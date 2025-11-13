@@ -45,9 +45,8 @@ class NetBoxORMInventory:
 
         # Get credentials from plugin config or parameters
         try:
-            from django.conf import settings
-            plugin_config = settings.PLUGINS_CONFIG.get('netbox_automation_plugin', {})
-            napalm_config = plugin_config.get('napalm', {})
+            from netbox.plugins import get_plugin_config
+            napalm_config = get_plugin_config('netbox_automation_plugin', 'napalm', {})
             default_username = napalm_config.get('username', 'cumulus')
             default_password = napalm_config.get('password', 'cumulus')
         except Exception as e:
@@ -160,9 +159,8 @@ class NornirDeviceManager:
         """
         # Read configuration from plugin config
         try:
-            from django.conf import settings
-            plugin_config = settings.PLUGINS_CONFIG.get('netbox_automation_plugin', {})
-            nornir_config = plugin_config.get('nornir', {})
+            from netbox.plugins import get_plugin_config
+            nornir_config = get_plugin_config('netbox_automation_plugin', 'nornir', {})
             default_num_workers = nornir_config.get('runner', {}).get('options', {}).get('num_workers', 20)
         except Exception as e:
             logger.warning(f"Could not load plugin config, using defaults: {e}")
