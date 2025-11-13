@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "netbox-automation-plugin"
+version = "1.0.0"
+authors = [
+    {name = "Whitefiber Undercloud Engineering", email = "irfan@whitefiber.com"},
+]
+description = "NetBox automation plugin with NAPALM and Nornir integration for parallel device operations"
+readme = "README.md"
+
+classifiers = [
+    'Development Status :: 4 - Beta',
+    'Intended Audience :: Developers',
+    'Natural Language :: English',
+    "Programming Language :: Python :: 3 :: Only",
+    'Programming Language :: Python :: 3.10',
+    'Programming Language :: Python :: 3.11',
+    'Programming Language :: Python :: 3.12',
+]
+
+requires-python = ">=3.10.0"
+dependencies = [
+    'napalm>=4.0.0',
+    'nornir>=3.0.0',
+    'nornir-napalm>=0.4.0',
+]
+
+[project.urls]
+Source = "https://gitlab.b52.whitefiber.internal/operations/netbox-automation-plugin"
+
+[tool.setuptools.packages.find]
+include = ["netbox_automation_plugin*"]
+
+[tool.setuptools.package-data]
+netbox_automation_plugin = ["templates/**", "static/**"]
