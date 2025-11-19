@@ -9,6 +9,7 @@ A comprehensive NetBox plugin that integrates with NAPALM and Nornir for:
 """
 
 from netbox.plugins import PluginConfig
+from pathlib import Path
 
 __version__ = '1.0.0'
 
@@ -46,6 +47,11 @@ class NetBoxAutomationPluginConfig(PluginConfig):
             'compliance_check_interval': 24,
         }
     }
+
+    @property
+    def template_dir(self):
+        """Return the path to the plugin's templates directory."""
+        return Path(__file__).parent / 'templates'
 
 
 config = NetBoxAutomationPluginConfig

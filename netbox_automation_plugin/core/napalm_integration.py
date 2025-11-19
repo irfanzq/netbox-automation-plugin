@@ -8,7 +8,7 @@ import napalm
 from napalm.base.exceptions import ConnectionException, CommandErrorException
 from django.conf import settings
 from dcim.models import Device
-from .models import AutomationJob, DeviceCompliance
+from ..models import AutomationJob, DeviceCompliance
 import logging
 import time
 

@@ -3,8 +3,6 @@ Nornir Integration for NetBox Automation Plugin (Production)
 
 This module provides Nornir integration to connect to NetBox devices in parallel
 using NAPALM drivers, including support for napalm-cumulus.
-
-Production version - direct connections only (no SSH proxy support).
 """
 
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
