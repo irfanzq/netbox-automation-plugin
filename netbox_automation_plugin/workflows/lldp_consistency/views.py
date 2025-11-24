@@ -2,8 +2,9 @@ from django.http import HttpResponse
 from django.shortcuts import render
 from django.views import View
 from django.utils.translation import gettext_lazy as _
+from datetime import datetime
 
-from dcim.models import Device, Interface
+from dcim.models import Device, Interface, FrontPort, RearPort
 from netbox.plugins import get_plugin_config
 
 from .forms import LLDPConsistencyCheckForm
@@ -27,6 +28,23 @@ class LLDPConsistencyCheckView(View):
         return render(request, self.template_name_form, {"form": form})
 
     def post(self, request):
+        # CSV export path – check if CSV button was clicked FIRST (uses cached results)
+        # This must be checked BEFORE form validation since the CSV form doesn't have device fields
+        if "export_csv" in request.POST:
+            # Retrieve cached results from session
+            cached_results = request.session.get('lldp_consistency_results')
+            if cached_results:
+                csv_content = self._build_csv(cached_results)
+                response = HttpResponse(csv_content, content_type="text/csv; charset=utf-8-sig")
+                response["Content-Disposition"] = 'attachment; filename="lldp_consistency_check.csv"'
+                return response
+            else:
+                # No cached results, show error on form
+                form = LLDPConsistencyCheckForm()
+                form.add_error(None, _("Results expired. Please run the check again."))
+                return render(request, self.template_name_form, {"form": form})
+
+        # Normal form submission - validate the form
         form = LLDPConsistencyCheckForm(request.POST)
         if not form.is_valid():
             return render(request, self.template_name_form, {"form": form})
@@ -40,7 +58,7 @@ class LLDPConsistencyCheckView(View):
             data.get("role") or
             data.get("status")
         )
-        
+
         if not has_selection:
             form.add_error(None, _("Please select at least one filter (Manufacturer, Site, Role, or Status) or choose specific devices."))
             return render(request, self.template_name_form, {"form": form})
@@ -50,22 +68,26 @@ class LLDPConsistencyCheckView(View):
             form.add_error(None, _("No devices found matching the selection (with primary IP)."))
             return render(request, self.template_name_form, {"form": form})
 
+        # Run the consistency check (only on initial form submission)
         results = self._run_consistency_check(devices)
 
-        # CSV export path – check if CSV button was clicked
-        if "export_csv" in request.POST:
-            csv_content = self._build_csv(results)
-            response = HttpResponse(csv_content, content_type="text/csv; charset=utf-8-sig")
-            response["Content-Disposition"] = 'attachment; filename="lldp_consistency_check.csv"'
-            return response
+        # Store results in session for CSV export (serialize device objects)
+        serialized_results = self._serialize_results_for_session(results)
+        request.session['lldp_consistency_results'] = serialized_results
+        request.session['lldp_consistency_device_count'] = len(devices)
 
         table = LLDPConsistencyResultTable(results, orderable=True)
         summary = self._build_summary(results, len(devices))
+
+        # Add version timestamp to verify latest code is running
+        code_version = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
         context = {
             "form": form,
             "table": table,
             "summary": summary,
+            "form_data": form.cleaned_data,  # Pass form data for CSV export
+            "code_version": code_version,  # Show when code was executed
         }
         return render(request, self.template_name_results, context)
 
@@ -180,7 +202,7 @@ class LLDPConsistencyCheckView(View):
                 netbox_description = netbox_interface.description if netbox_interface else ""
 
                 netbox_has_cable = bool(netbox_interface.cable) if netbox_interface else False
-                netbox_cable_matches, netbox_cable_info = self._check_netbox_cable_match(
+                netbox_cable_matches, netbox_cable_info, netbox_connection_info, path_type = self._check_netbox_cable_match(
                     netbox_interface, actual_device_name, neighbor_port
                 )
 
@@ -192,6 +214,10 @@ class LLDPConsistencyCheckView(View):
                 )
 
                 netbox_matches_lldp = netbox_description_matches_lldp or netbox_cable_matches
+                
+                # Check if NetBox has any info (description or cable)
+                netbox_has_description = bool(netbox_description)
+                netbox_has_info = netbox_has_description or netbox_has_cable
 
                 status, mismatch_type, notes = self._classify_result(
                     config_description=config_description,
@@ -199,6 +225,11 @@ class LLDPConsistencyCheckView(View):
                     netbox_matches_lldp=netbox_matches_lldp,
                     netbox_description_matches_lldp=netbox_description_matches_lldp,
                     netbox_cable_matches_lldp=netbox_cable_matches,
+                    netbox_has_info=netbox_has_info,
+                    netbox_has_description=netbox_has_description,
+                    netbox_has_cable=netbox_has_cable,
+                    netbox_cable_info=netbox_cable_info,
+                    netbox_connection_info=netbox_connection_info,
                     remote_device_exists=remote_device_exists,
                     remote_interface_exists=remote_interface_exists,
                 )
@@ -209,9 +240,11 @@ class LLDPConsistencyCheckView(View):
                         "interface": local_interface,
                         "lldp_neighbor": neighbor_hostname,
                         "lldp_port": neighbor_port,
-                        "netbox_peer": netbox_cable_info,
                         "config_description": config_description,
                         "netbox_description": netbox_description,
+                        "netbox_cable": netbox_cable_info,
+                        "netbox_connection": netbox_connection_info,
+                        "path_type": path_type,
                         "status": status,
                         "mismatch_type": mismatch_type,
                         "notes": notes,
@@ -223,7 +256,7 @@ class LLDPConsistencyCheckView(View):
     def _parse_interface_descriptions(self, running_config: str):
         """
         Parse interface descriptions from running config.
-        Copied from scripts/sync_lldp_interfaces.py with minor adaptations.
+        Supports Cumulus Linux, Arista EOS, and Juniper formats.
         """
         import re
 
@@ -237,17 +270,27 @@ class LLDPConsistencyCheckView(View):
         for line in running_config.split("\n"):
             line = line.strip()
 
+            # Check for interface block start (Cumulus/EOS/IOS format)
             interface_match = re.match(r"^interface\s+(\S+)", line, re.IGNORECASE)
             if interface_match:
                 current_interface = interface_match.group(1)
                 continue
 
+            # Check for end of interface block (exclamation mark or blank line after config)
+            if line == "!" or (not line and current_interface):
+                # Keep current_interface for next potential config line
+                # Don't reset to None here
+                pass
+
+            # Parse description within interface block
             if current_interface:
                 desc_match = re.match(r"^description\s+(.+)", line, re.IGNORECASE)
                 if desc_match:
                     descriptions[current_interface] = desc_match.group(1).strip()
-                    current_interface = None
+                    # DON'T reset current_interface here - keep parsing the interface block
+                    # current_interface = None  # <-- REMOVED THIS BUG
 
+            # Juniper/VyOS format: set interfaces <name> description "..."
             juniper_match = re.match(
                 r'^set\s+interfaces\s+(\S+)\s+description\s+"?([^"]+)"?',
                 line,
@@ -313,24 +356,56 @@ class LLDPConsistencyCheckView(View):
     def _check_netbox_cable_match(self, netbox_interface, actual_device_name, neighbor_port):
         """
         Check whether the existing NetBox cable matches the LLDP neighbor.
+        Returns cable info (immediate), connection info (final), and path type.
         """
         netbox_cable_matches = False
         netbox_cable_info = ""
+        netbox_connection_info = ""
+        path_type = "No Cable"
 
         if netbox_interface and netbox_interface.link_peers:
             for peer in netbox_interface.link_peers:
                 if hasattr(peer, "device") and hasattr(peer, "name"):
                     remote_device = peer.device.name
                     remote_interface = peer.name
+
+                    # NetBox Cable = immediate cable connection (link_peers)
                     netbox_cable_info = f"{remote_device}:{remote_interface}"
-                    if (
-                        remote_device.lower() == actual_device_name.lower()
-                        and remote_interface.lower() == neighbor_port.lower()
-                    ):
-                        netbox_cable_matches = True
+
+                    # Determine path type based on peer object type
+                    if isinstance(peer, Interface):
+                        # Direct cable to device interface
+                        path_type = "Direct"
+                    elif isinstance(peer, (FrontPort, RearPort)):
+                        # Cable goes through patch panel
+                        path_type = "Via Patch Panel"
+                    else:
+                        # Other types (CircuitTermination, PowerPort, etc.)
+                        path_type = "Other"
+
+                    # NetBox Connection = final destination (connected_endpoints)
+                    if netbox_interface.connected_endpoints:
+                        for endpoint in netbox_interface.connected_endpoints:
+                            if hasattr(endpoint, "device") and hasattr(endpoint, "name"):
+                                netbox_connection_info = f"{endpoint.device.name}:{endpoint.name}"
+                                break
+                    else:
+                        # No connected_endpoints, use cable info
+                        netbox_connection_info = netbox_cable_info
+
+                    # Check if connection matches LLDP neighbor
+                    # Always check connected_endpoints (works for both direct and patch panel)
+                    if netbox_connection_info:
+                        connection_parts = netbox_connection_info.split(":")
+                        if len(connection_parts) == 2:
+                            if (
+                                connection_parts[0].lower() == actual_device_name.lower()
+                                and connection_parts[1].lower() == neighbor_port.lower()
+                            ):
+                                netbox_cable_matches = True
                     break
 
-        return netbox_cable_matches, netbox_cable_info
+        return netbox_cable_matches, netbox_cable_info, netbox_connection_info, path_type
 
     def _check_description_match(self, description: str, neighbor_hostname: str, neighbor_port: str) -> bool:
         """
@@ -349,11 +424,17 @@ class LLDPConsistencyCheckView(View):
         netbox_matches_lldp: bool,
         netbox_description_matches_lldp: bool,
         netbox_cable_matches_lldp: bool,
+        netbox_has_info: bool,
+        netbox_has_description: bool,
+        netbox_has_cable: bool,
+        netbox_cable_info: str,
+        netbox_connection_info: str,
         remote_device_exists: bool,
         remote_interface_exists: bool,
     ):
         """
         Derive a high-level status and mismatch type for UI/CSV.
+        Distinguishes between "NetBox has no info" (warning) vs "NetBox has wrong info" (error).
         """
         # Remote not present in NetBox at all
         if not remote_device_exists:
@@ -378,11 +459,29 @@ class LLDPConsistencyCheckView(View):
                     "NetBox description/cable match LLDP; device config has no description.",
                 )
             else:
-                return (
-                    "warning",
-                    "Missing config description",
-                    "Device config has no description; LLDP shows a neighbor but NetBox does not match.",
-                )
+                # Config has no description, NetBox doesn't match
+                if not netbox_has_info:
+                    # Build detailed note about what's missing in NetBox
+                    missing_parts = []
+                    if not netbox_has_description:
+                        missing_parts.append("no description")
+                    if not netbox_cable_info:
+                        missing_parts.append("no cable")
+                    if not netbox_connection_info:
+                        missing_parts.append("no connection")
+                    netbox_missing = ", ".join(missing_parts) if missing_parts else "no info"
+
+                    return (
+                        "warning",
+                        "Missing info in config and NetBox",
+                        f"Device config has no description; NetBox has {netbox_missing}.",
+                    )
+                else:
+                    return (
+                        "warning",
+                        "Missing config description",
+                        "Device config has no description; NetBox has info but it doesn't match LLDP.",
+                    )
 
         if config_matches_lldp and netbox_matches_lldp:
             return ("ok", "Config/NetBox/LLDP consistent", "All three sources are consistent.")
@@ -395,24 +494,66 @@ class LLDPConsistencyCheckView(View):
             )
 
         if config_matches_lldp and not netbox_matches_lldp:
-            mismatch_source = []
-            if not netbox_description_matches_lldp:
-                mismatch_source.append("description")
-            if not netbox_cable_matches_lldp:
-                mismatch_source.append("cable")
-            detail = ", ".join(mismatch_source) or "description/cable"
-            return (
-                "warning",
-                "NetBox vs LLDP mismatch",
-                f"NetBox {detail} do not match LLDP, but running config does.",
-            )
+            # Config matches, but NetBox doesn't
+            if not netbox_has_info:
+                # NetBox has no info at all
+                missing_items = []
+                if not netbox_has_description:
+                    missing_items.append("description")
+                if not netbox_has_cable:
+                    missing_items.append("cable")
+                missing_detail = " or ".join(missing_items) or "description/cable"
+                return (
+                    "warning",
+                    "NetBox missing info",
+                    f"NetBox doesn't have {missing_detail} info; running config matches LLDP.",
+                )
+            else:
+                # NetBox has info but it's wrong
+                mismatch_source = []
+                if netbox_has_description and not netbox_description_matches_lldp:
+                    mismatch_source.append("description")
+                if netbox_has_cable and not netbox_cable_matches_lldp:
+                    mismatch_source.append("cable")
+                detail = ", ".join(mismatch_source) or "description/cable"
+                return (
+                    "warning",
+                    "NetBox vs LLDP mismatch",
+                    f"NetBox {detail} do not match LLDP, but running config does.",
+                )
 
         # Neither config nor NetBox match LLDP
-        return (
-            "error",
-            "Config & NetBox vs LLDP mismatch",
-            "Neither running config description nor NetBox description/cable match the LLDP neighbor.",
-        )
+        # Distinguish between "no info" vs "wrong info"
+        if not netbox_has_info:
+            # NetBox has no info, config is wrong
+            # Build detailed note about what's missing in NetBox
+            missing_parts = []
+            if not netbox_has_description:
+                missing_parts.append("no description")
+            if not netbox_cable_info:
+                missing_parts.append("no cable")
+            if not netbox_connection_info:
+                missing_parts.append("no connection")
+            netbox_missing = ", ".join(missing_parts) if missing_parts else "no info"
+
+            return (
+                "warning",
+                "Config mismatch, NetBox missing info",
+                f"Running config description doesn't match LLDP; NetBox has {netbox_missing}.",
+            )
+        else:
+            # Both have info but both are wrong
+            mismatch_details = []
+            if netbox_has_description and not netbox_description_matches_lldp:
+                mismatch_details.append("description")
+            if netbox_has_cable and not netbox_cable_matches_lldp:
+                mismatch_details.append("cable")
+            detail = ", ".join(mismatch_details) or "description/cable"
+            return (
+                "error",
+                "Config & NetBox vs LLDP mismatch",
+                f"Neither running config description nor NetBox {detail} match the LLDP neighbor.",
+            )
 
     def _build_summary(self, results, device_count: int):
         """
@@ -485,32 +626,51 @@ class LLDPConsistencyCheckView(View):
         output.write('\ufeff')
         
         writer = csv.writer(output, quoting=csv.QUOTE_MINIMAL)
+        # Match the exact column order from the UI table
         writer.writerow(
             [
-                "device",
-                "interface",
-                "config_description",
-                "netbox_description",
-                "netbox_peer",
-                "lldp_neighbor_device",
-                "lldp_neighbor_port",
-                "status",
-                "mismatch_type",
-                "notes",
+                "Device",
+                "Interface",
+                "LLDP Neighbor Device",
+                "LLDP Neighbor Port",
+                "Config Description",
+                "NetBox Description",
+                "NetBox Cable",
+                "NetBox Connection",
+                "Path Type",
+                "Status",
+                "Mismatch Type",
+                "Notes",
             ]
         )
 
         for r in results:
+            # Skip debug entries (entries with status="debug" or device=None)
+            if r.get("status") == "debug" or r.get("device") is None:
+                continue
+
+            # Handle both Device objects and serialized device dicts
+            device = r.get("device")
+            if isinstance(device, dict):
+                # Serialized format from session
+                device_name = device.get("name", "")
+            else:
+                # Device object from fresh run
+                device_name = getattr(device, "name", str(device))
+
             # Clean all text values to remove em dashes and problematic Unicode
+            # Match the exact column order from the UI table
             writer.writerow(
                 [
-                    self._clean_csv_value(getattr(r["device"], "name", r["device"])),
+                    self._clean_csv_value(device_name),
                     self._clean_csv_value(r.get("interface", "")),
-                    self._clean_csv_value(r.get("config_description", "")),
-                    self._clean_csv_value(r.get("netbox_description", "")),
-                    self._clean_csv_value(r.get("netbox_peer", "")),
                     self._clean_csv_value(r.get("lldp_neighbor", "")),
                     self._clean_csv_value(r.get("lldp_port", "")),
+                    self._clean_csv_value(r.get("config_description", "")),
+                    self._clean_csv_value(r.get("netbox_description", "")),
+                    self._clean_csv_value(r.get("netbox_cable", "")),
+                    self._clean_csv_value(r.get("netbox_connection", "")),
+                    self._clean_csv_value(r.get("path_type", "")),
                     self._clean_csv_value(r.get("status", "")),
                     self._clean_csv_value(r.get("mismatch_type", "")),
                     self._clean_csv_value(r.get("notes", "")),
@@ -518,5 +678,23 @@ class LLDPConsistencyCheckView(View):
             )
 
         return output.getvalue()
+
+    def _serialize_results_for_session(self, results):
+        """
+        Serialize results for session storage.
+        Convert Device objects to device IDs and names.
+        """
+        serialized = []
+        for r in results:
+            serialized_row = dict(r)  # Copy the dict
+            # Convert Device object to serializable format
+            if "device" in serialized_row and serialized_row["device"] is not None:
+                device = serialized_row["device"]
+                serialized_row["device"] = {
+                    "id": device.id,
+                    "name": device.name
+                }
+            serialized.append(serialized_row)
+        return serialized
 
 

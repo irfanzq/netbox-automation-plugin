@@ -27,10 +27,6 @@ class LLDPConsistencyResultTable(NetBoxTable):
         accessor="lldp_port",
         verbose_name=_("LLDP Neighbor Port"),
     )
-    netbox_peer = tables.Column(
-        accessor="netbox_peer",
-        verbose_name=_("NetBox Peer"),
-    )
     config_description = tables.Column(
         accessor="config_description",
         verbose_name=_("Config Description"),
@@ -38,6 +34,18 @@ class LLDPConsistencyResultTable(NetBoxTable):
     netbox_description = tables.Column(
         accessor="netbox_description",
         verbose_name=_("NetBox Description"),
+    )
+    netbox_cable = tables.Column(
+        accessor="netbox_cable",
+        verbose_name=_("NetBox Cable"),
+    )
+    netbox_connection = tables.Column(
+        accessor="netbox_connection",
+        verbose_name=_("NetBox Connection"),
+    )
+    path_type = tables.Column(
+        accessor="path_type",
+        verbose_name=_("Path Type"),
     )
     status = tables.Column(
         accessor="status",
@@ -60,9 +68,11 @@ class LLDPConsistencyResultTable(NetBoxTable):
             "interface",
             "lldp_neighbor",
             "lldp_port",
-            "netbox_peer",
             "config_description",
             "netbox_description",
+            "netbox_cable",
+            "netbox_connection",
+            "path_type",
             "status",
             "mismatch_type",
             "notes",
@@ -72,6 +82,11 @@ class LLDPConsistencyResultTable(NetBoxTable):
             "interface",
             "lldp_neighbor",
             "lldp_port",
+            "config_description",
+            "netbox_description",
+            "netbox_cable",
+            "netbox_connection",
+            "path_type",
             "status",
             "mismatch_type",
         )

@@ -11,9 +11,20 @@ from .lldp_consistency import (
     LLDPConsistencyResultTable,
 )
 
+# Import VLAN Deployment workflow
+from .vlan_deployment import (
+    VLANDeploymentForm,
+    VLANDeploymentView,
+    VLANDeploymentResultTable,
+)
+
 __all__ = [
     # LLDP Consistency Workflow
     'LLDPConsistencyCheckForm',
     'LLDPConsistencyCheckView',
     'LLDPConsistencyResultTable',
+    # VLAN Deployment Workflow
+    'VLANDeploymentForm',
+    'VLANDeploymentView',
+    'VLANDeploymentResultTable',
 ]

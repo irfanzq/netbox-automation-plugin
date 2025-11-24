@@ -1,0 +1,447 @@
+{% extends 'base/layout.html' %}
+{% load i18n %}
+{% load form_helpers %}
+
+{% block title %}{% trans "VLAN Deployment" %}{% endblock %}
+
+{% block content %}
+  <div class="row">
+    <div class="col-md-8">
+      <div class="card">
+        <div class="card-header">
+          <h5 class="card-title mb-0">{% trans "VLAN Deployment" %}</h5>
+        </div>
+        <div class="card-body">
+          <p class="text-muted">
+            {% trans "Deploy VLAN configurations to network devices and update NetBox interface assignments. Phase 1: Access mode (untagged) only." %}
+          </p>
+
+          {% if form.non_field_errors %}
+            <div class="alert alert-danger" role="alert">
+              {{ form.non_field_errors }}
+            </div>
+          {% endif %}
+
+          <!-- Loading overlay -->
+          <div id="loading-overlay" style="display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); z-index: 9999; align-items: center; justify-content: center;">
+            <div style="background: white; padding: 30px; border-radius: 8px; text-align: center; max-width: 400px;">
+              <div class="spinner-border text-primary mb-3" role="status" style="width: 3rem; height: 3rem;">
+                <span class="visually-hidden">Loading...</span>
+              </div>
+              <h4>Deploying VLAN Configuration...</h4>
+              <p class="text-muted mb-0">Applying configuration to devices. This may take a minute.</p>
+            </div>
+          </div>
+
+          <form method="post" id="vlan-deployment-form">
+            {% csrf_token %}
+
+            {# Deployment Scope - Always visible #}
+            <div class="mb-3">
+              <label class="form-label">{{ form.deployment_scope.label }}</label>
+              <div class="form-text">{{ form.deployment_scope.help_text }}</div>
+              {% for radio in form.deployment_scope %}
+                <div class="form-check">
+                  {{ radio.tag }}
+                  <label class="form-check-label" for="{{ radio.id_for_label }}">
+                    {{ radio.choice_label }}
+                  </label>
+                </div>
+              {% endfor %}
+              {% if form.deployment_scope.errors %}
+                <div class="invalid-feedback d-block">{{ form.deployment_scope.errors }}</div>
+              {% endif %}
+            </div>
+
+            {# Single Device Mode Fields #}
+            <div id="single-device-fields">
+              <div class="mb-3">
+                <label for="{{ form.devices.id_for_label }}" class="form-label required">{{ form.devices.label }}</label>
+                {{ form.devices }}
+                <div class="form-text">{{ form.devices.help_text }}</div>
+                {% if form.devices.errors %}
+                  <div class="invalid-feedback d-block">{{ form.devices.errors }}</div>
+                {% endif %}
+              </div>
+            </div>
+
+            {# Device Group Mode Fields #}
+            <div id="group-device-fields" style="display: none;">
+              <div class="mb-3">
+                <label for="{{ form.site.id_for_label }}" class="form-label required">{{ form.site.label }}</label>
+                {{ form.site }}
+                <div class="form-text">{{ form.site.help_text }}</div>
+                {% if form.site.errors %}
+                  <div class="invalid-feedback d-block">{{ form.site.errors }}</div>
+                {% endif %}
+              </div>
+
+              <div class="mb-3">
+                <label for="{{ form.location.id_for_label }}" class="form-label required">{{ form.location.label }}</label>
+                {{ form.location }}
+                <div class="form-text">{{ form.location.help_text }}</div>
+                {% if form.location.errors %}
+                  <div class="invalid-feedback d-block">{{ form.location.errors }}</div>
+                {% endif %}
+              </div>
+
+              <div class="mb-3">
+                <label for="{{ form.role.id_for_label }}" class="form-label required">{{ form.role.label }}</label>
+                {{ form.role }}
+                <div class="form-text">{{ form.role.help_text }}</div>
+                {% if form.role.errors %}
+                  <div class="invalid-feedback d-block">{{ form.role.errors }}</div>
+                {% endif %}
+              </div>
+            </div>
+
+            {# Interface Selection - Two fields: Checkboxes + Manual Entry #}
+            <div class="mb-3">
+              <label class="form-label required">Interfaces</label>
+
+              {# Field 1: Checkbox list for available interfaces #}
+              <div class="mb-2">
+                <label class="form-label text-muted small">Available Interfaces (select from device)</label>
+                <div id="interfaces-checkbox-container" style="max-height: 200px; overflow-y: auto; border: 1px solid #dee2e6; padding: 10px; border-radius: 4px; background-color: #f8f9fa;">
+                  <p class="text-muted mb-0">Select devices first to load interfaces</p>
+                </div>
+              </div>
+
+              {# Field 2: Manual text input for custom interfaces #}
+              <div class="mb-2">
+                <label for="id_interfaces_manual" class="form-label text-muted small">Additional Interfaces (manual entry)</label>
+                <textarea
+                  id="id_interfaces_manual"
+                  name="interfaces_manual"
+                  class="form-control"
+                  rows="2"
+                  placeholder="Optional: Add custom interfaces (e.g., swp100, swp200 or swp1-48)"
+                >{{ form.interfaces_manual.value|default:'' }}</textarea>
+                <div class="form-text">
+                  Enter additional interface names separated by commas or use ranges (e.g., swp1-48, Ethernet1-24).
+                </div>
+              </div>
+
+              <div class="form-text">
+                <strong>Combined selection:</strong> Both checkbox selections and manual entries will be combined and validated against NetBox.
+              </div>
+
+              {% if form.interfaces_select.errors %}
+                <div class="invalid-feedback d-block">{{ form.interfaces_select.errors }}</div>
+              {% endif %}
+              {% if form.interfaces_manual.errors %}
+                <div class="invalid-feedback d-block">{{ form.interfaces_manual.errors }}</div>
+              {% endif %}
+            </div>
+
+            {# VLAN ID - Text input with autocomplete #}
+            <div class="mb-3">
+              <label for="id_vlan_id" class="form-label required">{{ form.vlan_id.label }}</label>
+              <input
+                type="number"
+                id="id_vlan_id"
+                name="vlan_id"
+                class="form-control"
+                list="vlan_datalist"
+                placeholder="Type VLAN ID (e.g., 100)"
+                min="1"
+                max="4094"
+                required
+                value="{{ form.vlan_id.value|default:'' }}"
+              />
+              <datalist id="vlan_datalist">
+                <!-- Will be populated dynamically with VLANs from device's location -->
+              </datalist>
+              <div class="form-text">{{ form.vlan_id.help_text }} Autocomplete suggestions will appear based on device location.</div>
+              {% if form.vlan_id.errors %}
+                <div class="invalid-feedback d-block">{{ form.vlan_id.errors }}</div>
+              {% endif %}
+            </div>
+
+            {# Deployment Options - Mutually exclusive #}
+            <div class="mb-3">
+              <label class="form-label">Deployment Mode</label>
+
+              <div class="form-check">
+                {{ form.dry_run }}
+                <label class="form-check-label" for="{{ form.dry_run.id_for_label }}">
+                  {{ form.dry_run.label }}
+                </label>
+                <div class="form-text">{{ form.dry_run.help_text }}</div>
+              </div>
+
+              <div class="form-check mt-2">
+                {{ form.deploy_changes }}
+                <label class="form-check-label" for="{{ form.deploy_changes.id_for_label }}">
+                  {{ form.deploy_changes.label }}
+                </label>
+                <div class="form-text">{{ form.deploy_changes.help_text }}</div>
+              </div>
+            </div>
+
+            <div class="mt-3">
+              <button type="submit" class="btn btn-primary" id="deploy-btn" name="deploy" value="1">
+                <i class="mdi mdi-upload-network"></i>
+                {% trans "Deploy VLAN" %}
+              </button>
+              <button type="submit" name="export_csv" value="1" class="btn btn-secondary" id="deploy-csv-btn">
+                <i class="mdi mdi-download"></i>
+                {% trans "Deploy & Download CSV" %}
+              </button>
+            </div>
+          </form>
+
+          <script>
+            // Show/hide fields based on deployment scope
+            function updateFieldVisibility() {
+              const scope = document.querySelector('input[name="deployment_scope"]:checked').value;
+
+              const singleFields = document.getElementById('single-device-fields');
+              const groupFields = document.getElementById('group-device-fields');
+
+              if (scope === 'single') {
+                singleFields.style.display = 'block';
+                groupFields.style.display = 'none';
+              } else {
+                singleFields.style.display = 'none';
+                groupFields.style.display = 'block';
+              }
+            }
+
+            // Load interfaces and populate checkboxes when devices are selected
+            function loadCommonInterfaces() {
+              console.log('loadCommonInterfaces called');
+              const devicesSelect = document.getElementById('id_devices');
+              const interfacesContainer = document.getElementById('interfaces-checkbox-container');
+              const selectedDeviceIds = Array.from(devicesSelect.selectedOptions).map(opt => opt.value);
+
+              console.log('Selected device IDs:', selectedDeviceIds);
+
+              if (selectedDeviceIds.length === 0) {
+                interfacesContainer.innerHTML = '<p class="text-muted mb-0">Select devices first to load interfaces</p>';
+                return;
+              }
+
+              // Show loading
+              interfacesContainer.innerHTML = '<p class="text-muted mb-0">Loading interfaces...</p>';
+
+              // Build query string
+              const params = new URLSearchParams();
+              selectedDeviceIds.forEach(id => params.append('device_ids[]', id));
+
+              const url = `/plugins/automation/vlan-deployment/get-interfaces/?${params.toString()}`;
+              console.log('Fetching interfaces from:', url);
+
+              // Fetch common interfaces
+              fetch(url)
+                .then(response => {
+                  console.log('Interface response status:', response.status);
+                  return response.json();
+                })
+                .then(data => {
+                  console.log('Interface data received:', data);
+                  interfacesContainer.innerHTML = '';
+
+                  if (data.interfaces.length === 0) {
+                    interfacesContainer.innerHTML = '<p class="text-muted mb-0">No common interfaces found</p>';
+                  } else {
+                    // Create checkboxes for each interface
+                    data.interfaces.forEach(iface => {
+                      const div = document.createElement('div');
+                      div.className = 'form-check';
+
+                      const checkbox = document.createElement('input');
+                      checkbox.type = 'checkbox';
+                      checkbox.className = 'form-check-input';
+                      checkbox.name = 'interfaces_select';
+                      checkbox.value = iface;
+                      checkbox.id = `interface_${iface}`;
+
+                      const label = document.createElement('label');
+                      label.className = 'form-check-label';
+                      label.htmlFor = `interface_${iface}`;
+                      label.textContent = iface;
+
+                      div.appendChild(checkbox);
+                      div.appendChild(label);
+                      interfacesContainer.appendChild(div);
+                    });
+                  }
+
+                  // Also filter VLANs by site of selected devices
+                  console.log('About to call filterVLANsByDevices with:', selectedDeviceIds);
+                  filterVLANsByDevices(selectedDeviceIds);
+                })
+                .catch(error => {
+                  console.error('Error loading interfaces:', error);
+                  interfacesContainer.innerHTML = '<p class="text-danger mb-0">Error loading interfaces</p>';
+                });
+            }
+
+            // Filter VLANs by site when devices are selected (single mode)
+            function filterVLANsByDevices(deviceIds) {
+              console.log('filterVLANsByDevices called with:', deviceIds);
+
+              if (deviceIds.length === 0) {
+                // Reset VLAN datalist
+                const datalist = document.getElementById('vlan_datalist');
+                datalist.innerHTML = '';
+                return;
+              }
+
+              // Build query string with device IDs
+              const params = new URLSearchParams();
+              deviceIds.forEach(id => params.append('device_ids[]', id));
+
+              const url = `/plugins/automation/vlan-deployment/get-vlans/?${params.toString()}`;
+              console.log('Fetching VLANs from:', url);
+
+              // Fetch VLANs for the site of selected devices
+              fetch(url)
+                .then(response => {
+                  console.log('VLAN response status:', response.status);
+                  return response.json();
+                })
+                .then(data => {
+                  console.log('VLAN data received:', data);
+
+                  // Populate datalist with VLAN suggestions
+                  const datalist = document.getElementById('vlan_datalist');
+                  datalist.innerHTML = ''; // Clear existing options
+
+                  if (data.vlans && data.vlans.length > 0) {
+                    data.vlans.forEach(vlan => {
+                      const option = document.createElement('option');
+                      option.value = vlan.vid;
+                      option.textContent = vlan.name ? `${vlan.vid} - ${vlan.name}` : vlan.vid;
+                      datalist.appendChild(option);
+                    });
+                    console.log(`Populated datalist with ${data.vlans.length} VLANs from device location`);
+                  } else {
+                    console.log('No VLANs found for this location, user can still type custom VLAN ID');
+                  }
+                })
+                .catch(error => {
+                  console.error('Error loading VLANs:', error);
+                });
+            }
+
+            // Filter VLANs by site when site is selected (group mode)
+            function filterVLANsBySite() {
+              const siteSelect = document.getElementById('id_site');
+              const siteId = siteSelect.value;
+
+              if (!siteId) {
+                return;
+              }
+
+              // Fetch VLANs for this site
+              fetch(`/plugins/automation/vlan-deployment/get-vlans/?site_id=${siteId}`)
+                .then(response => response.json())
+                .then(data => {
+                  // Populate datalist with VLAN suggestions
+                  const datalist = document.getElementById('vlan_datalist');
+                  datalist.innerHTML = ''; // Clear existing options
+
+                  if (data.vlans && data.vlans.length > 0) {
+                    data.vlans.forEach(vlan => {
+                      const option = document.createElement('option');
+                      option.value = vlan.vid;
+                      option.textContent = vlan.name ? `${vlan.vid} - ${vlan.name}` : vlan.vid;
+                      datalist.appendChild(option);
+                    });
+                    console.log(`Populated datalist with ${data.vlans.length} VLANs from site`);
+                  } else {
+                    console.log('No VLANs found for this site, user can still type custom VLAN ID');
+                  }
+                })
+                .catch(error => {
+                  console.error('Error loading VLANs:', error);
+                });
+            }
+
+            // Make Dry Run and Deploy Changes mutually exclusive
+            function setupMutuallyExclusiveCheckboxes() {
+              const dryRunCheckbox = document.getElementById('id_dry_run');
+              const deployCheckbox = document.getElementById('id_deploy_changes');
+
+              if (dryRunCheckbox && deployCheckbox) {
+                dryRunCheckbox.addEventListener('change', function() {
+                  if (this.checked) {
+                    deployCheckbox.checked = false;
+                    deployCheckbox.disabled = true;
+                    deployCheckbox.parentElement.style.opacity = '0.5';
+                  } else {
+                    deployCheckbox.disabled = false;
+                    deployCheckbox.parentElement.style.opacity = '1';
+                  }
+                });
+
+                deployCheckbox.addEventListener('change', function() {
+                  if (this.checked) {
+                    dryRunCheckbox.checked = false;
+                    dryRunCheckbox.disabled = true;
+                    dryRunCheckbox.parentElement.style.opacity = '0.5';
+                  } else {
+                    dryRunCheckbox.disabled = false;
+                    dryRunCheckbox.parentElement.style.opacity = '1';
+                  }
+                });
+
+                // Initialize state on page load
+                if (dryRunCheckbox.checked) {
+                  deployCheckbox.disabled = true;
+                  deployCheckbox.parentElement.style.opacity = '0.5';
+                } else if (deployCheckbox.checked) {
+                  dryRunCheckbox.disabled = true;
+                  dryRunCheckbox.parentElement.style.opacity = '0.5';
+                }
+              }
+            }
+
+            // Initialize on page load
+            document.addEventListener('DOMContentLoaded', function() {
+              updateFieldVisibility();
+              setupMutuallyExclusiveCheckboxes();
+
+              // Listen for scope changes
+              document.querySelectorAll('input[name="deployment_scope"]').forEach(radio => {
+                radio.addEventListener('change', updateFieldVisibility);
+              });
+
+              // Listen for device selection changes (single mode)
+              const devicesSelect = document.getElementById('id_devices');
+              if (devicesSelect) {
+                devicesSelect.addEventListener('change', loadCommonInterfaces);
+
+                // If devices are already selected (form re-render after error), load interfaces
+                if (devicesSelect.selectedOptions.length > 0) {
+                  console.log('Devices already selected on page load, loading interfaces...');
+                  loadCommonInterfaces();
+                }
+              }
+
+              // Listen for site selection changes (group mode)
+              const siteSelect = document.getElementById('id_site');
+              if (siteSelect) {
+                siteSelect.addEventListener('change', filterVLANsBySite);
+              }
+            });
+
+            // Form submission handler
+            document.getElementById('vlan-deployment-form').addEventListener('submit', function(e) {
+              // Show loading overlay
+              const overlay = document.getElementById('loading-overlay');
+              overlay.style.display = 'flex';
+
+              // Disable form buttons
+              document.getElementById('deploy-btn').disabled = true;
+              document.getElementById('deploy-csv-btn').disabled = true;
+            });
+          </script>
+        </div>
+      </div>
+    </div>
+  </div>
+{% endblock %}
+

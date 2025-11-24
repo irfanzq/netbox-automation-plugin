@@ -9,8 +9,9 @@
   <div class="row mb-3">
     <div class="col-md-12">
       <div class="card">
-        <div class="card-header">
+        <div class="card-header d-flex justify-content-between align-items-center">
           <h5 class="card-title mb-0">{% trans "LLDP Consistency Check Summary" %}</h5>
+          <small class="text-muted">Code executed at: {{ code_version }}</small>
         </div>
         <div class="card-body">
           <dl class="row mb-0">
@@ -49,44 +50,16 @@
         </div>
       </div>
       
+      <!-- Hidden form for CSV export (uses cached results from session) -->
+      <form method="post" id="csv-export-form" style="display: none;">
+        {% csrf_token %}
+        <input type="hidden" name="export_csv" value="1">
+      </form>
+
       <script>
         document.getElementById('download-csv-btn').addEventListener('click', function() {
-          // Get the table
-          const table = document.querySelector('table');
-          let csv = [];
-          
-          // Get headers
-          const headers = [];
-          table.querySelectorAll('thead th').forEach(th => {
-            headers.push(th.textContent.trim());
-          });
-          csv.push(headers.join(','));
-          
-          // Get rows
-          table.querySelectorAll('tbody tr').forEach(tr => {
-            const row = [];
-            tr.querySelectorAll('td').forEach(td => {
-              // Escape quotes and wrap in quotes if contains comma
-              let value = td.textContent.trim().replace(/"/g, '""');
-              if (value.includes(',') || value.includes('\n') || value.includes('"')) {
-                value = '"' + value + '"';
-              }
-              row.push(value);
-            });
-            csv.push(row.join(','));
-          });
-          
-          // Create download
-          const csvContent = csv.join('\n');
-          const blob = new Blob([csvContent], { type: 'text/csv' });
-          const url = window.URL.createObjectURL(blob);
-          const a = document.createElement('a');
-          a.href = url;
-          a.download = 'lldp_consistency_check.csv';
-          document.body.appendChild(a);
-          a.click();
-          document.body.removeChild(a);
-          window.URL.revokeObjectURL(url);
+          // Submit the hidden form to trigger server-side CSV export from cached results
+          document.getElementById('csv-export-form').submit();
         });
       </script>
     </div>

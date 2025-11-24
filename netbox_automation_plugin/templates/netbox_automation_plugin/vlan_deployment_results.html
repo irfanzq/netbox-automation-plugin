@@ -1,0 +1,95 @@
+{% extends 'base/layout.html' %}
+{% load i18n %}
+{% load render_table from django_tables2 %}
+{% load form_helpers %}
+
+{% block title %}{% trans "VLAN Deployment Results" %}{% endblock %}
+
+{% block content %}
+  <div class="row mb-3">
+    <div class="col-md-12">
+      <div class="card">
+        <div class="card-header">
+          <h5 class="card-title mb-0">{% trans "VLAN Deployment Summary" %}</h5>
+        </div>
+        <div class="card-body">
+          <dl class="row mb-0">
+            <dt class="col-md-3">{% trans "Devices" %}</dt>
+            <dd class="col-md-3">{{ summary.device_count }}</dd>
+
+            <dt class="col-md-3">{% trans "Interfaces" %}</dt>
+            <dd class="col-md-3">{{ summary.interface_count }}</dd>
+
+            <dt class="col-md-3 text-success">{% trans "Successful" %}</dt>
+            <dd class="col-md-3 text-success">{{ summary.success }}</dd>
+
+            <dt class="col-md-3 text-info">{% trans "Dry Run" %}</dt>
+            <dd class="col-md-3 text-info">{{ summary.dry_run }}</dd>
+
+            <dt class="col-md-3 text-danger">{% trans "Errors" %}</dt>
+            <dd class="col-md-3 text-danger">{{ summary.error }}</dd>
+          </dl>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="row mb-3">
+    <div class="col-md-12">
+      <div class="card">
+        <div class="card-header d-flex justify-content-between align-items-center">
+          <h5 class="card-title mb-0">{% trans "VLAN Deployment Results" %}</h5>
+          <button type="button" id="download-csv-btn" class="btn btn-sm btn-secondary">
+            <i class="mdi mdi-download"></i>
+            {% trans "Download CSV" %}
+          </button>
+        </div>
+        <div class="card-body table-responsive">
+          {% render_table table %}
+        </div>
+      </div>
+      
+      <script>
+        document.getElementById('download-csv-btn').addEventListener('click', function() {
+          // Get the table
+          const table = document.querySelector('table');
+          let csv = [];
+          
+          // Get headers
+          const headers = [];
+          table.querySelectorAll('thead th').forEach(th => {
+            headers.push(th.textContent.trim());
+          });
+          csv.push(headers.join(','));
+          
+          // Get rows
+          table.querySelectorAll('tbody tr').forEach(tr => {
+            const row = [];
+            tr.querySelectorAll('td').forEach(td => {
+              // Escape quotes and wrap in quotes if contains comma
+              let value = td.textContent.trim().replace(/"/g, '""');
+              if (value.includes(',') || value.includes('\n') || value.includes('"')) {
+                value = '"' + value + '"';
+              }
+              row.push(value);
+            });
+            csv.push(row.join(','));
+          });
+          
+          // Create download
+          const csvContent = csv.join('\n');
+          const blob = new Blob([csvContent], { type: 'text/csv' });
+          const url = window.URL.createObjectURL(blob);
+          const a = document.createElement('a');
+          a.href = url;
+          a.download = 'vlan_deployment_results.csv';
+          document.body.appendChild(a);
+          a.click();
+          document.body.removeChild(a);
+          window.URL.revokeObjectURL(url);
+        });
+      </script>
+    </div>
+  </div>
+{% endblock %}
+
