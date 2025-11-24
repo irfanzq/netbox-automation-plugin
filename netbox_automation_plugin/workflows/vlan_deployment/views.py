@@ -642,6 +642,9 @@ class GetCommonInterfacesView(View):
             ).select_related('device_type', 'device_type__manufacturer')
             
             logger.info(f"Group mode: Found {devices.count()} devices matching filters (site={site_id}, location={location_id}, manufacturer={manufacturer_id}, role={role_id})")
+            # Log device names for debugging
+            device_names = [d.name for d in devices]
+            logger.info(f"Group mode devices: {device_names}")
         else:
             return JsonResponse({'interfaces': [], 'device_count': 0})
 
@@ -655,12 +658,93 @@ class GetCommonInterfacesView(View):
                 Interface.objects.filter(device=device).values_list('name', flat=True)
             )
             device_interface_sets.append(interfaces)
+            # Debug: Log first few interfaces per device
+            logger.debug(f"Device {device.name}: {len(interfaces)} interfaces, first 5: {list(interfaces)[:5]}")
 
-        # Find common interfaces (intersection of all sets)
+        # Find common interfaces using pattern matching
+        # Handles cases where devices have different naming (swp7 vs swp1s1, swp2s1, etc.)
         if device_interface_sets:
-            common_interfaces = set.intersection(*device_interface_sets)
+            import re
+            
+            def get_base_interface_name(interface_name):
+                """
+                Extract base interface name for pattern matching.
+                Examples:
+                - swp7 -> swp7
+                - swp1s1 -> swp1
+                - swp2s2 -> swp2
+                - Ethernet1 -> Ethernet1
+                - Ethernet1/1 -> Ethernet1
+                """
+                # Remove sub-interface notation (s1, s2, etc.)
+                # Pattern: swp1s1 -> swp1, swp2s2 -> swp2
+                match = re.match(r'^([a-zA-Z]+\d+)s\d+', interface_name)
+                if match:
+                    return match.group(1)
+                
+                # Remove port notation (Ethernet1/1 -> Ethernet1)
+                match = re.match(r'^([a-zA-Z]+\d+)/\d+', interface_name)
+                if match:
+                    return match.group(1)
+                
+                # Return as-is for simple names (swp7, Ethernet1)
+                return interface_name
+            
+            # Group interfaces by base name across all devices
+            base_interface_map = {}  # base_name -> set of actual interface names
+            for interface_set in device_interface_sets:
+                for interface in interface_set:
+                    base_name = get_base_interface_name(interface)
+                    if base_name not in base_interface_map:
+                        base_interface_map[base_name] = set()
+                    base_interface_map[base_name].add(interface)
+            
+            # Count how many devices have each base interface
+            base_interface_counts = {}
+            for interface_set in device_interface_sets:
+                base_names_found = set()
+                for interface in interface_set:
+                    base_name = get_base_interface_name(interface)
+                    base_names_found.add(base_name)
+                
+                for base_name in base_names_found:
+                    base_interface_counts[base_name] = base_interface_counts.get(base_name, 0) + 1
+            
+            # Calculate threshold: 80% of devices (or at least 2 devices if only 2-3 total)
+            total_devices = len(device_interface_sets)
+            threshold = max(2, int(total_devices * 0.8))
+            
+            # Filter out management interfaces (eth0, lo, mgmt, etc.)
+            management_interfaces = {'eth0', 'lo', 'mgmt', 'management', 'loopback', 'Loopback0'}
+            
+            # Get base interfaces that exist on at least threshold devices
+            common_base_interfaces = {
+                base_name for base_name, count in base_interface_counts.items()
+                if count >= threshold and base_name.lower() not in management_interfaces
+            }
+            
+            # For each common base interface, pick the most common actual interface name
+            # This handles swp7 vs swp7s1 - we'll show the one that appears most
+            common_interfaces = []
+            for base_name in common_base_interfaces:
+                # Get all actual interface names for this base
+                actual_names = base_interface_map[base_name]
+                
+                # Count occurrences of each actual name
+                actual_name_counts = {}
+                for interface_set in device_interface_sets:
+                    for interface in interface_set:
+                        if get_base_interface_name(interface) == base_name:
+                            actual_name_counts[interface] = actual_name_counts.get(interface, 0) + 1
+                
+                # Pick the most common actual name, or shortest if tie
+                if actual_name_counts:
+                    most_common = max(actual_name_counts.items(), key=lambda x: (x[1], -len(x[0])))
+                    common_interfaces.append(most_common[0])
+            
             # Sort for consistent display
             common_interfaces = sorted(common_interfaces, key=self._natural_sort_key)
+            logger.info(f"Common interfaces across {total_devices} devices (threshold: {threshold}): {len(common_interfaces)} found - {list(common_interfaces)[:10]}")
         else:
             common_interfaces = []
 
