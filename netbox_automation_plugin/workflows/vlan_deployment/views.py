@@ -201,6 +201,9 @@ class VLANDeploymentView(View):
                     })
                     
                     # Convert Nornir result to table entry
+                    # Get logs from deployment
+                    logs = interface_result.get('logs', []) if isinstance(interface_result.get('logs'), list) else []
+                    
                     if interface_result.get('success'):
                         status = "success"
                         config_applied = "Yes"
@@ -209,18 +212,35 @@ class VLANDeploymentView(View):
                         # Update NetBox if requested and deployment was committed
                         netbox_updated = "No"
                         if update_netbox and interface_result.get('committed', False) and vlan:
+                            logs.append("")
+                            logs.append("[Step 4] Updating NetBox interface assignment...")
                             netbox_result = self._update_netbox_interface(device, interface_name, vlan)
                             if netbox_result['success']:
                                 netbox_updated = "Yes"
                                 message += " | NetBox updated"
+                                logs.append(f"✓ NetBox interface updated successfully")
                             else:
                                 netbox_updated = "Failed"
                                 message += f" | NetBox update failed: {netbox_result['error']}"
+                                logs.append(f"✗ NetBox update failed: {netbox_result['error']}")
+                        elif interface_result.get('rolled_back', False):
+                            netbox_updated = "Skipped"
+                            message += " | NetBox update skipped (deployment rolled back)"
+                            logs.append(f"⚠ NetBox update skipped (deployment was rolled back)")
+                        else:
+                            logs.append(f"⚠ NetBox update skipped (deployment not committed)")
                     else:
                         status = "error"
                         config_applied = "Failed"
                         netbox_updated = "No"
                         message = interface_result.get('error', 'Unknown error')
+                    
+                    # Add final summary to logs
+                    logs.append("")
+                    logs.append("=== Deployment Completed ===")
+                    logs.append(f"Final Status: {status.upper()}")
+                    logs.append(f"Config Applied: {config_applied}")
+                    logs.append(f"NetBox Updated: {netbox_updated}")
                     
                     results.append({
                         "device": device,
@@ -231,7 +251,7 @@ class VLANDeploymentView(View):
                         "config_applied": config_applied,
                         "netbox_updated": netbox_updated,
                         "message": message,
-                        "deployment_logs": '\n'.join(interface_result.get('logs', [])) if 'logs' in interface_result else message,
+                        "deployment_logs": '\n'.join(logs) if logs else message,
                     })
 
         return results

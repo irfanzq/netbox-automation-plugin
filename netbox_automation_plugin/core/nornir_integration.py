@@ -1398,6 +1398,23 @@ def deploy_vlan_config(task, interface_name: str, vlan_id: int, platform: str, t
         # Get NetBox device object
         device = Device.objects.get(name=device_name)
         
+        # CRITICAL: Validate interface exists in NetBox before deploying
+        from dcim.models import Interface
+        try:
+            interface = Interface.objects.get(device=device, name=interface_name)
+            logger.info(f"{device_name}: Interface {interface_name} validated in NetBox")
+        except Interface.DoesNotExist:
+            error_msg = f"Interface {interface_name} does not exist on device {device_name} in NetBox"
+            logger.error(error_msg)
+            return {
+                "success": False,
+                "committed": False,
+                "rolled_back": False,
+                "error": error_msg,
+                "message": error_msg,
+                "logs": [f"✗ Pre-deployment validation failed: {error_msg}"]
+            }
+        
         # Generate platform-specific config
         if platform == 'cumulus':
             config = f"nv set interface {interface_name} bridge domain br_default access {vlan_id}"
