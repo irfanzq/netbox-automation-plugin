@@ -610,19 +610,43 @@ class GetCommonInterfacesView(View):
     """
     AJAX endpoint to get common interfaces for selected devices.
     Returns JSON list of interfaces that exist on ALL selected devices.
+    
+    Accepts either:
+    - device_ids[]: List of device IDs (Single mode)
+    - site_id, location_id, manufacturer_id, role_id: Filter parameters (Group mode)
     """
 
     def get(self, request):
         device_ids = request.GET.getlist('device_ids[]')
+        
+        # Group mode filter parameters
+        site_id = request.GET.get('site_id')
+        location_id = request.GET.get('location_id')
+        manufacturer_id = request.GET.get('manufacturer_id')
+        role_id = request.GET.get('role_id')
 
-        if not device_ids:
-            return JsonResponse({'interfaces': []})
-
-        # Get all devices
-        devices = Device.objects.filter(id__in=device_ids)
+        # Get devices either by IDs (Single mode) or by filters (Group mode)
+        if device_ids:
+            # Single mode: Use provided device IDs
+            devices = Device.objects.filter(id__in=device_ids)
+        elif site_id and location_id and manufacturer_id and role_id:
+            # Group mode: Query devices by filters
+            from django.db.models import Q
+            devices = Device.objects.filter(
+                site_id=site_id,
+                location_id=location_id,
+                device_type__manufacturer_id=manufacturer_id,
+                role_id=role_id
+            ).filter(
+                Q(primary_ip4__isnull=False) | Q(primary_ip6__isnull=False)
+            ).select_related('device_type', 'device_type__manufacturer')
+            
+            logger.info(f"Group mode: Found {devices.count()} devices matching filters (site={site_id}, location={location_id}, manufacturer={manufacturer_id}, role={role_id})")
+        else:
+            return JsonResponse({'interfaces': [], 'device_count': 0})
 
         if not devices.exists():
-            return JsonResponse({'interfaces': []})
+            return JsonResponse({'interfaces': [], 'device_count': 0})
 
         # Get interfaces for each device
         device_interface_sets = []

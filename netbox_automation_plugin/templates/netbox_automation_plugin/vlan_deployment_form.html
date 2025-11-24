@@ -217,7 +217,39 @@
               }
             }
 
-            // Load interfaces and populate checkboxes when devices are selected
+            // Helper function to render interface checkboxes
+            function renderInterfaceCheckboxes(interfaces, container) {
+              container.innerHTML = '';
+              
+              if (interfaces.length === 0) {
+                container.innerHTML = '<p class="text-muted mb-0">No common interfaces found</p>';
+                return;
+              }
+              
+              // Create checkboxes for each interface
+              interfaces.forEach(iface => {
+                const div = document.createElement('div');
+                div.className = 'form-check';
+
+                const checkbox = document.createElement('input');
+                checkbox.type = 'checkbox';
+                checkbox.className = 'form-check-input';
+                checkbox.name = 'interfaces_select';
+                checkbox.value = iface;
+                checkbox.id = `interface_${iface}`;
+
+                const label = document.createElement('label');
+                label.className = 'form-check-label';
+                label.htmlFor = `interface_${iface}`;
+                label.textContent = iface;
+
+                div.appendChild(checkbox);
+                div.appendChild(label);
+                container.appendChild(div);
+              });
+            }
+
+            // Load interfaces and populate checkboxes when devices are selected (Single mode)
             function loadCommonInterfaces() {
               console.log('loadCommonInterfaces called');
               const devicesSelect = document.getElementById('id_devices');
@@ -249,37 +281,65 @@
                 })
                 .then(data => {
                   console.log('Interface data received:', data);
-                  interfacesContainer.innerHTML = '';
-
-                  if (data.interfaces.length === 0) {
-                    interfacesContainer.innerHTML = '<p class="text-muted mb-0">No common interfaces found</p>';
-                  } else {
-                    // Create checkboxes for each interface
-                    data.interfaces.forEach(iface => {
-                      const div = document.createElement('div');
-                      div.className = 'form-check';
-
-                      const checkbox = document.createElement('input');
-                      checkbox.type = 'checkbox';
-                      checkbox.className = 'form-check-input';
-                      checkbox.name = 'interfaces_select';
-                      checkbox.value = iface;
-                      checkbox.id = `interface_${iface}`;
-
-                      const label = document.createElement('label');
-                      label.className = 'form-check-label';
-                      label.htmlFor = `interface_${iface}`;
-                      label.textContent = iface;
-
-                      div.appendChild(checkbox);
-                      div.appendChild(label);
-                      interfacesContainer.appendChild(div);
-                    });
-                  }
+                  
+                  // Use helper function to render checkboxes
+                  renderInterfaceCheckboxes(data.interfaces, interfacesContainer);
 
                   // Also filter VLANs by site of selected devices
                   console.log('About to call filterVLANsByDevices with:', selectedDeviceIds);
                   filterVLANsByDevices(selectedDeviceIds);
+                })
+                .catch(error => {
+                  console.error('Error loading interfaces:', error);
+                  interfacesContainer.innerHTML = '<p class="text-danger mb-0">Error loading interfaces</p>';
+                });
+            }
+
+            // Load interfaces for Group mode (Site + Location + Manufacturer + Role)
+            function loadInterfacesFromGroupFilters() {
+              console.log('loadInterfacesFromGroupFilters called');
+              
+              const siteSelect = document.getElementById('id_site');
+              const locationSelect = document.getElementById('id_location');
+              const manufacturerSelect = document.getElementById('id_manufacturer');
+              const roleSelect = document.getElementById('id_role');
+              const interfacesContainer = document.getElementById('interfaces-checkbox-container');
+              
+              const siteId = siteSelect ? siteSelect.value : '';
+              const locationId = locationSelect ? locationSelect.value : '';
+              const manufacturerId = manufacturerSelect ? manufacturerSelect.value : '';
+              const roleId = roleSelect ? roleSelect.value : '';
+              
+              console.log('Group filters:', {siteId, locationId, manufacturerId, roleId});
+              
+              // Only load interfaces if ALL filters are selected
+              if (!siteId || !locationId || !manufacturerId || !roleId) {
+                interfacesContainer.innerHTML = '<p class="text-muted mb-0">Select all filters (Site, Location, Manufacturer, Role) to load interfaces</p>';
+                return;
+              }
+              
+              // Show loading
+              interfacesContainer.innerHTML = '<p class="text-muted mb-0">Loading interfaces...</p>';
+              
+              // Build query string with filter parameters
+              const url = `/plugins/automation/vlan-deployment/get-interfaces/?site_id=${siteId}&location_id=${locationId}&manufacturer_id=${manufacturerId}&role_id=${roleId}`;
+              console.log('Fetching interfaces from:', url);
+              
+              // Fetch common interfaces for devices matching filters
+              fetch(url)
+                .then(response => {
+                  console.log('Interface response status:', response.status);
+                  return response.json();
+                })
+                .then(data => {
+                  console.log('Interface data received:', data);
+                  console.log(`Found ${data.device_count} devices with common interfaces`);
+                  
+                  // Use helper function to render checkboxes
+                  renderInterfaceCheckboxes(data.interfaces, interfacesContainer);
+                  
+                  // Also load VLANs for this site
+                  filterVLANsBySite();
                 })
                 .catch(error => {
                   console.error('Error loading interfaces:', error);
@@ -430,10 +490,29 @@
                 }
               }
 
-              // Listen for site selection changes (group mode)
+              // Listen for group filter changes (group mode - load interfaces)
               const siteSelect = document.getElementById('id_site');
+              const locationSelect = document.getElementById('id_location');
+              const manufacturerSelect = document.getElementById('id_manufacturer');
+              const roleSelect = document.getElementById('id_role');
+              
               if (siteSelect) {
-                siteSelect.addEventListener('change', filterVLANsBySite);
+                siteSelect.addEventListener('change', function() {
+                  filterVLANsBySite();  // Load VLANs
+                  loadInterfacesFromGroupFilters();  // Load interfaces
+                });
+              }
+              
+              if (locationSelect) {
+                locationSelect.addEventListener('change', loadInterfacesFromGroupFilters);
+              }
+              
+              if (manufacturerSelect) {
+                manufacturerSelect.addEventListener('change', loadInterfacesFromGroupFilters);
+              }
+              
+              if (roleSelect) {
+                roleSelect.addEventListener('change', loadInterfacesFromGroupFilters);
               }
             });
 
