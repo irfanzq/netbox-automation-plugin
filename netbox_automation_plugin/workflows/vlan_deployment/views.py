@@ -8,10 +8,10 @@ from dcim.models import Device, Interface
 from ipam.models import VLAN
 
 from ...core.napalm_integration import NAPALMDeviceManager
+from ...core.nornir_integration import NornirDeviceManager
 from .forms import VLANDeploymentForm
 from .tables import VLANDeploymentResultTable
 import logging
-from concurrent.futures import ThreadPoolExecutor, as_completed
 import traceback
 
 logger = logging.getLogger('netbox_automation_plugin')
@@ -156,203 +156,85 @@ class VLANDeploymentView(View):
 
         results = []
 
-        # Note: We use NAPALMDeviceManager per-device in _deploy_config_to_device
-        # This allows proper connection management and safe deployment per device
-
-        # Prepare task list: (device, interface) pairs
-        tasks = [(device, iface) for device in devices for iface in interface_list]
-        logger.info(f"VLAN Deployment: {len(tasks)} tasks across {len(devices)} devices")
-
-        # Get num_workers from plugin config (same as Nornir uses)
-        from netbox.plugins import get_plugin_config
-        try:
-            nornir_config = get_plugin_config('netbox_automation_plugin', 'nornir', {})
-            max_workers = nornir_config.get('runner', {}).get('options', {}).get('num_workers', 10)
-        except:
-            max_workers = 10
+        # Detect platform - all devices should be same platform (enforced by manufacturer filter)
+        platform = self._get_device_platform(devices[0]) if devices else 'cumulus'
         
-        logger.info(f"Using {max_workers} parallel workers for VLAN deployment")
+        logger.info(f"VLAN Deployment: {len(devices)} devices, {len(interface_list)} interfaces, platform: {platform}")
 
-        # Execute deployments in parallel using ThreadPoolExecutor
-        # Each device gets its own NAPALM connection (thread-safe)
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            # Submit all tasks
-            future_to_task = {
-                executor.submit(
-                    self._deploy_one_task,
-                    device, interface_name, vlan_id, vlan_name, dry_run, update_netbox, vlan
-                ): (device, interface_name)
-                for device, interface_name in tasks
-            }
-            
-            # Collect results as they complete
-            for future in as_completed(future_to_task):
-                device, interface_name = future_to_task[future]
-                try:
-                    result = future.result()
-                    results.append(result)
-                    logger.info(f"Completed: {device.name}/{interface_name} - {result['status']}")
-                except Exception as e:
-                    logger.error(f"Task failed for {device.name}/{interface_name}: {e}")
-                    import traceback
-                    logger.error(traceback.format_exc())
+        if dry_run:
+            # Dry run mode - generate preview without deploying
+            for device in devices:
+                for interface_name in interface_list:
+                    config_command = self._generate_vlan_config(interface_name, vlan_id, platform)
                     results.append({
                         "device": device,
                         "interface": interface_name,
                         "vlan_id": vlan_id,
                         "vlan_name": vlan_name,
-                        "status": "error",
-                        "config_applied": "No",
+                        "status": "success",
+                        "config_applied": "Dry Run",
                         "netbox_updated": "No",
-                        "message": f"Exception: {str(e)}",
-                        "deployment_logs": f"Error: {str(e)}\n{traceback.format_exc()}",
+                        "message": f"Platform: {platform} | Would apply: {config_command}",
+                        "deployment_logs": f"[Dry Run Mode] Command: {config_command}",
+                    })
+        else:
+            # Deploy mode - use Nornir for parallel execution
+            nornir_manager = NornirDeviceManager(devices=devices)
+            nornir_manager.initialize()
+            
+            # Deploy VLAN across all devices in parallel
+            nornir_results = nornir_manager.deploy_vlan(
+                interface_list=interface_list,
+                vlan_id=vlan_id,
+                platform=platform,
+                timeout=90
+            )
+            
+            # Process Nornir results into table format
+            for device in devices:
+                device_results = nornir_results.get(device.name, {})
+                
+                for interface_name in interface_list:
+                    interface_result = device_results.get(interface_name, {
+                        'success': False,
+                        'error': 'No result returned from Nornir'
+                    })
+                    
+                    # Convert Nornir result to table entry
+                    if interface_result.get('success'):
+                        status = "success"
+                        config_applied = "Yes"
+                        message = interface_result.get('message', 'Configuration deployed successfully')
+                        
+                        # Update NetBox if requested and deployment was committed
+                        netbox_updated = "No"
+                        if update_netbox and interface_result.get('committed', False) and vlan:
+                            netbox_result = self._update_netbox_interface(device, interface_name, vlan)
+                            if netbox_result['success']:
+                                netbox_updated = "Yes"
+                                message += " | NetBox updated"
+                            else:
+                                netbox_updated = "Failed"
+                                message += f" | NetBox update failed: {netbox_result['error']}"
+                    else:
+                        status = "error"
+                        config_applied = "Failed"
+                        netbox_updated = "No"
+                        message = interface_result.get('error', 'Unknown error')
+                    
+                    results.append({
+                        "device": device,
+                        "interface": interface_name,
+                        "vlan_id": vlan_id,
+                        "vlan_name": vlan_name,
+                        "status": status,
+                        "config_applied": config_applied,
+                        "netbox_updated": netbox_updated,
+                        "message": message,
+                        "deployment_logs": '\n'.join(interface_result.get('logs', [])) if 'logs' in interface_result else message,
                     })
 
         return results
-
-    def _deploy_one_task(self, device, interface_name, vlan_id, vlan_name, dry_run, update_netbox, vlan):
-        """
-        Deploy VLAN config to one device/interface pair.
-        Called in parallel by ThreadPoolExecutor - must be thread-safe.
-        Each invocation gets its own NAPALM connection.
-        """
-        # Detect platform for this device
-        platform = self._get_device_platform(device)
-        result_entry = {
-            "device": device,
-            "interface": interface_name,
-            "vlan_id": vlan_id,
-            "vlan_name": vlan_name,
-            "status": "pending",
-            "config_applied": "No",
-            "netbox_updated": "No",
-            "message": "",
-            "deployment_logs": "",
-        }
-
-        # Initialize deployment logs
-        logs = []
-
-        try:
-            logs.append(f"=== VLAN Deployment Started ===")
-            logs.append(f"Device: {device.name}")
-            logs.append(f"Interface: {interface_name}")
-            logs.append(f"VLAN ID: {vlan_id}")
-            logs.append(f"VLAN Name: {vlan_name}")
-            logs.append(f"Platform: {platform}")
-            logs.append(f"Mode: {'Dry Run' if dry_run else 'Deploy Changes'}")
-            logs.append("")
-
-            # Generate platform-specific VLAN config command
-            logs.append(f"[Step 1] Generating configuration command...")
-            config_command = self._generate_vlan_config(interface_name, vlan_id, platform)
-            logs.append(f"✓ Generated command: {config_command}")
-            logs.append("")
-
-            if dry_run:
-                # Dry run - just show what would be deployed
-                logs.append(f"[Dry Run Mode] No changes will be applied")
-                logs.append(f"Command that would be deployed: {config_command}")
-                result_entry["status"] = "success"
-                result_entry["config_applied"] = "Dry Run"
-                result_entry["message"] = f"Platform: {platform} | Would apply: {config_command}"
-            else:
-                # Apply configuration to device using safe deployment
-                logs.append(f"[Step 2] Deploying configuration to device...")
-                deploy_result = self._deploy_config_to_device(
-                    device, interface_name, config_command, platform, vlan_id
-                )
-
-                # Add deployment logs from the result
-                if deploy_result.get("logs"):
-                    logs.extend(deploy_result["logs"])
-
-                logs.append("")
-
-                if deploy_result["success"]:
-                    result_entry["status"] = "success"
-                    result_entry["config_applied"] = "Yes"
-
-                    logs.append(f"✓ Configuration deployment: SUCCESS")
-                    logs.append(f"✓ Configuration committed: {deploy_result.get('committed', False)}")
-
-                    # Build detailed message from deployment result
-                    message_parts = [deploy_result.get("message", "Configuration applied successfully")]
-
-                    # Add verification details if available
-                    if deploy_result.get("verification_results"):
-                        logs.append("")
-                        logs.append(f"[Step 3] Post-deployment verification results:")
-                        verif_results = deploy_result["verification_results"]
-                        verif_messages = []
-                        for check_name, check_result in verif_results.items():
-                            if check_result.get("success"):
-                                logs.append(f"  ✓ {check_name}: OK - {check_result.get('message', '')}")
-                                verif_messages.append(f"{check_name}: OK")
-                            else:
-                                logs.append(f"  ✗ {check_name}: FAILED - {check_result.get('message', 'Failed')}")
-                                verif_messages.append(f"{check_name}: {check_result.get('message', 'Failed')}")
-                        if verif_messages:
-                            message_parts.append(f"Verification: {', '.join(verif_messages)}")
-
-                    result_entry["message"] = " | ".join(message_parts)
-
-                    # Update NetBox if requested and config was committed (not rolled back)
-                    if update_netbox and deploy_result.get("committed", False):
-                        logs.append("")
-                        logs.append(f"[Step 4] Updating NetBox interface assignment...")
-                        if vlan:
-                            netbox_result = self._update_netbox_interface(
-                                device, interface_name, vlan
-                            )
-                            if netbox_result["success"]:
-                                result_entry["netbox_updated"] = "Yes"
-                                result_entry["message"] += " | NetBox updated"
-                                logs.append(f"✓ NetBox interface updated successfully")
-                            else:
-                                result_entry["netbox_updated"] = "Failed"
-                                result_entry["message"] += f" | NetBox update failed: {netbox_result['error']}"
-                                logs.append(f"✗ NetBox update failed: {netbox_result['error']}")
-                        else:
-                            result_entry["netbox_updated"] = "Skipped"
-                            result_entry["message"] += " | NetBox update skipped (VLAN not found)"
-                            logs.append(f"⚠ NetBox update skipped (VLAN not found in NetBox)")
-                    elif deploy_result.get("rolled_back", False):
-                        result_entry["netbox_updated"] = "Skipped"
-                        result_entry["message"] += " | NetBox update skipped (deployment rolled back)"
-                        logs.append(f"⚠ NetBox update skipped (deployment was rolled back)")
-                else:
-                    result_entry["status"] = "error"
-                    result_entry["config_applied"] = "Failed"
-                    result_entry["message"] = f"Config deployment failed: {deploy_result.get('message', 'Unknown error')}"
-
-                    logs.append(f"✗ Configuration deployment: FAILED")
-                    logs.append(f"Error: {deploy_result.get('message', 'Unknown error')}")
-
-                    # If rolled back, indicate that
-                    if deploy_result.get("rolled_back", False):
-                        result_entry["message"] += " (auto-rollback performed)"
-                        logs.append(f"⚠ Auto-rollback was performed")
-
-        except Exception as e:
-            result_entry["status"] = "error"
-            result_entry["message"] = f"Error: {str(e)}"
-            logs.append(f"✗ EXCEPTION: {str(e)}")
-            import traceback
-            logs.append(f"Traceback:")
-            logs.append(traceback.format_exc())
-
-        # Add final status to logs
-        logs.append("")
-        logs.append(f"=== Deployment Completed ===")
-        logs.append(f"Final Status: {result_entry['status'].upper()}")
-        logs.append(f"Config Applied: {result_entry['config_applied']}")
-        logs.append(f"NetBox Updated: {result_entry['netbox_updated']}")
-
-        # Store logs in result entry
-        result_entry["deployment_logs"] = "\n".join(logs)
-
-        return result_entry
 
     def _get_device_platform(self, device):
         """

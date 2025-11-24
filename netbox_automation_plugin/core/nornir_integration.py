@@ -1,14 +1,18 @@
 """
-Nornir Integration for NetBox Automation Plugin (Production)
+Nornir Integration for NetBox Automation Plugin
 
 This module provides Nornir integration to connect to NetBox devices in parallel
 using NAPALM drivers, including support for napalm-cumulus.
+
+Uses proper NetBox plugin architecture with get_plugin_config().
+Includes failsafe config deployment with Juniper-style commit-confirm workflow.
 """
 
-from typing import Any, Dict, List, Optional, TYPE_CHECKING
+from typing import Any, Dict, List, Optional, Callable, Tuple, TYPE_CHECKING
 from nornir.core.inventory import Inventory, Host, Hosts, Groups, Defaults, ConnectionOptions
 from nornir.core.task import Task, Result
 from nornir_napalm.plugins.tasks import napalm_get
+from nornir.core.plugins.connections import ConnectionPluginRegister
 import logging
 
 if TYPE_CHECKING:
@@ -16,53 +20,670 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# Register custom NAPALM connection plugin with SSH proxy support
+from .napalm_proxy_connection import NapalmProxy
+ConnectionPluginRegister.register("napalm_proxy", NapalmProxy)
+
+# Import Paramiko for custom SSH client
+import paramiko
+from paramiko import SSHClient, Transport
+
+
+class KeyboardInteractiveSSHClient(SSHClient):
+    """
+    Custom SSH client that uses keyboard-interactive authentication for EOS/IOS devices.
+    
+    EOS devices only accept 'publickey' or 'keyboard-interactive' authentication,
+    not password authentication. This class forces keyboard-interactive mode.
+    
+    Based on Palo Alto's SSHClient_interactive approach.
+    """
+    
+    def __init__(self, password: str):
+        """
+        Initialize the custom SSH client.
+        
+        Args:
+            password: Password to use for keyboard-interactive authentication
+        """
+        super().__init__()
+        self.password = password
+    
+    def keyboard_interactive_handler(
+        self, title: str, instructions: str, prompt_list: List[Tuple[str, bool]]
+    ) -> List[str]:
+        """
+        Handler for keyboard-interactive authentication prompts.
+        
+        Args:
+            title: Title of the authentication prompt
+            instructions: Instructions from the server
+            prompt_list: List of (prompt_text, echo) tuples
+            
+        Returns:
+            List of responses to the prompts
+        """
+        import sys
+        import logging
+        logger = logging.getLogger(__name__)
+        
+        # Debug logging
+        logger.error(f"KEYBOARD_INTERACTIVE: title={title}, instructions={instructions}")
+        logger.error(f"KEYBOARD_INTERACTIVE: prompt_list={prompt_list}")
+        print(f"KEYBOARD_INTERACTIVE DEBUG: title={title}", file=sys.stderr, flush=True)
+        print(f"KEYBOARD_INTERACTIVE DEBUG: instructions={instructions}", file=sys.stderr, flush=True)
+        print(f"KEYBOARD_INTERACTIVE DEBUG: prompt_list={prompt_list}", file=sys.stderr, flush=True)
+        
+        responses = []
+        for prompt, echo in prompt_list:
+            print(f"KEYBOARD_INTERACTIVE DEBUG: Processing prompt: '{prompt}' (echo={echo})", file=sys.stderr, flush=True)
+            # Check if this is a password prompt
+            if 'password' in prompt.lower() or 'passcode' in prompt.lower() or 'passphrase' in prompt.lower():
+                print(f"KEYBOARD_INTERACTIVE DEBUG: Detected password prompt, responding with password", file=sys.stderr, flush=True)
+                responses.append(self.password)
+            elif 'username' in prompt.lower() or 'login' in prompt.lower():
+                # Some devices might ask for username again
+                # We'll return empty string and let Paramiko handle it
+                print(f"KEYBOARD_INTERACTIVE DEBUG: Detected username prompt, responding with empty", file=sys.stderr, flush=True)
+                responses.append('')
+            else:
+                # Unknown prompt - try password as fallback
+                print(f"KEYBOARD_INTERACTIVE DEBUG: Unknown prompt, trying password as fallback", file=sys.stderr, flush=True)
+                responses.append(self.password)
+        
+        print(f"KEYBOARD_INTERACTIVE DEBUG: Returning responses: {[len(r) for r in responses]}", file=sys.stderr, flush=True)
+        return responses
+    
+    def _auth(self, username: str, password: str, *args: Any) -> None:
+        """
+        Override authentication to use keyboard-interactive instead of password.
+        
+        This method is called by Paramiko's connect() method.
+        We intercept it and use auth_interactive() instead of auth_password().
+        
+        Args:
+            username: Username for authentication
+            password: Password (stored in self.password)
+            *args: Additional arguments (ignored)
+        """
+        # Store password for the handler
+        self.password = password
+        
+        # Get the transport and use keyboard-interactive authentication
+        transport = self.get_transport()
+        if transport is None:
+            raise paramiko.ssh_exception.SSHException("Transport not available")
+        
+        # Use keyboard-interactive authentication
+        transport.auth_interactive(username, handler=self.keyboard_interactive_handler)
+
+
+def napalm_get_with_proxy(task: Task, getters: List[str] = None, retrieve: str = None, **kwargs) -> Result:
+    """
+    Custom task wrapper for napalm_get that uses direct NAPALM connection with ProxyCommand
+
+    Args:
+        task: Nornir task object
+        getters: List of NAPALM getters to execute
+        retrieve: Parameter for get_config (e.g., 'running', 'startup', 'all')
+        **kwargs: Additional arguments (ignored for compatibility)
+
+    Returns:
+        Result object with getter data
+    """
+    from napalm import get_network_driver
+    from paramiko.proxy import ProxyCommand
+
+    # Handle getters list - don't overwrite if already provided
+    if not getters:
+        getters = []
+
+    # Get connection parameters
+    hostname = task.host.hostname
+    username = task.host.username
+    password = task.host.password
+    platform = task.host.platform
+
+    # Setup debug logging to multiple outputs
+    import sys
+    try:
+        debug_file = open('/tmp/napalm_debug.log', 'a')
+    except:
+        debug_file = None
+    
+    def debug_log(msg):
+        """Log to stderr, file, and logger"""
+        try:
+            print(f"NAPALM_DEBUG: {msg}", file=sys.stderr, flush=True)
+        except:
+            pass
+        if debug_file:
+            try:
+                debug_file.write(f"{msg}\n")
+                debug_file.flush()
+            except:
+                pass
+        logger.error(msg)
+    
+    # CRITICAL DEBUG: Write to a file we can check
+    try:
+        with open('/tmp/napalm_proxy_debug.log', 'a') as f:
+            f.write(f"\n{'='*80}\n")
+            f.write(f"NAPALM_GET_WITH_PROXY called for {task.host.name} ({hostname})\n")
+            f.write(f"Time: {__import__('datetime').datetime.now()}\n")
+            f.flush()
+    except:
+        pass
+
+    debug_log(f"=== NAPALM_GET_WITH_PROXY START for {task.host.name} ({hostname}) ===")
+
+    # PRIMARY: Get SSH proxy from plugin config (main source)
+    # task.host.data can override if explicitly provided
+    ssh_proxy = None
+    try:
+        from netbox.plugins import get_plugin_config
+        automation_config = get_plugin_config('netbox_automation_plugin', 'automation', {})
+        logger.error(f"DEBUG: automation_config keys = {list(automation_config.keys())}")
+        ssh_proxy_config = automation_config.get('ssh_proxy')
+        logger.error(f"DEBUG: ssh_proxy_config from plugin = {repr(ssh_proxy_config)}")
+
+        # CRITICAL DEBUG
+        try:
+            with open('/tmp/napalm_proxy_debug.log', 'a') as f:
+                f.write(f"automation_config: {automation_config}\n")
+                f.write(f"ssh_proxy_config: {repr(ssh_proxy_config)}\n")
+                f.flush()
+        except:
+            pass
+
+        if ssh_proxy_config:
+            ssh_proxy = ssh_proxy_config.strip() if isinstance(ssh_proxy_config, str) else str(ssh_proxy_config).strip()
+            logger.error(f"DEBUG: SSH proxy from plugin config for {task.host.name}: {ssh_proxy}")
+    except Exception as e:
+        logger.error(f"ERROR: Could not read ssh_proxy from plugin config for {task.host.name}: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+    
+    # OVERRIDE: Check if task.host.data has an explicit ssh_proxy (overrides config)
+    ssh_proxy_override = task.host.data.get("ssh_proxy")
+    logger.error(f"DEBUG: ssh_proxy_override from task.host.data = {repr(ssh_proxy_override)}")
+    if ssh_proxy_override and ssh_proxy_override.strip():
+        ssh_proxy = ssh_proxy_override.strip()
+        logger.error(f"DEBUG: SSH proxy overridden from task.host.data for {task.host.name}: {ssh_proxy}")
+    
+    # Log final value
+    logger.error(f"DEBUG: FINAL ssh_proxy value = {repr(ssh_proxy)}")
+
+    # CRITICAL DEBUG
+    try:
+        with open('/tmp/napalm_proxy_debug.log', 'a') as f:
+            f.write(f"FINAL ssh_proxy value: {repr(ssh_proxy)}\n")
+            if ssh_proxy:
+                f.write(f"✓ WILL USE SSH PROXY: {ssh_proxy}\n")
+            else:
+                f.write(f"✗ NO SSH PROXY - DIRECT CONNECTION\n")
+            f.flush()
+    except:
+        pass
+
+    if ssh_proxy:
+        logger.error(f"=== Using SSH proxy for {task.host.name} ({hostname}): {ssh_proxy} ===")
+    else:
+        logger.error(f"=== NO SSH PROXY for {task.host.name} ({hostname}) - will attempt direct connection ===")
+
+    # Create NAPALM driver with detailed error handling and fallback
+    logger.info(f"Attempting to get NAPALM driver for platform: '{platform}'")
+    driver = None
+    
+    # Special handling for cumulus platform with fallback
+    if platform.lower() == 'cumulus':
+        logger.info(f"Platform is cumulus - will use fallback if NAPALM discovery fails")
+    
+    try:
+        # Debug: Check Python path
+        import sys
+        import traceback
+        logger.info(f"Python path: {sys.path[:3]}... (showing first 3)")
+        
+        # First, check if we can import napalm
+        import napalm
+        logger.info(f"napalm module imported: {napalm.__file__}")
+        
+        # Check if napalm_cumulus is available
+        try:
+            import napalm_cumulus
+            logger.info(f"napalm_cumulus module available: {napalm_cumulus.__file__}")
+            
+            # Try to import the driver class directly
+            try:
+                from napalm_cumulus.cumulus import CumulusDriver
+                logger.info(f"CumulusDriver class importable: {CumulusDriver}")
+            except ImportError as driver_import_error:
+                logger.warning(f"Cannot import CumulusDriver class: {driver_import_error}")
+        except ImportError as e:
+            logger.warning(f"napalm_cumulus module not importable: {e}")
+            logger.warning(f"   Import error details: {type(e).__name__}: {e}")
+        
+        # Try to get the driver using NAPALM's standard method
+        logger.info(f"Calling get_network_driver('{platform}')...")
+        try:
+            driver = get_network_driver(platform)
+            logger.info(f"Successfully got driver via NAPALM: {driver} (module: {driver.__module__})")
+        except Exception as napalm_error:
+            logger.warning(f"NAPALM get_network_driver failed: {napalm_error}")
+            logger.warning(f"   Error type: {type(napalm_error).__name__}")
+            
+            # FALLBACK: For cumulus, try direct import
+            if platform.lower() == 'cumulus':
+                logger.info(f"Attempting fallback: direct import of CumulusDriver...")
+                try:
+                    # Ensure /opt/napalm-cumulus is in Python path
+                    napalm_cumulus_path = '/opt/napalm-cumulus'
+                    if napalm_cumulus_path not in sys.path:
+                        sys.path.insert(0, napalm_cumulus_path)
+                        logger.info(f"Added {napalm_cumulus_path} to Python path")
+                    
+                    # Try importing - this should work since the module is installed
+                    from napalm_cumulus.cumulus import CumulusDriver
+                    driver = CumulusDriver
+                    logger.info(f"Successfully imported CumulusDriver directly: {driver} (module: {driver.__module__})")
+                    logger.info(f"Fallback succeeded - using CumulusDriver directly")
+                except ImportError as direct_error:
+                    logger.error(f"Direct import also failed: {direct_error}")
+                    logger.error(f"   Python path: {sys.path[:5]}")
+                    logger.error(f"   Checking if /opt/napalm-cumulus exists...")
+                    import os
+                    if os.path.exists('/opt/napalm-cumulus'):
+                        logger.error(f"   /opt/napalm-cumulus exists")
+                        if os.path.exists('/opt/napalm-cumulus/napalm_cumulus'):
+                            logger.error(f"   /opt/napalm-cumulus/napalm_cumulus exists")
+                        else:
+                            logger.error(f"   /opt/napalm-cumulus/napalm_cumulus does NOT exist")
+                    else:
+                        logger.error(f"   /opt/napalm-cumulus does NOT exist")
+                    raise napalm_error  # Re-raise original error
+            else:
+                raise napalm_error  # Re-raise for non-cumulus platforms
+        
+    except Exception as e:
+        error_msg = f"Cannot import '{platform}'. Is the library installed?"
+        logger.error(f"ERROR getting NAPALM driver for platform '{platform}': {e}")
+        logger.error(f"   Error type: {type(e).__name__}")
+        import traceback
+        logger.error(f"   Full traceback:\n{traceback.format_exc()}")
+        
+        # Additional debugging: Check what drivers are available
+        try:
+            import importlib.metadata
+            eps = importlib.metadata.entry_points(group='napalm.drivers')
+            available_drivers = [ep.name for ep in eps]
+            logger.error(f"   Available NAPALM drivers via entry points: {available_drivers}")
+        except Exception as ep_error:
+            logger.error(f"   Could not check entry points: {ep_error}")
+        
+        # Re-raise with more context
+        from napalm.base.exceptions import ModuleImportError
+        raise ModuleImportError(error_msg) from e
+    
+    if driver is None:
+        error_msg = f"Failed to get driver for platform '{platform}'"
+        logger.error(f"{error_msg}")
+        from napalm.base.exceptions import ModuleImportError
+        raise ModuleImportError(error_msg)
+
+    # Build optional_args with proper timeout settings for Netmiko
+    # These MUST be passed through to Netmiko's ConnectHandler
+    optional_args = {
+        # Netmiko timeout parameters (critical for proxy connections)
+        'conn_timeout': 60,      # TCP connection timeout (increased from default 10s)
+        'auth_timeout': 60,      # Authentication timeout (increased from default)
+        'banner_timeout': 30,    # SSH banner timeout
+        'timeout': 100,          # Read timeout (Netmiko default, but explicit)
+        'global_delay_factor': 2, # Add delay factor for slow connections through proxy
+        # CRITICAL: Disable host key checking to avoid interactive prompts
+        'ssh_strict': False,     # Don't reject unknown SSH host keys (default False, but explicit)
+        'system_host_keys': False,  # Don't load system known_hosts
+        'alt_host_keys': False,   # Don't use alternate host keys
+        # CRITICAL: Force password authentication, disable SSH key auth to target device
+        'use_keys': False,       # Don't use SSH keys for device authentication
+        'allow_agent': False,    # Don't use SSH agent
+    }
+    
+    # CRITICAL: For EOS devices, force SSH transport (not eAPI/HTTP)
+    if platform == 'eos':
+        optional_args['transport'] = 'ssh'
+        debug_log(f"=== EOS device: Forcing SSH transport (not eAPI) ===")
+
+    if ssh_proxy:
+        # Use ProxyCommand - this is the EXACT code that works in the test script
+        debug_log(f"=== Creating ProxyCommand with ssh_proxy={ssh_proxy}, hostname={hostname} ===")
+        try:
+            proxy_user, proxy_host = ssh_proxy.split("@", 1)
+            debug_log(f"DEBUG: proxy_user={proxy_user}, proxy_host={proxy_host}")
+        except ValueError:
+            debug_log(f"FATAL: Invalid ssh_proxy format for {task.host.name}: {ssh_proxy} (expected 'user@host')")
+            raise ValueError(f"Invalid ssh_proxy format: {ssh_proxy} (expected 'user@host')")
+        
+        # Note: Don't specify -i flag in ProxyCommand - let SSH use default keys or ssh-agent
+        # The -i flag would interfere with password auth to the target device
+        proxy_command_str = (
+            f"ssh -o StrictHostKeyChecking=no "
+            f"-o UserKnownHostsFile=/dev/null "
+            f"-o IdentityFile=/opt/ssh-keys/id_ed25519 "
+            f"-W {hostname}:22 "
+            f"{proxy_user}@{proxy_host}"
+        )
+        debug_log(f"DEBUG: ProxyCommand string = {proxy_command_str}")
+
+        proxy = ProxyCommand(proxy_command_str)
+        debug_log(f"DEBUG: ProxyCommand object created: {type(proxy).__name__}")
+        optional_args['sock'] = proxy
+        debug_log(f"DEBUG: Set optional_args['sock'] = {type(proxy).__name__}")
+        # Increase timeouts SIGNIFICANTLY for proxy connections
+        optional_args['conn_timeout'] = 120  # More time for proxy tunnel establishment
+        optional_args['auth_timeout'] = 90   # More time for authentication through proxy
+        optional_args['banner_timeout'] = 60  # More time for SSH banner through proxy
+        optional_args['timeout'] = 120       # Global timeout for operations
+        # CRITICAL: Ensure password auth is used, not keys
+        optional_args['use_keys'] = False
+        optional_args['allow_agent'] = False
+        debug_log(f"DEBUG: optional_args after setting sock = {list(optional_args.keys())}")
+        debug_log(f"DEBUG: optional_args['sock'] exists = {'sock' in optional_args}")
+        debug_log(f"=== SSH proxy configured: {ssh_proxy} for {hostname} ===")
+    else:
+        debug_log(f"=== NO PROXY - Direct connection to {hostname} ===")
+
+    # CRITICAL: For EOS/IOS devices, use keyboard-interactive authentication
+    # EOS devices only accept 'publickey' or 'keyboard-interactive', not password
+    use_keyboard_interactive = platform in ['ios', 'eos', 'nxos']
+    
+    # Initialize variables for keyboard-interactive patching
+    original_build_ssh_client = None
+    thread_local = None
+    
+    if use_keyboard_interactive:
+        debug_log(f"=== EOS/IOS device detected: {platform} - Using keyboard-interactive authentication ===")
+        
+        # Monkey-patch Netmiko's _build_ssh_client method to use our custom client
+        # We need to do this before NAPALM creates the Netmiko connection
+        import netmiko.base_connection
+        import threading
+        
+        # Store the original method and create a thread-local storage for password
+        original_build_ssh_client = netmiko.base_connection.BaseConnection._build_ssh_client
+        thread_local = threading.local()
+        thread_local.keyboard_interactive_password = password
+        
+        def patched_build_ssh_client(self):
+            """Patched version that returns our custom SSH client for EOS/IOS"""
+            # Get password from thread-local storage
+            auth_password = getattr(thread_local, 'keyboard_interactive_password', None)
+            
+            if auth_password:
+                # Create our custom SSH client
+                ssh_client = KeyboardInteractiveSSHClient(password=auth_password)
+                
+                # Configure it like Netmiko would
+                if self.system_host_keys:
+                    ssh_client.load_system_host_keys()
+                if self.alt_host_keys and hasattr(self, 'alt_key_file'):
+                    import os
+                    if os.path.isfile(self.alt_key_file):
+                        ssh_client.load_host_keys(self.alt_key_file)
+                
+                # Set missing host key policy
+                ssh_client.set_missing_host_key_policy(self.key_policy)
+                
+                return ssh_client
+            else:
+                # Fallback to original if password not set
+                return original_build_ssh_client(self)
+        
+        # Apply the patch
+        netmiko.base_connection.BaseConnection._build_ssh_client = patched_build_ssh_client
+        debug_log(f"DEBUG: Patched Netmiko's _build_ssh_client to use KeyboardInteractiveSSHClient")
+    else:
+        debug_log(f"=== Platform {platform} - Using standard password authentication ===")
+
+    # Create NAPALM connection - EXACT same way as test script
+    debug_log(f"=== Creating NAPALM device ===")
+    debug_log(f"DEBUG: hostname={hostname}")
+    debug_log(f"DEBUG: username={username}")
+    debug_log(f"DEBUG: platform={platform}")
+    debug_log(f"DEBUG: optional_args keys = {list(optional_args.keys())}")
+    debug_log(f"DEBUG: has sock = {'sock' in optional_args}")
+    if 'sock' in optional_args:
+        debug_log(f"DEBUG: optional_args['sock'] type = {type(optional_args['sock']).__name__}")
+    
+    # Create NAPALM device (patch must be active during this)
+    try:
+        device = driver(
+            hostname=hostname,
+            username=username,
+            password=password,
+            timeout=120,  # Increased NAPALM timeout for slow connections
+            optional_args=optional_args,
+        )
+    except Exception as e:
+        # Log error before restoring
+        debug_log(f"ERROR: Failed to create NAPALM device: {e}")
+        # Restore patch even on error (though device.open() won't be called)
+        if use_keyboard_interactive and original_build_ssh_client is not None:
+            try:
+                import netmiko.base_connection
+                netmiko.base_connection.BaseConnection._build_ssh_client = original_build_ssh_client
+                if thread_local is not None and hasattr(thread_local, 'keyboard_interactive_password'):
+                    delattr(thread_local, 'keyboard_interactive_password')
+                debug_log(f"DEBUG: Restored original Netmiko _build_ssh_client method (after device creation error)")
+            except Exception as restore_error:
+                debug_log(f"WARNING: Failed to restore original _build_ssh_client: {restore_error}")
+        raise
+    
+    debug_log(f"=== NAPALM device created ===")
+    
+    # Verify sock is set if proxy was configured
+    if ssh_proxy and hasattr(device, 'netmiko_optional_args'):
+        debug_log(f"DEBUG: device.netmiko_optional_args keys = {list(device.netmiko_optional_args.keys())}")
+        debug_log(f"DEBUG: device.netmiko_optional_args['sock'] = {device.netmiko_optional_args.get('sock')}")
+        if 'sock' in device.netmiko_optional_args:
+            debug_log(f"DEBUG: Sock successfully passed to device!")
+        else:
+            debug_log(f"FATAL: Sock NOT in device.netmiko_optional_args! Proxy will not work!")
+
+    # Open connection
+    debug_log(f"=== About to call device.open() for {hostname} ===")
+    debug_log(f"DEBUG: If using proxy, connection should go through {ssh_proxy if ssh_proxy else 'NONE'}")
+
+    # CRITICAL: Log connection attempt - raise exception if this fails so we know
+    import datetime
+    import sys
+    log_msg = f"\n{'='*80}\n"
+    log_msg += f"[{datetime.datetime.now()}] Attempting connection to {hostname}\n"
+    log_msg += f"SSH Proxy configured: {ssh_proxy}\n"
+    log_msg += f"Has sock in optional_args: {'sock' in optional_args}\n"
+    if 'sock' in optional_args:
+        log_msg += f"Sock type: {type(optional_args['sock']).__name__}\n"
+        log_msg += f"Sock value: {optional_args['sock']}\n"
+    log_msg += f"use_keys: {optional_args.get('use_keys', 'NOT SET')}\n"
+    log_msg += f"allow_agent: {optional_args.get('allow_agent', 'NOT SET')}\n"
+    log_msg += f"About to call device.open()...\n"
+
+    # ALWAYS print to stdout/stderr so it appears in Docker logs
+    print(f"🔍 NAPALM CONNECTION DEBUG: {log_msg}", file=sys.stderr, flush=True)
+
+    # Try multiple log locations
+    for log_path in ['/opt/netbox/netbox/media/napalm_debug.txt', '/tmp/napalm_connection_attempt.log']:
+        try:
+            with open(log_path, 'a') as f:
+                f.write(log_msg)
+                f.flush()
+            print(f"✓ Wrote debug log to {log_path}", file=sys.stderr, flush=True)
+            break  # Success, stop trying
+        except Exception as e:
+            print(f"✗ Failed to write to {log_path}: {e}", file=sys.stderr, flush=True)
+            continue  # Try next path
+
+    # Close debug file
+    if debug_file:
+        try:
+            debug_file.close()
+        except:
+            pass
+
+    # CRITICAL: device.open() must happen while patch is active!
+    try:
+        device.open()
+        # Log success
+        for log_path in ['/opt/netbox/netbox/media/napalm_debug.txt', '/tmp/napalm_connection_attempt.log']:
+            try:
+                with open(log_path, 'a') as f:
+                    f.write(f"✓ SUCCESS: Connected to {hostname}\n")
+                    f.flush()
+                break
+            except:
+                continue
+    except Exception as conn_error:
+        # Log failure with details
+        for log_path in ['/opt/netbox/netbox/media/napalm_debug.txt', '/tmp/napalm_connection_attempt.log']:
+            try:
+                with open(log_path, 'a') as f:
+                    f.write(f"✗ FAILED: {str(conn_error)}\n")
+                    f.write(f"Error type: {type(conn_error).__name__}\n")
+                    f.flush()
+                break
+            except:
+                continue
+        raise  # Re-raise the original error
+    finally:
+        # CRITICAL: Restore original method AFTER device.open() completes (even on error)
+        if use_keyboard_interactive and original_build_ssh_client is not None:
+            try:
+                import netmiko.base_connection
+                netmiko.base_connection.BaseConnection._build_ssh_client = original_build_ssh_client
+                # Clear thread-local password
+                if thread_local is not None and hasattr(thread_local, 'keyboard_interactive_password'):
+                    delattr(thread_local, 'keyboard_interactive_password')
+                debug_log(f"DEBUG: Restored original Netmiko _build_ssh_client method (after device.open())")
+            except Exception as restore_error:
+                debug_log(f"WARNING: Failed to restore original _build_ssh_client: {restore_error}")
+
+    # Execute getters
+    result = {}
+    try:
+        for getter in getters:
+            try:
+                method = getattr(device, f"get_{getter}")
+                # Special handling for get_config which needs retrieve parameter
+                if getter == "config" and retrieve:
+                    result[getter] = method(retrieve=retrieve)
+                else:
+                    result[getter] = method()
+            except Exception as e:
+                logger.error(f"Failed to execute getter '{getter}' on {task.host.name}: {e}")
+                raise
+    finally:
+        # Always close the connection
+        try:
+            device.close()
+        except:
+            pass
+
+        # CRITICAL: Close ProxyCommand subprocess to prevent zombie processes
+        if 'sock' in optional_args and optional_args['sock'] is not None:
+            try:
+                proxy_sock = optional_args['sock']
+                if hasattr(proxy_sock, 'close'):
+                    proxy_sock.close()
+                    debug_log(f"✓ Closed ProxyCommand for {hostname}")
+            except Exception as e:
+                debug_log(f"✗ Failed to close ProxyCommand for {hostname}: {e}")
+
+    return Result(host=task.host, result=result)
+
 
 class NetBoxORMInventory:
     """
-    Custom Nornir inventory plugin that reads from NetBox ORM
+    Custom Nornir inventory plugin that reads devices from NetBox using Django ORM
+    and uses the correct NAPALM driver (including cumulus for Mellanox/Nvidia devices)
     """
 
     def __init__(
         self,
         devices: Optional[List["Device"]] = None,
         device_filter: Optional[Dict[str, Any]] = None,
+        ssh_proxy: Optional[str] = None,
         username: Optional[str] = None,
         password: Optional[str] = None,
         **kwargs
     ):
+        logger.error("=" * 80)
+        logger.error("=== NetBoxORMInventory __init__ ===")
+        logger.error(f"DEBUG: ssh_proxy parameter = {repr(ssh_proxy)}")
+        logger.error(f"DEBUG: username parameter = {repr(username)}")
+        logger.error(f"DEBUG: devices count = {len(devices) if devices else 0}")
         """
-        Initialize inventory from NetBox devices
+        Initialize NetBox ORM-based Nornir inventory
 
         Args:
-            devices: List of NetBox Device objects
-            device_filter: Django ORM filter dict
-            username: SSH username (overrides plugin config)
-            password: SSH password (overrides plugin config)
+            devices: List of NetBox Device objects (optional)
+            device_filter: Django ORM filter to select devices (optional)
+            ssh_proxy: SSH proxy/bastion host for local dev (e.g., 'irfanzq@192.168.0.162')
+            username: SSH username (optional, overrides plugin config)
+            password: SSH password (optional, overrides plugin config)
         """
-        from dcim.models import Device
+        from netbox.plugins import get_plugin_config
 
-        # Get credentials from plugin config or parameters
+        # Read credentials from plugin config
         try:
-            from netbox.plugins import get_plugin_config
             napalm_config = get_plugin_config('netbox_automation_plugin', 'napalm', {})
-            default_username = napalm_config.get('username', 'cumulus')
-            default_password = napalm_config.get('password', 'cumulus')
-            # Support per-platform credentials
+            automation_config = get_plugin_config('netbox_automation_plugin', 'automation', {})
+            default_username = napalm_config.get('username')
+            default_password = napalm_config.get('password')
+            default_ssh_proxy = automation_config.get('ssh_proxy')  # Read SSH proxy from config
+            # NEW: Support per-platform credentials
             self.platform_credentials = napalm_config.get('platform_credentials', {})
+            # Log config values for debugging
+            if default_ssh_proxy:
+                logger.debug(f"NetBoxORMInventory: SSH proxy from config: {default_ssh_proxy}")
         except Exception as e:
-            logger.warning(f"Could not load plugin config, using defaults: {e}")
-            default_username = 'cumulus'
-            default_password = 'cumulus'
+            logger.error(f"Could not load plugin config: {e}")
+            import traceback
+            logger.debug(f"Config load error traceback: {traceback.format_exc()}")
+            default_username = None
+            default_password = None
+            default_ssh_proxy = None
             self.platform_credentials = {}
 
+        # Use provided credentials or fall back to plugin config
         self.username = username if username is not None else default_username
         self.password = password if password is not None else default_password
+        # If ssh_proxy not explicitly passed, read from config (for local dev environment)
+        # Ensure we handle None, empty string, and actual values consistently
+        if ssh_proxy is not None and ssh_proxy.strip():
+            self.ssh_proxy = ssh_proxy.strip()
+            logger.error(f"NetBoxORMInventory: Using explicitly provided SSH proxy: {self.ssh_proxy}")
+        elif default_ssh_proxy and default_ssh_proxy.strip():
+            self.ssh_proxy = default_ssh_proxy.strip()
+            logger.error(f"NetBoxORMInventory: Using SSH proxy from config: {self.ssh_proxy}")
+        else:
+            self.ssh_proxy = None
+            logger.error("NetBoxORMInventory: No SSH proxy configured")
+        
+        logger.error(f"DEBUG: FINAL self.ssh_proxy = {repr(self.ssh_proxy)}")
+        logger.error("=" * 80)
+        self.device_filter = device_filter or {}
+        self.devices = devices
+        
+    def load(self) -> Inventory:
+        """Load inventory from NetBox using Django ORM"""
 
-        # Query devices
-        if devices:
-            self.devices = devices
-        elif device_filter:
-            self.devices = Device.objects.filter(**device_filter).select_related(
+        # Import Django models here to avoid import-time issues
+        from dcim.models import Device
+        from netbox_automation_plugin.core.napalm_integration import NAPALMDeviceManager
+
+        # Get devices from NetBox
+        if self.devices is None:
+            devices = Device.objects.filter(**self.device_filter).select_related(
                 'device_type',
                 'device_type__manufacturer',
                 'site',
@@ -71,72 +692,104 @@ class NetBoxORMInventory:
                 'primary_ip6'
             )
         else:
-            self.devices = []
-
-    def load(self) -> Inventory:
-        """Load inventory from NetBox devices"""
+            devices = self.devices
+        
+        # Build Nornir hosts
         hosts = Hosts()
-
-        for device in self.devices:
-            # Get primary IP
-            if device.primary_ip4:
-                hostname = str(device.primary_ip4.address).split('/')[0]
-            elif device.primary_ip6:
-                hostname = str(device.primary_ip6.address).split('/')[0]
-            else:
+        
+        for device in devices:
+            # Skip devices without primary IP
+            if not device.primary_ip4 and not device.primary_ip6:
                 logger.warning(f"Device {device.name} has no primary IP, skipping")
                 continue
+            
+            # Get primary IP
+            primary_ip = None
+            if device.primary_ip4:
+                primary_ip = str(device.primary_ip4.address).split('/')[0]
+            elif device.primary_ip6:
+                primary_ip = str(device.primary_ip6.address).split('/')[0]
+            
+            # Get NAPALM driver using our integration
+            napalm_manager = NAPALMDeviceManager(device)
+            driver = napalm_manager.get_driver_name()
 
-            # Determine NAPALM driver
-            manufacturer = device.device_type.manufacturer.name.lower() if device.device_type and device.device_type.manufacturer else ''
+            # Get device metadata
+            manufacturer = device.device_type.manufacturer.name if device.device_type and device.device_type.manufacturer else 'Unknown'
+            model = device.device_type.model if device.device_type else 'Unknown'
+            site = device.site.name if device.site else 'Unknown'
+            role = device.role.name if device.role else 'Unknown'
 
-            if 'cumulus' in manufacturer or 'mellanox' in manufacturer or 'nvidia' in manufacturer:
-                platform = 'cumulus'
-            elif 'arista' in manufacturer:
-                platform = 'eos'
-            elif 'cisco' in manufacturer:
-                if 'nexus' in device.device_type.model.lower() if device.device_type else '':
-                    platform = 'nxos'
-                else:
-                    platform = 'ios'
-            elif 'juniper' in manufacturer:
-                platform = 'junos'
-            else:
-                platform = 'ios'
-
-            # Get platform-specific credentials if configured
+            # NEW: Get platform-specific credentials if configured
             device_username = self.username
             device_password = self.password
 
-            if platform in self.platform_credentials:
-                platform_creds = self.platform_credentials[platform]
+            # Debug: Log available platform credentials and driver
+            logger.error(f"DEBUG: Checking platform credentials for {device.name}")
+            logger.error(f"DEBUG: driver = {driver}")
+            logger.error(f"DEBUG: platform_credentials keys = {list(self.platform_credentials.keys())}")
+            logger.error(f"DEBUG: default username = {self.username}")
+            logger.error(f"DEBUG: default password = {self.password}")
+
+            if driver in self.platform_credentials:
+                platform_creds = self.platform_credentials[driver]
                 device_username = platform_creds.get('username', self.username)
                 device_password = platform_creds.get('password', self.password)
-                logger.info(f"Using platform-specific credentials for {device.name} (platform: {platform})")
+                logger.error(f"✓ Using platform-specific credentials for {device.name} (platform: {driver})")
+                logger.error(f"  Username: {device_username}")
+                logger.error(f"  Password: {'*' * len(device_password) if device_password else 'None'}")
+            else:
+                logger.error(f"✗ No platform-specific credentials found for {driver}, using defaults")
+                logger.error(f"  Username: {device_username}")
+                logger.error(f"  Password: {'*' * len(device_password) if device_password else 'None'}")
 
-            # Create host entry
-            hosts[device.name] = Host(
-                name=device.name,
-                hostname=hostname,
-                platform=platform,
-                username=device_username,
-                password=device_password,
-                data={
-                    'device_id': device.id,
-                    'manufacturer': manufacturer,
-                    'model': device.device_type.model if device.device_type else '',
-                    'site': device.site.name if device.site else '',
-                    'role': device.role.name if device.role else ''
-                },
-                connection_options={
-                    'napalm': ConnectionOptions(
-                        extras={
-                            'optional_args': {}
+            # Build connection options for SSH proxy (LOCAL DEV ENVIRONMENT ONLY)
+            connection_options = {}
+
+            if self.ssh_proxy:
+                # Use custom NAPALM connection plugin that supports SSH proxy
+                # This creates a ProxyCommand subprocess tunnel through the bastion host
+                logger.info(f"Configuring SSH proxy connection through {self.ssh_proxy} for {device.name} ({primary_ip})")
+
+                # Use our custom napalm_proxy connection instead of standard napalm
+                # Pass ssh_proxy through extras so the connection plugin can access it
+                connection_options["napalm_proxy"] = ConnectionOptions(
+                    extras={
+                        "ssh_proxy": self.ssh_proxy,  # Pass SSH proxy to connection plugin
+                        "optional_args": {
+                            "timeout": 60,
                         }
-                    )
+                    }
+                )
+            else:
+                logger.warning(f"No SSH proxy configured for {device.name} ({primary_ip}) - direct connection will be attempted")
+
+            host = Host(
+                name=device.name,
+                hostname=primary_ip,
+                platform=driver,  # NAPALM driver name
+                username=device_username,  # Use platform-specific username
+                password=device_password,  # Use platform-specific password
+                connection_options=connection_options if connection_options else {},
+                data={
+                    'netbox_id': device.id,
+                    'manufacturer': manufacturer,
+                    'model': model,
+                    'site': site,
+                    'role': role,
+                    'napalm_driver': driver,
+                    'ssh_proxy': self.ssh_proxy if self.ssh_proxy else None,  # CRITICAL: Must be set for napalm_get_with_proxy
                 }
             )
+            logger.error(f"=== Created Nornir host {device.name} ===")
+            logger.error(f"  hostname={primary_ip}")
+            logger.error(f"  platform={driver}")
+            logger.error(f"  ssh_proxy in data={host.data.get('ssh_proxy')}")
+            logger.error(f"  self.ssh_proxy={self.ssh_proxy}")
 
+            hosts[device.name] = host
+        
+        # Create inventory
         return Inventory(
             hosts=hosts,
             groups=Groups(),
@@ -147,23 +800,25 @@ class NetBoxORMInventory:
 class NornirDeviceManager:
     """
     Manager class for running Nornir tasks against NetBox devices
-    Production version - direct connections only
+    Uses proper plugin architecture with get_plugin_config()
     """
 
     def __init__(
         self,
         devices: Optional[List["Device"]] = None,
         device_filter: Optional[Dict[str, Any]] = None,
+        ssh_proxy: Optional[str] = None,
         username: Optional[str] = None,
         password: Optional[str] = None,
         num_workers: Optional[int] = None
     ):
         """
-        Initialize Nornir device manager
+        Initialize Nornir device manager using plugin configuration
 
         Args:
             devices: List of NetBox Device objects (optional)
             device_filter: Django ORM filter to select devices (optional)
+            ssh_proxy: SSH proxy/bastion for local dev (e.g., 'irfanzq@192.168.0.162')
             username: SSH username (optional, overrides plugin config)
             password: SSH password (optional, overrides plugin config)
             num_workers: Number of parallel workers (optional, overrides plugin config)
@@ -172,15 +827,38 @@ class NornirDeviceManager:
         try:
             from netbox.plugins import get_plugin_config
             nornir_config = get_plugin_config('netbox_automation_plugin', 'nornir', {})
-            default_num_workers = nornir_config.get('runner', {}).get('options', {}).get('num_workers', 20)
+            automation_config = get_plugin_config('netbox_automation_plugin', 'automation', {})
+            # Balance workers for speed vs SSH proxy limits (MaxSessions=10)
+            # With ProxyCommand cleanup, we can safely use 10 workers
+            default_num_workers = nornir_config.get('runner', {}).get('options', {}).get('num_workers', 10)
+            default_ssh_proxy = automation_config.get('ssh_proxy')  # Read from config
+            # Log config values for debugging
+            if default_ssh_proxy:
+                logger.info(f"SSH proxy from config: {default_ssh_proxy}")
+            else:
+                logger.debug(f"SSH proxy not configured in automation config (value: {default_ssh_proxy})")
         except Exception as e:
             logger.warning(f"Could not load plugin config, using defaults: {e}")
-            default_num_workers = 20
+            import traceback
+            logger.debug(f"Config load error traceback: {traceback.format_exc()}")
+            default_num_workers = 10  # Balance speed vs SSH proxy MaxSessions limit
+            default_ssh_proxy = None
 
         self.devices = devices
         self.device_filter = device_filter
-        self.username = username
-        self.password = password
+        # If ssh_proxy not explicitly passed, read from config (for local dev environment)
+        # Ensure we handle None, empty string, and actual values consistently
+        if ssh_proxy is not None and ssh_proxy.strip():
+            self.ssh_proxy = ssh_proxy.strip()
+            logger.debug(f"Using explicitly provided SSH proxy: {self.ssh_proxy}")
+        elif default_ssh_proxy and default_ssh_proxy.strip():
+            self.ssh_proxy = default_ssh_proxy.strip()
+            logger.debug(f"Using SSH proxy from config: {self.ssh_proxy}")
+        else:
+            self.ssh_proxy = None
+            logger.debug("No SSH proxy configured (neither explicit nor from config)")
+        self.username = username  # Store for passing to inventory
+        self.password = password  # Store for passing to inventory
         self.num_workers = num_workers if num_workers is not None else default_num_workers
         self.nr = None
         
@@ -190,164 +868,563 @@ class NornirDeviceManager:
         logger = logging.getLogger('netbox_automation_plugin.nornir')
 
         # Build custom inventory from NetBox devices
+        logger.info(f"NornirDeviceManager.initialize: Creating inventory with ssh_proxy={self.ssh_proxy}")
         inventory = NetBoxORMInventory(
             devices=self.devices,
             device_filter=self.device_filter,
+            ssh_proxy=self.ssh_proxy,
             username=self.username,
             password=self.password
+        ).load()
+        logger.info(f"NornirDeviceManager.initialize: Inventory created with {len(inventory.hosts)} hosts")
+
+        # Create Nornir with our inventory and threaded runner for parallel execution
+        from nornir.core import Nornir
+        from nornir.core.plugins.connections import ConnectionPluginRegister
+        from nornir.plugins.runners import ThreadedRunner
+
+        # CRITICAL: Auto-register all available connection plugins (napalm, netmiko, etc.)
+        ConnectionPluginRegister.auto_register()
+
+        # Re-register our custom napalm_proxy plugin after auto_register
+        # (auto_register might have cleared custom registrations)
+        from netbox_automation_plugin.core.napalm_proxy_connection import NapalmProxy
+        ConnectionPluginRegister.register("napalm_proxy", NapalmProxy)
+        logger.info("Registered napalm_proxy connection plugin")
+
+        # Create Nornir instance with our custom inventory and threaded runner
+        self.nr = Nornir(
+            inventory=inventory,
+            runner=ThreadedRunner(num_workers=self.num_workers)
         )
 
-        # Initialize Nornir with ThreadedRunner
-        from nornir import InitNornir
-        from nornir.core.plugins.runners import ThreadedRunner
-
-        self.nr = InitNornir(
-            runner={
-                "plugin": "threaded",
-                "options": {
-                    "num_workers": self.num_workers,
-                },
-            },
-            inventory=inventory.load(),
-            logging={"enabled": True, "level": "INFO"}
-        )
-
-        logger.info(f"Nornir initialized with {len(self.nr.inventory.hosts)} hosts, {self.num_workers} workers")
-
-    def get_lldp_neighbors(self) -> Dict[str, Any]:
+        if self.ssh_proxy:
+            logger.info(f"Nornir initialized with {len(self.nr.inventory.hosts)} hosts, {self.num_workers} workers, SSH proxy: {self.ssh_proxy}")
+        else:
+            logger.info(f"Nornir initialized with {len(self.nr.inventory.hosts)} hosts, {self.num_workers} workers")
+        return self.nr
+    
+    def get_facts(self) -> Dict[str, Any]:
         """
-        Collect LLDP neighbors from all devices
+        Get facts from all devices in parallel
 
         Returns:
-            Dict mapping device names to LLDP neighbor data
+            Dictionary mapping device names to their facts
         """
         if not self.nr:
-            raise RuntimeError("Nornir not initialized. Call initialize() first.")
+            self.nr = self.initialize()
 
-        results = self.nr.run(task=napalm_get, getters=['lldp_neighbors'])
+        # Run napalm_get task with proxy support
+        result = self.nr.run(
+            task=napalm_get_with_proxy,
+            getters=["facts"]
+        )
         
-        output = {}
-        for device_name, multi_result in results.items():
-            if multi_result.failed:
-                output[device_name] = {
-                    'failed': True,
-                    'error': str(multi_result.exception) if multi_result.exception else 'Unknown error'
+        # Process results
+        facts = {}
+        for host, task_result in result.items():
+            try:
+                if task_result.failed:
+                    # Get the actual error message
+                    error_msg = str(task_result.exception) if task_result.exception else "Unknown error"
+
+                    # Log the full traceback for debugging
+                    if task_result.exception:
+                        logger.error(f"Task failed for {host}: {error_msg}")
+                        import traceback
+                        if hasattr(task_result.exception, '__traceback__'):
+                            logger.error(''.join(traceback.format_exception(
+                                type(task_result.exception),
+                                task_result.exception,
+                                task_result.exception.__traceback__
+                            )))
+
+                    facts[host] = {
+                        'error': error_msg,
+                        'failed': True
+                    }
+                else:
+                    facts[host] = task_result.result.get('facts', {})
+                    facts[host]['failed'] = False
+            except Exception as e:
+                logger.error(f"Error processing result for {host}: {e}")
+                import traceback
+                logger.error(traceback.format_exc())
+                facts[host] = {
+                    'error': f"Error processing result: {e}",
+                    'failed': True
+                }
+
+        return facts
+    
+    def get_interfaces(self) -> Dict[str, Any]:
+        """
+        Get interfaces from all devices in parallel
+
+        Returns:
+            Dictionary mapping device names to their interfaces
+        """
+        if not self.nr:
+            self.initialize()
+
+        result = self.nr.run(
+            task=napalm_get_with_proxy,
+            getters=["interfaces"]
+        )
+        
+        interfaces = {}
+        for host, task_result in result.items():
+            if task_result.failed:
+                interfaces[host] = {
+                    'error': str(task_result.exception),
+                    'failed': True
                 }
             else:
-                lldp_data = multi_result[0].result.get('lldp_neighbors', {})
-                output[device_name] = lldp_data
-                output[device_name]['failed'] = False
+                interfaces[host] = task_result.result.get('interfaces', {})
+                interfaces[host]['failed'] = False
+        
+        return interfaces
+    
+    def get_config(self, retrieve: str = "all") -> Dict[str, Any]:
+        """
+        Get configuration from all devices in parallel
 
-        return output
+        Args:
+            retrieve: Type of config to retrieve ("all", "running", "startup", "candidate")
+
+        Returns:
+            Dictionary mapping device names to their configurations
+        """
+        if not self.nr:
+            self.initialize()
+
+        result = self.nr.run(
+            task=napalm_get_with_proxy,
+            getters=["config"],
+            retrieve=retrieve
+        )
+        
+        configs = {}
+        for host, task_result in result.items():
+            if task_result.failed:
+                configs[host] = {
+                    'error': str(task_result.exception),
+                    'failed': True
+                }
+            else:
+                configs[host] = task_result.result.get('config', {})
+                configs[host]['failed'] = False
+        
+        return configs
+    
+    def get_lldp_neighbors(self) -> Dict[str, Any]:
+        """
+        Get LLDP neighbors from all devices in parallel
+
+        Returns:
+            Dictionary mapping device names to their LLDP neighbors
+            Example: {'device1': {'Ethernet1': [{'hostname': 'switch1', 'port': 'Eth1/1'}]}}
+        """
+        if not self.nr:
+            self.initialize()
+
+        result = self.nr.run(
+            task=napalm_get_with_proxy,
+            getters=["lldp_neighbors"]
+        )
+
+        lldp_data = {}
+        for host, task_result in result.items():
+            if task_result.failed:
+                lldp_data[host] = {
+                    'error': str(task_result.exception),
+                    'failed': True
+                }
+            else:
+                lldp_data[host] = task_result.result.get('lldp_neighbors', {})
+                lldp_data[host]['failed'] = False
+
+        return lldp_data
 
     def get_lldp_neighbors_detail(self) -> Dict[str, Any]:
         """
-        Collect detailed LLDP neighbors from all devices
+        Get detailed LLDP neighbor information from all devices in parallel
 
         Returns:
-            Dict mapping device names to detailed LLDP neighbor data
+            Dictionary mapping device names to their detailed LLDP neighbor information
         """
-        if not self.nr:
-            raise RuntimeError("Nornir not initialized. Call initialize() first.")
+        # CRITICAL DEBUG
+        try:
+            with open('/tmp/napalm_proxy_debug.log', 'a') as f:
+                f.write(f"\n{'='*80}\n")
+                f.write(f"get_lldp_neighbors_detail() called\n")
+                f.write(f"Time: {__import__('datetime').datetime.now()}\n")
+                f.write(f"About to call self.nr.run(task=napalm_get_with_proxy)\n")
+                f.flush()
+        except Exception as e:
+            pass
 
-        results = self.nr.run(task=napalm_get, getters=['lldp_neighbors_detail'])
-        
-        output = {}
-        for device_name, multi_result in results.items():
-            if multi_result.failed:
-                output[device_name] = {
-                    'failed': True,
-                    'error': str(multi_result.exception) if multi_result.exception else 'Unknown error'
+        if not self.nr:
+            self.initialize()
+
+        result = self.nr.run(
+            task=napalm_get_with_proxy,
+            getters=["lldp_neighbors_detail"]
+        )
+
+        lldp_detail = {}
+        for host, task_result in result.items():
+            if task_result.failed:
+                # Get full error details including traceback
+                import traceback
+                error_msg = str(task_result.exception)
+                if task_result.exception:
+                    error_msg += f"\nTraceback: {''.join(traceback.format_exception(type(task_result.exception), task_result.exception, task_result.exception.__traceback__))}"
+
+                lldp_detail[host] = {
+                    'error': error_msg,
+                    'failed': True
                 }
             else:
-                lldp_data = multi_result[0].result.get('lldp_neighbors_detail', {})
-                output[device_name] = lldp_data
-                output[device_name]['failed'] = False
+                lldp_detail[host] = task_result.result.get('lldp_neighbors_detail', {})
+                lldp_detail[host]['failed'] = False
 
-        return output
+        return lldp_detail
 
-    def get_config(self, retrieve: str = 'running') -> Dict[str, Any]:
+    def run_custom_task(self, task_func: Callable, **kwargs) -> Dict[str, Any]:
         """
-        Collect configurations from all devices
+        Run a custom Nornir task against all devices
 
         Args:
-            retrieve: Which config to retrieve ('running', 'startup', 'candidate', or 'all')
+            task_func: Nornir task function
+            **kwargs: Additional arguments to pass to the task
 
         Returns:
-            Dict mapping device names to configuration data
+            Dictionary mapping device names to task results
         """
         if not self.nr:
-            raise RuntimeError("Nornir not initialized. Call initialize() first.")
+            self.initialize()
 
-        results = self.nr.run(task=napalm_get, getters=['config'], retrieve=retrieve)
-        
-        output = {}
-        for device_name, multi_result in results.items():
-            if multi_result.failed:
-                output[device_name] = {
-                    'failed': True,
-                    'error': str(multi_result.exception) if multi_result.exception else 'Unknown error'
+        result = self.nr.run(task=task_func, **kwargs)
+
+        results = {}
+        for host, task_result in result.items():
+            if task_result.failed:
+                results[host] = {
+                    'error': str(task_result.exception),
+                    'failed': True
                 }
             else:
-                config_data = multi_result[0].result.get('config', {})
-                output[device_name] = config_data
-                output[device_name]['failed'] = False
+                results[host] = {
+                    'result': task_result.result,
+                    'failed': False
+                }
 
-        return output
-
-    def get_interfaces(self) -> Dict[str, Any]:
+        return results
+    
+    def deploy_config_safe(self, config_template: str, replace: bool = True, 
+                          timeout: int = 60, checks: Optional[List[str]] = None,
+                          critical_interfaces: Optional[List[str]] = None,
+                          min_neighbors: int = 0, job_id: Optional[int] = None) -> Dict[str, Any]:
         """
-        Collect interface information from all devices
-
+        Deploy configuration to all devices in parallel with failsafe commit-confirm
+        
+        This method runs the failsafe deployment workflow on all devices simultaneously:
+        - Each device loads config (replace or merge)
+        - Each device commits with auto-rollback timer
+        - Each device runs verification checks
+        - Each device confirms if checks pass, or auto-rolls back
+        
+        Args:
+            config_template: Configuration template string (use {{device_name}}, {{site}}, etc.)
+            replace: If True, replace entire config. If False, merge incrementally
+            timeout: Rollback timer per device in seconds (60-120 recommended)
+            checks: List of verification checks to run (default: ['connectivity', 'interfaces', 'lldp'])
+            critical_interfaces: List of interface names that must be up
+            min_neighbors: Minimum LLDP neighbors required
+            job_id: Optional AutomationJob ID for tracking
+        
         Returns:
-            Dict mapping device names to interface data
+            Dictionary mapping device names to deployment results
         """
         if not self.nr:
-            raise RuntimeError("Nornir not initialized. Call initialize() first.")
-
-        results = self.nr.run(task=napalm_get, getters=['interfaces'])
+            self.initialize()
         
-        output = {}
-        for device_name, multi_result in results.items():
-            if multi_result.failed:
-                output[device_name] = {
-                    'failed': True,
-                    'error': str(multi_result.exception) if multi_result.exception else 'Unknown error'
+        if checks is None:
+            checks = ['connectivity', 'interfaces', 'lldp']
+        
+        # Define the Nornir task
+        def deploy_task(task: Task, config_template: str, replace: bool, timeout: int,
+                       checks: List[str], critical_interfaces: Optional[List[str]],
+                       min_neighbors: int, job_id: Optional[int]) -> Result:
+            """
+            Nornir task to deploy config safely on a single device
+            """
+            from dcim.models import Device
+            from netbox_automation_plugin.core.napalm_integration import NAPALMDeviceManager
+            
+            # Get the NetBox device object
+            device_name = task.host.name
+            netbox_device_id = task.host.data.get('netbox_id')
+            
+            try:
+                device = Device.objects.get(id=netbox_device_id)
+            except Device.DoesNotExist:
+                return Result(
+                    host=task.host,
+                    failed=True,
+                    result={
+                        'success': False,
+                        'committed': False,
+                        'rolled_back': False,
+                        'message': f'NetBox device with ID {netbox_device_id} not found',
+                        'error': 'Device not found'
+                    }
+                )
+            
+            # Render template with device context
+            rendered_config = _render_template(config_template, device)
+            
+            # Create NAPALM manager and deploy safely
+            manager = NAPALMDeviceManager(device)
+            
+            try:
+                manager.connect()
+                
+                deploy_result = manager.deploy_config_safe(
+                    config=rendered_config,
+                    replace=replace,
+                    timeout=timeout,
+                    checks=checks,
+                    critical_interfaces=critical_interfaces,
+                    min_neighbors=min_neighbors
+                )
+                
+                # Track job if provided
+                if job_id:
+                    try:
+                        from netbox_automation_plugin.models import AutomationJob
+                        job = AutomationJob.objects.get(id=job_id)
+                        job.result_data[device_name] = deploy_result
+                        job.save()
+                    except:
+                        pass
+                
+                return Result(
+                    host=task.host,
+                    failed=not deploy_result['success'],
+                    result=deploy_result
+                )
+                
+            except Exception as e:
+                error_result = {
+                    'success': False,
+                    'committed': False,
+                    'rolled_back': False,
+                    'message': f'Exception during deployment: {str(e)}',
+                    'error': str(e)
                 }
+                
+                # Track job if provided
+                if job_id:
+                    try:
+                        from netbox_automation_plugin.models import AutomationJob
+                        job = AutomationJob.objects.get(id=job_id)
+                        job.result_data[device_name] = error_result
+                        job.save()
+                    except:
+                        pass
+                
+                return Result(
+                    host=task.host,
+                    failed=True,
+                    result=error_result
+                )
+                
+            finally:
+                manager.disconnect()
+        
+        # Run deployment in parallel across all devices
+        logger.info(f"Starting parallel safe deployment to {len(self.nr.inventory.hosts)} devices")
+        logger.info(f"Settings: replace={replace}, timeout={timeout}s, checks={checks}")
+        
+        result = self.nr.run(
+            task=deploy_task,
+            config_template=config_template,
+            replace=replace,
+            timeout=timeout,
+            checks=checks,
+            critical_interfaces=critical_interfaces,
+            min_neighbors=min_neighbors,
+            job_id=job_id
+        )
+        
+        # Process results
+        results = {}
+        success_count = 0
+        failed_count = 0
+        rolled_back_count = 0
+        
+        for host, task_result in result.items():
+            if task_result.failed:
+                results[host] = task_result.result
+                failed_count += 1
+                if task_result.result.get('rolled_back', False):
+                    rolled_back_count += 1
             else:
-                interface_data = multi_result[0].result.get('interfaces', {})
-                output[device_name] = interface_data
-                output[device_name]['failed'] = False
+                results[host] = task_result.result
+                if task_result.result.get('success', False):
+                    success_count += 1
+                else:
+                    failed_count += 1
+                    if task_result.result.get('rolled_back', False):
+                        rolled_back_count += 1
+        
+        logger.info(f"Deployment complete: {success_count} succeeded, {failed_count} failed, {rolled_back_count} rolled back")
+        
+        return results
 
-        return output
-
-    def get_facts(self) -> Dict[str, Any]:
+    def deploy_vlan(self, interface_list: List[str], vlan_id: int, platform: str, timeout: int = 90) -> Dict[str, Any]:
         """
-        Collect device facts from all devices
-
+        Deploy VLAN configuration to multiple interfaces across all devices in parallel.
+        
+        Args:
+            interface_list: List of interface names (e.g., ['swp7', 'swp8'])
+            vlan_id: VLAN ID to configure (1-4094)
+            platform: Platform type ('cumulus' or 'eos')
+            timeout: Rollback timeout in seconds (default: 90)
+        
         Returns:
-            Dict mapping device names to facts data
+            Dictionary mapping device names to deployment results per interface
+            {
+                'device1': {
+                    'swp7': {'success': True, 'committed': True, ...},
+                    'swp8': {'success': True, 'committed': True, ...}
+                },
+                'device2': {...}
+            }
         """
         if not self.nr:
-            raise RuntimeError("Nornir not initialized. Call initialize() first.")
-
-        results = self.nr.run(task=napalm_get, getters=['facts'])
+            self.nr = self.initialize()
         
-        output = {}
-        for device_name, multi_result in results.items():
-            if multi_result.failed:
-                output[device_name] = {
-                    'failed': True,
-                    'error': str(multi_result.exception) if multi_result.exception else 'Unknown error'
-                }
-            else:
-                facts_data = multi_result[0].result.get('facts', {})
-                output[device_name] = facts_data
-                output[device_name]['failed'] = False
+        logger.info(f"Starting VLAN {vlan_id} deployment to {len(self.nr.inventory.hosts)} devices, "
+                   f"{len(interface_list)} interfaces per device, platform: {platform}")
+        
+        # Deploy to all interfaces across all devices
+        all_results = {}
+        
+        for interface_name in interface_list:
+            logger.info(f"Deploying VLAN {vlan_id} to interface {interface_name} across all devices...")
+            
+            result = self.nr.run(
+                task=deploy_vlan_config,
+                interface_name=interface_name,
+                vlan_id=vlan_id,
+                platform=platform,
+                timeout=timeout
+            )
+            
+            # Process results for this interface
+            for host, task_result in result.items():
+                if host not in all_results:
+                    all_results[host] = {}
+                
+                if task_result.failed:
+                    all_results[host][interface_name] = {
+                        'success': False,
+                        'committed': False,
+                        'rolled_back': False,
+                        'error': str(task_result.exception) if task_result.exception else 'Unknown error',
+                        'message': 'Task failed'
+                    }
+                else:
+                    all_results[host][interface_name] = task_result.result
+        
+        logger.info(f"VLAN deployment complete for {len(all_results)} devices")
+        
+        return all_results
 
-        return output
 
-    def close(self):
-        """Close all connections"""
-        if self.nr:
-            self.nr.close_connections()
+def _render_template(template: str, device: "Device") -> str:
+    """
+    Render configuration template with device context
+    
+    Args:
+        template: Configuration template string
+        device: NetBox Device object
+    
+    Returns:
+        Rendered configuration string
+    """
+    context = {
+        'device_name': device.name,
+        'device_type': device.device_type.model if device.device_type else '',
+        'manufacturer': device.device_type.manufacturer.name if device.device_type and device.device_type.manufacturer else '',
+        'site': device.site.name if device.site else '',
+        'role': device.role.name if device.role else '',
+        'primary_ip': device.primary_ip4.address.split('/')[0] if device.primary_ip4 else '',
+    }
+    
+    rendered = template
+    for key, value in context.items():
+        rendered = rendered.replace(f'{{{{{key}}}}}', str(value))
+    
+    return rendered
+
+
+def deploy_vlan_config(task, interface_name: str, vlan_id: int, platform: str, timeout: int = 90):
+    """
+    Nornir task: Deploy VLAN configuration to a device interface with safe deployment.
+    Uses NAPALM's commit-confirm for Cumulus, configure session for EOS.
+    
+    Args:
+        task: Nornir task object
+        interface_name: Interface name (e.g., 'swp7', 'Ethernet1')
+        vlan_id: VLAN ID to configure
+        platform: Platform type ('cumulus' or 'eos')
+        timeout: Rollback timeout in seconds (default: 90)
+    
+    Returns:
+        Nornir Result with deployment status
+    """
+    from netbox_automation_plugin.core.napalm_integration import NAPALMDeviceManager
+    from dcim.models import Device
+    import logging
+    
+    logger = logging.getLogger('netbox_automation_plugin')
+    device_name = task.host.name
+    
+    try:
+        # Get NetBox device object
+        device = Device.objects.get(name=device_name)
+        
+        # Generate platform-specific config
+        if platform == 'cumulus':
+            config = f"nv set interface {interface_name} bridge domain br_default access {vlan_id}"
+        elif platform == 'eos':
+            config = f"interface {interface_name}\n   switchport mode access\n   switchport access vlan {vlan_id}"
+        else:
+            return {"success": False, "error": f"Unsupported platform: {platform}"}
+        
+        # Use NAPALMDeviceManager for safe deployment
+        napalm_mgr = NAPALMDeviceManager(device)
+        result = napalm_mgr.deploy_config_safe(
+            config=config,
+            timeout=timeout,
+            replace=False,
+            interface_name=interface_name,
+            vlan_id=vlan_id
+        )
+        
+        return result
+        
+    except Device.DoesNotExist:
+        error_msg = f"Device {device_name} not found in NetBox"
+        logger.error(error_msg)
+        return {"success": False, "error": error_msg}
+    except Exception as e:
+        error_msg = f"Exception during VLAN deployment: {str(e)}"
+        logger.error(f"{device_name}: {error_msg}")
+        import traceback
+        logger.error(traceback.format_exc())
+        return {"success": False, "error": error_msg}
