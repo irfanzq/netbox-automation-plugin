@@ -383,7 +383,28 @@ class VLANDeploymentView(View):
         logs = []
 
         try:
-            logs.append(f"[2.1] Platform detection: {platform}")
+            # Pre-deployment validation: Check if interface exists in NetBox
+            logs.append(f"[2.1] Pre-deployment validation")
+            from dcim.models import Interface
+            try:
+                interface = Interface.objects.get(device=device, name=interface_name)
+                logs.append(f"✓ Interface {interface_name} exists in NetBox for {device.name}")
+                logger.info(f"Interface validation passed: {device.name} has {interface_name}")
+            except Interface.DoesNotExist:
+                error_msg = f"Interface {interface_name} does not exist on device {device.name} in NetBox"
+                logs.append(f"✗ {error_msg}")
+                logger.error(error_msg)
+                return {
+                    "success": False,
+                    "committed": False,
+                    "rolled_back": False,
+                    "message": error_msg,
+                    "verification_results": {},
+                    "logs": logs,
+                    "error": error_msg
+                }
+
+            logs.append(f"[2.2] Platform detection: {platform}")
 
             # Convert platform-specific commands to NAPALM config format
             if platform == 'cumulus':
@@ -391,7 +412,7 @@ class VLANDeploymentView(View):
                 # NAPALM's commit_config() will handle "nv config apply --confirm {timeout}s" automatically
                 # So we only need the NVUE set command, not the apply command
                 config_text = config_command
-                logs.append(f"[2.2] Cumulus NVUE command prepared: {config_text}")
+                logs.append(f"[2.3] Cumulus NVUE command prepared: {config_text}")
                 logger.info(f"Deploying to Cumulus device {device.name}: {config_text}")
 
             elif platform == 'eos':
@@ -399,7 +420,7 @@ class VLANDeploymentView(View):
                 # NAPALM will handle the commit-confirm workflow using configure session
                 # EOS uses configure session with commit timer for safe deployment
                 config_text = config_command
-                logs.append(f"[2.2] Arista EOS command prepared: {config_text}")
+                logs.append(f"[2.3] Arista EOS command prepared: {config_text}")
                 logger.info(f"Deploying to EOS device {device.name}: {config_text}")
 
             else:
@@ -416,7 +437,7 @@ class VLANDeploymentView(View):
                 }
 
             # Initialize NAPALM manager for this device
-            logs.append(f"[2.3] Initializing NAPALM connection to {device.name}...")
+            logs.append(f"[2.4] Initializing NAPALM connection to {device.name}...")
             logs.append(f"      Device IP: {device.primary_ip4 or device.primary_ip6}")
             napalm_manager = NAPALMDeviceManager(device)
             logger.info(f"Initialized NAPALM manager for {device.name} (platform: {platform})")
@@ -429,7 +450,7 @@ class VLANDeploymentView(View):
             # Use merge mode (replace=False) since we're only adding VLAN config
             # Set timeout to 90 seconds for rollback timer
             # Check connectivity and interfaces (the interface we're configuring should stay up)
-            logs.append(f"[2.4] Starting safe deployment with 90s rollback timer...")
+            logs.append(f"[2.5] Starting safe deployment with 90s rollback timer...")
             logs.append(f"      Mode: Merge (incremental changes)")
             logs.append(f"      Checks: connectivity")
             logs.append(f"      Interface: {interface_name}")
@@ -449,14 +470,14 @@ class VLANDeploymentView(View):
 
             # Extract detailed logs from deploy_result if available
             if deploy_result.get("logs"):
-                logs.append(f"[2.5] Deployment execution logs:")
+                logs.append(f"[2.6] Deployment execution logs:")
                 for log_line in deploy_result["logs"]:
                     logs.append(f"      {log_line}")
 
             logger.info(f"Deployment result for {device.name}: success={deploy_result.get('success')}, "
                        f"committed={deploy_result.get('committed')}, rolled_back={deploy_result.get('rolled_back')}")
 
-            logs.append(f"[2.6] Deployment completed:")
+            logs.append(f"[2.7] Deployment completed:")
             logs.append(f"      Success: {deploy_result.get('success', False)}")
             logs.append(f"      Committed: {deploy_result.get('committed', False)}")
             logs.append(f"      Rolled Back: {deploy_result.get('rolled_back', False)}")
@@ -495,7 +516,7 @@ class VLANDeploymentView(View):
             # Always disconnect NAPALM connection
             if napalm_manager:
                 try:
-                    logs.append(f"[2.7] Disconnecting from {device.name}...")
+                    logs.append(f"[2.8] Disconnecting from {device.name}...")
                     napalm_manager.disconnect()
                     logs.append(f"✓ Disconnected successfully")
                 except Exception as e:
