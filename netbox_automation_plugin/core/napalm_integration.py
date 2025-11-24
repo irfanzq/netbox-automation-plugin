@@ -939,10 +939,14 @@ class NAPALMDeviceManager:
                     logger.info(f"  Baseline: {interface_name} is_up={baseline['interface']['is_up']}, is_enabled={baseline['interface']['is_enabled']}")
                     logs.append(f"  ✓ Interface {interface_name}: UP={baseline['interface']['is_up']}, Enabled={baseline['interface']['is_enabled']}")
                 else:
-                    # Interface doesn't exist yet (might be creating it)
-                    baseline['interface'] = None
-                    logger.info(f"  Baseline: {interface_name} does not exist (may be new)")
-                    logs.append(f"  ⚠ Interface {interface_name}: Does not exist (may be new)")
+                    # Interface doesn't exist on device
+                    # This is an ERROR - interface should exist in NetBox AND on device
+                    error_msg = f"Interface {interface_name} does not exist on device {self.device.name}"
+                    logger.error(f"CRITICAL: {error_msg}")
+                    logs.append(f"  ✗ Interface {interface_name}: Does not exist on device!")
+                    result['message'] = f"Interface validation failed: {error_msg}"
+                    result['logs'] = logs
+                    return result
 
             # Collect LLDP neighbors baseline (if checking)
             if 'lldp' in checks:
