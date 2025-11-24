@@ -86,6 +86,15 @@
               </div>
 
               <div class="mb-3">
+                <label for="{{ form.manufacturer.id_for_label }}" class="form-label required">{{ form.manufacturer.label }}</label>
+                {{ form.manufacturer }}
+                <div class="form-text">{{ form.manufacturer.help_text }}</div>
+                {% if form.manufacturer.errors %}
+                  <div class="invalid-feedback d-block">{{ form.manufacturer.errors }}</div>
+                {% endif %}
+              </div>
+
+              <div class="mb-3">
                 <label for="{{ form.role.id_for_label }}" class="form-label required">{{ form.role.label }}</label>
                 {{ form.role }}
                 <div class="form-text">{{ form.role.help_text }}</div>

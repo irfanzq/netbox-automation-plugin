@@ -2,7 +2,7 @@ from django import forms
 from django.utils.translation import gettext_lazy as _
 from django.core.validators import MinValueValidator, MaxValueValidator
 
-from dcim.models import Device, Site, Location, DeviceRole, Interface
+from dcim.models import Device, Site, Location, DeviceRole, Interface, Manufacturer
 from ipam.models import VLAN
 
 
@@ -52,6 +52,13 @@ class VLANDeploymentForm(forms.Form):
         required=False,
         label=_("Location"),
         help_text=_("Select location within the site (e.g., Spruce)."),
+    )
+
+    manufacturer = forms.ModelChoiceField(
+        queryset=Manufacturer.objects.all(),
+        required=False,
+        label=_("Manufacturer"),
+        help_text=_("Select manufacturer to filter devices (e.g., Arista for EOS, Mellanox for Cumulus). Prevents mixing incompatible platforms."),
     )
 
     role = forms.ModelChoiceField(
@@ -185,6 +192,8 @@ class VLANDeploymentForm(forms.Form):
         elif scope == 'group':
             if not site or not location or not role:
                 raise forms.ValidationError(_("Please select Site, Location, and Role for group deployment."))
+            if not cleaned_data.get('manufacturer'):
+                raise forms.ValidationError(_("Please select Manufacturer for group deployment to prevent mixing incompatible platforms (e.g., EOS and Cumulus)."))
 
         # Combine checkbox selections and manual entries
         combined_interfaces = list(interfaces_select) if interfaces_select else []
