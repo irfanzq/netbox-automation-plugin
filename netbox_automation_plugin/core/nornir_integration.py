@@ -47,10 +47,13 @@ class NetBoxORMInventory:
             napalm_config = get_plugin_config('netbox_automation_plugin', 'napalm', {})
             default_username = napalm_config.get('username', 'cumulus')
             default_password = napalm_config.get('password', 'cumulus')
+            # Support per-platform credentials
+            self.platform_credentials = napalm_config.get('platform_credentials', {})
         except Exception as e:
             logger.warning(f"Could not load plugin config, using defaults: {e}")
             default_username = 'cumulus'
             default_password = 'cumulus'
+            self.platform_credentials = {}
 
         self.username = username if username is not None else default_username
         self.password = password if password is not None else default_password
@@ -101,13 +104,23 @@ class NetBoxORMInventory:
             else:
                 platform = 'ios'
 
+            # Get platform-specific credentials if configured
+            device_username = self.username
+            device_password = self.password
+
+            if platform in self.platform_credentials:
+                platform_creds = self.platform_credentials[platform]
+                device_username = platform_creds.get('username', self.username)
+                device_password = platform_creds.get('password', self.password)
+                logger.info(f"Using platform-specific credentials for {device.name} (platform: {platform})")
+
             # Create host entry
             hosts[device.name] = Host(
                 name=device.name,
                 hostname=hostname,
                 platform=platform,
-                username=self.username,
-                password=self.password,
+                username=device_username,
+                password=device_password,
                 data={
                     'device_id': device.id,
                     'manufacturer': manufacturer,

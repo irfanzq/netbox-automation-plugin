@@ -31,6 +31,13 @@ class NetBoxAutomationPluginConfig(PluginConfig):
             'password': '',
             'timeout': 60,
             'optional_args': {},
+            # Per-platform credentials (optional)
+            # If specified, these override the default username/password for specific platforms
+            'platform_credentials': {
+                # 'cumulus': {'username': 'cumulus', 'password': 'Admin@123'},
+                # 'eos': {'username': 'admin', 'password': 'admin@123'},
+                # 'ios': {'username': 'cisco', 'password': 'cisco123'},
+            },
         },
         'nornir': {
             'runner': {
