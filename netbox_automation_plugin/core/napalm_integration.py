@@ -1149,6 +1149,20 @@ class NAPALMDeviceManager:
                             read_timeout=30
                         )
                         logger.debug(f"Config command '{cmd}' output: {output}")
+                        
+                        # Check for EOS command errors
+                        if output and ('% Invalid input' in output or '% Error' in output or 'Invalid command' in output):
+                            error_msg = f"EOS rejected command '{cmd}': {output.strip()}"
+                            logger.error(error_msg)
+                            logs.append(f"  ✗ {error_msg}")
+                            # Abort the session
+                            try:
+                                netmiko_conn.send_command("abort", expect_string=r'#', read_timeout=10)
+                            except:
+                                pass
+                            result['message'] = f"Configuration rejected by device: {output.strip()}"
+                            result['logs'] = logs
+                            return result
 
                     # Step 3: Show pending diff (for logging)
                     try:
