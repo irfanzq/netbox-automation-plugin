@@ -200,12 +200,56 @@ class NAPALMDeviceManager:
                 optional_args=optional_args
             )
             
-            self.connection.open()
-            logger.info(f"Connected to {self.device.name} using {driver_name} driver")
-            return True
+            # Retry connection with exponential backoff (handles transient network failures)
+            max_retries = 3
+            retry_delay = 2  # Initial delay in seconds
+            
+            for attempt in range(max_retries):
+                try:
+                    self.connection.open()
+                    logger.info(f"Connected to {self.device.name} using {driver_name} driver (attempt {attempt + 1})")
+                    return True
+                except (ConnectionException, Exception) as e:
+                    # Check if this is a retryable error (connection failure, not auth failure)
+                    is_retryable = (
+                        isinstance(e, ConnectionException) or
+                        'Connection' in str(type(e).__name__) or
+                        'refused' in str(e).lower() or
+                        'timeout' in str(e).lower() or
+                        'socket' in str(e).lower()
+                    )
+                    
+                    if attempt < max_retries - 1 and is_retryable:
+                        wait_time = retry_delay * (2 ** attempt)  # Exponential: 2s, 4s, 8s
+                        logger.warning(
+                            f"Connection attempt {attempt + 1}/{max_retries} failed for {self.device.name}: {e}. "
+                            f"Retrying in {wait_time}s..."
+                        )
+                        time.sleep(wait_time)
+                        
+                        # Recreate connection for retry (old connection may be in bad state)
+                        try:
+                            if hasattr(self, 'connection') and self.connection:
+                                try:
+                                    self.connection.close()
+                                except:
+                                    pass
+                        except:
+                            pass
+                        
+                        self.connection = self.driver(
+                            hostname=device_hostname,
+                            username=username,
+                            password=password,
+                            timeout=timeout,
+                            optional_args=optional_args
+                        )
+                    else:
+                        # Final attempt failed or non-retryable error
+                        raise
             
         except Exception as e:
-            logger.error(f"Failed to connect to {self.device.name}: {e}")
+            logger.error(f"Failed to connect to {self.device.name} after {max_retries} attempts: {e}")
             import traceback
             logger.error(traceback.format_exc())
             return False

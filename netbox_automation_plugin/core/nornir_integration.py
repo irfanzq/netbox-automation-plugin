@@ -14,6 +14,7 @@ from nornir.core.task import Task, Result
 from nornir_napalm.plugins.tasks import napalm_get
 from nornir.core.plugins.connections import ConnectionPluginRegister
 import logging
+import time
 
 if TYPE_CHECKING:
     from dcim.models import Device
@@ -537,29 +538,93 @@ def napalm_get_with_proxy(task: Task, getters: List[str] = None, retrieve: str =
             pass
 
     # CRITICAL: device.open() must happen while patch is active!
+    # Retry connection with exponential backoff (handles transient network failures)
+    max_retries = 3
+    retry_delay = 2  # Initial delay in seconds
+    connection_success = False
+    conn_error = None
+    
     try:
-        device.open()
-        # Log success
-        for log_path in ['/opt/netbox/netbox/media/napalm_debug.txt', '/tmp/napalm_connection_attempt.log']:
+        for attempt in range(max_retries):
             try:
-                with open(log_path, 'a') as f:
-                    f.write(f"✓ SUCCESS: Connected to {hostname}\n")
-                    f.flush()
-                break
-            except:
-                continue
-    except Exception as conn_error:
-        # Log failure with details
-        for log_path in ['/opt/netbox/netbox/media/napalm_debug.txt', '/tmp/napalm_connection_attempt.log']:
-            try:
-                with open(log_path, 'a') as f:
-                    f.write(f"✗ FAILED: {str(conn_error)}\n")
-                    f.write(f"Error type: {type(conn_error).__name__}\n")
-                    f.flush()
-                break
-            except:
-                continue
-        raise  # Re-raise the original error
+                device.open()
+                connection_success = True
+                # Log success
+                for log_path in ['/opt/netbox/netbox/media/napalm_debug.txt', '/tmp/napalm_connection_attempt.log']:
+                    try:
+                        with open(log_path, 'a') as f:
+                            f.write(f"✓ SUCCESS: Connected to {hostname} (attempt {attempt + 1})\n")
+                            f.flush()
+                        break
+                    except:
+                        continue
+                debug_log(f"✓ Connected to {hostname} on attempt {attempt + 1}")
+                break  # Success, exit retry loop
+                
+            except Exception as e:
+                conn_error = e
+                # Check if this is a retryable error (connection failure, not auth failure)
+                is_retryable = (
+                    'Connection' in str(type(e).__name__) or
+                    'refused' in str(e).lower() or
+                    'timeout' in str(e).lower() or
+                    'socket' in str(e).lower()
+                )
+                
+                if attempt < max_retries - 1 and is_retryable:
+                    wait_time = retry_delay * (2 ** attempt)  # Exponential: 2s, 4s, 8s
+                    debug_log(f"Connection attempt {attempt + 1}/{max_retries} failed: {e}. Retrying in {wait_time}s...")
+                    
+                    # Log retry attempt
+                    for log_path in ['/opt/netbox/netbox/media/napalm_debug.txt', '/tmp/napalm_connection_attempt.log']:
+                        try:
+                            with open(log_path, 'a') as f:
+                                f.write(f"⚠ RETRY {attempt + 1}/{max_retries}: {e}. Waiting {wait_time}s...\n")
+                                f.flush()
+                            break
+                        except:
+                            continue
+                    
+                    time.sleep(wait_time)
+                    
+                    # Recreate device for retry (old device may be in bad state)
+                    try:
+                        if device:
+                            try:
+                                device.close()
+                            except:
+                                pass
+                    except:
+                        pass
+                    
+                    # Recreate NAPALM device for retry
+                    try:
+                        device = driver(
+                            hostname=hostname,
+                            username=username,
+                            password=password,
+                            optional_args=optional_args
+                        )
+                    except Exception as recreate_error:
+                        debug_log(f"Failed to recreate device for retry: {recreate_error}")
+                        break  # Can't retry if we can't recreate device
+                else:
+                    # Final attempt failed or non-retryable error
+                    debug_log(f"Connection failed (non-retryable or final attempt): {e}")
+                    break
+        
+        if not connection_success:
+            # Log final failure
+            for log_path in ['/opt/netbox/netbox/media/napalm_debug.txt', '/tmp/napalm_connection_attempt.log']:
+                try:
+                    with open(log_path, 'a') as f:
+                        f.write(f"✗ FAILED after {max_retries} attempts: {conn_error}\n")
+                        f.write(f"Error type: {type(conn_error).__name__}\n")
+                        f.flush()
+                    break
+                except:
+                    continue
+            raise conn_error
     finally:
         # CRITICAL: Restore original method AFTER device.open() completes (even on error)
         if use_keyboard_interactive and original_build_ssh_client is not None:
