@@ -163,15 +163,7 @@ def napalm_get_with_proxy(task: Task, getters: List[str] = None, retrieve: str =
                 pass
         logger.error(msg)
     
-    # CRITICAL DEBUG: Write to a file we can check
-    try:
-        with open('/tmp/napalm_proxy_debug.log', 'a') as f:
-            f.write(f"\n{'='*80}\n")
-            f.write(f"NAPALM_GET_WITH_PROXY called for {task.host.name} ({hostname})\n")
-            f.write(f"Time: {__import__('datetime').datetime.now()}\n")
-            f.flush()
-    except:
-        pass
+    # Debug logging (production - direct connections only)
 
     debug_log(f"=== NAPALM_GET_WITH_PROXY START for {task.host.name} ({hostname}) ===")
     debug_log(f"=== Direct connection to {hostname} (production - no SSH proxy) ===")
@@ -356,9 +348,6 @@ def napalm_get_with_proxy(task: Task, getters: List[str] = None, retrieve: str =
     debug_log(f"DEBUG: username={username}")
     debug_log(f"DEBUG: platform={platform}")
     debug_log(f"DEBUG: optional_args keys = {list(optional_args.keys())}")
-    debug_log(f"DEBUG: has sock = {'sock' in optional_args}")
-    if 'sock' in optional_args:
-        debug_log(f"DEBUG: optional_args['sock'] type = {type(optional_args['sock']).__name__}")
     
     # Create NAPALM device (patch must be active during this)
     try:
@@ -386,16 +375,6 @@ def napalm_get_with_proxy(task: Task, getters: List[str] = None, retrieve: str =
     
     debug_log(f"=== NAPALM device created ===")
     
-    # Verify sock is set if proxy was configured
-    # Production: Direct connections only (no SSH proxy)
-    if hasattr(device, 'netmiko_optional_args'):
-        debug_log(f"DEBUG: device.netmiko_optional_args keys = {list(device.netmiko_optional_args.keys())}")
-        debug_log(f"DEBUG: device.netmiko_optional_args['sock'] = {device.netmiko_optional_args.get('sock')}")
-        if 'sock' in device.netmiko_optional_args:
-            debug_log(f"DEBUG: Sock successfully passed to device!")
-        else:
-            debug_log(f"FATAL: Sock NOT in device.netmiko_optional_args! Proxy will not work!")
-
     # Open connection
     debug_log(f"=== About to call device.open() for {hostname} ===")
     debug_log(f"DEBUG: Direct connection (production - no proxy)")
@@ -406,10 +385,6 @@ def napalm_get_with_proxy(task: Task, getters: List[str] = None, retrieve: str =
     log_msg = f"\n{'='*80}\n"
     log_msg += f"[{datetime.datetime.now()}] Attempting connection to {hostname}\n"
     log_msg += f"Connection: Direct (production - no SSH proxy)\n"
-    log_msg += f"Has sock in optional_args: {'sock' in optional_args}\n"
-    if 'sock' in optional_args:
-        log_msg += f"Sock type: {type(optional_args['sock']).__name__}\n"
-        log_msg += f"Sock value: {optional_args['sock']}\n"
     log_msg += f"use_keys: {optional_args.get('use_keys', 'NOT SET')}\n"
     log_msg += f"allow_agent: {optional_args.get('allow_agent', 'NOT SET')}\n"
     log_msg += f"About to call device.open()...\n"
@@ -929,16 +904,6 @@ class NornirDeviceManager:
         Returns:
             Dictionary mapping device names to their detailed LLDP neighbor information
         """
-        # CRITICAL DEBUG
-        try:
-            with open('/tmp/napalm_proxy_debug.log', 'a') as f:
-                f.write(f"\n{'='*80}\n")
-                f.write(f"get_lldp_neighbors_detail() called\n")
-                f.write(f"Time: {__import__('datetime').datetime.now()}\n")
-                f.write(f"About to call self.nr.run(task=napalm_get_with_proxy)\n")
-                f.flush()
-        except Exception as e:
-            pass
 
         if not self.nr:
             self.initialize()
