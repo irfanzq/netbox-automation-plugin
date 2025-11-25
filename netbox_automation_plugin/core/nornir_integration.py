@@ -20,9 +20,15 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# Register custom NAPALM connection plugin with SSH proxy support
-from .napalm_proxy_connection import NapalmProxy
-ConnectionPluginRegister.register("napalm_proxy", NapalmProxy)
+# Register custom NAPALM connection plugin with SSH proxy support (optional, for dev environments)
+try:
+    from .napalm_proxy_connection import NapalmProxy
+    ConnectionPluginRegister.register("napalm_proxy", NapalmProxy)
+    logger.debug("Registered napalm_proxy connection plugin (SSH proxy support available)")
+except ImportError:
+    # napalm_proxy_connection not available (production environment - direct connections only)
+    logger.debug("napalm_proxy_connection not available - using direct connections only")
+    pass
 
 # Import Paramiko for custom SSH client
 import paramiko
@@ -886,11 +892,16 @@ class NornirDeviceManager:
         # CRITICAL: Auto-register all available connection plugins (napalm, netmiko, etc.)
         ConnectionPluginRegister.auto_register()
 
-        # Re-register our custom napalm_proxy plugin after auto_register
+        # Re-register our custom napalm_proxy plugin after auto_register (optional, for dev)
         # (auto_register might have cleared custom registrations)
-        from netbox_automation_plugin.core.napalm_proxy_connection import NapalmProxy
-        ConnectionPluginRegister.register("napalm_proxy", NapalmProxy)
-        logger.info("Registered napalm_proxy connection plugin")
+        try:
+            from netbox_automation_plugin.core.napalm_proxy_connection import NapalmProxy
+            ConnectionPluginRegister.register("napalm_proxy", NapalmProxy)
+            logger.debug("Registered napalm_proxy connection plugin (SSH proxy support available)")
+        except ImportError:
+            # napalm_proxy_connection not available (production - direct connections only)
+            logger.debug("napalm_proxy_connection not available - direct connections only")
+            pass
 
         # Create Nornir instance with our custom inventory and threaded runner
         self.nr = Nornir(

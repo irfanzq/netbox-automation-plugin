@@ -53,6 +53,17 @@ class VLANDeploymentView(View):
             form.add_error(None, _("No devices found matching the selection (with primary IP)."))
             return render(request, self.template_name_form, {"form": form})
 
+        # Filter out excluded devices
+        excluded_devices = form.cleaned_data.get('excluded_devices', [])
+        if excluded_devices:
+            excluded_device_ids = {d.id for d in excluded_devices}
+            devices = [d for d in devices if d.id not in excluded_device_ids]
+            logger.info(f"Excluded {len(excluded_devices)} devices. Remaining: {len(devices)} devices for deployment")
+            
+            if not devices:
+                form.add_error(None, _("All devices were excluded. Please select at least one device for deployment."))
+                return render(request, self.template_name_form, {"form": form})
+
         # Run deployment
         results = self._run_vlan_deployment(devices, form.cleaned_data)
 
@@ -66,10 +77,16 @@ class VLANDeploymentView(View):
         table = VLANDeploymentResultTable(results, orderable=True)
         summary = self._build_summary(results, len(devices))
 
+        # Get excluded devices info
+        excluded_devices = form.cleaned_data.get('excluded_devices', [])
+        excluded_device_names = [d.name for d in excluded_devices] if excluded_devices else []
+
         context = {
             "form": form,
             "table": table,
             "summary": summary,
+            "excluded_devices": excluded_device_names,
+            "excluded_count": len(excluded_devices),
         }
         return render(request, self.template_name_results, context)
 
@@ -710,41 +727,52 @@ class GetCommonInterfacesView(View):
                 for base_name in base_names_found:
                     base_interface_counts[base_name] = base_interface_counts.get(base_name, 0) + 1
             
-            # Calculate threshold: 80% of devices (or at least 2 devices if only 2-3 total)
+            # Calculate threshold: 80% of devices, but at least 1 device (for single device case)
             total_devices = len(device_interface_sets)
-            threshold = max(2, int(total_devices * 0.8))
-            
-            # Filter out management interfaces (eth0, lo, mgmt, etc.)
-            management_interfaces = {'eth0', 'lo', 'mgmt', 'management', 'loopback', 'Loopback0'}
-            
-            # Get base interfaces that exist on at least threshold devices
-            common_base_interfaces = {
-                base_name for base_name, count in base_interface_counts.items()
-                if count >= threshold and base_name.lower() not in management_interfaces
-            }
-            
-            # For each common base interface, pick the most common actual interface name
-            # This handles swp7 vs swp7s1 - we'll show the one that appears most
-            common_interfaces = []
-            for base_name in common_base_interfaces:
-                # Get all actual interface names for this base
-                actual_names = base_interface_map[base_name]
+            if total_devices == 1:
+                # Single device: show all interfaces (except management)
+                management_interfaces = {'eth0', 'lo', 'mgmt', 'management', 'loopback', 'Loopback0'}
+                all_interfaces = device_interface_sets[0]
+                common_interfaces = sorted(
+                    [iface for iface in all_interfaces if iface.lower() not in management_interfaces],
+                    key=self._natural_sort_key
+                )
+                logger.info(f"Single device: Showing {len(common_interfaces)} interfaces (excluding management)")
+            else:
+                # Multiple devices: use threshold approach
+                threshold = max(1, int(total_devices * 0.8))
                 
-                # Count occurrences of each actual name
-                actual_name_counts = {}
-                for interface_set in device_interface_sets:
-                    for interface in interface_set:
-                        if get_base_interface_name(interface) == base_name:
-                            actual_name_counts[interface] = actual_name_counts.get(interface, 0) + 1
+                # Filter out management interfaces (eth0, lo, mgmt, etc.)
+                management_interfaces = {'eth0', 'lo', 'mgmt', 'management', 'loopback', 'Loopback0'}
                 
-                # Pick the most common actual name, or shortest if tie
-                if actual_name_counts:
-                    most_common = max(actual_name_counts.items(), key=lambda x: (x[1], -len(x[0])))
-                    common_interfaces.append(most_common[0])
-            
-            # Sort for consistent display
-            common_interfaces = sorted(common_interfaces, key=self._natural_sort_key)
-            logger.info(f"Common interfaces across {total_devices} devices (threshold: {threshold}): {len(common_interfaces)} found - {list(common_interfaces)[:10]}")
+                # Get base interfaces that exist on at least threshold devices
+                common_base_interfaces = {
+                    base_name for base_name, count in base_interface_counts.items()
+                    if count >= threshold and base_name.lower() not in management_interfaces
+                }
+                
+                # For each common base interface, pick the most common actual interface name
+                # This handles swp7 vs swp7s1 - we'll show the one that appears most
+                common_interfaces = []
+                for base_name in common_base_interfaces:
+                    # Get all actual interface names for this base
+                    actual_names = base_interface_map[base_name]
+                    
+                    # Count occurrences of each actual name
+                    actual_name_counts = {}
+                    for interface_set in device_interface_sets:
+                        for interface in interface_set:
+                            if get_base_interface_name(interface) == base_name:
+                                actual_name_counts[interface] = actual_name_counts.get(interface, 0) + 1
+                    
+                    # Pick the most common actual name, or shortest if tie
+                    if actual_name_counts:
+                        most_common = max(actual_name_counts.items(), key=lambda x: (x[1], -len(x[0])))
+                        common_interfaces.append(most_common[0])
+                
+                # Sort for consistent display
+                common_interfaces = sorted(common_interfaces, key=self._natural_sort_key)
+                logger.info(f"Common interfaces across {total_devices} devices (threshold: {threshold}): {len(common_interfaces)} found - {list(common_interfaces)[:10]}")
         else:
             common_interfaces = []
 
