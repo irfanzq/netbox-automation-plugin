@@ -102,16 +102,16 @@
                   <div class="invalid-feedback d-block">{{ form.role.errors }}</div>
                 {% endif %}
               </div>
-            </div>
 
-            {# Excluded Devices - Available in both modes #}
-            <div class="mb-3">
-              <label for="{{ form.excluded_devices.id_for_label }}" class="form-label">{{ form.excluded_devices.label }}</label>
-              {{ form.excluded_devices }}
-              <div class="form-text">{{ form.excluded_devices.help_text }}</div>
-              {% if form.excluded_devices.errors %}
-                <div class="invalid-feedback d-block">{{ form.excluded_devices.errors }}</div>
-              {% endif %}
+              {# Excluded Devices - Only available in Group mode #}
+              <div class="mb-3">
+                <label for="{{ form.excluded_devices.id_for_label }}" class="form-label">{{ form.excluded_devices.label }}</label>
+                {{ form.excluded_devices }}
+                <div class="form-text">{{ form.excluded_devices.help_text }}</div>
+                {% if form.excluded_devices.errors %}
+                  <div class="invalid-feedback d-block">{{ form.excluded_devices.errors }}</div>
+                {% endif %}
+              </div>
             </div>
 
             {# Interface Selection - Two fields: Checkboxes + Manual Entry #}

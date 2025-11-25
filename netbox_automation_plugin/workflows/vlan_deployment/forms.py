@@ -103,13 +103,14 @@ class VLANDeploymentForm(forms.Form):
         }),
     )
 
-    # Excluded devices - Devices to skip during deployment
+    # Excluded devices - Devices to skip during deployment (Group mode only)
     excluded_devices = forms.ModelMultipleChoiceField(
         queryset=Device.objects.all(),
         required=False,
         label=_("Excluded Devices"),
         help_text=_(
-            "Optional: Select devices to exclude from deployment. Useful when some devices don't have certain interfaces. "
+            "Optional (Group mode only): Select devices to exclude from the automatically selected group. "
+            "Useful when some devices don't have certain interfaces. "
             "For example, if swp64 only exists on device5, exclude devices 1-4 for swp64 deployment."
         ),
         widget=forms.SelectMultiple(attrs={

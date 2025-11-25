@@ -53,9 +53,10 @@ class VLANDeploymentView(View):
             form.add_error(None, _("No devices found matching the selection (with primary IP)."))
             return render(request, self.template_name_form, {"form": form})
 
-        # Filter out excluded devices
+        # Filter out excluded devices (only applies to Group mode)
+        deployment_scope = form.cleaned_data.get('deployment_scope', 'single')
         excluded_devices = form.cleaned_data.get('excluded_devices', [])
-        if excluded_devices:
+        if excluded_devices and deployment_scope == 'group':
             excluded_device_ids = {d.id for d in excluded_devices}
             devices = [d for d in devices if d.id not in excluded_device_ids]
             logger.info(f"Excluded {len(excluded_devices)} devices. Remaining: {len(devices)} devices for deployment")
