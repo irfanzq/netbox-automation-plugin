@@ -115,12 +115,7 @@ class NAPALMDeviceManager:
                 platform_optional_args = platform_creds.get('optional_args', {})
                 optional_args.update(platform_optional_args)
                 
-                # Check for SSH proxy configuration
-                ssh_proxy = automation_config.get('ssh_proxy') or napalm_config.get('ssh_proxy')
-                
                 logger.info(f"Connecting to {self.device.name} using driver={driver_name}, username={username}")
-                if ssh_proxy:
-                    logger.info(f"Using SSH proxy: {ssh_proxy}")
                 
             except Exception as e:
                 logger.warning(f"Could not load plugin config, using global settings: {e}")
@@ -128,7 +123,6 @@ class NAPALMDeviceManager:
                 password = getattr(settings, 'NAPALM_PASSWORD', '')
                 timeout = getattr(settings, 'NAPALM_TIMEOUT', 60)
                 optional_args = getattr(settings, 'NAPALM_OPTIONAL_ARGS', {})
-                ssh_proxy = None
             
             # Special handling for platform-specific drivers
             if driver_name == 'cumulus':
@@ -139,50 +133,8 @@ class NAPALMDeviceManager:
                 optional_args = cumulus_args
             elif driver_name == 'eos':
                 # Arista EOS: Force SSH transport (not eAPI/HTTP)
-                # eAPI might not be enabled or accessible through proxy
                 optional_args['transport'] = 'ssh'
                 logger.info(f"EOS device: Forcing SSH transport (not eAPI)")
-            
-            # Setup SSH proxy if configured
-            if ssh_proxy and ssh_proxy.strip():
-                from paramiko.proxy import ProxyCommand
-                
-                # Parse proxy string (format: user@host or just host)
-                if '@' in ssh_proxy:
-                    proxy_user, proxy_host = ssh_proxy.split('@', 1)
-                else:
-                    proxy_user = None
-                    proxy_host = ssh_proxy
-                
-                # Get hostname (primary_ip4.address is IPNetwork object, need .ip or str())
-                if self.device.primary_ip4:
-                    hostname = str(self.device.primary_ip4.address.ip)
-                elif self.device.primary_ip6:
-                    hostname = str(self.device.primary_ip6.address.ip)
-                else:
-                    hostname = None
-                
-                # Build ProxyCommand for SSH bastion/jump host
-                proxy_command = (
-                    f"ssh -o StrictHostKeyChecking=no "
-                    f"-o UserKnownHostsFile=/dev/null "
-                    f"-o IdentityFile=/opt/ssh-keys/id_ed25519 "
-                    f"-W {hostname}:22 "
-                    f"{proxy_user + '@' if proxy_user else ''}{proxy_host}"
-                )
-                
-                logger.info(f"Using ProxyCommand: {proxy_command}")
-                
-                # Create ProxyCommand socket
-                self.proxy_sock = ProxyCommand(proxy_command)
-                optional_args['sock'] = self.proxy_sock
-                
-                # Increase timeouts for proxy connections
-                optional_args['conn_timeout'] = optional_args.get('conn_timeout', 120)
-                optional_args['auth_timeout'] = optional_args.get('auth_timeout', 90)
-                optional_args['banner_timeout'] = optional_args.get('banner_timeout', 60)
-            else:
-                self.proxy_sock = None
             
             # Get device IP address (primary_ip4.address is IPNetwork object)
             if self.device.primary_ip4:
@@ -264,14 +216,6 @@ class NAPALMDeviceManager:
                 logger.info(f"Disconnected from {self.device.name}")
             except Exception as e:
                 logger.error(f"Error disconnecting from {self.device.name}: {e}")
-        
-        # Close proxy socket if it exists
-        if hasattr(self, 'proxy_sock') and self.proxy_sock:
-            try:
-                self.proxy_sock.close()
-                logger.debug(f"Closed ProxyCommand socket for {self.device.name}")
-            except Exception as e:
-                logger.warning(f"Error closing proxy socket for {self.device.name}: {e}")
     
     def get_facts(self):
         """
@@ -941,11 +885,11 @@ class NAPALMDeviceManager:
             logger.info(f"Phase 0: Establishing connection to {self.device.name}...")
             logs.append(f"  Status: Establishing new connection...")
             if not self.connect():
-                result['message'] = f"Failed to establish connection to {self.device.name}. Check credentials, network connectivity, and SSH proxy settings."
+                result['message'] = f"Failed to establish connection to {self.device.name}. Check credentials and network connectivity."
                 logger.error(f"Phase 0 failed: Could not connect to {self.device.name}")
                 logs.append(f"  ✗ Connection FAILED")
                 logs.append(f"  Error: Could not connect to device")
-                logs.append(f"  Check: Credentials, network connectivity, SSH proxy settings")
+                logs.append(f"  Check: Credentials and network connectivity")
                 result['logs'] = logs
                 return result
             logger.info(f"Phase 0: Connection established successfully")

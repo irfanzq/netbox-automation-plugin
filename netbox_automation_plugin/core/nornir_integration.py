@@ -21,15 +21,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# Register custom NAPALM connection plugin with SSH proxy support (optional, for dev environments)
-try:
-    from .napalm_proxy_connection import NapalmProxy
-    ConnectionPluginRegister.register("napalm_proxy", NapalmProxy)
-    logger.debug("Registered napalm_proxy connection plugin (SSH proxy support available)")
-except ImportError:
-    # napalm_proxy_connection not available (production environment - direct connections only)
-    logger.debug("napalm_proxy_connection not available - using direct connections only")
-    pass
+# Production version - direct connections only (no SSH proxy support)
 
 # Import Paramiko for custom SSH client
 import paramiko
@@ -127,7 +119,7 @@ class KeyboardInteractiveSSHClient(SSHClient):
 
 def napalm_get_with_proxy(task: Task, getters: List[str] = None, retrieve: str = None, **kwargs) -> Result:
     """
-    Custom task wrapper for napalm_get that uses direct NAPALM connection with ProxyCommand
+    Custom task wrapper for napalm_get that uses direct NAPALM connection (production - direct connections only)
 
     Args:
         task: Nornir task object
@@ -139,7 +131,6 @@ def napalm_get_with_proxy(task: Task, getters: List[str] = None, retrieve: str =
         Result object with getter data
     """
     from napalm import get_network_driver
-    from paramiko.proxy import ProxyCommand
 
     # Handle getters list - don't overwrite if already provided
     if not getters:
@@ -183,60 +174,7 @@ def napalm_get_with_proxy(task: Task, getters: List[str] = None, retrieve: str =
         pass
 
     debug_log(f"=== NAPALM_GET_WITH_PROXY START for {task.host.name} ({hostname}) ===")
-
-    # PRIMARY: Get SSH proxy from plugin config (main source)
-    # task.host.data can override if explicitly provided
-    ssh_proxy = None
-    try:
-        from netbox.plugins import get_plugin_config
-        automation_config = get_plugin_config('netbox_automation_plugin', 'automation', {})
-        logger.error(f"DEBUG: automation_config keys = {list(automation_config.keys())}")
-        ssh_proxy_config = automation_config.get('ssh_proxy')
-        logger.error(f"DEBUG: ssh_proxy_config from plugin = {repr(ssh_proxy_config)}")
-
-        # CRITICAL DEBUG
-        try:
-            with open('/tmp/napalm_proxy_debug.log', 'a') as f:
-                f.write(f"automation_config: {automation_config}\n")
-                f.write(f"ssh_proxy_config: {repr(ssh_proxy_config)}\n")
-                f.flush()
-        except:
-            pass
-
-        if ssh_proxy_config:
-            ssh_proxy = ssh_proxy_config.strip() if isinstance(ssh_proxy_config, str) else str(ssh_proxy_config).strip()
-            logger.error(f"DEBUG: SSH proxy from plugin config for {task.host.name}: {ssh_proxy}")
-    except Exception as e:
-        logger.error(f"ERROR: Could not read ssh_proxy from plugin config for {task.host.name}: {e}")
-        import traceback
-        logger.error(traceback.format_exc())
-    
-    # OVERRIDE: Check if task.host.data has an explicit ssh_proxy (overrides config)
-    ssh_proxy_override = task.host.data.get("ssh_proxy")
-    logger.error(f"DEBUG: ssh_proxy_override from task.host.data = {repr(ssh_proxy_override)}")
-    if ssh_proxy_override and ssh_proxy_override.strip():
-        ssh_proxy = ssh_proxy_override.strip()
-        logger.error(f"DEBUG: SSH proxy overridden from task.host.data for {task.host.name}: {ssh_proxy}")
-    
-    # Log final value
-    logger.error(f"DEBUG: FINAL ssh_proxy value = {repr(ssh_proxy)}")
-
-    # CRITICAL DEBUG
-    try:
-        with open('/tmp/napalm_proxy_debug.log', 'a') as f:
-            f.write(f"FINAL ssh_proxy value: {repr(ssh_proxy)}\n")
-            if ssh_proxy:
-                f.write(f"✓ WILL USE SSH PROXY: {ssh_proxy}\n")
-            else:
-                f.write(f"✗ NO SSH PROXY - DIRECT CONNECTION\n")
-            f.flush()
-    except:
-        pass
-
-    if ssh_proxy:
-        logger.error(f"=== Using SSH proxy for {task.host.name} ({hostname}): {ssh_proxy} ===")
-    else:
-        logger.error(f"=== NO SSH PROXY for {task.host.name} ({hostname}) - will attempt direct connection ===")
+    debug_log(f"=== Direct connection to {hostname} (production - no SSH proxy) ===")
 
     # Create NAPALM driver with detailed error handling and fallback
     logger.info(f"Attempting to get NAPALM driver for platform: '{platform}'")
@@ -341,17 +279,16 @@ def napalm_get_with_proxy(task: Task, getters: List[str] = None, retrieve: str =
     # Build optional_args with proper timeout settings for Netmiko
     # These MUST be passed through to Netmiko's ConnectHandler
     optional_args = {
-        # Netmiko timeout parameters (critical for proxy connections)
-        'conn_timeout': 60,      # TCP connection timeout (increased from default 10s)
-        'auth_timeout': 60,      # Authentication timeout (increased from default)
+        # Netmiko timeout parameters
+        'conn_timeout': 60,      # TCP connection timeout
+        'auth_timeout': 60,      # Authentication timeout
         'banner_timeout': 30,    # SSH banner timeout
         'timeout': 100,          # Read timeout (Netmiko default, but explicit)
-        'global_delay_factor': 2, # Add delay factor for slow connections through proxy
-        # CRITICAL: Disable host key checking to avoid interactive prompts
-        'ssh_strict': False,     # Don't reject unknown SSH host keys (default False, but explicit)
+        # Disable host key checking to avoid interactive prompts
+        'ssh_strict': False,     # Don't reject unknown SSH host keys
         'system_host_keys': False,  # Don't load system known_hosts
         'alt_host_keys': False,   # Don't use alternate host keys
-        # CRITICAL: Force password authentication, disable SSH key auth to target device
+        # Force password authentication, disable SSH key auth to target device
         'use_keys': False,       # Don't use SSH keys for device authentication
         'allow_agent': False,    # Don't use SSH agent
     }
@@ -360,45 +297,6 @@ def napalm_get_with_proxy(task: Task, getters: List[str] = None, retrieve: str =
     if platform == 'eos':
         optional_args['transport'] = 'ssh'
         debug_log(f"=== EOS device: Forcing SSH transport (not eAPI) ===")
-
-    if ssh_proxy:
-        # Use ProxyCommand - this is the EXACT code that works in the test script
-        debug_log(f"=== Creating ProxyCommand with ssh_proxy={ssh_proxy}, hostname={hostname} ===")
-        try:
-            proxy_user, proxy_host = ssh_proxy.split("@", 1)
-            debug_log(f"DEBUG: proxy_user={proxy_user}, proxy_host={proxy_host}")
-        except ValueError:
-            debug_log(f"FATAL: Invalid ssh_proxy format for {task.host.name}: {ssh_proxy} (expected 'user@host')")
-            raise ValueError(f"Invalid ssh_proxy format: {ssh_proxy} (expected 'user@host')")
-        
-        # Note: Don't specify -i flag in ProxyCommand - let SSH use default keys or ssh-agent
-        # The -i flag would interfere with password auth to the target device
-        proxy_command_str = (
-            f"ssh -o StrictHostKeyChecking=no "
-            f"-o UserKnownHostsFile=/dev/null "
-            f"-o IdentityFile=/opt/ssh-keys/id_ed25519 "
-            f"-W {hostname}:22 "
-            f"{proxy_user}@{proxy_host}"
-        )
-        debug_log(f"DEBUG: ProxyCommand string = {proxy_command_str}")
-
-        proxy = ProxyCommand(proxy_command_str)
-        debug_log(f"DEBUG: ProxyCommand object created: {type(proxy).__name__}")
-        optional_args['sock'] = proxy
-        debug_log(f"DEBUG: Set optional_args['sock'] = {type(proxy).__name__}")
-        # Increase timeouts SIGNIFICANTLY for proxy connections
-        optional_args['conn_timeout'] = 120  # More time for proxy tunnel establishment
-        optional_args['auth_timeout'] = 90   # More time for authentication through proxy
-        optional_args['banner_timeout'] = 60  # More time for SSH banner through proxy
-        optional_args['timeout'] = 120       # Global timeout for operations
-        # CRITICAL: Ensure password auth is used, not keys
-        optional_args['use_keys'] = False
-        optional_args['allow_agent'] = False
-        debug_log(f"DEBUG: optional_args after setting sock = {list(optional_args.keys())}")
-        debug_log(f"DEBUG: optional_args['sock'] exists = {'sock' in optional_args}")
-        debug_log(f"=== SSH proxy configured: {ssh_proxy} for {hostname} ===")
-    else:
-        debug_log(f"=== NO PROXY - Direct connection to {hostname} ===")
 
     # CRITICAL: For EOS/IOS devices, use keyboard-interactive authentication
     # EOS devices only accept 'publickey' or 'keyboard-interactive', not password
@@ -489,7 +387,8 @@ def napalm_get_with_proxy(task: Task, getters: List[str] = None, retrieve: str =
     debug_log(f"=== NAPALM device created ===")
     
     # Verify sock is set if proxy was configured
-    if ssh_proxy and hasattr(device, 'netmiko_optional_args'):
+    # Production: Direct connections only (no SSH proxy)
+    if hasattr(device, 'netmiko_optional_args'):
         debug_log(f"DEBUG: device.netmiko_optional_args keys = {list(device.netmiko_optional_args.keys())}")
         debug_log(f"DEBUG: device.netmiko_optional_args['sock'] = {device.netmiko_optional_args.get('sock')}")
         if 'sock' in device.netmiko_optional_args:
@@ -499,14 +398,14 @@ def napalm_get_with_proxy(task: Task, getters: List[str] = None, retrieve: str =
 
     # Open connection
     debug_log(f"=== About to call device.open() for {hostname} ===")
-    debug_log(f"DEBUG: If using proxy, connection should go through {ssh_proxy if ssh_proxy else 'NONE'}")
+    debug_log(f"DEBUG: Direct connection (production - no proxy)")
 
     # CRITICAL: Log connection attempt - raise exception if this fails so we know
     import datetime
     import sys
     log_msg = f"\n{'='*80}\n"
     log_msg += f"[{datetime.datetime.now()}] Attempting connection to {hostname}\n"
-    log_msg += f"SSH Proxy configured: {ssh_proxy}\n"
+    log_msg += f"Connection: Direct (production - no SSH proxy)\n"
     log_msg += f"Has sock in optional_args: {'sock' in optional_args}\n"
     if 'sock' in optional_args:
         log_msg += f"Sock type: {type(optional_args['sock']).__name__}\n"
@@ -659,15 +558,6 @@ def napalm_get_with_proxy(task: Task, getters: List[str] = None, retrieve: str =
         except:
             pass
 
-        # CRITICAL: Close ProxyCommand subprocess to prevent zombie processes
-        if 'sock' in optional_args and optional_args['sock'] is not None:
-            try:
-                proxy_sock = optional_args['sock']
-                if hasattr(proxy_sock, 'close'):
-                    proxy_sock.close()
-                    debug_log(f"✓ Closed ProxyCommand for {hostname}")
-            except Exception as e:
-                debug_log(f"✗ Failed to close ProxyCommand for {hostname}: {e}")
 
     return Result(host=task.host, result=result)
 
@@ -682,23 +572,16 @@ class NetBoxORMInventory:
         self,
         devices: Optional[List["Device"]] = None,
         device_filter: Optional[Dict[str, Any]] = None,
-        ssh_proxy: Optional[str] = None,
         username: Optional[str] = None,
         password: Optional[str] = None,
         **kwargs
     ):
-        logger.error("=" * 80)
-        logger.error("=== NetBoxORMInventory __init__ ===")
-        logger.error(f"DEBUG: ssh_proxy parameter = {repr(ssh_proxy)}")
-        logger.error(f"DEBUG: username parameter = {repr(username)}")
-        logger.error(f"DEBUG: devices count = {len(devices) if devices else 0}")
         """
-        Initialize NetBox ORM-based Nornir inventory
+        Initialize NetBox ORM-based Nornir inventory (production - direct connections only)
 
         Args:
             devices: List of NetBox Device objects (optional)
             device_filter: Django ORM filter to select devices (optional)
-            ssh_proxy: SSH proxy/bastion host for local dev (e.g., 'irfanzq@192.168.0.162')
             username: SSH username (optional, overrides plugin config)
             password: SSH password (optional, overrides plugin config)
         """
@@ -707,41 +590,19 @@ class NetBoxORMInventory:
         # Read credentials from plugin config
         try:
             napalm_config = get_plugin_config('netbox_automation_plugin', 'napalm', {})
-            automation_config = get_plugin_config('netbox_automation_plugin', 'automation', {})
             default_username = napalm_config.get('username')
             default_password = napalm_config.get('password')
-            default_ssh_proxy = automation_config.get('ssh_proxy')  # Read SSH proxy from config
-            # NEW: Support per-platform credentials
+            # Support per-platform credentials
             self.platform_credentials = napalm_config.get('platform_credentials', {})
-            # Log config values for debugging
-            if default_ssh_proxy:
-                logger.debug(f"NetBoxORMInventory: SSH proxy from config: {default_ssh_proxy}")
         except Exception as e:
-            logger.error(f"Could not load plugin config: {e}")
-            import traceback
-            logger.debug(f"Config load error traceback: {traceback.format_exc()}")
+            logger.warning(f"Could not load plugin config: {e}")
             default_username = None
             default_password = None
-            default_ssh_proxy = None
             self.platform_credentials = {}
 
         # Use provided credentials or fall back to plugin config
         self.username = username if username is not None else default_username
         self.password = password if password is not None else default_password
-        # If ssh_proxy not explicitly passed, read from config (for local dev environment)
-        # Ensure we handle None, empty string, and actual values consistently
-        if ssh_proxy is not None and ssh_proxy.strip():
-            self.ssh_proxy = ssh_proxy.strip()
-            logger.error(f"NetBoxORMInventory: Using explicitly provided SSH proxy: {self.ssh_proxy}")
-        elif default_ssh_proxy and default_ssh_proxy.strip():
-            self.ssh_proxy = default_ssh_proxy.strip()
-            logger.error(f"NetBoxORMInventory: Using SSH proxy from config: {self.ssh_proxy}")
-        else:
-            self.ssh_proxy = None
-            logger.error("NetBoxORMInventory: No SSH proxy configured")
-        
-        logger.error(f"DEBUG: FINAL self.ssh_proxy = {repr(self.ssh_proxy)}")
-        logger.error("=" * 80)
         self.device_filter = device_filter or {}
         self.devices = devices
         
@@ -814,26 +675,8 @@ class NetBoxORMInventory:
                 logger.error(f"  Username: {device_username}")
                 logger.error(f"  Password: {'*' * len(device_password) if device_password else 'None'}")
 
-            # Build connection options for SSH proxy (LOCAL DEV ENVIRONMENT ONLY)
+            # Production: Direct connections only (no SSH proxy)
             connection_options = {}
-
-            if self.ssh_proxy:
-                # Use custom NAPALM connection plugin that supports SSH proxy
-                # This creates a ProxyCommand subprocess tunnel through the bastion host
-                logger.info(f"Configuring SSH proxy connection through {self.ssh_proxy} for {device.name} ({primary_ip})")
-
-                # Use our custom napalm_proxy connection instead of standard napalm
-                # Pass ssh_proxy through extras so the connection plugin can access it
-                connection_options["napalm_proxy"] = ConnectionOptions(
-                    extras={
-                        "ssh_proxy": self.ssh_proxy,  # Pass SSH proxy to connection plugin
-                        "optional_args": {
-                            "timeout": 60,
-                        }
-                    }
-                )
-            else:
-                logger.warning(f"No SSH proxy configured for {device.name} ({primary_ip}) - direct connection will be attempted")
 
             host = Host(
                 name=device.name,
@@ -849,14 +692,11 @@ class NetBoxORMInventory:
                     'site': site,
                     'role': role,
                     'napalm_driver': driver,
-                    'ssh_proxy': self.ssh_proxy if self.ssh_proxy else None,  # CRITICAL: Must be set for napalm_get_with_proxy
                 }
             )
             logger.error(f"=== Created Nornir host {device.name} ===")
             logger.error(f"  hostname={primary_ip}")
             logger.error(f"  platform={driver}")
-            logger.error(f"  ssh_proxy in data={host.data.get('ssh_proxy')}")
-            logger.error(f"  self.ssh_proxy={self.ssh_proxy}")
 
             hosts[device.name] = host
         
@@ -878,18 +718,16 @@ class NornirDeviceManager:
         self,
         devices: Optional[List["Device"]] = None,
         device_filter: Optional[Dict[str, Any]] = None,
-        ssh_proxy: Optional[str] = None,
         username: Optional[str] = None,
         password: Optional[str] = None,
         num_workers: Optional[int] = None
     ):
         """
-        Initialize Nornir device manager using plugin configuration
+        Initialize Nornir device manager using plugin configuration (production - direct connections only)
 
         Args:
             devices: List of NetBox Device objects (optional)
             device_filter: Django ORM filter to select devices (optional)
-            ssh_proxy: SSH proxy/bastion for local dev (e.g., 'irfanzq@192.168.0.162')
             username: SSH username (optional, overrides plugin config)
             password: SSH password (optional, overrides plugin config)
             num_workers: Number of parallel workers (optional, overrides plugin config)
@@ -898,36 +736,13 @@ class NornirDeviceManager:
         try:
             from netbox.plugins import get_plugin_config
             nornir_config = get_plugin_config('netbox_automation_plugin', 'nornir', {})
-            automation_config = get_plugin_config('netbox_automation_plugin', 'automation', {})
-            # Balance workers for speed vs SSH proxy limits (MaxSessions=10)
-            # With ProxyCommand cleanup, we can safely use 10 workers
-            default_num_workers = nornir_config.get('runner', {}).get('options', {}).get('num_workers', 10)
-            default_ssh_proxy = automation_config.get('ssh_proxy')  # Read from config
-            # Log config values for debugging
-            if default_ssh_proxy:
-                logger.info(f"SSH proxy from config: {default_ssh_proxy}")
-            else:
-                logger.debug(f"SSH proxy not configured in automation config (value: {default_ssh_proxy})")
+            default_num_workers = nornir_config.get('runner', {}).get('options', {}).get('num_workers', 20)
         except Exception as e:
             logger.warning(f"Could not load plugin config, using defaults: {e}")
-            import traceback
-            logger.debug(f"Config load error traceback: {traceback.format_exc()}")
-            default_num_workers = 10  # Balance speed vs SSH proxy MaxSessions limit
-            default_ssh_proxy = None
+            default_num_workers = 20
 
         self.devices = devices
         self.device_filter = device_filter
-        # If ssh_proxy not explicitly passed, read from config (for local dev environment)
-        # Ensure we handle None, empty string, and actual values consistently
-        if ssh_proxy is not None and ssh_proxy.strip():
-            self.ssh_proxy = ssh_proxy.strip()
-            logger.debug(f"Using explicitly provided SSH proxy: {self.ssh_proxy}")
-        elif default_ssh_proxy and default_ssh_proxy.strip():
-            self.ssh_proxy = default_ssh_proxy.strip()
-            logger.debug(f"Using SSH proxy from config: {self.ssh_proxy}")
-        else:
-            self.ssh_proxy = None
-            logger.debug("No SSH proxy configured (neither explicit nor from config)")
         self.username = username  # Store for passing to inventory
         self.password = password  # Store for passing to inventory
         self.num_workers = num_workers if num_workers is not None else default_num_workers
@@ -938,12 +753,11 @@ class NornirDeviceManager:
         import logging
         logger = logging.getLogger('netbox_automation_plugin.nornir')
 
-        # Build custom inventory from NetBox devices
-        logger.info(f"NornirDeviceManager.initialize: Creating inventory with ssh_proxy={self.ssh_proxy}")
+        # Build custom inventory from NetBox devices (production - direct connections only)
+        logger.info(f"NornirDeviceManager.initialize: Creating inventory (direct connections)")
         inventory = NetBoxORMInventory(
             devices=self.devices,
             device_filter=self.device_filter,
-            ssh_proxy=self.ssh_proxy,
             username=self.username,
             password=self.password
         ).load()
@@ -954,19 +768,8 @@ class NornirDeviceManager:
         from nornir.core.plugins.connections import ConnectionPluginRegister
         from nornir.plugins.runners import ThreadedRunner
 
-        # CRITICAL: Auto-register all available connection plugins (napalm, netmiko, etc.)
+        # Auto-register all available connection plugins (napalm, netmiko, etc.)
         ConnectionPluginRegister.auto_register()
-
-        # Re-register our custom napalm_proxy plugin after auto_register (optional, for dev)
-        # (auto_register might have cleared custom registrations)
-        try:
-            from netbox_automation_plugin.core.napalm_proxy_connection import NapalmProxy
-            ConnectionPluginRegister.register("napalm_proxy", NapalmProxy)
-            logger.debug("Registered napalm_proxy connection plugin (SSH proxy support available)")
-        except ImportError:
-            # napalm_proxy_connection not available (production - direct connections only)
-            logger.debug("napalm_proxy_connection not available - direct connections only")
-            pass
 
         # Create Nornir instance with our custom inventory and threaded runner
         self.nr = Nornir(
@@ -974,10 +777,7 @@ class NornirDeviceManager:
             runner=ThreadedRunner(num_workers=self.num_workers)
         )
 
-        if self.ssh_proxy:
-            logger.info(f"Nornir initialized with {len(self.nr.inventory.hosts)} hosts, {self.num_workers} workers, SSH proxy: {self.ssh_proxy}")
-        else:
-            logger.info(f"Nornir initialized with {len(self.nr.inventory.hosts)} hosts, {self.num_workers} workers")
+        logger.info(f"Nornir initialized with {len(self.nr.inventory.hosts)} hosts, {self.num_workers} workers (direct connections)")
         return self.nr
     
     def get_facts(self) -> Dict[str, Any]:
