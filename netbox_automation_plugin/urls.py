@@ -2,6 +2,7 @@ from django.urls import path
 
 from .workflows.lldp_consistency.views import LLDPConsistencyCheckView
 from .workflows.vlan_deployment.views import VLANDeploymentView, GetCommonInterfacesView, GetVLANsBySiteView
+from .workflows.netbox_vlan_tagging.views import VLANTaggingView
 
 app_name = "netbox_automation_plugin"
 
@@ -25,6 +26,11 @@ urlpatterns = [
         "vlan-deployment/get-vlans/",
         GetVLANsBySiteView.as_view(),
         name="vlan_deployment_get_vlans",
+    ),
+    path(
+        "netbox-vlan-tagging/",
+        VLANTaggingView.as_view(),
+        name="netbox_vlan_tagging",
     ),
 ]
 

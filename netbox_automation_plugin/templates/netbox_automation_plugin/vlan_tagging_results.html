@@ -1,0 +1,703 @@
+{% extends 'base/layout.html' %}
+{% load i18n %}
+
+{% block title %}{% trans "VLAN Tagging Results" %}{% endblock %}
+
+{% block content %}
+  <div class="row mb-3">
+    <div class="col-md-12">
+      <div class="card">
+        <div class="card-header">
+          <h5 class="card-title mb-0">
+            {% if workflow_mode == "analysis" %}
+              {% trans "Analysis Results" %}
+            {% else %}
+              {% trans "Tagging Results" %}
+            {% endif %}
+          </h5>
+        </div>
+        <div class="card-body">
+          {# Device Summary #}
+          <h6>{% trans "Device Summary" %}</h6>
+          <dl class="row mb-3">
+            <dt class="col-md-3">{% trans "Total Devices" %}</dt>
+            <dd class="col-md-3">{{ results.device_summary.total }}</dd>
+            <dt class="col-md-3 text-success">{% trans "Ready" %}</dt>
+            <dd class="col-md-3 text-success">{{ results.device_summary.ready }}</dd>
+            <dt class="col-md-3 text-danger">{% trans "Not Ready" %}</dt>
+            <dd class="col-md-3 text-danger">{{ results.device_summary.not_ready }}</dd>
+            <dt class="col-md-3 text-warning">{% trans "Needs Review" %}</dt>
+            <dd class="col-md-3 text-warning">{{ results.device_summary.needs_review }}</dd>
+          </dl>
+
+          {# Interface Summary #}
+          <h6>{% trans "Interface Summary" %}</h6>
+          <div class="alert alert-info mb-2" style="font-size: 0.9em;">
+            <strong>Tag Definitions:</strong>
+            <ul class="mb-0" style="padding-left: 1.5em;">
+              <li><strong>Access-Ready</strong> (<code>vlan-mode:access</code>): Single untagged VLAN only (Arista/Mellanox access ports)</li>
+              <li><strong>Tagged Mode</strong> (<code>vlan-mode:tagged</code>): Both tagged and untagged VLANs (Cumulus/Mellanox VLAN-aware bridge)</li>
+              <li><strong>Uplink</strong> (<code>vlan-mode:uplink</code>): Connected to spine or peer switch</li>
+              <li><strong>Routed</strong> (<code>vlan-mode:routed</code>): Has IP address (L3 port)</li>
+            </ul>
+          </div>
+          <dl class="row mb-0">
+            <dt class="col-md-3">{% trans "Total Interfaces" %}</dt>
+            <dd class="col-md-3">{{ results.interface_summary.total }}</dd>
+            <dt class="col-md-3 text-info">{% trans "Access-Ready" %} <small class="text-muted">(vlan-mode:access)</small></dt>
+            <dd class="col-md-3 text-info">{{ results.interface_summary.access }}</dd>
+            <dt class="col-md-3 text-primary">{% trans "Tagged Mode" %} <small class="text-muted">(vlan-mode:tagged)</small></dt>
+            <dd class="col-md-3 text-primary">{{ results.interface_summary.tagged }}</dd>
+            <dt class="col-md-3" style="color: #17a2b8;">{% trans "Uplink" %} <small class="text-muted">(vlan-mode:uplink)</small></dt>
+            <dd class="col-md-3" style="color: #17a2b8; font-weight: bold;">{{ results.interface_summary.uplink }}</dd>
+            <dt class="col-md-3" style="color: #6f42c1;">{% trans "Routed" %} <small class="text-muted">(vlan-mode:routed)</small></dt>
+            <dd class="col-md-3" style="color: #6f42c1; font-weight: bold;">{{ results.interface_summary.routed }}</dd>
+            <dt class="col-md-3 text-warning">{% trans "Needs Review" %} <small class="text-muted">(vlan-mode:needs-review)</small></dt>
+            <dd class="col-md-3 text-warning">{{ results.interface_summary.needs_review }}</dd>
+            <dt class="col-md-3 text-muted">{% trans "No Tag" %}</dt>
+            <dd class="col-md-3 text-muted">{{ results.interface_summary.no_tag }}</dd>
+          </dl>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  {# Current Tags Info (if in analysis mode) #}
+  {% if workflow_mode == "analysis" and current_tags_info %}
+    <div class="row mb-3">
+      <div class="col-md-12">
+        <div class="card border-info">
+          <div class="card-header bg-info text-white">
+            <h5 class="card-title mb-0">
+              <i class="mdi mdi-tag-multiple"></i>
+              {% trans "Currently Tagged Devices and Interfaces" %}
+            </h5>
+          </div>
+          <div class="card-body">
+            <div class="alert alert-info">
+              <h6><i class="mdi mdi-information"></i> {% trans "Current Tag Status" %}</h6>
+              <p class="mb-0">
+                {% trans "This section shows devices and interfaces that currently have automation tags applied in NetBox." %}
+              </p>
+            </div>
+
+            <h6><i class="mdi mdi-server"></i> {% trans "Devices Tagged" %}</h6>
+            <p>
+              <strong>{% trans "Total" %}:</strong> 
+              <span class="badge bg-info">{{ current_tags_info.devices_tagged.count }}</span>
+            </p>
+            {% if current_tags_info.devices_tagged.devices %}
+              <div class="table-responsive">
+                <table class="table table-sm table-hover">
+                  <thead>
+                    <tr>
+                      <th>{% trans "Device Name" %}</th>
+                      <th>{% trans "Tag Applied" %}</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {% for device in current_tags_info.devices_tagged.devices %}
+                      <tr>
+                        <td><code>{{ device }}</code></td>
+                        <td><span class="badge" style="background-color: #0dcaf0; color: #ffffff;">automation-ready:vlan</span></td>
+                      </tr>
+                    {% endfor %}
+                  </tbody>
+                </table>
+              </div>
+            {% else %}
+              <p class="text-muted">{% trans "No devices are currently tagged." %}</p>
+            {% endif %}
+
+            <hr>
+
+            <h6><i class="mdi mdi-ethernet-cable"></i> {% trans "Interfaces Tagged" %}</h6>
+            {% for tag_type, data in current_tags_info.interfaces_tagged.items %}
+              {% if data.count > 0 %}
+                <div class="mb-3">
+                  <p>
+                    <strong>{{ tag_type|title }}:</strong> 
+                    <span class="badge bg-primary">{{ data.count }}</span>
+                    {% if tag_type == "uplink" %}
+                      <span class="badge" style="background-color: #17a2b8; color: #ffffff;">vlan-mode:{{ tag_type }}</span>
+                    {% elif tag_type == "access" %}
+                      <span class="badge" style="background-color: #0dcaf0; color: #ffffff;">vlan-mode:{{ tag_type }}</span>
+                    {% elif tag_type == "tagged" %}
+                      <span class="badge" style="background-color: #0d6efd; color: #ffffff;">vlan-mode:{{ tag_type }}</span>
+                    {% elif tag_type == "routed" %}
+                      <span class="badge" style="background-color: #6f42c1; color: #ffffff;">vlan-mode:{{ tag_type }}</span>
+                    {% elif tag_type == "needs-review" %}
+                      <span class="badge" style="background-color: #ffc107; color: #000000;">vlan-mode:{{ tag_type }}</span>
+                    {% else %}
+                      <span class="badge" style="background-color: #0dcaf0; color: #ffffff;">vlan-mode:{{ tag_type }}</span>
+                    {% endif %}
+                  </p>
+                  {% if data.interfaces and data.interfaces|length > 0 %}
+                    <div class="table-responsive">
+                      <table class="table table-sm table-hover">
+                        <thead>
+                          <tr>
+                            <th>{% trans "Interface" %}</th>
+                            <th>{% trans "Tag Applied" %}</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {% for interface in data.interfaces|slice:":50" %}
+                            <tr>
+                              <td><code>{{ interface }}</code></td>
+                              <td>
+                                {% if tag_type == "uplink" %}
+                                  <span class="badge" style="background-color: #17a2b8; color: #ffffff;">vlan-mode:{{ tag_type }}</span>
+                                {% elif tag_type == "access" %}
+                                  <span class="badge" style="background-color: #0dcaf0; color: #ffffff;">vlan-mode:{{ tag_type }}</span>
+                                {% elif tag_type == "tagged" %}
+                                  <span class="badge" style="background-color: #0d6efd; color: #ffffff;">vlan-mode:{{ tag_type }}</span>
+                                {% elif tag_type == "routed" %}
+                                  <span class="badge" style="background-color: #6f42c1; color: #ffffff;">vlan-mode:{{ tag_type }}</span>
+                                {% elif tag_type == "needs-review" %}
+                                  <span class="badge" style="background-color: #ffc107; color: #000000;">vlan-mode:{{ tag_type }}</span>
+                                {% else %}
+                                  <span class="badge" style="background-color: #0dcaf0; color: #ffffff;">vlan-mode:{{ tag_type }}</span>
+                                {% endif %}
+                              </td>
+                            </tr>
+                          {% endfor %}
+                          {% if data.interfaces|length > 50 %}
+                            <tr>
+                              <td colspan="2" class="text-muted">
+                                <em>... and {{ data.interfaces|length|add:"-50" }} more interfaces</em>
+                              </td>
+                            </tr>
+                          {% endif %}
+                        </tbody>
+                      </table>
+                    </div>
+                  {% else %}
+                    <p class="text-muted"><em>No interfaces in this category.</em></p>
+                  {% endif %}
+                </div>
+              {% endif %}
+            {% endfor %}
+          </div>
+        </div>
+      </div>
+    </div>
+  {% endif %}
+
+  {# Tagging Results (if in tagging mode) #}
+  {% if workflow_mode == "tagging" and tagging_results %}
+    <div class="row mb-3">
+      <div class="col-md-12">
+        <div class="card border-success">
+          <div class="card-header bg-success text-white">
+            <h5 class="card-title mb-0">
+              <i class="mdi mdi-check-circle"></i>
+              {% if operation_type == "delete" %}
+                {% trans "Tags Successfully Deleted" %}
+              {% elif operation_type == "both" %}
+                {% trans "Tags Successfully Updated" %}
+              {% else %}
+                {% trans "Tags Successfully Applied" %}
+              {% endif %}
+            </h5>
+          </div>
+          <div class="card-body">
+            <div class="alert alert-success">
+              <h6><i class="mdi mdi-information"></i> {% trans "Deployment Summary" %}</h6>
+              <p class="mb-0">
+                {% if operation_type == "delete" %}
+                  {% trans "Tags have been successfully deleted from NetBox." %}
+                {% elif operation_type == "both" %}
+                  {% trans "Tags have been successfully updated in NetBox. Some tags were applied and some were deleted." %}
+                {% else %}
+                  {% trans "Tags have been successfully applied to NetBox. You can now use these tags in other workflows or for filtering." %}
+                {% endif %}
+              </p>
+            </div>
+
+            <h6><i class="mdi mdi-server"></i> {% trans "Devices Tagged" %}</h6>
+            <p>
+              <strong>{% trans "Total" %}:</strong> 
+              <span class="badge bg-success">{{ tagging_results.devices_tagged.count }}</span>
+            </p>
+            {% if tagging_results.devices_tagged.devices %}
+              <div class="table-responsive">
+                <table class="table table-sm table-hover">
+                  <thead>
+                    <tr>
+                      <th>{% trans "Device Name" %}</th>
+                      <th>{% trans "Tag Applied" %}</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {% for device in tagging_results.devices_tagged.devices %}
+                      <tr>
+                        <td><code>{{ device }}</code></td>
+                        <td><span class="badge" style="background-color: #0dcaf0; color: #ffffff;">automation-ready:vlan</span></td>
+                      </tr>
+                    {% endfor %}
+                  </tbody>
+                </table>
+              </div>
+            {% else %}
+              <p class="text-muted">{% trans "No devices were tagged." %}</p>
+            {% endif %}
+
+            <hr>
+
+            <h6><i class="mdi mdi-ethernet-cable"></i> {% trans "Interfaces Tagged" %}</h6>
+            {% for tag_type, data in tagging_results.interfaces_tagged.items %}
+              {% if data.count > 0 %}
+                <div class="mb-3">
+                  <p>
+                    <strong>{{ tag_type|title }}:</strong> 
+                    <span class="badge bg-primary">{{ data.count }}</span>
+                    {% if tagging_results.interfaces_updated %}
+                      {% for updated_type, updated_data in tagging_results.interfaces_updated.items %}
+                        {% if updated_type == tag_type and updated_data.count > 0 %}
+                          <span class="badge" style="background-color: #ffc107; color: #000000;" class="ms-2">{{ updated_data.count }} updated</span>
+                        {% endif %}
+                      {% endfor %}
+                    {% endif %}
+                    {% if tagging_results.interfaces_no_change %}
+                      {% for no_change_type, no_change_data in tagging_results.interfaces_no_change.items %}
+                        {% if no_change_type == tag_type and no_change_data.count > 0 %}
+                          <span class="badge" style="background-color: #6c757d; color: #ffffff;" class="ms-2">{{ no_change_data.count }} already tagged</span>
+                        {% endif %}
+                      {% endfor %}
+                    {% endif %}
+                    {% if tag_type == "uplink" %}
+                      <span class="badge" style="background-color: #17a2b8; color: #ffffff;">vlan-mode:{{ tag_type }}</span>
+                    {% elif tag_type == "access" %}
+                      <span class="badge" style="background-color: #0dcaf0; color: #ffffff;">vlan-mode:{{ tag_type }}</span>
+                    {% elif tag_type == "tagged" %}
+                      <span class="badge" style="background-color: #0d6efd; color: #ffffff;">vlan-mode:{{ tag_type }}</span>
+                    {% elif tag_type == "routed" %}
+                      <span class="badge" style="background-color: #6f42c1; color: #ffffff;">vlan-mode:{{ tag_type }}</span>
+                    {% elif tag_type == "needs-review" %}
+                      <span class="badge" style="background-color: #ffc107; color: #000000;">vlan-mode:{{ tag_type }}</span>
+                    {% else %}
+                      <span class="badge" style="background-color: #0dcaf0; color: #ffffff;">vlan-mode:{{ tag_type }}</span>
+                    {% endif %}
+                  </p>
+                  {% if data.interfaces and data.interfaces|length > 0 %}
+                    <div class="table-responsive">
+                      <table class="table table-sm table-hover">
+                        <thead>
+                          <tr>
+                            <th>{% trans "Interface" %}</th>
+                            <th>{% trans "Tag Applied" %}</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {% for interface in data.interfaces|slice:":50" %}
+                            <tr>
+                              <td><code>{{ interface }}</code></td>
+                              <td>
+                                {% if tag_type == "uplink" %}
+                                  <span class="badge" style="background-color: #17a2b8; color: #ffffff;">vlan-mode:{{ tag_type }}</span>
+                                {% elif tag_type == "access" %}
+                                  <span class="badge" style="background-color: #0dcaf0; color: #ffffff;">vlan-mode:{{ tag_type }}</span>
+                                {% elif tag_type == "tagged" %}
+                                  <span class="badge" style="background-color: #0d6efd; color: #ffffff;">vlan-mode:{{ tag_type }}</span>
+                                {% elif tag_type == "routed" %}
+                                  <span class="badge" style="background-color: #6f42c1; color: #ffffff;">vlan-mode:{{ tag_type }}</span>
+                                {% elif tag_type == "needs-review" %}
+                                  <span class="badge" style="background-color: #ffc107; color: #000000;">vlan-mode:{{ tag_type }}</span>
+                                {% else %}
+                                  <span class="badge" style="background-color: #0dcaf0; color: #ffffff;">vlan-mode:{{ tag_type }}</span>
+                                {% endif %}
+                              </td>
+                            </tr>
+                          {% endfor %}
+                          {% if data.interfaces|length > 50 %}
+                            <tr>
+                              <td colspan="2" class="text-muted">
+                                <em>... and {{ data.interfaces|length|add:"-50" }} more interfaces</em>
+                              </td>
+                            </tr>
+                          {% endif %}
+                        </tbody>
+                      </table>
+                    </div>
+                  {% else %}
+                    <p class="text-muted"><em>No interfaces in this category.</em></p>
+                  {% endif %}
+                  
+                  {# Show updated interfaces if any #}
+                  {% if tagging_results.interfaces_updated %}
+                    {% for updated_type, updated_data in tagging_results.interfaces_updated.items %}
+                      {% if updated_type == tag_type and updated_data.interfaces|length > 0 %}
+                        <div class="mt-2">
+                          <strong class="text-warning">Updated ({{ updated_data.count }}):</strong>
+                          <div class="table-responsive mt-1">
+                            <table class="table table-sm table-hover">
+                              <thead>
+                                <tr>
+                                  <th>{% trans "Interface" %}</th>
+                                  <th>{% trans "Status" %}</th>
+                                </tr>
+                              </thead>
+                              <tbody>
+                                {% for interface in updated_data.interfaces|slice:":20" %}
+                                  <tr>
+                                    <td><code>{{ interface }}</code></td>
+                                    <td><span class="badge" style="background-color: #ffc107; color: #000000;">Tag Updated</span></td>
+                                  </tr>
+                                {% endfor %}
+                              </tbody>
+                            </table>
+                          </div>
+                        </div>
+                      {% endif %}
+                    {% endfor %}
+                  {% endif %}
+                  
+                  {# Show already tagged interfaces if any #}
+                  {% if tagging_results.interfaces_no_change %}
+                    {% for no_change_type, no_change_data in tagging_results.interfaces_no_change.items %}
+                      {% if no_change_type == tag_type and no_change_data.interfaces|length > 0 %}
+                        <div class="mt-2">
+                          <strong class="text-secondary">Already Tagged ({{ no_change_data.count }}):</strong>
+                          <div class="table-responsive mt-1">
+                            <table class="table table-sm table-hover">
+                              <thead>
+                                <tr>
+                                  <th>{% trans "Interface" %}</th>
+                                  <th>{% trans "Status" %}</th>
+                                </tr>
+                              </thead>
+                              <tbody>
+                                {% for interface in no_change_data.interfaces|slice:":20" %}
+                                  <tr>
+                                    <td><code>{{ interface }}</code></td>
+                                    <td><span class="badge" style="background-color: #6c757d; color: #ffffff;">Already Tagged</span></td>
+                                  </tr>
+                                {% endfor %}
+                              </tbody>
+                            </table>
+                          </div>
+                        </div>
+                      {% endif %}
+                    {% endfor %}
+                  {% endif %}
+                </div>
+              {% endif %}
+            {% endfor %}
+            
+            {# Separate section for Already Tagged interfaces #}
+            {% if tagging_results.interfaces_no_change %}
+              <hr>
+              <h6><i class="mdi mdi-check-circle-outline"></i> {% trans "Already Tagged (No Change Needed)" %}</h6>
+              <p class="text-muted">
+                {% trans "These interfaces already have the correct tag applied based on current criteria. No changes were made." %}
+              </p>
+              
+              {% for no_change_type, no_change_data in tagging_results.interfaces_no_change.items %}
+                {% if no_change_data.count > 0 %}
+                    <div class="mb-3">
+                      <p>
+                        <strong>{{ no_change_type|title }}:</strong> 
+                        <span class="badge" style="background-color: #6c757d; color: #ffffff;">{{ no_change_data.count }} already tagged</span>
+                        {% if no_change_type == "uplink" %}
+                          <span class="badge" style="background-color: #17a2b8; color: #ffffff;">vlan-mode:{{ no_change_type }}</span>
+                        {% elif no_change_type == "access" %}
+                          <span class="badge" style="background-color: #0dcaf0; color: #ffffff;">vlan-mode:{{ no_change_type }}</span>
+                        {% elif no_change_type == "tagged" %}
+                          <span class="badge" style="background-color: #0d6efd; color: #ffffff;">vlan-mode:{{ no_change_type }}</span>
+                        {% elif no_change_type == "routed" %}
+                          <span class="badge" style="background-color: #6f42c1; color: #ffffff;">vlan-mode:{{ no_change_type }}</span>
+                        {% elif no_change_type == "needs-review" %}
+                          <span class="badge" style="background-color: #ffc107; color: #000000;">vlan-mode:{{ no_change_type }}</span>
+                        {% else %}
+                          <span class="badge" style="background-color: #0dcaf0; color: #ffffff;">vlan-mode:{{ no_change_type }}</span>
+                        {% endif %}
+                      </p>
+                      {% if no_change_data.interfaces and no_change_data.interfaces|length > 0 %}
+                        <div class="table-responsive">
+                          <table class="table table-sm table-hover">
+                            <thead>
+                              <tr>
+                                <th>{% trans "Interface" %}</th>
+                                <th>{% trans "Tag Status" %}</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {% for interface in no_change_data.interfaces|slice:":50" %}
+                                <tr>
+                                  <td><code>{{ interface }}</code></td>
+                                  <td>
+                                    <span class="badge" style="background-color: #6c757d; color: #ffffff;">Already Tagged</span>
+                                    {% if no_change_type == "uplink" %}
+                                      <span class="badge" style="background-color: #17a2b8; color: #ffffff; margin-left: 5px;">vlan-mode:{{ no_change_type }}</span>
+                                    {% elif no_change_type == "access" %}
+                                      <span class="badge" style="background-color: #0dcaf0; color: #ffffff; margin-left: 5px;">vlan-mode:{{ no_change_type }}</span>
+                                    {% elif no_change_type == "tagged" %}
+                                      <span class="badge" style="background-color: #0d6efd; color: #ffffff; margin-left: 5px;">vlan-mode:{{ no_change_type }}</span>
+                                    {% elif no_change_type == "routed" %}
+                                      <span class="badge" style="background-color: #6f42c1; color: #ffffff; margin-left: 5px;">vlan-mode:{{ no_change_type }}</span>
+                                    {% elif no_change_type == "needs-review" %}
+                                      <span class="badge" style="background-color: #ffc107; color: #000000; margin-left: 5px;">vlan-mode:{{ no_change_type }}</span>
+                                    {% else %}
+                                      <span class="badge" style="background-color: #0dcaf0; color: #ffffff; margin-left: 5px;">vlan-mode:{{ no_change_type }}</span>
+                                    {% endif %}
+                                  </td>
+                                </tr>
+                              {% endfor %}
+                              {% if no_change_data.interfaces|length > 50 %}
+                                <tr>
+                                  <td colspan="2" class="text-muted">
+                                    <em>... and {{ no_change_data.interfaces|length|add:"-50" }} more interfaces</em>
+                                  </td>
+                                </tr>
+                              {% endif %}
+                            </tbody>
+                          </table>
+                        </div>
+                      {% else %}
+                        <p class="text-muted"><em>No interfaces in this category.</em></p>
+                      {% endif %}
+                    </div>
+                {% endif %}
+              {% endfor %}
+            {% endif %}
+
+            {# Deletion Results #}
+            {% if tagging_results.devices_deleted.count > 0 or tagging_results.interfaces_deleted.count > 0 %}
+              <hr>
+              <h6 class="text-danger"><i class="mdi mdi-delete"></i> {% trans "Tags Deleted" %}</h6>
+              
+              {% if tagging_results.devices_deleted.count > 0 %}
+                <div class="mb-3">
+                  <p>
+                    <strong>{% trans "Devices" %}:</strong> 
+                    <span class="badge bg-danger">{{ tagging_results.devices_deleted.count }}</span>
+                  </p>
+                  {% if tagging_results.devices_deleted.devices %}
+                    <div class="table-responsive">
+                      <table class="table table-sm table-hover">
+                        <thead>
+                          <tr>
+                            <th>{% trans "Device Name" %}</th>
+                            <th>{% trans "Tag Removed" %}</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {% for device in tagging_results.devices_deleted.devices %}
+                            <tr>
+                              <td><code>{{ device }}</code></td>
+                              <td><span class="badge" style="background-color: #dc3545; color: #ffffff;">automation-ready:vlan</span></td>
+                            </tr>
+                          {% endfor %}
+                        </tbody>
+                      </table>
+                    </div>
+                  {% endif %}
+                </div>
+              {% endif %}
+
+              {% if tagging_results.interfaces_deleted.count > 0 %}
+                <div class="mb-3">
+                  <p>
+                    <strong>{% trans "Interfaces" %}:</strong> 
+                    <span class="badge bg-danger">{{ tagging_results.interfaces_deleted.count }}</span>
+                  </p>
+                  {% if tagging_results.interfaces_deleted.interfaces %}
+                    <div class="table-responsive">
+                      <table class="table table-sm table-hover">
+                        <thead>
+                          <tr>
+                            <th>{% trans "Interface" %}</th>
+                            <th>{% trans "Status" %}</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {% for interface in tagging_results.interfaces_deleted.interfaces|slice:":50" %}
+                            <tr>
+                              <td><code>{{ interface }}</code></td>
+                              <td><span class="badge" style="background-color: #dc3545; color: #ffffff;">Tags Deleted</span></td>
+                            </tr>
+                          {% endfor %}
+                          {% if tagging_results.interfaces_deleted.interfaces|length > 50 %}
+                            <tr>
+                              <td colspan="2" class="text-muted">
+                                <em>... and {{ tagging_results.interfaces_deleted.interfaces|length|add:"-50" }} more interfaces</em>
+                              </td>
+                            </tr>
+                          {% endif %}
+                        </tbody>
+                      </table>
+                    </div>
+                  {% endif %}
+                </div>
+              {% endif %}
+            {% endif %}
+
+            {% if tagging_results.errors %}
+              <div class="alert alert-warning mt-3">
+                <h6><i class="mdi mdi-alert"></i> {% trans "Warnings" %}</h6>
+                <ul class="mb-0">
+                  {% for error in tagging_results.errors %}
+                    <li>{{ error }}</li>
+                  {% endfor %}
+                </ul>
+              </div>
+            {% endif %}
+          </div>
+        </div>
+      </div>
+    </div>
+  {% endif %}
+
+  {# Device Details #}
+  <div class="row mb-3">
+    <div class="col-md-12">
+      <div class="card">
+        <div class="card-header">
+          <h5 class="card-title mb-0">{% trans "Device Details" %}</h5>
+        </div>
+        <div class="card-body table-responsive">
+          {% if results.device_summary.ready == 0 and workflow_mode == "tagging" %}
+            <div class="alert alert-warning">
+              <h6><i class="mdi mdi-alert"></i> {% trans "No Devices Tagged" %}</h6>
+              <p class="mb-2">{% trans "No devices met the 'ready' criteria for tagging. Common reasons:" %}</p>
+              <ul class="mb-0">
+                <li>{% trans "Device status is not 'active' or 'staged'" %}</li>
+                <li>{% trans "Device has no primary IP configured" %}</li>
+                <li>{% trans "Device manufacturer is not supported (must be Cumulus/Mellanox or Arista)" %}</li>
+                <li>{% trans "Device has no host-facing connections (spine switch)" %}</li>
+                <li>{% trans "Device role is not appropriate (e.g., Network Spine instead of Network Leaf)" %}</li>
+              </ul>
+              <p class="mt-2 mb-0">
+                <strong>{% trans "Check the 'Reasons' column below to see why each device was not marked as ready." %}</strong>
+              </p>
+            </div>
+          {% endif %}
+          <table class="table table-hover">
+            <thead>
+              <tr>
+                <th>{% trans "Device" %}</th>
+                <th>{% trans "Role" %}</th>
+                <th>{% trans "Site" %}</th>
+                <th>{% trans "Status" %}</th>
+                <th>{% trans "Manufacturer" %}</th>
+                <th>{% trans "Recommendation" %}</th>
+                <th>{% trans "Reasons" %}</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for device_detail in results.device_details %}
+                <tr>
+                  <td><a href="{% url 'dcim:device' pk=device_detail.device.pk %}">{{ device_detail.device_name }}</a></td>
+                  <td>{{ device_detail.role }}</td>
+                  <td>{{ device_detail.site }}</td>
+                  <td>{{ device_detail.status }}</td>
+                  <td>{{ device_detail.manufacturer }}</td>
+                  <td>
+                    {% if device_detail.recommendation == "ready" %}
+                      <span class="badge" style="background-color: #198754; color: #ffffff;">Ready</span>
+                    {% elif device_detail.recommendation == "not_ready" %}
+                      <span class="badge" style="background-color: #dc3545; color: #ffffff;">Not Ready</span>
+                    {% else %}
+                      <span class="badge" style="background-color: #ffc107; color: #000000;">Needs Review</span>
+                    {% endif %}
+                  </td>
+                  <td>
+                    {% if device_detail.reasons %}
+                      <ul class="mb-0">
+                        {% for reason in device_detail.reasons %}
+                          <li>{{ reason }}</li>
+                        {% endfor %}
+                      </ul>
+                    {% elif device_detail.criteria_met %}
+                      <ul class="mb-0 text-success">
+                        {% for criteria in device_detail.criteria_met %}
+                          <li>{{ criteria }}</li>
+                        {% endfor %}
+                      </ul>
+                    {% endif %}
+                  </td>
+                </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  {# Interface Details #}
+  <div class="row mb-3">
+    <div class="col-md-12">
+      <div class="card">
+        <div class="card-header">
+          <h5 class="card-title mb-0">{% trans "Interface Details" %}</h5>
+        </div>
+        <div class="card-body table-responsive">
+          <table class="table table-hover">
+            <thead>
+              <tr>
+                <th>{% trans "Device" %}</th>
+                <th>{% trans "Interface" %}</th>
+                <th>{% trans "Connected To" %}</th>
+                <th>{% trans "Recommended Tag" %}</th>
+                <th>{% trans "Reasons" %}</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for interface_detail in results.interface_details %}
+                <tr>
+                  <td><a href="{% url 'dcim:device' pk=interface_detail.device.pk %}">{{ interface_detail.device_name }}</a></td>
+                  <td><a href="{% url 'dcim:interface' pk=interface_detail.interface.pk %}">{{ interface_detail.interface_name }}</a></td>
+                  <td>
+                    {% if interface_detail.connected_device %}
+                      {{ interface_detail.connected_device }} ({{ interface_detail.connected_role }})
+                    {% else %}
+                      <span class="text-muted">Not cabled</span>
+                    {% endif %}
+                  </td>
+                  <td>
+                    {% if interface_detail.recommended_tag %}
+                      {% if interface_detail.recommended_tag == "access" %}
+                        <span class="badge" style="background-color: #0dcaf0; color: #ffffff;">vlan-mode:access</span>
+                      {% elif interface_detail.recommended_tag == "tagged" %}
+                        <span class="badge" style="background-color: #0d6efd; color: #ffffff;">vlan-mode:tagged</span>
+                      {% elif interface_detail.recommended_tag == "uplink" %}
+                        <span class="badge" style="background-color: #17a2b8; color: #ffffff;">vlan-mode:uplink</span>
+                      {% elif interface_detail.recommended_tag == "routed" %}
+                        <span class="badge" style="background-color: #6f42c1; color: #ffffff;">vlan-mode:routed</span>
+                      {% elif interface_detail.recommended_tag == "needs-review" %}
+                        <span class="badge" style="background-color: #ffc107; color: #000000;">vlan-mode:needs-review</span>
+                      {% endif %}
+                    {% else %}
+                      <span class="text-muted">No tag</span>
+                    {% endif %}
+                  </td>
+                  <td>
+                    {% if interface_detail.reasons %}
+                      <ul class="mb-0">
+                        {% for reason in interface_detail.reasons %}
+                          <li>{{ reason }}</li>
+                        {% endfor %}
+                      </ul>
+                    {% endif %}
+                  </td>
+                </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="row">
+    <div class="col-md-12">
+      <a href="{% url 'plugins:netbox_automation_plugin:netbox_vlan_tagging' %}" class="btn btn-primary">
+        <i class="mdi mdi-arrow-left"></i>
+        {% trans "Back to Form" %}
+      </a>
+    </div>
+  </div>
+{% endblock %}
+

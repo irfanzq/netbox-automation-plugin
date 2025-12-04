@@ -18,6 +18,13 @@ from .vlan_deployment import (
     VLANDeploymentResultTable,
 )
 
+# Import NetBox VLAN Tagging workflow
+from .netbox_vlan_tagging import (
+    VLANTaggingForm,
+    VLANTaggingView,
+    VLANTaggingResultTable,
+)
+
 __all__ = [
     # LLDP Consistency Workflow
     'LLDPConsistencyCheckForm',
@@ -27,4 +34,8 @@ __all__ = [
     'VLANDeploymentForm',
     'VLANDeploymentView',
     'VLANDeploymentResultTable',
+    # NetBox VLAN Tagging Workflow
+    'VLANTaggingForm',
+    'VLANTaggingView',
+    'VLANTaggingResultTable',
 ]

@@ -11,6 +11,11 @@ menu_items = (
         link_text="VLAN Deployment",
         permissions=["dcim.change_device", "dcim.change_interface"],
     ),
+    PluginMenuItem(
+        link="plugins:netbox_automation_plugin:netbox_vlan_tagging",
+        link_text="NetBox VLAN Tagging",
+        permissions=["dcim.view_device", "dcim.view_interface", "extras.change_tag"],
+    ),
 )
 
 
