@@ -3,7 +3,7 @@
 ## Workflow Name Recommendations
 
 **Recommended Names:**
-1. **"Automation Guardrails"** ⭐ (Most descriptive, matches purpose)
+1. **"Automation Guardrails"** (Most descriptive, matches purpose)
 2. **"VLAN Readiness Tagger"** (Clear and specific)
 3. **"Interface Classifier"** (Simple and direct)
 4. **"AutoGuard"** (Short and catchy)
@@ -38,7 +38,7 @@ A separate workflow will be designed in the future for full-network tagging acro
 **No connection to deployment workflows** - purely for analyzing and tagging devices/interfaces
 
 ### Template-Based Criteria
-**⚠️ CRITICAL: All interface criteria are derived based on the Jinja template logic (`cumulus-4600-leaf.jinja`):**
+**CRITICAL: All interface criteria are derived based on the Jinja template logic (`cumulus-4600-leaf.jinja`):**
 
 - **Primary Check**: `interface.cable` must exist (if no cable, cannot determine purpose)
 - **If cable exists**: Use `interface.connected_endpoints[0]` to get neighbor information
@@ -68,12 +68,12 @@ Spine switches, routers, and aggregation layers are **not** part of this workflo
 **Purpose**: Mark devices that are safe for VLAN automation
 
 **Criteria for "Green" Device:**
-- ✅ Device status is `active` or `staged`
-- ✅ Device has primary IP configured (reachable)
-- ✅ Device manufacturer/platform is supported (Mellanox/Cumulus or Arista EOS)
-- ✅ Device is not in maintenance mode or decommissioning
-- ✅ Device has valid credentials configured in NetBox
-- ✅ **Device role check** (see below)
+- Device status is `active` or `staged`
+- Device has primary IP configured (reachable)
+- Device manufacturer/platform is supported (Mellanox/Cumulus or Arista EOS)
+- Device is not in maintenance mode or decommissioning
+- Device has valid credentials configured in NetBox
+- **Device role check** (see below)
 
 **Device Role Determination:**
 
@@ -102,10 +102,10 @@ Only **host-facing interfaces** on leaf-type switches are processed by this work
 
 Interfaces connecting to spines, routers, IB fabrics, or internal infrastructure are **not part of this tagging pipeline**.
 
-**⚠️ CRITICAL: All interface criteria START with checking if cable is present in NetBox**
+**CRITICAL: All interface criteria START with checking if cable is present in NetBox**
 
 **Primary Check:**
-- ✅ **`interface.cable` must exist** - If no cable, cannot determine interface purpose (skip tagging or mark as needs-review)
+- **`interface.cable` must exist** - If no cable, cannot determine interface purpose (skip tagging or mark as needs-review)
 
 **If `interface.cable` exists**, then `interface.connected_endpoints[0]` is available with full neighbor information:
 - Connected device: `interface.connected_endpoints[0].device`
@@ -119,19 +119,19 @@ Interfaces connecting to spines, routers, IB fabrics, or internal infrastructure
 **Purpose**: Mark interfaces that are safe to configure as access ports with a single untagged VLAN
 
 **Criteria (from Jinja template line 22):**
-- ✅ **`interface.cable` exists** (PRIMARY CHECK - must be first)
-- ✅ **`interface.connected_endpoints[0].device.role.parent.name == "Host Device"`**
+- **`interface.cable` exists** (PRIMARY CHECK - must be first)
+- **`interface.connected_endpoints[0].device.role.parent.name == "Host Device"`**
   - Connected device's role parent is "Host Device" (GPU hosts, CPU hosts, Storage hosts)
-- ✅ **`interface.connected_endpoints[0].device.status in ["active", "staged", "failed", "planned"]`**
+- **`interface.connected_endpoints[0].device.status in ["active", "staged", "failed", "planned"]`**
   - Connected device must be in one of these statuses
-- ✅ No conflicting configuration (from device config check):
+- No conflicting configuration (from device config check):
   - **Arista EOS**: Not a port-channel member (interface with `channel-group` command - VLAN config must be on port-channel interface, not member interface)
   - **Arista EOS**: Not a trunk port (interface with `switchport mode trunk` command)
   - **All platforms**: Not a routed port (interface with `no switchport` on EOS, or IP address/VRF on Cumulus/Mellanox)
   
   **Note**: In Cumulus/Mellanox, bond member interfaces (like `swp1` that is part of `bond_swp1`) CAN have individual VLAN configuration - this is normal and valid, not a conflict.
-- ✅ Not a management interface (not `eth0`, `mgmt0`, etc.)
-- ✅ **Note**: Existing `switchport access vlan` is OK - VLAN changes are allowed on access-ready interfaces
+- Not a management interface (not `eth0`, `mgmt0`, etc.)
+- **Note**: Existing `switchport access vlan` is OK - VLAN changes are allowed on access-ready interfaces
 
 **Platform-Specific Behavior:**
 - **Cumulus/Mellanox**: Interface has **only untagged VLAN** (no tagged VLANs)
@@ -161,18 +161,18 @@ Interfaces connecting to spines, routers, IB fabrics, or internal infrastructure
 **Purpose**: Mark interfaces that have both tagged and untagged VLANs configured (Cumulus/Mellanox VLAN-aware bridge behavior)
 
 **Criteria:**
-- ✅ **`interface.cable` exists** (PRIMARY CHECK - must be first)
-- ✅ **`interface.connected_endpoints[0].device.role.parent.name == "Host Device"`**
+- **`interface.cable` exists** (PRIMARY CHECK - must be first)
+- **`interface.connected_endpoints[0].device.role.parent.name == "Host Device"`**
   - Connected device's role parent is "Host Device" (GPU hosts, CPU hosts, Storage hosts)
-- ✅ **`interface.connected_endpoints[0].device.status in ["active", "staged", "failed", "planned"]`**
+- **`interface.connected_endpoints[0].device.status in ["active", "staged", "failed", "planned"]`**
   - Connected device must be in one of these statuses
-- ✅ **NetBox interface `mode='tagged'`** (802.1Q Mode = Tagged)
-- ✅ **Interface has BOTH `untagged_vlan` AND `tagged_vlans`** configured in NetBox
-- ✅ No conflicting configuration (from device config check):
+- **NetBox interface `mode='tagged'`** (802.1Q Mode = Tagged)
+- **Interface has BOTH `untagged_vlan` AND `tagged_vlans`** configured in NetBox
+- No conflicting configuration (from device config check):
   - **All platforms**: Not a routed port (interface with `no switchport` on EOS, or IP address/VRF on Cumulus/Mellanox)
   
   **Note**: In Cumulus/Mellanox, bond member interfaces (like `swp1` that is part of `bond_swp1`) CAN have individual VLAN configuration - this is normal and valid, not a conflict.
-- ✅ Not a management interface (not `eth0`, `mgmt0`, etc.)
+- Not a management interface (not `eth0`, `mgmt0`, etc.)
 
 **Platform-Specific Behavior:**
 - **Cumulus/Mellanox ONLY**: Having both tagged and untagged VLANs is **NORMAL** (VLAN-aware bridge architecture)
@@ -203,11 +203,11 @@ Interfaces connecting to spines, routers, IB fabrics, or internal infrastructure
 **Purpose**: Mark interfaces that are uplinks or trunks
 
 **Criteria (from Jinja template line 55):**
-- ✅ **`interface.cable` exists** (PRIMARY CHECK - must be first)
-- ✅ **`interface.connected_endpoints[0].device.role == device.role`** OR **`interface.connected_endpoints[0].device.role.name == "Network Spine"`**
+- **`interface.cable` exists** (PRIMARY CHECK - must be first)
+- **`interface.connected_endpoints[0].device.role == device.role`** OR **`interface.connected_endpoints[0].device.role.name == "Network Spine"`**
   - Connected device has same role as current device (peer switch) OR is Network Spine
-- ✅ Interface is configured as trunk (tagged VLANs) - optional check from device config
-- ✅ Interface is part of underlay network (BGP neighbors, EVPN uplinks) - optional check
+- Interface is configured as trunk (tagged VLANs) - optional check from device config
+- Interface is part of underlay network (BGP neighbors, EVPN uplinks) - optional check
 
 **Template Reference:**
 ```jinja
@@ -225,10 +225,10 @@ Interfaces connecting to spines, routers, IB fabrics, or internal infrastructure
 **Purpose**: Mark interfaces that are routed ports
 
 **Criteria:**
-- ✅ Interface has IP address configured (routed port)
-- ✅ Interface has `no switchport` configured (EOS) or is in VRF (Cumulus)
-- ✅ Interface is not part of `br_default` bridge domain (Cumulus/Mellanox)
-- ✅ Interface is connected to router or L3 device
+- Interface has IP address configured (routed port)
+- Interface has `no switchport` configured (EOS) or is in VRF (Cumulus)
+- Interface is not part of `br_default` bridge domain (Cumulus/Mellanox)
+- Interface is connected to router or L3 device
 
 **What this means:**
 - Interface is classified as routed port (L3)
@@ -251,7 +251,7 @@ Interfaces connecting to spines, routers, IB fabrics, or internal infrastructure
 2. **Unknown connection type**
    - Port is empty + Cabled + NOT connected to Host Device + Cannot determine if uplink/routed/other from NetBox data
 
-**⚠️ IMPORTANT - Platform-Specific Exceptions:**
+**IMPORTANT - Platform-Specific Exceptions:**
 - **Cumulus/Mellanox**: Having both tagged and untagged VLANs is **NOT a conflict**
   - This is normal VLAN-aware bridge behavior
   - Interface with `mode='tagged'`, `untagged_vlan=3019`, and `tagged_vlans=[3000,3020]` → **Tag as `vlan-mode:tagged`** (NOT needs-review)
@@ -267,16 +267,16 @@ Interfaces connecting to spines, routers, IB fabrics, or internal infrastructure
 
 ### 3. Auto-Tagging Logic (Minimal Human Intervention)
 
-**⚠️ CRITICAL: All auto-tagging logic starts with checking if `interface.cable` exists**
+**CRITICAL: All auto-tagging logic starts with checking if `interface.cable` exists**
 
 **Most interfaces are auto-tagged automatically** - no human review needed:
 
 #### Auto-tag as `vlan-mode:access`:
 **Criteria (from Jinja template line 22):**
-- ✅ **`interface.cable` exists** (PRIMARY CHECK)
-- ✅ **`interface.connected_endpoints[0].device.role.parent.name == "Host Device"`**
-- ✅ **`interface.connected_endpoints[0].device.status in ["active", "staged", "failed", "planned"]`**
-- ✅ **Interface has ONLY untagged VLAN** (no tagged VLANs) OR **no VLAN configured**
+- **`interface.cable` exists** (PRIMARY CHECK)
+- **`interface.connected_endpoints[0].device.role.parent.name == "Host Device"`**
+- **`interface.connected_endpoints[0].device.status in ["active", "staged", "failed", "planned"]`**
+- **Interface has ONLY untagged VLAN** (no tagged VLANs) OR **no VLAN configured**
   - **Cumulus/Mellanox**: `mode='access'` or `untagged_vlan` exists but no `tagged_vlans`
   - **Arista EOS**: `switchport mode access` with single untagged VLAN
 - Port may be empty (no VLAN config) - this is OK for new ports
@@ -290,11 +290,11 @@ Interfaces connecting to spines, routers, IB fabrics, or internal infrastructure
 
 #### Auto-tag as `vlan-mode:tagged`:
 **Criteria (Cumulus/Mellanox only):**
-- ✅ **`interface.cable` exists** (PRIMARY CHECK)
-- ✅ **`interface.connected_endpoints[0].device.role.parent.name == "Host Device"`**
-- ✅ **`interface.connected_endpoints[0].device.status in ["active", "staged", "failed", "planned"]`**
-- ✅ **NetBox interface `mode='tagged'`** (802.1Q Mode = Tagged)
-- ✅ **Interface has BOTH `untagged_vlan` AND `tagged_vlans`** configured in NetBox
+- **`interface.cable` exists** (PRIMARY CHECK)
+- **`interface.connected_endpoints[0].device.role.parent.name == "Host Device"`**
+- **`interface.connected_endpoints[0].device.status in ["active", "staged", "failed", "planned"]`**
+- **NetBox interface `mode='tagged'`** (802.1Q Mode = Tagged)
+- **Interface has BOTH `untagged_vlan` AND `tagged_vlans`** configured in NetBox
 - This is normal VLAN-aware bridge behavior → Auto-tag as `vlan-mode:tagged`
 
 **Template Logic:**
@@ -304,8 +304,8 @@ Interfaces connecting to spines, routers, IB fabrics, or internal infrastructure
 
 #### Auto-tag as `vlan-mode:uplink`:
 **Criteria (from Jinja template line 55):**
-- ✅ **`interface.cable` exists** (PRIMARY CHECK)
-- ✅ **`interface.connected_endpoints[0].device.role == device.role`** OR **`interface.connected_endpoints[0].device.role.name == "Network Spine"`**
+- **`interface.cable` exists** (PRIMARY CHECK)
+- **`interface.connected_endpoints[0].device.role == device.role`** OR **`interface.connected_endpoints[0].device.role.name == "Network Spine"`**
 - This is an uplink → Auto-tag as `vlan-mode:uplink`
 
 **Template Logic:**
@@ -315,18 +315,18 @@ Interfaces connecting to spines, routers, IB fabrics, or internal infrastructure
 
 #### Auto-tag as `vlan-mode:routed`:
 **Criteria (from device config check):**
-- ✅ **`interface.cable` exists** (PRIMARY CHECK)
-- ✅ Interface has IP address configured (routed port)
-- ✅ Interface has `no switchport` configured (EOS) or is in VRF (Cumulus)
-- ✅ Connected to router or L3 device (from `connected_endpoints[0].device.role`)
+- **`interface.cable` exists** (PRIMARY CHECK)
+- Interface has IP address configured (routed port)
+- Interface has `no switchport` configured (EOS) or is in VRF (Cumulus)
+- Connected to router or L3 device (from `connected_endpoints[0].device.role`)
 - This is a routed connection → Auto-tag as `vlan-mode:routed`
 
 #### No tag (cannot determine - from Jinja template line 59):
 **Criteria (from Jinja template line 59):**
-- ❌ **`interface.cable` does NOT exist** (cannot determine purpose without cable)
+- **`interface.cable` does NOT exist** (cannot determine purpose without cable)
   - Cannot auto-tag - requires cable information in NetBox first
   - User should add cable information, then re-run analysis
-- ❌ **`interface.cable` exists BUT `interface.connected_endpoints[0].device.status in ["decommissioning", "offline"]`**
+- **`interface.cable` exists BUT `interface.connected_endpoints[0].device.status in ["decommissioning", "offline"]`**
   - Cannot auto-tag - connected device is not active
   - User should update device status or wait for device to come online
 
@@ -349,7 +349,7 @@ Interfaces connecting to spines, routers, IB fabrics, or internal infrastructure
 ### Method 1: NetBox Data Analysis (Primary - Based on Jinja Template)
 **Use NetBox data to infer interface type (matches Jinja template logic):**
 
-**⚠️ CRITICAL: Start with cable check - this is the PRIMARY check from the template**
+**CRITICAL: Start with cable check - this is the PRIMARY check from the template**
 
 1. **First Check: `interface.cable` exists**
    - If `interface.cable` exists → `interface.connected_endpoints[0]` is available
@@ -433,7 +433,7 @@ Interfaces connecting to spines, routers, IB fabrics, or internal infrastructure
   - Interface-level summary: Access-ready / Tagged / Uplink / Routed / Needs Review count
   - Per-device breakdown with device status
   - Per-interface breakdown with classification and reasons
-  - Visual indicators (✅ Green, ⚠️ Yellow, ❌ Red)
+  - Visual indicators (Green, Yellow, Red)
 - **Recommendations**: Suggestions for tagging based on analysis
 
 **Output:**
