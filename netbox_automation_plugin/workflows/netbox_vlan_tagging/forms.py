@@ -115,11 +115,3 @@ class VLANTaggingForm(forms.Form):
         help_text=_("Delete all 'vlan-mode:*' tags from interfaces on selected devices."),
     )
 
-    # Optional: Use device config check for safety warnings
-    use_device_config_check = forms.BooleanField(
-        required=False,
-        initial=False,
-        label=_("Use Device Config Check (Optional)"),
-        help_text=_("Query device configuration to warn about NetBox/device mismatches (slower but safer)."),
-    )
-

@@ -172,20 +172,6 @@
               </div>
             </div>
 
-            {# Optional Device Config Check #}
-            <div class="mb-3">
-              <div class="form-check">
-                {{ form.use_device_config_check }}
-                <label class="form-check-label" for="{{ form.use_device_config_check.id_for_label }}">
-                  {{ form.use_device_config_check.label }}
-                </label>
-              </div>
-              <div class="form-text">{{ form.use_device_config_check.help_text }}</div>
-              {% if form.use_device_config_check.errors %}
-                <div class="invalid-feedback d-block">{{ form.use_device_config_check.errors }}</div>
-              {% endif %}
-            </div>
-
             <div class="form-actions">
               <button type="submit" id="submit-btn" class="btn btn-primary" name="action" value="analyze">
                 <i class="mdi mdi-play" id="submit-icon"></i>

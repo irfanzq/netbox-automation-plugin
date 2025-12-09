@@ -677,23 +677,9 @@
                     {% if interface_detail.reasons %}
                       <ul class="mb-0">
                         {% for reason in interface_detail.reasons %}
-                          {% if "⚠️ Config Warning:" in reason %}
-                            <li class="text-warning"><strong>{{ reason }}</strong></li>
-                          {% else %}
-                            <li>{{ reason }}</li>
-                          {% endif %}
+                          <li>{{ reason }}</li>
                         {% endfor %}
                       </ul>
-                    {% endif %}
-                    {% if interface_detail.config_warnings %}
-                      <div class="alert alert-warning mt-2 mb-0" style="font-size: 0.85em; padding: 0.5rem;">
-                        <strong><i class="mdi mdi-alert"></i> Device Config Warnings:</strong>
-                        <ul class="mb-0 mt-1">
-                          {% for warning in interface_detail.config_warnings %}
-                            <li>{{ warning }}</li>
-                          {% endfor %}
-                        </ul>
-                      </div>
                     {% endif %}
                   </td>
                 </tr>
