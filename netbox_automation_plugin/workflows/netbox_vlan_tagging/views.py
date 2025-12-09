@@ -10,8 +10,10 @@ from extras.models import Tag
 
 from .forms import VLANTaggingForm
 from .tables import VLANTaggingResultTable
+from netbox_automation_plugin.core.napalm_integration import NAPALMDeviceManager
 import logging
 import traceback
+import re
 
 logger = logging.getLogger('netbox_automation_plugin')
 
@@ -537,7 +539,159 @@ class VLANTaggingView(View):
             analysis['reasons'].append(f"Cannot determine interface type from NetBox data (connected to {connected_role.name if connected_role else 'unknown device'})")
             analysis['criteria_missed'].append("Unknown connection type")
         
+        # Device config check (optional - for safety warnings)
+        if use_device_config_check:
+            config_warnings = self._check_device_config(interface, device)
+            if config_warnings:
+                analysis['config_warnings'] = config_warnings
+                # Add warnings to reasons for visibility
+                for warning in config_warnings:
+                    analysis['reasons'].append(f"⚠️ Config Warning: {warning}")
+        
         return analysis
+    
+    def _check_device_config(self, interface, device):
+        """
+        Check device configuration for interface conflicts
+        
+        Returns a list of warning messages if conflicts are detected.
+        NetBox is the source of truth, but we warn if device config doesn't match.
+        
+        Checks:
+        - Arista EOS: port-channel member, trunk port, routed port
+        - Cumulus/Mellanox: bond member (bond interfaces themselves are OK), routed port
+        
+        Returns:
+            List of warning strings (empty if no conflicts)
+        """
+        warnings = []
+        
+        try:
+            # Get device manufacturer/platform
+            manufacturer_name = device.device_type.manufacturer.name.lower() if device.device_type and device.device_type.manufacturer else ''
+            is_cumulus_mellanox = 'cumulus' in manufacturer_name or 'mellanox' in manufacturer_name
+            is_arista = 'arista' in manufacturer_name
+            
+            # Only check if device is supported
+            if not (is_cumulus_mellanox or is_arista):
+                return warnings  # No warnings for unsupported platforms
+            
+            # Connect to device using NAPALM
+            napalm_manager = NAPALMDeviceManager(device)
+            if not napalm_manager.connect():
+                warnings.append(f"Could not connect to device to verify configuration")
+                return warnings
+            
+            try:
+                # Get running configuration
+                config_result = napalm_manager.get_config(retrieve='running')
+                if not config_result or 'running' not in config_result:
+                    warnings.append(f"Could not retrieve device configuration")
+                    return warnings
+                
+                running_config = config_result.get('running', '')
+                interface_name = interface.name
+                
+                # Parse interface configuration based on platform
+                if is_arista:
+                    # Arista EOS interface config parsing
+                    warnings.extend(self._check_arista_interface_config(running_config, interface_name))
+                elif is_cumulus_mellanox:
+                    # Cumulus/Mellanox interface config parsing
+                    warnings.extend(self._check_cumulus_interface_config(running_config, interface_name))
+                
+            finally:
+                napalm_manager.disconnect()
+                
+        except Exception as e:
+            logger.warning(f"Error checking device config for {device.name}:{interface.name}: {e}")
+            logger.debug(traceback.format_exc())
+            warnings.append(f"Error checking device configuration: {str(e)}")
+        
+        return warnings
+    
+    def _check_arista_interface_config(self, config, interface_name):
+        """
+        Check Arista EOS interface configuration for conflicts
+        
+        Returns list of warning messages
+        """
+        warnings = []
+        
+        # Find interface section in config
+        interface_pattern = rf'^interface\s+{re.escape(interface_name)}\s*$'
+        interface_section = None
+        
+        lines = config.split('\n')
+        in_interface = False
+        interface_lines = []
+        
+        for i, line in enumerate(lines):
+            if re.match(interface_pattern, line.strip(), re.IGNORECASE):
+                in_interface = True
+                interface_lines = []
+                continue
+            elif in_interface:
+                if line.strip().startswith('interface ') or line.strip() == '!':
+                    # End of interface section
+                    break
+                interface_lines.append(line.strip())
+        
+        if not interface_lines:
+            # Interface not found in config - might be a new interface
+            return warnings
+        
+        interface_config = '\n'.join(interface_lines)
+        
+        # Check for port-channel member
+        if 'channel-group' in interface_config.lower():
+            warnings.append(f"Interface is a port-channel member (channel-group configured) - VLAN config must be on port-channel interface, not member")
+        
+        # Check for trunk port
+        if 'switchport mode trunk' in interface_config.lower():
+            warnings.append(f"Interface is configured as trunk port (switchport mode trunk) - NetBox indicates access-ready, verify NetBox data")
+        
+        # Check for routed port
+        if 'no switchport' in interface_config.lower():
+            warnings.append(f"Interface is configured as routed port (no switchport) - NetBox indicates access-ready, verify NetBox data")
+        
+        # Check for IP address (routed port)
+        if re.search(r'ip\s+address\s+', interface_config, re.IGNORECASE):
+            warnings.append(f"Interface has IP address configured (routed port) - NetBox indicates access-ready, verify NetBox data")
+        
+        return warnings
+    
+    def _check_cumulus_interface_config(self, config, interface_name):
+        """
+        Check Cumulus/Mellanox interface configuration for conflicts
+        
+        Returns list of warning messages
+        Note: Bond member interfaces CAN have VLAN config in Cumulus - this is normal
+        """
+        warnings = []
+        
+        # Check if interface is a bond member
+        # Pattern: bond swp1 slaves swp1 (or similar)
+        bond_member_pattern = rf'bond\s+\w+\s+slaves\s+{re.escape(interface_name)}\b'
+        if re.search(bond_member_pattern, config, re.IGNORECASE):
+            # This is a bond member - check if it's the bond interface itself
+            # Bond interfaces (like bond_swp1) can have VLAN config - this is OK
+            # Physical interfaces that are bond members should not have VLAN config
+            if not interface_name.startswith('bond'):
+                warnings.append(f"Interface is a bond member (physical interface) - VLAN config should be on bond interface, not member")
+        
+        # Check for IP address (routed port)
+        # Pattern: interface swp1, ip address 10.0.0.1/24
+        interface_ip_pattern = rf'interface\s+{re.escape(interface_name)}[,\s].*?ip\s+address\s+'
+        if re.search(interface_ip_pattern, config, re.IGNORECASE | re.DOTALL):
+            warnings.append(f"Interface has IP address configured (routed port) - NetBox indicates access-ready, verify NetBox data")
+        
+        # Check for VRF (routed port)
+        vrf_pattern = rf'interface\s+{re.escape(interface_name)}[,\s].*?vrf\s+'
+        if re.search(vrf_pattern, config, re.IGNORECASE | re.DOTALL):
+            warnings.append(f"Interface is in VRF (routed port) - NetBox indicates access-ready, verify NetBox data")
+        
+        return warnings
     
     def _apply_tags(self, devices, analysis_results, tag_devices, tag_interfaces):
         """
