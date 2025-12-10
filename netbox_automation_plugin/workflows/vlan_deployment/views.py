@@ -301,105 +301,145 @@ class VLANDeploymentView(View):
             timestamp = timezone.now().strftime('%Y-%m-%d %H:%M:%S UTC')
             
             if platform == 'cumulus':
-                # For Cumulus, use CLI commands to get REAL config
+                # For Cumulus, get interface config in JSON format
                 try:
                     if napalm_manager.connect():
                         connection = napalm_manager.connection
                         
-                        # First, check if interface has IP address (routed interface)
-                        interfaces_ip = napalm_manager.get_interfaces_ip()
-                        if interfaces_ip and interface_name in interfaces_ip:
-                            # Interface has IP address - it's a routed interface
-                            # Get full interface config using nv show
-                            try:
-                                if hasattr(connection, 'cli'):
-                                    # Use CLI to get real interface config
-                                    cli_output = connection.cli([f'nv show interface {interface_name}'])
-                                    if cli_output and interface_name in cli_output:
-                                        # Parse the output to show IP config
-                                        output = cli_output[interface_name]
-                                        ip_info = interfaces_ip[interface_name]
-                                        ip_lines = []
-                                        for ip_version in ['ipv4', 'ipv6']:
-                                            if ip_version in ip_info:
-                                                for ip, details in ip_info[ip_version].items():
-                                                    prefix = details.get('prefix_length', '')
-                                                    ip_lines.append(f"  ip address {ip}/{prefix}")
-                                        
-                                        # Try to extract VRF from CLI output
-                                        if 'vrf' in output.lower():
-                                            for line in output.split('\n'):
-                                                if 'vrf' in line.lower() and ':' in line:
-                                                    vrf_name = line.split(':')[-1].strip()
-                                                    if vrf_name:
-                                                        ip_lines.append(f"  vrf: {vrf_name}")
-                                                        break
-                                        
-                                        current_config = f"interface {interface_name}\n" + "\n".join(ip_lines) if ip_lines else f"interface {interface_name}\n{output}"
-                                    else:
-                                        # Fallback: just show IP info
-                                        ip_info = interfaces_ip[interface_name]
-                                        ip_lines = []
-                                        for ip_version in ['ipv4', 'ipv6']:
-                                            if ip_version in ip_info:
-                                                for ip, details in ip_info[ip_version].items():
-                                                    prefix = details.get('prefix_length', '')
-                                                    ip_lines.append(f"  ip address {ip}/{prefix}")
-                                        current_config = f"interface {interface_name}\n" + "\n".join(ip_lines)
-                                else:
-                                    # No CLI method, use IP info from get_interfaces_ip
-                                    ip_info = interfaces_ip[interface_name]
-                                    ip_lines = []
-                                    for ip_version in ['ipv4', 'ipv6']:
-                                        if ip_version in ip_info:
-                                            for ip, details in ip_info[ip_version].items():
-                                                prefix = details.get('prefix_length', '')
-                                                ip_lines.append(f"  ip address {ip}/{prefix}")
-                                    current_config = f"interface {interface_name}\n" + "\n".join(ip_lines)
-                            except Exception as e_ip:
-                                logger.warning(f"Could not get full interface config for routed interface {device.name}:{interface_name}: {e_ip}")
-                                # Fallback to just IP info
-                                ip_info = interfaces_ip[interface_name]
-                                ip_lines = []
-                                for ip_version in ['ipv4', 'ipv6']:
-                                    if ip_version in ip_info:
-                                        for ip, details in ip_info[ip_version].items():
-                                            prefix = details.get('prefix_length', '')
-                                            ip_lines.append(f"  ip address {ip}/{prefix}")
-                                current_config = f"interface {interface_name}\n" + "\n".join(ip_lines)
-                            
-                            napalm_manager.disconnect()
-                            return {
-                                'success': True,
-                                'current_config': current_config,
-                                'source': 'device',
-                                'timestamp': timestamp
-                            }
-                        
-                        # No IP address - get bridge domain config using CLI
+                        # Get interface config in JSON format
                         try:
                             if hasattr(connection, 'cli'):
-                                # Use CLI to get real bridge domain config
-                                cli_output = connection.cli([f'nv show interface {interface_name} bridge domain br_default'])
-                                if cli_output and interface_name in cli_output:
-                                    output = cli_output[interface_name]
-                                    # Parse the output to extract VLAN
-                                    current_config = self._parse_cumulus_cli_output(output, interface_name)
-                                else:
-                                    # Try full interface config
-                                    cli_output = connection.cli([f'nv show interface {interface_name}'])
-                                    if cli_output and interface_name in cli_output:
-                                        output = cli_output[interface_name]
-                                        current_config = self._parse_cumulus_cli_output(output, interface_name)
+                                # Use nv show -o json to get structured config
+                                cli_output = connection.cli([f'nv show interface {interface_name} -o json'])
+                                if cli_output:
+                                    # CLI output can be dict or string - handle both
+                                    if isinstance(cli_output, dict):
+                                        # If dict, get the value (might be keyed by interface name or command)
+                                        if interface_name in cli_output:
+                                            output = cli_output[interface_name]
+                                        else:
+                                            # Get first value if interface name not in keys
+                                            output = list(cli_output.values())[0] if cli_output else ""
                                     else:
-                                        current_config = f"interface {interface_name} - no bridge domain config found (interface may not be configured)"
+                                        output = str(cli_output)
+                                    
+                                    # Parse JSON and convert to actual NVUE commands
+                                    if output.strip():
+                                        try:
+                                            import json
+                                            if isinstance(output, str):
+                                                json_obj = json.loads(output)
+                                            else:
+                                                json_obj = output
+                                            
+                                            # Convert JSON to actual NVUE commands
+                                            command_lines = []
+                                            
+                                            # Extract key fields from JSON and convert to commands
+                                            if isinstance(json_obj, dict):
+                                                # IP configuration
+                                                if 'ip' in json_obj:
+                                                    ip_config = json_obj['ip']
+                                                    
+                                                    # VRF
+                                                    if 'vrf' in ip_config:
+                                                        vrf = ip_config['vrf']
+                                                        if isinstance(vrf, dict):
+                                                            vrf_value = vrf.get('applied') or vrf.get('operational') or list(vrf.values())[0] if vrf else None
+                                                        else:
+                                                            vrf_value = vrf
+                                                        if vrf_value:
+                                                            command_lines.append(f"nv set interface {interface_name} ip vrf {vrf_value}")
+                                                    
+                                                    # IP addresses
+                                                    if 'address' in ip_config:
+                                                        addresses = ip_config['address']
+                                                        if isinstance(addresses, dict):
+                                                            for addr in addresses.keys():
+                                                                command_lines.append(f"nv set interface {interface_name} ip address {addr}")
+                                                    
+                                                    # Gateway
+                                                    if 'gateway' in ip_config:
+                                                        gateway = ip_config['gateway']
+                                                        if isinstance(gateway, dict):
+                                                            gateway_value = gateway.get('applied') or gateway.get('operational') or list(gateway.values())[0] if gateway else None
+                                                        else:
+                                                            gateway_value = gateway
+                                                        if gateway_value:
+                                                            command_lines.append(f"nv set interface {interface_name} ip gateway {gateway_value}")
+                                                
+                                                # Bridge domain (if configured)
+                                                if 'bridge' in json_obj:
+                                                    bridge_config = json_obj['bridge']
+                                                    if 'domain' in bridge_config:
+                                                        domain_config = bridge_config['domain']
+                                                        if 'br_default' in domain_config:
+                                                            br_default = domain_config['br_default']
+                                                            if 'access' in br_default:
+                                                                access_vlan = br_default['access']
+                                                                if isinstance(access_vlan, dict):
+                                                                    vlan_value = access_vlan.get('applied') or access_vlan.get('operational') or list(access_vlan.values())[0] if access_vlan else None
+                                                                else:
+                                                                    vlan_value = access_vlan
+                                                                if vlan_value:
+                                                                    command_lines.append(f"nv set interface {interface_name} bridge domain br_default access {vlan_value}")
+                                                
+                                                # Type (if explicitly set)
+                                                if 'type' in json_obj:
+                                                    iface_type = json_obj['type']
+                                                    if isinstance(iface_type, dict):
+                                                        type_value = iface_type.get('applied') or iface_type.get('operational') or list(iface_type.values())[0] if iface_type else None
+                                                    else:
+                                                        type_value = iface_type
+                                                    if type_value and type_value != 'eth':  # Only show if not default
+                                                        command_lines.append(f"nv set interface {interface_name} type {type_value}")
+                                            
+                                            current_config = '\n'.join(command_lines) if command_lines else f"(no configuration commands found for interface {interface_name})"
+                                            
+                                        except (json.JSONDecodeError, TypeError, KeyError) as e:
+                                            logger.warning(f"Error parsing JSON config for {device.name}:{interface_name}: {e}")
+                                            # If JSON parsing fails, show pretty-printed JSON as fallback
+                                            try:
+                                                import json
+                                                if isinstance(output, str):
+                                                    json_obj = json.loads(output)
+                                                    current_config = json.dumps(json_obj, indent=2)
+                                                else:
+                                                    current_config = json.dumps(output, indent=2)
+                                            except:
+                                                # Fallback to raw output
+                                                current_config = output.strip()
+                                    else:
+                                        current_config = f"(no configuration found for interface {interface_name})"
+                                else:
+                                    current_config = f"(no output from device for interface {interface_name})"
                             else:
                                 # No CLI method, try get_config
-                                config = napalm_manager.get_config(retrieve='running', format='json')
+                                config = napalm_manager.get_config(retrieve='running')
                                 if config:
-                                    current_config = self._parse_cumulus_interface_config(config, interface_name)
+                                    # Try to extract interface section from config
+                                    if isinstance(config, dict) and 'running' in config:
+                                        running_config = config['running']
+                                        if isinstance(running_config, str) and interface_name in running_config:
+                                            # Extract interface section
+                                            lines = running_config.split('\n')
+                                            interface_lines = []
+                                            in_interface = False
+                                            for line in lines:
+                                                if f"interface {interface_name}" in line or f"{interface_name}" in line:
+                                                    in_interface = True
+                                                if in_interface:
+                                                    interface_lines.append(line)
+                                                    # Stop at next interface or end
+                                                    if line.strip().startswith('interface ') and interface_name not in line and in_interface:
+                                                        break
+                                            current_config = '\n'.join(interface_lines) if interface_lines else f"(no config found)"
+                                        else:
+                                            current_config = f"(interface not found in running config)"
+                                    else:
+                                        current_config = f"(CLI method not available)"
                                 else:
-                                    current_config = f"interface {interface_name} - could not retrieve config (CLI method not available)"
+                                    current_config = f"(could not retrieve config)"
                             
                             napalm_manager.disconnect()
                             return {
@@ -409,12 +449,11 @@ class VLANDeploymentView(View):
                                 'timestamp': timestamp
                             }
                         except Exception as e2:
-                            logger.warning(f"Could not get bridge domain config for {device.name}:{interface_name}: {e2}")
+                            logger.warning(f"Could not get interface config for {device.name}:{interface_name}: {e2}")
                             napalm_manager.disconnect()
-                            # Don't fallback to NetBox here - return error
                             return {
                                 'success': False,
-                                'current_config': f"interface {interface_name} - ERROR: Could not retrieve config from device: {str(e2)}",
+                                'current_config': f"ERROR: Could not retrieve config from device: {str(e2)}",
                                 'source': 'error',
                                 'timestamp': timestamp,
                                 'error': str(e2)
@@ -427,42 +466,70 @@ class VLANDeploymentView(View):
                     return self._get_netbox_inferred_config(device, interface_name, platform, device_unreachable=True)
             
             elif platform == 'eos':
-                # For EOS, use CLI to get REAL running config
+                # For EOS, get full interface config using CLI - no hardcoding
                 try:
                     if napalm_manager.connect():
                         connection = napalm_manager.connection
                         
-                        # Use CLI to get real interface config
-                        if hasattr(connection, 'cli'):
-                            cli_output = connection.cli([f'show running-config interface {interface_name}'])
-                            if cli_output:
-                                # Extract interface section from output
-                                output = list(cli_output.values())[0] if isinstance(cli_output, dict) else str(cli_output)
-                                current_config = self._parse_eos_cli_output(output, interface_name)
+                        # Get full interface config using show running-config
+                        try:
+                            if hasattr(connection, 'cli'):
+                                # Get complete interface configuration
+                                cli_output = connection.cli([f'show running-config interface {interface_name}'])
+                                if cli_output:
+                                    # Extract interface section from output - show full config
+                                    output = list(cli_output.values())[0] if isinstance(cli_output, dict) else str(cli_output)
+                                    # Show the full config as-is from device
+                                    current_config = output.strip() if output.strip() else f"interface {interface_name}\n(no config found)"
+                                else:
+                                    current_config = f"interface {interface_name}\n(show running-config returned empty output)"
                             else:
-                                # Fallback to get_config
+                                # No CLI method, use get_config
                                 config = napalm_manager.get_config(retrieve='running')
                                 if config:
-                                    current_config = self._parse_eos_interface_config(config, interface_name)
+                                    # Extract interface section from running config
+                                    if isinstance(config, dict) and 'running' in config:
+                                        running_config = config['running']
+                                        if isinstance(running_config, str) and interface_name in running_config:
+                                            # Extract interface section
+                                            lines = running_config.split('\n')
+                                            interface_lines = []
+                                            in_interface = False
+                                            for line in lines:
+                                                if f"interface {interface_name}" in line:
+                                                    in_interface = True
+                                                if in_interface:
+                                                    interface_lines.append(line)
+                                                    # Stop at next interface or end
+                                                    if line.strip().startswith('interface ') and interface_name not in line and in_interface:
+                                                        break
+                                            current_config = '\n'.join(interface_lines) if interface_lines else f"interface {interface_name}\n(no config found in running config)"
+                                        else:
+                                            current_config = f"interface {interface_name}\n(could not find interface in running config)"
+                                    else:
+                                        current_config = f"interface {interface_name}\n(could not parse config - CLI method not available)"
                                 else:
-                                    current_config = f"interface {interface_name} - could not retrieve config"
-                        else:
-                            # No CLI method, use get_config
-                            config = napalm_manager.get_config(retrieve='running')
-                            if config:
-                                current_config = self._parse_eos_interface_config(config, interface_name)
-                            else:
-                                current_config = f"interface {interface_name} - could not retrieve config"
-                        
-                        napalm_manager.disconnect()
-                        return {
-                            'success': True,
-                            'current_config': current_config,
-                            'source': 'device',
-                            'timestamp': timestamp
-                        }
+                                    current_config = f"interface {interface_name}\n(could not retrieve config)"
+                            
+                            napalm_manager.disconnect()
+                            return {
+                                'success': True,
+                                'current_config': current_config,
+                                'source': 'device',
+                                'timestamp': timestamp
+                            }
+                        except Exception as e2:
+                            logger.warning(f"Could not get interface config for {device.name}:{interface_name}: {e2}")
+                            napalm_manager.disconnect()
+                            return {
+                                'success': False,
+                                'current_config': f"interface {interface_name} - ERROR: Could not retrieve config from device: {str(e2)}",
+                                'source': 'error',
+                                'timestamp': timestamp,
+                                'error': str(e2)
+                            }
                 except Exception as e:
-                    logger.error(f"Could not get device config for {device.name}:{interface_name}: {e}")
+                    logger.error(f"Could not connect to device {device.name}:{interface_name}: {e}")
                     if napalm_manager:
                         napalm_manager.disconnect()
                     # Device unreachable - fallback to NetBox with clear marking
@@ -744,7 +811,18 @@ class VLANDeploymentView(View):
             current_untagged = interface.untagged_vlan.vid if interface.untagged_vlan else None
             current_tagged = list(interface.tagged_vlans.values_list('vid', flat=True))
             current_ip_addresses = [str(ip.address) for ip in interface.ip_addresses.all()]
-            current_vrf = interface.vrf.name if hasattr(interface, 'vrf') and interface.vrf else None
+            
+            # Get VRF - try multiple ways to access it
+            current_vrf = None
+            if hasattr(interface, 'vrf'):
+                if interface.vrf:
+                    current_vrf = interface.vrf.name if hasattr(interface.vrf, 'name') else str(interface.vrf)
+            # Also check if VRF is on IP addresses
+            if not current_vrf:
+                for ip_addr in interface.ip_addresses.all():
+                    if hasattr(ip_addr, 'vrf') and ip_addr.vrf:
+                        current_vrf = ip_addr.vrf.name if hasattr(ip_addr.vrf, 'name') else str(ip_addr.vrf)
+                        break
             current_cable_status = 'Connected' if interface.cable else 'Not Connected'
             current_connected_to = None
             if interface.cable:
@@ -853,12 +931,32 @@ class VLANDeploymentView(View):
         diff_lines.append("")
         
         if platform == 'cumulus':
-            # For Cumulus, show command differences
-            if "no current config" in current_config.lower() or "no config found" in current_config.lower():
-                diff_lines.append(f"+ {proposed_config}")
+            # For Cumulus, show NVUE commands being removed vs added
+            if "no current config" in current_config.lower() or "no config found" in current_config.lower() or "(no configuration" in current_config.lower():
+                diff_lines.append("Added:")
+                diff_lines.append(f"  + {proposed_config}")
             else:
-                diff_lines.append(f"- {current_config}")
-                diff_lines.append(f"+ {proposed_config}")
+                # Parse current config commands to show what will be removed
+                current_lines = [line.strip() for line in current_config.split('\n') if line.strip()]
+                removed_items = []
+                added_items = [proposed_config]
+                
+                # All current commands will be removed/replaced (since we're changing from routed to bridged)
+                for line in current_lines:
+                    if line.startswith('nv set'):
+                        removed_items.append(line)
+                
+                # Show removed items
+                if removed_items:
+                    diff_lines.append("Removed/Replaced:")
+                    for item in removed_items:
+                        diff_lines.append(f"  - {item}")
+                    diff_lines.append("")
+                
+                # Show added items
+                diff_lines.append("Added:")
+                for item in added_items:
+                    diff_lines.append(f"  + {item}")
         elif platform == 'eos':
             # For EOS, show interface config differences
             current_lines = current_config.split('\n')
