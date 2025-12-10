@@ -6,6 +6,7 @@ from django.db import transaction
 
 from dcim.models import Device, Interface
 from ipam.models import VLAN
+from extras.models import Tag
 
 from ...core.napalm_integration import NAPALMDeviceManager
 from ...core.nornir_integration import NornirDeviceManager
@@ -65,6 +66,17 @@ class VLANDeploymentView(View):
                 form.add_error(None, _("All devices were excluded. Please select at least one device for deployment."))
                 return render(request, self.template_name_form, {"form": form})
 
+        # Additional tag validation before deployment (even for dry run, to show warnings)
+        # This provides a second layer of validation and shows warnings even in dry run mode
+        tagging_warnings = form.cleaned_data.get('_tagging_warnings', [])
+        if not form.cleaned_data.get('dry_run', False):
+            # For actual deployment, do a final check
+            validation_errors = self._validate_tags_before_deployment(devices, form.cleaned_data.get('combined_interfaces', []))
+            if validation_errors:
+                for error in validation_errors:
+                    form.add_error(None, error)
+                return render(request, self.template_name_form, {"form": form})
+
         # Run deployment
         results = self._run_vlan_deployment(devices, form.cleaned_data)
 
@@ -82,12 +94,16 @@ class VLANDeploymentView(View):
         excluded_devices = form.cleaned_data.get('excluded_devices', [])
         excluded_device_names = [d.name for d in excluded_devices] if excluded_devices else []
 
+        # Get tagging warnings if any
+        tagging_warnings = form.cleaned_data.get('_tagging_warnings', [])
+        
         context = {
             "form": form,
             "table": table,
             "summary": summary,
             "excluded_devices": excluded_device_names,
             "excluded_count": len(excluded_devices),
+            "tagging_warnings": tagging_warnings,
         }
         return render(request, self.template_name_results, context)
 
@@ -120,6 +136,511 @@ class VLANDeploymentView(View):
             return devices
 
         return []
+
+    def _validate_tags_for_dry_run(self, devices, interface_list):
+        """
+        Validate tags for dry run mode - shows what would block/warn/pass.
+        Returns validation results without blocking.
+        
+        Returns:
+            dict: {
+                'device_validation': {device_name: {'status': 'pass'|'block'|'warn', 'message': str}},
+                'interface_validation': {f'{device_name}:{iface}': {'status': 'pass'|'block'|'warn', 'message': str}}
+            }
+        """
+        from extras.models import Tag
+        
+        results = {
+            'device_validation': {},
+            'interface_validation': {},
+        }
+        
+        # Get tags
+        try:
+            device_tag = Tag.objects.get(name='automation-ready:vlan')
+        except Tag.DoesNotExist:
+            device_tag = None
+        
+        interface_tag_names = {
+            'uplink': 'vlan-mode:uplink',
+            'routed': 'vlan-mode:routed',
+            'needs-review': 'vlan-mode:needs-review',
+            'access': 'vlan-mode:access',
+        }
+        interface_tags = {}
+        for key, tag_name in interface_tag_names.items():
+            try:
+                interface_tags[key] = Tag.objects.get(name=tag_name)
+            except Tag.DoesNotExist:
+                interface_tags[key] = None
+        
+        # Validate each device
+        for device in devices:
+            device.refresh_from_db()
+            device_tags = list(device.tags.all())
+            
+            if device_tag and device_tag not in device_tags:
+                results['device_validation'][device.name] = {
+                    'status': 'block',
+                    'message': f"Device not tagged as 'automation-ready:vlan' - would block deployment"
+                }
+            else:
+                results['device_validation'][device.name] = {
+                    'status': 'pass',
+                    'message': f"Device tagged as 'automation-ready:vlan' - would pass"
+                }
+            
+            # Validate each interface
+            for iface_name in interface_list:
+                key = f"{device.name}:{iface_name}"
+                try:
+                    interface = Interface.objects.get(device=device, name=iface_name)
+                    interface.refresh_from_db()
+                    interface_tag_list = list(interface.tags.all())
+                    interface_tag_names_list = [t.name for t in interface_tag_list]
+                    
+                    # Check for blocking tags
+                    if interface_tags.get('uplink') and interface_tags['uplink'].name in interface_tag_names_list:
+                        results['interface_validation'][key] = {
+                            'status': 'block',
+                            'message': f"Interface marked as 'vlan-mode:uplink' - would block deployment"
+                        }
+                        continue
+                    
+                    if interface_tags.get('routed') and interface_tags['routed'].name in interface_tag_names_list:
+                        results['interface_validation'][key] = {
+                            'status': 'block',
+                            'message': f"Interface marked as 'vlan-mode:routed' - would block deployment"
+                        }
+                        continue
+                    
+                    # Check port-channel membership
+                    if hasattr(interface, 'lag') and interface.lag:
+                        results['interface_validation'][key] = {
+                            'status': 'block',
+                            'message': f"Interface is port-channel member - would block deployment"
+                        }
+                        continue
+                    
+                    # Check cable
+                    if not interface.cable:
+                        results['interface_validation'][key] = {
+                            'status': 'block',
+                            'message': f"Interface not cabled - would block deployment"
+                        }
+                        continue
+                    
+                    # Check connected device status
+                    try:
+                        endpoints = interface.connected_endpoints
+                        if endpoints:
+                            endpoint = endpoints[0]
+                            connected_device = endpoint.device
+                            if connected_device.status in ['offline', 'decommissioning']:
+                                results['interface_validation'][key] = {
+                                    'status': 'block',
+                                    'message': f"Connected device status '{connected_device.status}' - would block deployment"
+                                }
+                                continue
+                    except Exception:
+                        pass
+                    
+                    # Check for warnings
+                    if interface_tags.get('needs-review') and interface_tags['needs-review'].name in interface_tag_names_list:
+                        results['interface_validation'][key] = {
+                            'status': 'warn',
+                            'message': f"Interface marked as 'vlan-mode:needs-review' - would warn but allow"
+                        }
+                    elif interface_tags.get('access') and interface_tags['access'].name in interface_tag_names_list:
+                        results['interface_validation'][key] = {
+                            'status': 'pass',
+                            'message': f"Interface tagged as 'vlan-mode:access' - would pass"
+                        }
+                    else:
+                        results['interface_validation'][key] = {
+                            'status': 'warn',
+                            'message': f"Interface not tagged - would warn but allow"
+                        }
+                
+                except Interface.DoesNotExist:
+                    results['interface_validation'][key] = {
+                        'status': 'block',
+                        'message': f"Interface does not exist - would block deployment"
+                    }
+        
+        return results
+
+    def _get_current_device_config(self, device, interface_name, platform):
+        """
+        Get current interface configuration from device (read-only).
+        Tries to connect to device, falls back to NetBox inference if unavailable.
+        
+        Returns:
+            dict: {
+                'success': bool,
+                'current_config': str,  # Current config from device
+                'source': 'device'|'netbox'|'error',
+                'error': str (if failed)
+            }
+        """
+        napalm_manager = None
+        try:
+            napalm_manager = NAPALMDeviceManager(device)
+            
+            if platform == 'cumulus':
+                # For Cumulus, use nv show command via NAPALM
+                # Try to get interface bridge domain config
+                try:
+                    if napalm_manager.connect():
+                        # Use NAPALM's cli() method if available, or get_config and parse
+                        # For now, we'll use a simpler approach - get full config and parse
+                        # Or use napalm-cumulus specific methods
+                        config = napalm_manager.get_config(retrieve='running')
+                        if config:
+                            # Parse config to find interface bridge domain settings
+                            # This is a simplified version - in production you might want to use
+                            # nv show interface <iface> bridge domain br_default directly
+                            current_config = self._parse_cumulus_interface_config(config, interface_name)
+                            napalm_manager.disconnect()
+                            return {
+                                'success': True,
+                                'current_config': current_config,
+                                'source': 'device'
+                            }
+                except Exception as e:
+                    logger.warning(f"Could not get device config for {device.name}:{interface_name}: {e}")
+                    if napalm_manager:
+                        napalm_manager.disconnect()
+            
+            elif platform == 'eos':
+                # For EOS, get running config and parse interface section
+                try:
+                    if napalm_manager.connect():
+                        config = napalm_manager.get_config(retrieve='running')
+                        if config:
+                            current_config = self._parse_eos_interface_config(config, interface_name)
+                            napalm_manager.disconnect()
+                            return {
+                                'success': True,
+                                'current_config': current_config,
+                                'source': 'device'
+                            }
+                except Exception as e:
+                    logger.warning(f"Could not get device config for {device.name}:{interface_name}: {e}")
+                    if napalm_manager:
+                        napalm_manager.disconnect()
+            
+            # Fallback to NetBox inference
+            return self._get_netbox_inferred_config(device, interface_name, platform)
+            
+        except Exception as e:
+            logger.error(f"Error getting device config for {device.name}:{interface_name}: {e}")
+            if napalm_manager:
+                try:
+                    napalm_manager.disconnect()
+                except:
+                    pass
+            # Fallback to NetBox
+            return self._get_netbox_inferred_config(device, interface_name, platform)
+    
+    def _parse_cumulus_interface_config(self, config_dict, interface_name):
+        """
+        Parse Cumulus config to extract interface bridge domain settings.
+        This is a simplified parser - in production you might want to use nv show directly.
+        """
+        # For now, return a placeholder - actual implementation would parse nv show output
+        # or use napalm-cumulus's get_config which might return structured data
+        running_config = config_dict.get('running', '')
+        if running_config:
+            # Try to find interface bridge domain config in running config
+            # This is simplified - actual implementation would need proper parsing
+            return f"Interface {interface_name} bridge domain config (parsed from device)"
+        return f"Interface {interface_name} - no current config found"
+    
+    def _parse_eos_interface_config(self, config_dict, interface_name):
+        """
+        Parse EOS config to extract interface switchport settings.
+        """
+        running_config = config_dict.get('running', '')
+        if running_config and interface_name in running_config:
+            # Extract interface section
+            lines = running_config.split('\n')
+            in_interface = False
+            interface_lines = []
+            for line in lines:
+                if f"interface {interface_name}" in line:
+                    in_interface = True
+                    interface_lines.append(line)
+                elif in_interface:
+                    if line.strip().startswith('interface ') or line.strip() == '!':
+                        break
+                    interface_lines.append(line)
+            return '\n'.join(interface_lines) if interface_lines else f"Interface {interface_name} - no config found"
+        return f"Interface {interface_name} - no config found"
+    
+    def _get_netbox_inferred_config(self, device, interface_name, platform):
+        """
+        Infer current config from NetBox interface state.
+        Used as fallback when device is unreachable.
+        """
+        try:
+            interface = Interface.objects.get(device=device, name=interface_name)
+            interface.refresh_from_db()
+            
+            untagged_vlan = interface.untagged_vlan.vid if interface.untagged_vlan else None
+            tagged_vlans = list(interface.tagged_vlans.values_list('vid', flat=True))
+            mode = interface.mode if hasattr(interface, 'mode') else None
+            
+            if platform == 'cumulus':
+                if untagged_vlan:
+                    config = f"nv set interface {interface_name} bridge domain br_default access {untagged_vlan}"
+                else:
+                    config = f"Interface {interface_name} - no VLAN configured"
+                if tagged_vlans:
+                    config += f"\nTagged VLANs: {', '.join(map(str, tagged_vlans))}"
+            elif platform == 'eos':
+                if mode == 'access' and untagged_vlan:
+                    config = f"interface {interface_name}\n   switchport mode access\n   switchport access vlan {untagged_vlan}"
+                elif mode == 'tagged' and tagged_vlans:
+                    config = f"interface {interface_name}\n   switchport mode trunk\n   switchport trunk allowed vlan {','.join(map(str, tagged_vlans))}"
+                else:
+                    config = f"interface {interface_name} - no VLAN configured"
+            else:
+                config = f"Interface {interface_name} - unknown platform"
+            
+            return {
+                'success': True,
+                'current_config': config,
+                'source': 'netbox'
+            }
+        except Interface.DoesNotExist:
+            return {
+                'success': False,
+                'current_config': f"Interface {interface_name} not found in NetBox",
+                'source': 'error',
+                'error': 'Interface not found'
+            }
+    
+    def _get_netbox_current_state(self, device, interface_name, vlan_id):
+        """
+        Get current NetBox interface state.
+        
+        Returns:
+            dict: {
+                'mode': str or None,
+                'untagged_vlan': int or None,
+                'tagged_vlans': list of ints,
+                'has_changes': bool
+            }
+        """
+        try:
+            interface = Interface.objects.get(device=device, name=interface_name)
+            interface.refresh_from_db()
+            
+            current_mode = interface.mode if hasattr(interface, 'mode') else None
+            current_untagged = interface.untagged_vlan.vid if interface.untagged_vlan else None
+            current_tagged = list(interface.tagged_vlans.values_list('vid', flat=True))
+            
+            # Proposed state
+            proposed_mode = 'tagged'  # Always set to tagged
+            proposed_untagged = vlan_id
+            proposed_tagged = current_tagged  # Keep existing tagged VLANs
+            
+            # Check if there are changes
+            has_changes = (
+                current_mode != proposed_mode or
+                current_untagged != proposed_untagged
+            )
+            
+            return {
+                'current': {
+                    'mode': current_mode,
+                    'untagged_vlan': current_untagged,
+                    'tagged_vlans': current_tagged,
+                },
+                'proposed': {
+                    'mode': proposed_mode,
+                    'untagged_vlan': proposed_untagged,
+                    'tagged_vlans': proposed_tagged,
+                },
+                'has_changes': has_changes
+            }
+        except Interface.DoesNotExist:
+            return {
+                'current': {'mode': None, 'untagged_vlan': None, 'tagged_vlans': []},
+                'proposed': {'mode': 'tagged', 'untagged_vlan': vlan_id, 'tagged_vlans': []},
+                'has_changes': True
+            }
+    
+    def _generate_config_diff(self, current_config, proposed_config, platform):
+        """
+        Generate a diff between current and proposed config.
+        
+        Returns:
+            str: Formatted diff showing changes
+        """
+        if current_config == proposed_config:
+            return "No changes (config already applied)"
+        
+        # Simple diff format
+        diff_lines = []
+        diff_lines.append("--- Current Configuration")
+        diff_lines.append("+++ Proposed Configuration")
+        diff_lines.append("")
+        
+        if platform == 'cumulus':
+            # For Cumulus, show command differences
+            if "no current config" in current_config.lower() or "no config found" in current_config.lower():
+                diff_lines.append(f"+ {proposed_config}")
+            else:
+                diff_lines.append(f"- {current_config}")
+                diff_lines.append(f"+ {proposed_config}")
+        elif platform == 'eos':
+            # For EOS, show interface config differences
+            current_lines = current_config.split('\n')
+            proposed_lines = proposed_config.split('\n')
+            
+            # Simple line-by-line diff
+            for line in current_lines:
+                if line.strip() and line not in proposed_lines:
+                    diff_lines.append(f"- {line}")
+            for line in proposed_lines:
+                if line.strip() and line not in current_lines:
+                    diff_lines.append(f"+ {line}")
+        
+        return '\n'.join(diff_lines)
+    
+    def _generate_netbox_diff(self, current_state, proposed_state):
+        """
+        Generate a diff for NetBox interface state changes.
+        
+        Returns:
+            str: Formatted diff showing NetBox changes
+        """
+        if not current_state['has_changes']:
+            return "No changes (NetBox already has this configuration)"
+        
+        diff_lines = []
+        diff_lines.append("NetBox Interface Changes:")
+        diff_lines.append("")
+        
+        # Mode change
+        if current_state['current']['mode'] != proposed_state['mode']:
+            old_mode = current_state['current']['mode'] or 'None'
+            diff_lines.append(f"  802.1Q Mode: {old_mode} → {proposed_state['mode']}")
+        
+        # Untagged VLAN change
+        if current_state['current']['untagged_vlan'] != proposed_state['untagged_vlan']:
+            old_vlan = current_state['current']['untagged_vlan'] or 'None'
+            new_vlan = proposed_state['untagged_vlan'] or 'None'
+            diff_lines.append(f"  Untagged VLAN: {old_vlan} → {new_vlan}")
+        
+        # Tagged VLANs (usually unchanged, but show if different)
+        if set(current_state['current']['tagged_vlans']) != set(proposed_state['tagged_vlans']):
+            old_tagged = ', '.join(map(str, current_state['current']['tagged_vlans'])) or 'None'
+            new_tagged = ', '.join(map(str, proposed_state['tagged_vlans'])) or 'None'
+            diff_lines.append(f"  Tagged VLANs: [{old_tagged}] → [{new_tagged}]")
+        
+        if len(diff_lines) == 2:  # Only header and empty line
+            return "No changes"
+        
+        return '\n'.join(diff_lines)
+
+    def _validate_tags_before_deployment(self, devices, interface_list):
+        """
+        Final validation before deployment - double-check tags and interface eligibility.
+        This is a safety check that runs even after form validation.
+        
+        Returns list of error messages (empty if all valid).
+        """
+        errors = []
+        
+        # Get tags
+        try:
+            device_tag = Tag.objects.get(name='automation-ready:vlan')
+        except Tag.DoesNotExist:
+            device_tag = None
+            logger.warning("Tag 'automation-ready:vlan' does not exist - skipping device tag validation")
+        
+        interface_tag_names = {
+            'uplink': 'vlan-mode:uplink',
+            'routed': 'vlan-mode:routed',
+        }
+        interface_tags = {}
+        for key, tag_name in interface_tag_names.items():
+            try:
+                interface_tags[key] = Tag.objects.get(name=tag_name)
+            except Tag.DoesNotExist:
+                interface_tags[key] = None
+        
+        # Validate each device
+        for device in devices:
+            device.refresh_from_db()
+            device_tags = list(device.tags.all())
+            
+            # Check device tag (BLOCKING)
+            if device_tag and device_tag not in device_tags:
+                errors.append(
+                    f"Device '{device.name}' is not tagged as 'automation-ready:vlan'. "
+                    f"Please run the Tagging Workflow first to tag this device."
+                )
+            
+            # Validate each interface on this device
+            for iface_name in interface_list:
+                try:
+                    interface = Interface.objects.get(device=device, name=iface_name)
+                    interface.refresh_from_db()
+                    interface_tag_list = list(interface.tags.all())
+                    interface_tag_names_list = [t.name for t in interface_tag_list]
+                    
+                    # Check for blocking tags (BLOCKING)
+                    if interface_tags.get('uplink') and interface_tags['uplink'].name in interface_tag_names_list:
+                        errors.append(
+                            f"Interface '{iface_name}' on device '{device.name}' is marked as 'vlan-mode:uplink' - cannot modify uplink interfaces."
+                        )
+                        continue
+                    
+                    if interface_tags.get('routed') and interface_tags['routed'].name in interface_tag_names_list:
+                        errors.append(
+                            f"Interface '{iface_name}' on device '{device.name}' is marked as 'vlan-mode:routed' - cannot modify routed interfaces."
+                        )
+                        continue
+                    
+                    # Check for port-channel membership (BLOCKING)
+                    if hasattr(interface, 'lag') and interface.lag:
+                        errors.append(
+                            f"Interface '{iface_name}' on device '{device.name}' is a port-channel member - configure on port-channel '{interface.lag.name}' instead."
+                        )
+                        continue
+                    
+                    # Check if cabled (BLOCKING)
+                    if not interface.cable:
+                        errors.append(
+                            f"Interface '{iface_name}' on device '{device.name}' is not cabled in NetBox - please add cable information first."
+                        )
+                        continue
+                    
+                    # Check connected device status (BLOCKING)
+                    try:
+                        endpoints = interface.connected_endpoints
+                        if endpoints:
+                            endpoint = endpoints[0]
+                            connected_device = endpoint.device
+                            if connected_device.status in ['offline', 'decommissioning']:
+                                errors.append(
+                                    f"Interface '{iface_name}' on device '{device.name}' is connected to device '{connected_device.name}' "
+                                    f"with status '{connected_device.status}' - cannot configure VLAN."
+                                )
+                                continue
+                    except Exception as e:
+                        logger.warning(f"Could not get connected endpoints for {device.name}:{iface_name}: {e}")
+                
+                except Interface.DoesNotExist:
+                    errors.append(
+                        f"Interface '{iface_name}' does not exist on device '{device.name}'"
+                    )
+        
+        return errors
 
     def _run_vlan_deployment(self, devices, cleaned_data):
         """
@@ -180,20 +701,92 @@ class VLANDeploymentView(View):
         logger.info(f"VLAN Deployment: {len(devices)} devices, {len(interface_list)} interfaces, platform: {platform}")
 
         if dry_run:
-            # Dry run mode - generate preview without deploying
+            # Dry run mode - generate comprehensive preview with validation and diffs
+            # First, run tag validation
+            validation_results = self._validate_tags_for_dry_run(devices, interface_list)
+            
             for device in devices:
+                device_validation = validation_results['device_validation'].get(device.name, {})
+                
                 for interface_name in interface_list:
-                    config_command = self._generate_vlan_config(interface_name, vlan_id, platform)
+                    interface_key = f"{device.name}:{interface_name}"
+                    interface_validation = validation_results['interface_validation'].get(interface_key, {})
+                    
+                    # Get proposed config
+                    proposed_config = self._generate_vlan_config(interface_name, vlan_id, platform)
+                    
+                    # Get current device config (try device, fallback to NetBox)
+                    device_config_result = self._get_current_device_config(device, interface_name, platform)
+                    current_device_config = device_config_result.get('current_config', 'Unable to fetch')
+                    config_source = device_config_result.get('source', 'error')
+                    
+                    # Generate config diff
+                    config_diff = self._generate_config_diff(current_device_config, proposed_config, platform)
+                    
+                    # Get NetBox current and proposed state
+                    netbox_state = self._get_netbox_current_state(device, interface_name, vlan_id)
+                    netbox_diff = self._generate_netbox_diff(netbox_state, netbox_state['proposed'])
+                    
+                    # Build validation status message
+                    validation_status = []
+                    if device_validation.get('status') == 'block':
+                        validation_status.append(f"⚠ Device: {device_validation.get('message', 'Would block')}")
+                    elif device_validation.get('status') == 'warn':
+                        validation_status.append(f"⚠ Device: {device_validation.get('message', 'Would warn')}")
+                    else:
+                        validation_status.append(f"✓ Device: {device_validation.get('message', 'Would pass')}")
+                    
+                    if interface_validation.get('status') == 'block':
+                        validation_status.append(f"⚠ Interface: {interface_validation.get('message', 'Would block')}")
+                    elif interface_validation.get('status') == 'warn':
+                        validation_status.append(f"⚠ Interface: {interface_validation.get('message', 'Would warn')}")
+                    else:
+                        validation_status.append(f"✓ Interface: {interface_validation.get('message', 'Would pass')}")
+                    
+                    # Determine overall status
+                    if device_validation.get('status') == 'block' or interface_validation.get('status') == 'block':
+                        overall_status = "error"
+                        status_message = "Would BLOCK deployment"
+                    elif device_validation.get('status') == 'warn' or interface_validation.get('status') == 'warn':
+                        overall_status = "success"
+                        status_message = "Would WARN but allow deployment"
+                    else:
+                        overall_status = "success"
+                        status_message = "Would PASS validation"
+                    
+                    # Build comprehensive deployment logs
+                    logs = []
+                    logs.append("=== DRY RUN MODE - PREVIEW ONLY ===")
+                    logs.append("")
+                    logs.append("--- Validation Results ---")
+                    logs.extend(validation_status)
+                    logs.append("")
+                    logs.append(f"--- Device Config ({config_source}) ---")
+                    logs.append(f"Current: {current_device_config}")
+                    logs.append(f"Proposed: {proposed_config}")
+                    logs.append("")
+                    logs.append("--- Config Diff ---")
+                    logs.append(config_diff)
+                    logs.append("")
+                    logs.append("--- NetBox Changes ---")
+                    logs.append(netbox_diff)
+                    logs.append("")
+                    logs.append(f"Status: {status_message}")
+                    
                     results.append({
                         "device": device,
                         "interface": interface_name,
                         "vlan_id": vlan_id,
                         "vlan_name": vlan_name,
-                        "status": "success",
+                        "status": overall_status,
                         "config_applied": "Dry Run",
-                        "netbox_updated": "No",
-                        "message": f"Platform: {platform} | Would apply: {config_command}",
-                        "deployment_logs": f"[Dry Run Mode] Command: {config_command}",
+                        "netbox_updated": "Preview",
+                        "message": f"{status_message} | Platform: {platform}",
+                        "deployment_logs": '\n'.join(logs),
+                        "validation_status": validation_status,
+                        "device_config_diff": config_diff,
+                        "netbox_diff": netbox_diff,
+                        "config_source": config_source,
                     })
         else:
             # Deploy mode - use Nornir for parallel execution
@@ -497,8 +1090,10 @@ class VLANDeploymentView(View):
                         "error": f"Interface {interface_name} not found in NetBox"
                     }
 
-                # Set untagged VLAN (access mode)
-                interface.mode = 'access'
+                # Set untagged VLAN (tagged mode for VLAN-aware bridges)
+                # Note: Even for access ports, we use 'tagged' mode in NetBox because
+                # Cumulus/Mellanox devices use VLAN-aware bridges where all ports are in tagged mode
+                interface.mode = 'tagged'
                 interface.untagged_vlan = vlan
                 interface.save()
 

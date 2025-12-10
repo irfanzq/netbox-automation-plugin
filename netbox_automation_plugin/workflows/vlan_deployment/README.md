@@ -14,6 +14,7 @@ This workflow deploys VLAN configurations to network devices and updates NetBox 
 - Dry run mode for previewing changes
 - Automatic NetBox interface VLAN assignment updates
 - CSV export of deployment results
+- **Tag-based validation** - Pre-validates devices and interfaces using NetBox tags (requires Tagging Workflow)
 
 ## Files Created
 All files are **environment-agnostic** and can be copied directly to production:
@@ -53,6 +54,33 @@ The workflow automatically detects the device platform using NetBox device type/
 After successful deployment, updates NetBox interface:
 - Sets `mode = 'access'`
 - Sets `untagged_vlan = <selected_vlan>`
+
+### 4. Tag-Based Validation
+The workflow validates devices and interfaces before deployment using NetBox tags. This provides automation guardrails to prevent accidental changes to critical interfaces.
+
+**Device-Level Validation:**
+- **Required Tag**: `automation-ready:vlan`
+  - Devices must be tagged as automation-ready before deployment
+  - If not tagged, deployment is blocked with error message
+  - Use the **Tagging Workflow** to tag devices first
+
+**Interface-Level Validation (Blocking Errors):**
+- Interfaces tagged as `vlan-mode:uplink` → **BLOCKED** (cannot modify uplinks)
+- Interfaces tagged as `vlan-mode:routed` → **BLOCKED** (cannot modify routed ports)
+- Port-channel member interfaces → **BLOCKED** (configure on port-channel instead)
+- Interfaces not cabled in NetBox → **BLOCKED** (add cable information first)
+- Connected device status is `offline` or `decommissioning` → **BLOCKED**
+
+**Interface-Level Validation (Warnings):**
+- Interfaces tagged as `vlan-mode:needs-review` → **WARNING** (proceed with caution)
+- Interfaces not tagged but pass other checks → **WARNING** (suggest running Tagging Workflow)
+
+**Note:** Tag validation only applies to **actual deployment** (`Deploy Changes` mode). Dry run mode skips tag validation to allow previewing changes even if tags are not set.
+
+**Integration with Tagging Workflow:**
+1. Run **Plugins → NetBox VLAN Tagging** to analyze and tag devices/interfaces
+2. Then run **Plugins → VLAN Deployment** to deploy VLANs
+3. The deployment workflow will validate tags before proceeding
 
 ## TODO: Implementation Required
 
@@ -112,12 +140,15 @@ After NetBox restart, the workflow will appear in the Plugins menu:
 - **Plugins → VLAN Deployment**
 
 ### Workflow Steps
-1. Select deployment scope (single device or group)
-2. Choose VLAN from NetBox VLANs
-3. Enter interface names (comma-separated, e.g., `bond1,bond2,bond3`)
-4. Enable/disable dry run mode
-5. Enable/disable NetBox updates
-6. Click "Deploy VLAN" or "Deploy & Download CSV"
+1. **Pre-requisite**: Run **Plugins → NetBox VLAN Tagging** to tag devices as `automation-ready:vlan` and interfaces appropriately
+2. Select deployment scope (single device or group)
+3. Choose VLAN ID (1-4094)
+4. Select interfaces from checkbox list or enter manually (comma-separated, e.g., `bond1,bond2,bond3`)
+5. Enable/disable dry run mode (recommended: preview first)
+6. Enable/disable NetBox updates (only applies if deploying changes)
+7. Click "Deploy VLAN" or "Deploy & Download CSV"
+
+**Important:** If devices are not tagged as `automation-ready:vlan`, deployment will be blocked. Use the Tagging Workflow first to prepare devices and interfaces.
 
 ### Example Use Cases
 

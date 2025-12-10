@@ -4,6 +4,7 @@ from django.core.validators import MinValueValidator, MaxValueValidator
 
 from dcim.models import Device, Site, Location, DeviceRole, Interface, Manufacturer
 from ipam.models import VLAN
+from extras.models import Tag
 
 
 class VLANDeploymentForm(forms.Form):
@@ -230,6 +231,15 @@ class VLANDeploymentForm(forms.Form):
         # Validate that all interfaces exist on selected devices (only if devices are selected)
         if devices and combined_interfaces:
             self._validate_interfaces_on_devices(devices, combined_interfaces, cleaned_data)
+            
+            # Validate tags and interface eligibility
+            # For actual deployment: block on errors
+            # For dry run: show warnings but don't block (validation shown in dry run results)
+            if deploy_changes:
+                self._validate_tags_and_interfaces(devices, combined_interfaces, cleaned_data, blocking=True)
+            elif dry_run:
+                # Dry run: validate but only show warnings, don't block
+                self._validate_tags_and_interfaces(devices, combined_interfaces, cleaned_data, blocking=False)
 
         # Store combined interface list for use in view
         cleaned_data['combined_interfaces'] = combined_interfaces
@@ -257,4 +267,146 @@ class VLANDeploymentForm(forms.Form):
 
         if errors:
             raise forms.ValidationError(errors)
+    
+    def _validate_tags_and_interfaces(self, devices, interface_list, cleaned_data, blocking=True):
+        """
+        Validate device and interface tags before deployment.
+        Implements pre-validation checks from TAGGING_WORKFLOW_CRITERIA.md.
+        
+        Args:
+            blocking: If True, raise ValidationError on blocking issues. If False, only collect warnings.
+        
+        Blocking errors (must fix):
+        - Device not tagged as automation-ready:vlan
+        - Interface tagged as vlan-mode:uplink
+        - Interface tagged as vlan-mode:routed
+        - Interface is port-channel member
+        - Interface not cabled
+        - Connected device status is offline/decommissioning
+        
+        Warnings (can proceed with confirmation):
+        - Interface tagged as vlan-mode:needs-review
+        - Interface not tagged but passes other checks
+        """
+        from extras.models import Tag
+        
+        blocking_errors = []
+        warnings = []
+        
+        # Get tags
+        try:
+            device_tag = Tag.objects.get(name='automation-ready:vlan')
+        except Tag.DoesNotExist:
+            device_tag = None
+        
+        interface_tag_names = {
+            'uplink': 'vlan-mode:uplink',
+            'routed': 'vlan-mode:routed',
+            'needs-review': 'vlan-mode:needs-review',
+            'access': 'vlan-mode:access',
+        }
+        interface_tags = {}
+        for key, tag_name in interface_tag_names.items():
+            try:
+                interface_tags[key] = Tag.objects.get(name=tag_name)
+            except Tag.DoesNotExist:
+                interface_tags[key] = None
+        
+        # Validate each device
+        for device in devices:
+            device.refresh_from_db()
+            device_tags = list(device.tags.all())
+            
+            # Check device tag (BLOCKING)
+            if device_tag and device_tag not in device_tags:
+                blocking_errors.append(
+                    f"Device '{device.name}' is not tagged as 'automation-ready:vlan'. "
+                    f"Please run the Tagging Workflow first to tag this device."
+                )
+            
+            # Validate each interface on this device
+            for iface_name in interface_list:
+                try:
+                    interface = Interface.objects.get(device=device, name=iface_name)
+                    interface.refresh_from_db()
+                    interface_tag_list = list(interface.tags.all())
+                    interface_tag_names_list = [t.name for t in interface_tag_list]
+                    
+                    # Check for blocking tags (BLOCKING)
+                    if interface_tags.get('uplink') and interface_tags['uplink'].name in interface_tag_names_list:
+                        blocking_errors.append(
+                            f"Interface '{iface_name}' on device '{device.name}' is marked as 'vlan-mode:uplink' - cannot modify uplink interfaces."
+                        )
+                        continue  # Skip further checks for this interface
+                    
+                    if interface_tags.get('routed') and interface_tags['routed'].name in interface_tag_names_list:
+                        blocking_errors.append(
+                            f"Interface '{iface_name}' on device '{device.name}' is marked as 'vlan-mode:routed' - cannot modify routed interfaces."
+                        )
+                        continue  # Skip further checks for this interface
+                    
+                    # Check for port-channel membership (BLOCKING)
+                    if hasattr(interface, 'lag') and interface.lag:
+                        blocking_errors.append(
+                            f"Interface '{iface_name}' on device '{device.name}' is a port-channel member - configure on port-channel '{interface.lag.name}' instead."
+                        )
+                        continue  # Skip further checks for this interface
+                    
+                    # Check if cabled (BLOCKING)
+                    if not interface.cable:
+                        blocking_errors.append(
+                            f"Interface '{iface_name}' on device '{device.name}' is not cabled in NetBox - please add cable information first."
+                        )
+                        continue  # Skip further checks for this interface
+                    
+                    # Check connected device status (BLOCKING)
+                    try:
+                        endpoints = interface.connected_endpoints
+                        if endpoints:
+                            endpoint = endpoints[0]
+                            connected_device = endpoint.device
+                            if connected_device.status in ['offline', 'decommissioning']:
+                                blocking_errors.append(
+                                    f"Interface '{iface_name}' on device '{device.name}' is connected to device '{connected_device.name}' "
+                                    f"with status '{connected_device.status}' - cannot configure VLAN."
+                                )
+                                continue  # Skip further checks for this interface
+                    except Exception as e:
+                        # If we can't get endpoints, log but don't block (cable exists)
+                        import logging
+                        logger = logging.getLogger('netbox_automation_plugin')
+                        logger.warning(f"Could not get connected endpoints for {device.name}:{iface_name}: {e}")
+                    
+                    # Check for warning conditions
+                    if interface_tags.get('needs-review') and interface_tags['needs-review'].name in interface_tag_names_list:
+                        warnings.append(
+                            f"Interface '{iface_name}' on device '{device.name}' is marked as 'vlan-mode:needs-review' - "
+                            f"please review in Tagging Workflow first. Proceeding anyway."
+                        )
+                    elif interface_tags.get('access') and interface_tags['access'].name not in interface_tag_names_list:
+                        # Interface is not tagged as access-ready but passes other checks
+                        warnings.append(
+                            f"Interface '{iface_name}' on device '{device.name}' is not tagged as 'vlan-mode:access' - "
+                            f"may have conflicts. Consider running Tagging Workflow to tag this interface."
+                        )
+                
+                except Interface.DoesNotExist:
+                    # Interface doesn't exist - this should have been caught earlier, but handle gracefully
+                    blocking_errors.append(
+                        f"Interface '{iface_name}' does not exist on device '{device.name}'"
+                    )
+        
+        # Raise blocking errors if any (only if blocking=True)
+        if blocking_errors and blocking:
+            error_msg = "The following issues must be resolved before deployment:\n\n" + "\n".join(f"• {err}" for err in blocking_errors)
+            if warnings:
+                error_msg += "\n\nWarnings:\n" + "\n".join(f"⚠ {warn}" for warn in warnings)
+            raise forms.ValidationError(error_msg)
+        
+        # Store warnings and blocking errors for display (for dry run mode)
+        if warnings or (blocking_errors and not blocking):
+            cleaned_data['_tagging_warnings'] = warnings
+            if blocking_errors and not blocking:
+                # In dry run, store blocking errors as warnings
+                cleaned_data['_tagging_blocking_errors'] = blocking_errors
 
