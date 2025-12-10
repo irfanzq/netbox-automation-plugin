@@ -192,6 +192,22 @@
     </div>
   </div>
 
+  {# Loading Modal #}
+  <div id="loading-modal" class="modal fade" tabindex="-1" role="dialog" data-backdrop="static" data-keyboard="false" style="display: none; z-index: 9999;">
+    <div class="modal-dialog modal-dialog-centered" role="document">
+      <div class="modal-content">
+        <div class="modal-body text-center py-5">
+          <div class="spinner-border text-primary mb-3" role="status" style="width: 3rem; height: 3rem; border-width: 0.3rem;">
+            <span class="sr-only">Loading...</span>
+          </div>
+          <h5 id="loading-message" class="mb-2">{% trans "Processing..." %}</h5>
+          <p class="text-muted mb-0">{% trans "Please wait while we process your request." %}</p>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div id="loading-backdrop" class="modal-backdrop fade" style="display: none; z-index: 9998;"></div>
+
   <style>
     /* Style for disabled checkboxes and buttons */
     input[type="checkbox"]:disabled + label {
@@ -204,6 +220,26 @@
     button:disabled {
       opacity: 0.6;
       cursor: not-allowed;
+    }
+    
+    /* Loading modal styles */
+    #loading-modal .modal-content {
+      border: none;
+      box-shadow: 0 0.5rem 1rem rgba(0, 0, 0, 0.15);
+    }
+    
+    #loading-modal .spinner-border {
+      border-width: 0.3rem;
+    }
+    
+    /* Rotating animation for spinner */
+    @keyframes spin {
+      0% { transform: rotate(0deg); }
+      100% { transform: rotate(360deg); }
+    }
+    
+    .spinner-border {
+      animation: spin 0.75s linear infinite;
     }
   </style>
 
@@ -322,12 +358,143 @@
       toggleTaggingOptions();
     }
 
+    // Show loading modal on form submission
+    function showLoadingModal(action) {
+      const modal = document.getElementById('loading-modal');
+      const backdrop = document.getElementById('loading-backdrop');
+      const message = document.getElementById('loading-message');
+      
+      // Set appropriate message based on action
+      let actionMessage = '';
+      switch(action) {
+        case 'analyze':
+          actionMessage = '{% trans "Running Analysis..." %}';
+          break;
+        case 'deploy':
+          actionMessage = '{% trans "Applying Tags to NetBox..." %}';
+          break;
+        case 'delete':
+          actionMessage = '{% trans "Deleting Tags from NetBox..." %}';
+          break;
+        default:
+          actionMessage = '{% trans "Processing..." %}';
+      }
+      
+      if (message) {
+        message.textContent = actionMessage;
+      }
+      
+      // Show modal - works with both Bootstrap 4 and 5
+      if (modal) {
+        // Show backdrop
+        if (backdrop) {
+          backdrop.style.display = 'block';
+          backdrop.classList.add('show');
+        }
+        
+        // Show modal
+        modal.style.display = 'block';
+        modal.classList.add('show');
+        document.body.classList.add('modal-open');
+        document.body.style.overflow = 'hidden';
+      }
+    }
+
+    // Hide loading modal (in case page doesn't redirect)
+    function hideLoadingModal() {
+      const modal = document.getElementById('loading-modal');
+      const backdrop = document.getElementById('loading-backdrop');
+      
+      if (modal) {
+        modal.style.display = 'none';
+        modal.classList.remove('show');
+      }
+      
+      if (backdrop) {
+        backdrop.style.display = 'none';
+        backdrop.classList.remove('show');
+      }
+      
+      document.body.classList.remove('modal-open');
+      document.body.style.overflow = '';
+    }
+
+    // Add form submission handler
+    function initFormSubmission() {
+      const form = document.getElementById('vlan-tagging-form');
+      if (!form) return;
+      
+      form.addEventListener('submit', function(e) {
+        // Get the action button that was clicked
+        const submitEvent = e.submitter || (window.event ? window.event.submitter : null);
+        let action = 'analyze'; // default
+        
+        if (submitEvent) {
+          action = submitEvent.value || submitEvent.name || 'analyze';
+        } else {
+          // Fallback: check which button is visible/enabled
+          const deployBtn = document.getElementById('deploy-btn');
+          const deleteBtn = document.getElementById('delete-btn');
+          const submitBtn = document.getElementById('submit-btn');
+          
+          if (deployBtn && deployBtn.style.display !== 'none' && !deployBtn.disabled) {
+            action = 'deploy';
+          } else if (deleteBtn && deleteBtn.style.display !== 'none' && !deleteBtn.disabled) {
+            action = 'delete';
+          } else if (submitBtn && submitBtn.style.display !== 'none' && !submitBtn.disabled) {
+            action = 'analyze';
+          }
+        }
+        
+        // Show loading modal
+        showLoadingModal(action);
+        
+        // Disable all buttons to prevent double submission
+        const buttons = form.querySelectorAll('button[type="submit"]');
+        buttons.forEach(btn => {
+          btn.disabled = true;
+        });
+      });
+    }
+
+    // Initialize functions
+    function initFormToggles() {
+      // Toggle device selection fields
+      document.querySelectorAll('input[name="device_selection"]').forEach(radio => {
+        radio.addEventListener('change', toggleDeviceSelectionFields);
+      });
+
+      // Toggle tagging options based on workflow mode
+      document.querySelectorAll('input[name="workflow_mode"]').forEach(radio => {
+        radio.addEventListener('change', toggleTaggingOptions);
+      });
+
+      // Add listeners for mutual exclusivity
+      const tagDevices = document.getElementById('id_tag_devices');
+      const tagInterfaces = document.getElementById('id_tag_interfaces');
+      const deleteDeviceTags = document.getElementById('id_delete_device_tags');
+      const deleteInterfaceTags = document.getElementById('id_delete_interface_tags');
+      
+      if (tagDevices) tagDevices.addEventListener('change', updateMutualExclusivity);
+      if (tagInterfaces) tagInterfaces.addEventListener('change', updateMutualExclusivity);
+      if (deleteDeviceTags) deleteDeviceTags.addEventListener('change', updateMutualExclusivity);
+      if (deleteInterfaceTags) deleteInterfaceTags.addEventListener('change', updateMutualExclusivity);
+
+      // Set initial state
+      toggleDeviceSelectionFields();
+      toggleTaggingOptions();
+    }
+
     // Initialize on page load
     if (document.readyState === 'loading') {
-      document.addEventListener('DOMContentLoaded', initFormToggles);
+      document.addEventListener('DOMContentLoaded', function() {
+        initFormToggles();
+        initFormSubmission();
+      });
     } else {
       // DOM is already ready
       initFormToggles();
+      initFormSubmission();
     }
   </script>
 {% endblock %}
