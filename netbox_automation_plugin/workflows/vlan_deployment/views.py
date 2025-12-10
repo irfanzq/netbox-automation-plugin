@@ -626,7 +626,7 @@ class VLANDeploymentView(View):
             rollback_lines.append("Platform: Cumulus Linux (NVUE)")
             rollback_lines.append("")
             rollback_lines.append("Auto-Rollback:")
-            rollback_lines.append(f"  ✓ Supported: Yes (native commit-confirm)")
+            rollback_lines.append(f"  [OK] Supported: Yes (native commit-confirm)")
             rollback_lines.append(f"  • Method: nv config apply --confirm {timeout}s")
             rollback_lines.append(f"  • Timer: {timeout} seconds")
             rollback_lines.append(f"  • Behavior: Automatically rolls back if not confirmed within {timeout}s")
@@ -643,7 +643,7 @@ class VLANDeploymentView(View):
             rollback_lines.append("")
             rollback_lines.append("Auto-Rollback:")
             timer_minutes = max(2, min(120, timeout // 60))
-            rollback_lines.append(f"  ✓ Supported: Yes (configure session with commit timer)")
+            rollback_lines.append(f"  [OK] Supported: Yes (configure session with commit timer)")
             rollback_lines.append(f"  • Method: configure session <name> + commit timer {timer_minutes}:00:00")
             rollback_lines.append(f"  • Timer: {timer_minutes} minutes")
             rollback_lines.append(f"  • Behavior: Automatically rolls back when timer expires if not confirmed")
@@ -663,7 +663,7 @@ class VLANDeploymentView(View):
             rollback_lines.append(f"Platform: {platform}")
             rollback_lines.append("")
             rollback_lines.append("Auto-Rollback:")
-            rollback_lines.append("  ⚠ Not supported on this platform")
+            rollback_lines.append("  [WARN] Not supported on this platform")
             rollback_lines.append("  • Manual intervention may be required")
         
         return '\n'.join(rollback_lines)
@@ -684,13 +684,13 @@ class VLANDeploymentView(View):
         # Device validation
         device_status = device_validation.get('status', 'unknown')
         device_msg = device_validation.get('message', '')
-        status_symbol = '❌' if device_status == 'block' else '⚠️' if device_status == 'warn' else '✓'
+        status_symbol = '[BLOCK]' if device_status == 'block' else '[WARN]' if device_status == 'warn' else '[PASS]'
         table_lines.append(f"Device: automation-ready:vlan    | {status_symbol} {device_status.upper():5} | {device_msg}")
         
         # Interface validation
         iface_status = interface_validation.get('status', 'unknown')
         iface_msg = interface_validation.get('message', '')
-        status_symbol = '❌' if iface_status == 'block' else '⚠️' if iface_status == 'warn' else '✓'
+        status_symbol = '[BLOCK]' if iface_status == 'block' else '[WARN]' if iface_status == 'warn' else '[PASS]'
         table_lines.append(f"Interface: tag check            | {status_symbol} {iface_status.upper():5} | {iface_msg}")
         
         return '\n'.join(table_lines)
@@ -709,13 +709,13 @@ class VLANDeploymentView(View):
         # Determine risk level
         if device_validation.get('status') == 'block' or interface_validation.get('status') == 'block':
             risk_level = "HIGH"
-            risk_icon = "🔴"
+            risk_icon = "[HIGH]"
         elif device_validation.get('status') == 'warn' or interface_validation.get('status') == 'warn':
             risk_level = "MEDIUM"
-            risk_icon = "🟡"
+            risk_icon = "[MEDIUM]"
         else:
             risk_level = "LOW"
-            risk_icon = "🟢"
+            risk_icon = "[LOW]"
         
         risk_lines.append(f"Risk Level: {risk_icon} {risk_level}")
         risk_lines.append("")
@@ -994,7 +994,7 @@ class VLANDeploymentView(View):
                     logs.append(f"Interface: {interface_name}")
                     logs.append(f"Type: {interface_details.get('type', 'Unknown')}")
                     logs.append(f"Description: {interface_details.get('description', 'No description')}")
-                    logs.append(f"Cable Status: {'✓ Cabled' if interface_details.get('cabled') else '✗ Not cabled'}")
+                    logs.append(f"Cable Status: {'[OK] Cabled' if interface_details.get('cabled') else '[FAIL] Not cabled'}")
                     if interface_details.get('connected_device'):
                         logs.append(f"Connected To: {interface_details.get('connected_device')} ({interface_details.get('connected_role', 'Unknown')})")
                     if interface_details.get('port_channel_member'):
@@ -1012,14 +1012,14 @@ class VLANDeploymentView(View):
                     # Connection Status
                     logs.append("--- Device Config Source ---")
                     if config_source == 'device':
-                        logs.append(f"✓ Connected to device successfully")
+                        logs.append(f"[OK] Connected to device successfully")
                         if config_timestamp != 'N/A':
                             logs.append(f"Config fetched at: {config_timestamp}")
                     elif config_source == 'netbox':
-                        logs.append(f"⚠ Device unreachable - using NetBox inference")
+                        logs.append(f"[WARN] Device unreachable - using NetBox inference")
                         logs.append(f"Note: Actual device config may differ from NetBox state")
                     else:
-                        logs.append(f"✗ Unable to fetch config (device unreachable and NetBox inference failed)")
+                        logs.append(f"[FAIL] Unable to fetch config (device unreachable and NetBox inference failed)")
                     logs.append("")
                     
                     # Side-by-Side Config Comparison
@@ -1139,17 +1139,17 @@ class VLANDeploymentView(View):
                             if netbox_result['success']:
                                 netbox_updated = "Yes"
                                 message += " | NetBox updated"
-                                logs.append(f"✓ NetBox interface updated successfully")
+                                logs.append(f"[OK] NetBox interface updated successfully")
                             else:
                                 netbox_updated = "Failed"
                                 message += f" | NetBox update failed: {netbox_result['error']}"
-                                logs.append(f"✗ NetBox update failed: {netbox_result['error']}")
+                                logs.append(f"[FAIL] NetBox update failed: {netbox_result['error']}")
                         elif interface_result.get('rolled_back', False):
                             netbox_updated = "Skipped"
                             message += " | NetBox update skipped (deployment rolled back)"
-                            logs.append(f"⚠ NetBox update skipped (deployment was rolled back)")
+                            logs.append(f"[WARN] NetBox update skipped (deployment was rolled back)")
                         else:
-                            logs.append(f"⚠ NetBox update skipped (deployment not committed)")
+                            logs.append(f"[WARN] NetBox update skipped (deployment not committed)")
                     else:
                         status = "error"
                         config_applied = "Failed"
@@ -1281,7 +1281,7 @@ class VLANDeploymentView(View):
 
             else:
                 logger.error(f"Unsupported platform {platform} for device {device.name}")
-                logs.append(f"✗ Unsupported platform: {platform}")
+                logs.append(f"[FAIL] Unsupported platform: {platform}")
                 return {
                     "success": False,
                     "committed": False,
@@ -1297,7 +1297,7 @@ class VLANDeploymentView(View):
             logs.append(f"      Device IP: {device.primary_ip4 or device.primary_ip6}")
             napalm_manager = NAPALMDeviceManager(device)
             logger.info(f"Initialized NAPALM manager for {device.name} (platform: {platform})")
-            logs.append(f"✓ NAPALM manager initialized")
+                    logs.append(f"[OK] NAPALM manager initialized")
 
             # Deploy using safe deployment with post-checks
             # Both EOS and Cumulus support commit-confirm workflow:
@@ -1352,7 +1352,7 @@ class VLANDeploymentView(View):
 
         except Exception as e:
             logger.error(f"Exception during safe deployment to {device.name}: {e}")
-            logs.append(f"✗ Exception during deployment: {str(e)}")
+            logs.append(f"[FAIL] Exception during deployment: {str(e)}")
             import traceback
             logs.append(f"Traceback:")
             for line in traceback.format_exc().split('\n'):
@@ -1374,10 +1374,10 @@ class VLANDeploymentView(View):
                 try:
                     logs.append(f"[2.7] Disconnecting from {device.name}...")
                     napalm_manager.disconnect()
-                    logs.append(f"✓ Disconnected successfully")
+                    logs.append(f"[OK] Disconnected successfully")
                 except Exception as e:
                     logger.warning(f"Error disconnecting from {device.name}: {e}")
-                    logs.append(f"⚠ Warning during disconnect: {e}")
+                    logs.append(f"[WARN] Warning during disconnect: {e}")
 
     def _update_netbox_interface(self, device, interface_name, vlan):
         """
