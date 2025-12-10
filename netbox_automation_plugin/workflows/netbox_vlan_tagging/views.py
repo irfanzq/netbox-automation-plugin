@@ -391,10 +391,6 @@ class VLANTaggingView(View):
         
         Returns a dictionary with interface analysis results, or None if not host-facing
         """
-        # Skip management interfaces
-        if interface.name in ['eth0', 'mgmt0', 'Management1', 'lo']:
-            return None
-        
         analysis = {
             'interface': interface,
             'device': device,
@@ -405,6 +401,19 @@ class VLANTaggingView(View):
             'criteria_met': [],
             'criteria_missed': [],
         }
+        
+        # CRITICAL CHECK: Interface with IP address is a routed port
+        # This check must come FIRST, even before skipping management interfaces
+        # Management interfaces with IPs (like eth0 with management IP) should be tagged as routed
+        if interface.ip_addresses.exists():
+            analysis['recommended_tag'] = 'routed'
+            analysis['reasons'].append("Interface has IP address configured (routed port)")
+            analysis['criteria_met'].append("Routed port detected (has IP address)")
+            return analysis  # Return immediately - routed ports are always tagged as routed
+        
+        # Skip management interfaces WITHOUT IP addresses (they're not routed, just management)
+        if interface.name in ['eth0', 'mgmt0', 'Management1', 'lo']:
+            return None
         
         # PRIMARY CHECK: Cable must exist
         if not interface.cable:
@@ -480,12 +489,8 @@ class VLANTaggingView(View):
                 analysis['reasons'].append("Interface has tagged VLANs but configuration is unclear")
                 analysis['criteria_missed'].append("Tagged VLANs present but mode/platform mismatch")
         
-        # Check if routed (interface has IP or connected to router/L3 device)
-        # Check this BEFORE uplink, as routers are L3 devices
-        elif interface.ip_addresses.exists():
-            analysis['recommended_tag'] = 'routed'
-            analysis['reasons'].append("Interface has IP address configured (routed port)")
-            analysis['criteria_met'].append("Routed port detected")
+        # Check if connected to router/L3 device
+        # Note: IP address check was already done at the beginning of this function
         elif connected_role:
             # Router/firewall role names from actual NetBox instance
             router_role_names = [

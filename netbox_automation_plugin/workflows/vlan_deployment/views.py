@@ -199,6 +199,15 @@ class VLANDeploymentView(View):
                     interface_tag_list = list(interface.tags.all())
                     interface_tag_names_list = [t.name for t in interface_tag_list]
                     
+                    # CRITICAL CHECK: Interface with IP address is a routed port (BLOCKING)
+                    # This must be checked BEFORE tag checks, as IP address is a stronger signal
+                    if interface.ip_addresses.exists():
+                        results['interface_validation'][key] = {
+                            'status': 'block',
+                            'message': f"Interface has IP address configured (routed port) - would block deployment"
+                        }
+                        continue  # Skip further checks for this interface
+                    
                     # Check for blocking tags
                     if interface_tags.get('uplink') and interface_tags['uplink'].name in interface_tag_names_list:
                         results['interface_validation'][key] = {
@@ -784,6 +793,14 @@ class VLANDeploymentView(View):
                     interface.refresh_from_db()
                     interface_tag_list = list(interface.tags.all())
                     interface_tag_names_list = [t.name for t in interface_tag_list]
+                    
+                    # CRITICAL CHECK: Interface with IP address is a routed port (BLOCKING)
+                    # This must be checked BEFORE tag checks, as IP address is a stronger signal
+                    if interface.ip_addresses.exists():
+                        errors.append(
+                            f"Interface '{iface_name}' on device '{device.name}' has IP address configured (routed port) - cannot modify routed interfaces."
+                        )
+                        continue  # Skip further checks for this interface
                     
                     # Check for blocking tags (BLOCKING)
                     if interface_tags.get('uplink') and interface_tags['uplink'].name in interface_tag_names_list:
