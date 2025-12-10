@@ -280,12 +280,16 @@ class VLANDeploymentView(View):
                 'success': bool,
                 'current_config': str,  # Current config from device
                 'source': 'device'|'netbox'|'error',
+                'timestamp': str,  # Timestamp of config fetch
                 'error': str (if failed)
             }
         """
         napalm_manager = None
         try:
+            from datetime import datetime
+            import pytz
             napalm_manager = NAPALMDeviceManager(device)
+            timestamp = datetime.now(pytz.UTC).strftime('%Y-%m-%d %H:%M:%S UTC')
             
             if platform == 'cumulus':
                 # For Cumulus, use nv show command via NAPALM
@@ -305,7 +309,8 @@ class VLANDeploymentView(View):
                             return {
                                 'success': True,
                                 'current_config': current_config,
-                                'source': 'device'
+                                'source': 'device',
+                                'timestamp': timestamp
                             }
                 except Exception as e:
                     logger.warning(f"Could not get device config for {device.name}:{interface_name}: {e}")
@@ -323,7 +328,8 @@ class VLANDeploymentView(View):
                             return {
                                 'success': True,
                                 'current_config': current_config,
-                                'source': 'device'
+                                'source': 'device',
+                                'timestamp': timestamp
                             }
                 except Exception as e:
                     logger.warning(f"Could not get device config for {device.name}:{interface_name}: {e}")
@@ -383,6 +389,9 @@ class VLANDeploymentView(View):
         Infer current config from NetBox interface state.
         Used as fallback when device is unreachable.
         """
+        from datetime import datetime
+        import pytz
+        
         try:
             interface = Interface.objects.get(device=device, name=interface_name)
             interface.refresh_from_db()
@@ -408,16 +417,20 @@ class VLANDeploymentView(View):
             else:
                 config = f"Interface {interface_name} - unknown platform"
             
+            timestamp = datetime.now(pytz.UTC).strftime('%Y-%m-%d %H:%M:%S UTC')
             return {
                 'success': True,
                 'current_config': config,
-                'source': 'netbox'
+                'source': 'netbox',
+                'timestamp': timestamp
             }
         except Interface.DoesNotExist:
+            timestamp = datetime.now(pytz.UTC).strftime('%Y-%m-%d %H:%M:%S UTC')
             return {
                 'success': False,
                 'current_config': f"Interface {interface_name} not found in NetBox",
                 'source': 'error',
+                'timestamp': timestamp,
                 'error': 'Interface not found'
             }
     
@@ -545,6 +558,187 @@ class VLANDeploymentView(View):
             return "No changes"
         
         return '\n'.join(diff_lines)
+    
+    def _get_interface_details(self, device, interface_name):
+        """
+        Get detailed interface information for dry run display.
+        
+        Returns:
+            dict: Interface details including type, cable, connected device, etc.
+        """
+        try:
+            interface = Interface.objects.get(device=device, name=interface_name)
+            interface.refresh_from_db()
+            
+            details = {
+                'name': interface_name,
+                'type': interface.type if hasattr(interface, 'type') else 'Unknown',
+                'description': interface.description or 'No description',
+                'cabled': interface.cable is not None,
+                'connected_device': None,
+                'connected_role': None,
+                'port_channel_member': False,
+                'port_channel_name': None,
+            }
+            
+            # Check port-channel membership
+            if hasattr(interface, 'lag') and interface.lag:
+                details['port_channel_member'] = True
+                details['port_channel_name'] = interface.lag.name
+            
+            # Get connected device info
+            if interface.cable:
+                try:
+                    endpoints = interface.connected_endpoints
+                    if endpoints:
+                        endpoint = endpoints[0]
+                        connected_device = endpoint.device
+                        details['connected_device'] = connected_device.name
+                        details['connected_role'] = connected_device.role.name if connected_device.role else 'Unknown'
+                        details['connected_status'] = connected_device.status
+                except Exception as e:
+                    logger.debug(f"Could not get connected device info: {e}")
+            
+            return details
+        except Interface.DoesNotExist:
+            return {
+                'name': interface_name,
+                'type': 'Unknown',
+                'description': 'Interface not found in NetBox',
+                'cabled': False,
+                'connected_device': None,
+                'connected_role': None,
+                'port_channel_member': False,
+            }
+    
+    def _generate_rollback_info(self, device, interface_name, vlan_id, platform, timeout=90):
+        """
+        Generate comprehensive rollback information for both Cumulus and EOS.
+        
+        Returns:
+            str: Formatted rollback information
+        """
+        rollback_lines = []
+        rollback_lines.append("Rollback Plan:")
+        rollback_lines.append("")
+        
+        if platform == 'cumulus':
+            rollback_lines.append("Platform: Cumulus Linux (NVUE)")
+            rollback_lines.append("")
+            rollback_lines.append("Auto-Rollback:")
+            rollback_lines.append(f"  ✓ Supported: Yes (native commit-confirm)")
+            rollback_lines.append(f"  • Method: nv config apply --confirm {timeout}s")
+            rollback_lines.append(f"  • Timer: {timeout} seconds")
+            rollback_lines.append(f"  • Behavior: Automatically rolls back if not confirmed within {timeout}s")
+            rollback_lines.append("")
+            rollback_lines.append("Manual Rollback (if needed):")
+            rollback_lines.append(f"  nv unset interface {interface_name} bridge domain br_default access")
+            rollback_lines.append(f"  nv config apply")
+            rollback_lines.append("")
+            rollback_lines.append("To Confirm (prevent rollback):")
+            rollback_lines.append("  nv config confirm")
+            
+        elif platform == 'eos':
+            rollback_lines.append("Platform: Arista EOS")
+            rollback_lines.append("")
+            rollback_lines.append("Auto-Rollback:")
+            timer_minutes = max(2, min(120, timeout // 60))
+            rollback_lines.append(f"  ✓ Supported: Yes (configure session with commit timer)")
+            rollback_lines.append(f"  • Method: configure session <name> + commit timer {timer_minutes}:00:00")
+            rollback_lines.append(f"  • Timer: {timer_minutes} minutes")
+            rollback_lines.append(f"  • Behavior: Automatically rolls back when timer expires if not confirmed")
+            rollback_lines.append("")
+            rollback_lines.append("Manual Rollback (if needed):")
+            rollback_lines.append("  # Before timer expires:")
+            rollback_lines.append("  configure session <session_name>")
+            rollback_lines.append("  abort")
+            rollback_lines.append("")
+            rollback_lines.append("  # Or wait for timer to expire (automatic rollback)")
+            rollback_lines.append("")
+            rollback_lines.append("To Confirm (prevent rollback):")
+            rollback_lines.append("  commit")
+            rollback_lines.append("")
+            rollback_lines.append("Note: Session name is auto-generated (format: netbox_vlan_XXXX)")
+        else:
+            rollback_lines.append(f"Platform: {platform}")
+            rollback_lines.append("")
+            rollback_lines.append("Auto-Rollback:")
+            rollback_lines.append("  ⚠ Not supported on this platform")
+            rollback_lines.append("  • Manual intervention may be required")
+        
+        return '\n'.join(rollback_lines)
+    
+    def _generate_validation_table(self, device_validation, interface_validation):
+        """
+        Generate a formatted validation breakdown table.
+        
+        Returns:
+            str: Formatted validation table
+        """
+        table_lines = []
+        table_lines.append("Validation Breakdown:")
+        table_lines.append("")
+        table_lines.append("Check                          | Status | Details")
+        table_lines.append("-" * 80)
+        
+        # Device validation
+        device_status = device_validation.get('status', 'unknown')
+        device_msg = device_validation.get('message', '')
+        status_symbol = '❌' if device_status == 'block' else '⚠️' if device_status == 'warn' else '✓'
+        table_lines.append(f"Device: automation-ready:vlan    | {status_symbol} {device_status.upper():5} | {device_msg}")
+        
+        # Interface validation
+        iface_status = interface_validation.get('status', 'unknown')
+        iface_msg = interface_validation.get('message', '')
+        status_symbol = '❌' if iface_status == 'block' else '⚠️' if iface_status == 'warn' else '✓'
+        table_lines.append(f"Interface: tag check            | {status_symbol} {iface_status.upper():5} | {iface_msg}")
+        
+        return '\n'.join(table_lines)
+    
+    def _generate_risk_assessment(self, device_validation, interface_validation, current_vlan, new_vlan):
+        """
+        Generate risk assessment based on validation and changes.
+        
+        Returns:
+            str: Risk assessment text
+        """
+        risk_lines = []
+        risk_lines.append("Risk Assessment:")
+        risk_lines.append("")
+        
+        # Determine risk level
+        if device_validation.get('status') == 'block' or interface_validation.get('status') == 'block':
+            risk_level = "HIGH"
+            risk_icon = "🔴"
+        elif device_validation.get('status') == 'warn' or interface_validation.get('status') == 'warn':
+            risk_level = "MEDIUM"
+            risk_icon = "🟡"
+        else:
+            risk_level = "LOW"
+            risk_icon = "🟢"
+        
+        risk_lines.append(f"Risk Level: {risk_icon} {risk_level}")
+        risk_lines.append("")
+        
+        # List risk factors
+        risk_factors = []
+        if device_validation.get('status') == 'block':
+            risk_factors.append("Device not tagged as automation-ready (would block deployment)")
+        if interface_validation.get('status') == 'block':
+            risk_factors.append("Interface validation failed (would block deployment)")
+        if interface_validation.get('status') == 'warn':
+            risk_factors.append("Interface not properly tagged (would warn but allow)")
+        if current_vlan and current_vlan != new_vlan:
+            risk_factors.append(f"VLAN change: {current_vlan} → {new_vlan} (existing configuration will be modified)")
+        
+        if risk_factors:
+            risk_lines.append("Risk Factors:")
+            for factor in risk_factors:
+                risk_lines.append(f"  • {factor}")
+        else:
+            risk_lines.append("Risk Factors: None identified")
+        
+        return '\n'.join(risk_lines)
 
     def _validate_tags_before_deployment(self, devices, interface_list):
         """
@@ -705,12 +899,43 @@ class VLANDeploymentView(View):
             # First, run tag validation
             validation_results = self._validate_tags_for_dry_run(devices, interface_list)
             
+            # Calculate summary statistics
+            total_devices = len(devices)
+            total_interfaces = len(devices) * len(interface_list)
+            would_pass = 0
+            would_warn = 0
+            would_block = 0
+            
             for device in devices:
                 device_validation = validation_results['device_validation'].get(device.name, {})
                 
                 for interface_name in interface_list:
                     interface_key = f"{device.name}:{interface_name}"
                     interface_validation = validation_results['interface_validation'].get(interface_key, {})
+                    
+                    # Count status
+                    if device_validation.get('status') == 'block' or interface_validation.get('status') == 'block':
+                        would_block += 1
+                    elif device_validation.get('status') == 'warn' or interface_validation.get('status') == 'warn':
+                        would_warn += 1
+                    else:
+                        would_pass += 1
+            
+            for device in devices:
+                device_validation = validation_results['device_validation'].get(device.name, {})
+                
+                # Get device info
+                device_ip = str(device.primary_ip4.address).split('/')[0] if device.primary_ip4 else (str(device.primary_ip6.address).split('/')[0] if device.primary_ip6 else 'N/A')
+                device_site = device.site.name if device.site else 'N/A'
+                device_location = device.location.name if device.location else 'N/A'
+                device_role = device.role.name if device.role else 'N/A'
+                
+                for interface_name in interface_list:
+                    interface_key = f"{device.name}:{interface_name}"
+                    interface_validation = validation_results['interface_validation'].get(interface_key, {})
+                    
+                    # Get interface details
+                    interface_details = self._get_interface_details(device, interface_name)
                     
                     # Get proposed config
                     proposed_config = self._generate_vlan_config(interface_name, vlan_id, platform)
@@ -719,6 +944,7 @@ class VLANDeploymentView(View):
                     device_config_result = self._get_current_device_config(device, interface_name, platform)
                     current_device_config = device_config_result.get('current_config', 'Unable to fetch')
                     config_source = device_config_result.get('source', 'error')
+                    config_timestamp = device_config_result.get('timestamp', 'N/A')
                     
                     # Generate config diff
                     config_diff = self._generate_config_diff(current_device_config, proposed_config, platform)
@@ -727,21 +953,15 @@ class VLANDeploymentView(View):
                     netbox_state = self._get_netbox_current_state(device, interface_name, vlan_id)
                     netbox_diff = self._generate_netbox_diff(netbox_state, netbox_state['proposed'])
                     
-                    # Build validation status message
-                    validation_status = []
-                    if device_validation.get('status') == 'block':
-                        validation_status.append(f"⚠ Device: {device_validation.get('message', 'Would block')}")
-                    elif device_validation.get('status') == 'warn':
-                        validation_status.append(f"⚠ Device: {device_validation.get('message', 'Would warn')}")
-                    else:
-                        validation_status.append(f"✓ Device: {device_validation.get('message', 'Would pass')}")
+                    # Generate validation table
+                    validation_table = self._generate_validation_table(device_validation, interface_validation)
                     
-                    if interface_validation.get('status') == 'block':
-                        validation_status.append(f"⚠ Interface: {interface_validation.get('message', 'Would block')}")
-                    elif interface_validation.get('status') == 'warn':
-                        validation_status.append(f"⚠ Interface: {interface_validation.get('message', 'Would warn')}")
-                    else:
-                        validation_status.append(f"✓ Interface: {interface_validation.get('message', 'Would pass')}")
+                    # Generate risk assessment
+                    current_vlan = netbox_state['current']['untagged_vlan']
+                    risk_assessment = self._generate_risk_assessment(device_validation, interface_validation, current_vlan, vlan_id)
+                    
+                    # Generate rollback info
+                    rollback_info = self._generate_rollback_info(device, interface_name, vlan_id, platform, timeout=90)
                     
                     # Determine overall status
                     if device_validation.get('status') == 'block' or interface_validation.get('status') == 'block':
@@ -756,22 +976,110 @@ class VLANDeploymentView(View):
                     
                     # Build comprehensive deployment logs
                     logs = []
-                    logs.append("=== DRY RUN MODE - PREVIEW ONLY ===")
+                    logs.append("=" * 80)
+                    logs.append("DRY RUN MODE - PREVIEW ONLY")
+                    logs.append("=" * 80)
                     logs.append("")
-                    logs.append("--- Validation Results ---")
-                    logs.extend(validation_status)
+                    
+                    # Device and Platform Info
+                    logs.append("--- Device & Platform Information ---")
+                    logs.append(f"Device: {device.name} ({device_role})")
+                    logs.append(f"Site: {device_site} / Location: {device_location}")
+                    logs.append(f"IP Address: {device_ip}")
+                    logs.append(f"Platform: {platform.upper()}")
                     logs.append("")
-                    logs.append(f"--- Device Config ({config_source}) ---")
-                    logs.append(f"Current: {current_device_config}")
-                    logs.append(f"Proposed: {proposed_config}")
+                    
+                    # Interface Details
+                    logs.append("--- Interface Details ---")
+                    logs.append(f"Interface: {interface_name}")
+                    logs.append(f"Type: {interface_details.get('type', 'Unknown')}")
+                    logs.append(f"Description: {interface_details.get('description', 'No description')}")
+                    logs.append(f"Cable Status: {'✓ Cabled' if interface_details.get('cabled') else '✗ Not cabled'}")
+                    if interface_details.get('connected_device'):
+                        logs.append(f"Connected To: {interface_details.get('connected_device')} ({interface_details.get('connected_role', 'Unknown')})")
+                    if interface_details.get('port_channel_member'):
+                        logs.append(f"Port-Channel Member: Yes (member of {interface_details.get('port_channel_name')})")
+                    logs.append("")
+                    
+                    # Validation Breakdown Table
+                    logs.append(validation_table)
+                    logs.append("")
+                    
+                    # Risk Assessment
+                    logs.append(risk_assessment)
+                    logs.append("")
+                    
+                    # Connection Status
+                    logs.append("--- Device Config Source ---")
+                    if config_source == 'device':
+                        logs.append(f"✓ Connected to device successfully")
+                        if config_timestamp != 'N/A':
+                            logs.append(f"Config fetched at: {config_timestamp}")
+                    elif config_source == 'netbox':
+                        logs.append(f"⚠ Device unreachable - using NetBox inference")
+                        logs.append(f"Note: Actual device config may differ from NetBox state")
+                    else:
+                        logs.append(f"✗ Unable to fetch config (device unreachable and NetBox inference failed)")
+                    logs.append("")
+                    
+                    # Side-by-Side Config Comparison
+                    logs.append("--- Configuration Comparison ---")
+                    logs.append("")
+                    logs.append("Current Configuration:")
+                    for line in current_device_config.split('\n'):
+                        if line.strip():
+                            logs.append(f"  {line}")
+                    logs.append("")
+                    logs.append("Proposed Configuration:")
+                    for line in proposed_config.split('\n'):
+                        if line.strip():
+                            logs.append(f"  {line}")
                     logs.append("")
                     logs.append("--- Config Diff ---")
-                    logs.append(config_diff)
+                    for line in config_diff.split('\n'):
+                        logs.append(f"  {line}")
                     logs.append("")
-                    logs.append("--- NetBox Changes ---")
-                    logs.append(netbox_diff)
+                    
+                    # NetBox Changes
+                    logs.append("--- NetBox Interface Changes ---")
+                    for line in netbox_diff.split('\n'):
+                        logs.append(f"  {line}")
                     logs.append("")
-                    logs.append(f"Status: {status_message}")
+                    
+                    # Rollback Information
+                    logs.append(rollback_info)
+                    logs.append("")
+                    
+                    # Summary Statistics (for first interface only, to avoid repetition)
+                    if interface_name == interface_list[0]:
+                        logs.append("--- Summary Statistics ---")
+                        logs.append(f"Total Devices: {total_devices}")
+                        logs.append(f"Total Interfaces: {total_interfaces}")
+                        logs.append(f"Would Pass: {would_pass}")
+                        logs.append(f"Would Warn: {would_warn}")
+                        logs.append(f"Would Block: {would_block}")
+                        logs.append("")
+                    
+                    # Actionable Next Steps
+                    logs.append("--- Next Steps ---")
+                    if device_validation.get('status') == 'block':
+                        logs.append("1. Run Tagging Workflow to tag device as 'automation-ready:vlan'")
+                        logs.append("2. Re-run this dry run to verify validation passes")
+                    if interface_validation.get('status') == 'block':
+                        logs.append("1. Fix interface issues (cable, tags, etc.)")
+                        logs.append("2. Re-run this dry run to verify validation passes")
+                    if interface_validation.get('status') == 'warn':
+                        logs.append("1. Consider running Tagging Workflow to properly tag interface")
+                        logs.append("2. Review interface configuration before deploying")
+                    if device_validation.get('status') != 'block' and interface_validation.get('status') != 'block':
+                        logs.append("1. Review all changes above")
+                        logs.append("2. If changes look correct, proceed with actual deployment")
+                    logs.append("")
+                    
+                    # Final Status
+                    logs.append("=" * 80)
+                    logs.append(f"Final Status: {status_message}")
+                    logs.append("=" * 80)
                     
                     results.append({
                         "device": device,
@@ -783,10 +1091,12 @@ class VLANDeploymentView(View):
                         "netbox_updated": "Preview",
                         "message": f"{status_message} | Platform: {platform}",
                         "deployment_logs": '\n'.join(logs),
-                        "validation_status": validation_status,
+                        "validation_status": validation_table,
                         "device_config_diff": config_diff,
                         "netbox_diff": netbox_diff,
                         "config_source": config_source,
+                        "risk_assessment": risk_assessment,
+                        "rollback_info": rollback_info,
                     })
         else:
             # Deploy mode - use Nornir for parallel execution
