@@ -286,10 +286,9 @@ class VLANDeploymentView(View):
         """
         napalm_manager = None
         try:
-            from datetime import datetime
-            import pytz
+            from django.utils import timezone
             napalm_manager = NAPALMDeviceManager(device)
-            timestamp = datetime.now(pytz.UTC).strftime('%Y-%m-%d %H:%M:%S UTC')
+            timestamp = timezone.now().strftime('%Y-%m-%d %H:%M:%S UTC')
             
             if platform == 'cumulus':
                 # For Cumulus, use nv show command via NAPALM
@@ -389,8 +388,7 @@ class VLANDeploymentView(View):
         Infer current config from NetBox interface state.
         Used as fallback when device is unreachable.
         """
-        from datetime import datetime
-        import pytz
+        from django.utils import timezone
         
         try:
             interface = Interface.objects.get(device=device, name=interface_name)
@@ -417,7 +415,7 @@ class VLANDeploymentView(View):
             else:
                 config = f"Interface {interface_name} - unknown platform"
             
-            timestamp = datetime.now(pytz.UTC).strftime('%Y-%m-%d %H:%M:%S UTC')
+            timestamp = timezone.now().strftime('%Y-%m-%d %H:%M:%S UTC')
             return {
                 'success': True,
                 'current_config': config,
@@ -425,7 +423,7 @@ class VLANDeploymentView(View):
                 'timestamp': timestamp
             }
         except Interface.DoesNotExist:
-            timestamp = datetime.now(pytz.UTC).strftime('%Y-%m-%d %H:%M:%S UTC')
+            timestamp = timezone.now().strftime('%Y-%m-%d %H:%M:%S UTC')
             return {
                 'success': False,
                 'current_config': f"Interface {interface_name} not found in NetBox",
@@ -1297,7 +1295,7 @@ class VLANDeploymentView(View):
             logs.append(f"      Device IP: {device.primary_ip4 or device.primary_ip6}")
             napalm_manager = NAPALMDeviceManager(device)
             logger.info(f"Initialized NAPALM manager for {device.name} (platform: {platform})")
-                    logs.append(f"[OK] NAPALM manager initialized")
+            logs.append(f"[OK] NAPALM manager initialized")
 
             # Deploy using safe deployment with post-checks
             # Both EOS and Cumulus support commit-confirm workflow:
