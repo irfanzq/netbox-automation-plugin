@@ -279,6 +279,173 @@ class VLANDeploymentView(View):
         
         return results
 
+    def _looks_like_value(self, key):
+        """Check if a key looks like a value (IP address, number, etc.) rather than a config key."""
+        import re
+        # IP address pattern (IPv4 or IPv6 with CIDR)
+        if re.match(r'^[0-9a-fA-F:.]+/\d+$', key):
+            return True
+        # Pure number
+        if re.match(r'^\d+$', key):
+            return True
+        # IPv6 address without CIDR (less common but possible)
+        if '::' in key and re.match(r'^[0-9a-fA-F:.]+$', key):
+            return True
+        return False
+
+    def _parse_json_to_nv_commands(self, config_dict, base_path, interface_name):
+        """
+        Recursively parse JSON structure from nv config show -o json and generate nv set commands.
+        This is a generic parser that doesn't hardcode specific fields - it parses whatever is present.
+        
+        Args:
+            config_dict: Dictionary from JSON (interface configuration)
+            base_path: Current path prefix (e.g., "ip", "bridge domain")
+            interface_name: Interface name for the nv set command
+            
+        Returns:
+            List of nv set command strings
+        """
+        commands = []
+        
+        if not isinstance(config_dict, dict):
+            return commands
+        
+        for key, value in config_dict.items():
+            # Build the path
+            path = f"{base_path} {key}" if base_path else key
+            
+            # Check if value is a dict (nested structure)
+            if isinstance(value, dict):
+                # Check if dict is empty {} - this means the key itself might be a value
+                if not value:
+                    # Empty dict - key might be a value (e.g., IP address as key: "172.19.1.29/23": {})
+                    if self._looks_like_value(key):
+                        # Key is the value - use it directly
+                        if base_path:
+                            # Filter out link-local IPv6
+                            if 'address' in base_path.lower() and key.startswith('fe80::'):
+                                pass  # Skip link-local
+                            else:
+                                commands.append(f"nv set interface {interface_name} {base_path} {key}")
+                else:
+                    # Non-empty dict - recurse into nested structure
+                    nested_commands = self._parse_json_to_nv_commands(value, path, interface_name)
+                    commands.extend(nested_commands)
+            else:
+                # Leaf value - generate command
+                # Filter out link-local IPv6
+                if 'address' in key.lower() and isinstance(value, str) and value.startswith('fe80::'):
+                    pass  # Skip link-local
+                else:
+                    # Convert value to string
+                    value_str = str(value)
+                    commands.append(f"nv set interface {interface_name} {path} {value_str}")
+        
+        return commands
+
+    def _parse_yaml_to_nv_commands(self, block_lines, base_path, interface_name):
+        """
+        Recursively parse YAML-like structure from nv config show and generate nv set commands.
+        This is a generic parser that doesn't hardcode specific fields - it parses whatever is present.
+        
+        Args:
+            block_lines: List of lines from the YAML-like config
+            base_path: Current path prefix (e.g., "ip", "bridge domain")
+            interface_name: Interface name for the nv set command
+            
+        Returns:
+            List of nv set command strings
+        """
+        commands = []
+        i = 0
+        while i < len(block_lines):
+            line = block_lines[i]
+            if not line.strip():
+                i += 1
+                continue
+            
+            # Get indentation level
+            indent = len(line) - len(line.lstrip())
+            stripped = line.strip()
+            
+            # Skip if no colon (not a key:value pair)
+            if ':' not in stripped:
+                i += 1
+                continue
+            
+            # Parse key: value or key: (with nested structure)
+            key_part, value_part = stripped.split(':', 1)
+            key = key_part.strip()
+            value = value_part.strip()
+            
+            # Check if next line is more indented (nested structure)
+            if i + 1 < len(block_lines):
+                next_line = block_lines[i + 1]
+                next_indent = len(next_line) - len(next_line.lstrip())
+                next_stripped = next_line.strip()
+                
+                if next_indent > indent and ':' in next_stripped:
+                    # Check if next line's key looks like a value (e.g., IP address as key)
+                    next_key_part = next_stripped.split(':', 1)[0].strip()
+                    if self._looks_like_value(next_key_part) and value == '':
+                        # Special case: key is actually a value
+                        # e.g., "address:\n  172.19.1.29/23: {}"
+                        # The IP address is the value for "address"
+                        path = f"{base_path} {key}" if base_path else key
+                        if 'address' in key.lower() and next_key_part.startswith('fe80::'):
+                            pass  # Skip link-local IPv6
+                        else:
+                            commands.append(f"nv set interface {interface_name} {path} {next_key_part}")
+                        i += 1  # Skip next line
+                        continue
+                    
+                    # Regular nested structure - recurse
+                    nested_lines = []
+                    for j in range(i + 1, len(block_lines)):
+                        nested_line = block_lines[j]
+                        nested_indent = len(nested_line) - len(nested_line.lstrip())
+                        if nested_indent <= indent:
+                            break
+                        nested_lines.append(nested_line)
+                    
+                    # Recursively parse nested structure
+                    nested_commands = self._parse_yaml_to_nv_commands(
+                        nested_lines, 
+                        f"{base_path} {key}" if base_path else key,
+                        interface_name
+                    )
+                    commands.extend(nested_commands)
+                    i = j
+                    continue
+            
+            # Leaf value - generate command
+            # Check if key itself looks like a value (e.g., IP address as key: "172.19.1.29/23: {}")
+            if self._looks_like_value(key) and (value == '' or value == '{}'):
+                # Key is the value - use it directly
+                path = base_path if base_path else ""
+                if path:
+                    # Filter out link-local IPv6
+                    if 'address' in path.lower() and key.startswith('fe80::'):
+                        pass  # Skip link-local
+                    else:
+                        commands.append(f"nv set interface {interface_name} {path} {key}")
+            elif value and value != '{}':
+                # Value is on same line: "key: value"
+                value_clean = value.strip('{}').strip()
+                if value_clean:
+                    path = f"{base_path} {key}" if base_path else key
+                    # Filter out link-local IPv6
+                    if 'address' in key.lower() and value_clean.startswith('fe80::'):
+                        pass  # Skip link-local
+                    else:
+                        commands.append(f"nv set interface {interface_name} {path} {value_clean}")
+            # If value is empty and we didn't recurse, it's a parent key with no direct value
+            
+            i += 1
+        
+        return commands
+
     def _get_current_device_config(self, device, interface_name, platform):
         """
         Get current interface configuration from device (read-only).
@@ -301,118 +468,161 @@ class VLANDeploymentView(View):
             timestamp = timezone.now().strftime('%Y-%m-%d %H:%M:%S UTC')
             
             if platform == 'cumulus':
-                # For Cumulus, get interface config in JSON format
+                # For Cumulus, use nv config show (most complete, shows bridge/VLAN configs)
+                # Note: We don't use nv show interface -o json as fallback because it's incomplete
+                # (missing gateway, missing bridge access VLANs) - better to show "no config" than false info
                 try:
                     if napalm_manager.connect():
                         connection = napalm_manager.connection
                         
-                        # Get interface config in JSON format
+                        # Primary method: Use nv config show (more complete, shows bridge/VLAN configs)
+                        # Add retry logic in case command fails if sent too early
+                        current_config = None
+                        device_connected = True  # Track if device is actually connected
                         try:
                             if hasattr(connection, 'cli'):
-                                # Use nv show -o json to get structured config
-                                cli_output = connection.cli([f'nv show interface {interface_name} -o json'])
-                                if cli_output:
-                                    # CLI output can be dict or string - handle both
-                                    if isinstance(cli_output, dict):
-                                        # If dict, get the value (might be keyed by interface name or command)
-                                        if interface_name in cli_output:
-                                            output = cli_output[interface_name]
-                                        else:
-                                            # Get first value if interface name not in keys
-                                            output = list(cli_output.values())[0] if cli_output else ""
-                                    else:
-                                        output = str(cli_output)
-                                    
-                                    # Parse JSON and convert to actual NVUE commands
-                                    if output.strip():
-                                        try:
-                                            import json
-                                            if isinstance(output, str):
-                                                json_obj = json.loads(output)
-                                            else:
-                                                json_obj = output
-                                            
-                                            # Convert JSON to actual NVUE commands
-                                            command_lines = []
-                                            
-                                            # Extract key fields from JSON and convert to commands
-                                            if isinstance(json_obj, dict):
-                                                # IP configuration
-                                                if 'ip' in json_obj:
-                                                    ip_config = json_obj['ip']
-                                                    
-                                                    # VRF
-                                                    if 'vrf' in ip_config:
-                                                        vrf = ip_config['vrf']
-                                                        if isinstance(vrf, dict):
-                                                            vrf_value = vrf.get('applied') or vrf.get('operational') or list(vrf.values())[0] if vrf else None
-                                                        else:
-                                                            vrf_value = vrf
-                                                        if vrf_value:
-                                                            command_lines.append(f"nv set interface {interface_name} ip vrf {vrf_value}")
-                                                    
-                                                    # IP addresses
-                                                    if 'address' in ip_config:
-                                                        addresses = ip_config['address']
-                                                        if isinstance(addresses, dict):
-                                                            for addr in addresses.keys():
-                                                                command_lines.append(f"nv set interface {interface_name} ip address {addr}")
-                                                    
-                                                    # Gateway
-                                                    if 'gateway' in ip_config:
-                                                        gateway = ip_config['gateway']
-                                                        if isinstance(gateway, dict):
-                                                            gateway_value = gateway.get('applied') or gateway.get('operational') or list(gateway.values())[0] if gateway else None
-                                                        else:
-                                                            gateway_value = gateway
-                                                        if gateway_value:
-                                                            command_lines.append(f"nv set interface {interface_name} ip gateway {gateway_value}")
-                                                
-                                                # Bridge domain (if configured)
-                                                if 'bridge' in json_obj:
-                                                    bridge_config = json_obj['bridge']
-                                                    if 'domain' in bridge_config:
-                                                        domain_config = bridge_config['domain']
-                                                        if 'br_default' in domain_config:
-                                                            br_default = domain_config['br_default']
-                                                            if 'access' in br_default:
-                                                                access_vlan = br_default['access']
-                                                                if isinstance(access_vlan, dict):
-                                                                    vlan_value = access_vlan.get('applied') or access_vlan.get('operational') or list(access_vlan.values())[0] if access_vlan else None
-                                                                else:
-                                                                    vlan_value = access_vlan
-                                                                if vlan_value:
-                                                                    command_lines.append(f"nv set interface {interface_name} bridge domain br_default access {vlan_value}")
-                                                
-                                                # Type (if explicitly set)
-                                                if 'type' in json_obj:
-                                                    iface_type = json_obj['type']
-                                                    if isinstance(iface_type, dict):
-                                                        type_value = iface_type.get('applied') or iface_type.get('operational') or list(iface_type.values())[0] if iface_type else None
-                                                    else:
-                                                        type_value = iface_type
-                                                    if type_value and type_value != 'eth':  # Only show if not default
-                                                        command_lines.append(f"nv set interface {interface_name} type {type_value}")
-                                            
-                                            current_config = '\n'.join(command_lines) if command_lines else f"(no configuration commands found for interface {interface_name})"
-                                            
-                                        except (json.JSONDecodeError, TypeError, KeyError) as e:
-                                            logger.warning(f"Error parsing JSON config for {device.name}:{interface_name}: {e}")
-                                            # If JSON parsing fails, show pretty-printed JSON as fallback
-                                            try:
-                                                import json
-                                                if isinstance(output, str):
-                                                    json_obj = json.loads(output)
-                                                    current_config = json.dumps(json_obj, indent=2)
+                                # Primary: Use nv config show -o json (more reliable than YAML parsing)
+                                # Retry up to 3 times with 1 second delay between retries
+                                config_show_output = None
+                                config_json = None
+                                max_retries = 3
+                                for attempt in range(max_retries):
+                                    try:
+                                        config_show_output = connection.cli(['nv config show -o json'])
+                                        if config_show_output:
+                                            # Extract output (might be keyed by command)
+                                            if isinstance(config_show_output, dict):
+                                                if 'nv config show -o json' in config_show_output:
+                                                    config_json_str = config_show_output['nv config show -o json']
+                                                elif 'nv config show' in config_show_output:
+                                                    config_json_str = config_show_output['nv config show']
                                                 else:
-                                                    current_config = json.dumps(output, indent=2)
-                                            except:
-                                                # Fallback to raw output
-                                                current_config = output.strip()
-                                    else:
+                                                    config_json_str = list(config_show_output.values())[0] if config_show_output else None
+                                            else:
+                                                config_json_str = str(config_show_output)
+                                            
+                                            if config_json_str and config_json_str.strip():
+                                                break  # Success, exit retry loop
+                                        if attempt < max_retries - 1:
+                                            import time
+                                            time.sleep(1)  # Wait 1 second before retry
+                                            logger.debug(f"nv config show attempt {attempt + 1} failed, retrying...")
+                                    except Exception as e_retry:
+                                        if attempt < max_retries - 1:
+                                            import time
+                                            time.sleep(1)
+                                            logger.debug(f"nv config show attempt {attempt + 1} failed with error: {e_retry}, retrying...")
+                                        else:
+                                            logger.warning(f"nv config show failed after {max_retries} attempts: {e_retry}")
+                                
+                                # Parse JSON config if we got it
+                                if config_json_str and config_json_str.strip():
+                                    import json
+                                    command_lines = []
+                                    
+                                    try:
+                                        # Parse JSON
+                                        config_data = json.loads(config_json_str)
+                                        
+                                        # Navigate to interface section
+                                        # Structure: [{"header": {...}}, {"set": {"interface": {...}}}]
+                                        interface_config = None
+                                        for item in config_data:
+                                            if isinstance(item, dict) and 'set' in item:
+                                                set_data = item['set']
+                                                if isinstance(set_data, dict) and 'interface' in set_data:
+                                                    interfaces = set_data['interface']
+                                                    if isinstance(interfaces, dict) and interface_name in interfaces:
+                                                        interface_config = interfaces[interface_name]
+                                                        break
+                                        
+                                        if interface_config:
+                                            # Convert JSON structure to nv set commands
+                                            parsed_commands = self._parse_json_to_nv_commands(interface_config, "", interface_name)
+                                            command_lines.extend(parsed_commands)
+                                        
+                                        if command_lines:
+                                            current_config = '\n'.join(command_lines)
+                                        else:
+                                            # Interface not found in config or has no configuration commands
+                                            current_config = None  # Will try grep fallback
+                                    except json.JSONDecodeError as e:
+                                        logger.warning(f"Failed to parse JSON config for {device.name}:{interface_name}: {e}")
+                                        current_config = None  # Will try grep fallback
+                                    except Exception as e:
+                                        logger.warning(f"Error processing JSON config for {device.name}:{interface_name}: {e}")
+                                        current_config = None  # Will try grep fallback
+                                
+                                # Fallback: If nv config show -o json didn't find interface, try YAML grep
+                                if not current_config:
+                                    logger.debug(f"nv config show -o json didn't find {interface_name} or returned empty. Trying YAML grep fallback...")
+                                    try:
+                                        # Use grep with context: nv config show | grep -A15 -B15 {interface_name}
+                                        # Note: grep works better with YAML format (line-based)
+                                        grep_command = f'nv config show | grep -A15 -B15 {interface_name}'
+                                        grep_output = connection.cli([grep_command])
+                                        
+                                        if grep_output:
+                                            # Extract output
+                                            grep_result = None
+                                            if isinstance(grep_output, dict):
+                                                if grep_command in grep_output:
+                                                    grep_result = grep_output[grep_command]
+                                                else:
+                                                    grep_result = list(grep_output.values())[0] if grep_output else None
+                                            else:
+                                                grep_result = str(grep_output)
+                                            
+                                            if grep_result and grep_result.strip():
+                                                # Parse grep output (has context lines before/after)
+                                                import re
+                                                command_lines = []
+                                                
+                                                # Find the interface line in grep output
+                                                grep_lines = grep_result.split('\n')
+                                                interface_found = False
+                                                interface_block_lines = []
+                                                interface_indent = None
+                                                
+                                                for i, line in enumerate(grep_lines):
+                                                    stripped = line.strip()
+                                                    if stripped.startswith(f'{interface_name}:'):
+                                                        interface_found = True
+                                                        interface_indent = len(line) - len(line.lstrip())
+                                                        # Start collecting from this line
+                                                        interface_block_lines.append(line)
+                                                        # Collect following lines until we hit another interface or section
+                                                        for j in range(i + 1, len(grep_lines)):
+                                                            next_line = grep_lines[j]
+                                                            if not next_line.strip():
+                                                                continue
+                                                            next_indent = len(next_line) - len(next_line.lstrip())
+                                                            # Stop if we hit a line at same or less indent with colon (new interface/section)
+                                                            if next_indent <= interface_indent and ':' in next_line.strip():
+                                                                break
+                                                            interface_block_lines.append(next_line)
+                                                        break
+                                                
+                                                if interface_found and interface_block_lines:
+                                                    # Use the same generic parser for grep output
+                                                    parsed_commands = self._parse_yaml_to_nv_commands(interface_block_lines, "", interface_name)
+                                                    
+                                                    # Add all parsed commands (link-local IPv6 already filtered in parser)
+                                                    command_lines.extend(parsed_commands)
+                                                
+                                                if command_lines:
+                                                    current_config = '\n'.join(command_lines)
+                                    except Exception as e_grep:
+                                        logger.debug(f"Grep fallback failed for {device.name}:{interface_name}: {e_grep}")
+                                
+                                # Final check: If both methods failed, show appropriate message
+                                if not current_config:
+                                    if device_connected:
+                                        # Device is connected but no config found
                                         current_config = f"(no configuration found for interface {interface_name})"
-                                else:
-                                    current_config = f"(no output from device for interface {interface_name})"
+                                    else:
+                                        # Device connection issue
+                                        current_config = f"(unable to retrieve config from device for interface {interface_name})"
                             else:
                                 # No CLI method, try get_config
                                 config = napalm_manager.get_config(retrieve='running')
@@ -441,10 +651,11 @@ class VLANDeploymentView(View):
                                 else:
                                     current_config = f"(could not retrieve config)"
                             
+                            
                             napalm_manager.disconnect()
                             return {
                                 'success': True,
-                                'current_config': current_config,
+                                'current_config': current_config if current_config is not None else f"(no output from device for interface {interface_name})",
                                 'source': 'device',
                                 'timestamp': timestamp
                             }
@@ -1462,12 +1673,34 @@ class VLANDeploymentView(View):
                     if is_blocked:
                         overall_status = "error"
                         status_message = "Would BLOCK deployment"
+                        overall_status_text = "BLOCKED"
                     elif device_validation.get('status') == 'warn' or interface_validation.get('status') == 'warn':
                         overall_status = "success"
                         status_message = "Would WARN but allow deployment"
+                        overall_status_text = "WARN"
                     else:
                         overall_status = "success"
                         status_message = "Would PASS validation"
+                        overall_status_text = "PASS"
+                    
+                    # Extract status text for table display
+                    device_status_text = "PASS" if device_validation.get('status') == 'pass' else "BLOCK"
+                    interface_status_text = interface_validation.get('status', 'pass').upper()
+                    if interface_status_text == 'PASS':
+                        interface_status_text = "PASS"
+                    elif interface_status_text == 'WARN':
+                        interface_status_text = "WARN"
+                    elif interface_status_text == 'BLOCK':
+                        interface_status_text = "BLOCK"
+                    else:
+                        interface_status_text = "PASS"
+                    
+                    # Extract risk level from risk assessment
+                    risk_level = "LOW"
+                    if "HIGH" in risk_assessment or "HIGH Risk" in risk_assessment:
+                        risk_level = "HIGH"
+                    elif "MEDIUM" in risk_assessment or "MEDIUM Risk" in risk_assessment:
+                        risk_level = "MEDIUM"
                     
                     # Build comprehensive deployment logs
                     logs = []
@@ -1688,6 +1921,11 @@ class VLANDeploymentView(View):
                         "config_source": config_source,
                         "risk_assessment": risk_assessment,
                         "rollback_info": rollback_info,
+                        # New fields for scalable table view
+                        "device_status": device_status_text,
+                        "interface_status": interface_status_text,
+                        "overall_status": overall_status_text,
+                        "risk_level": risk_level,
                     })
         else:
             # Deploy mode - use Nornir for parallel execution

@@ -39,10 +39,17 @@
       <div class="card">
         <div class="card-header d-flex justify-content-between align-items-center">
           <h5 class="card-title mb-0">{% trans "VLAN Deployment Results" %}</h5>
-          <button type="button" id="download-csv-btn" class="btn btn-sm btn-secondary">
-            <i class="mdi mdi-download"></i>
-            {% trans "Download CSV" %}
-          </button>
+          <div>
+            <div class="btn-group btn-group-sm me-2" role="group" id="status-filter-buttons">
+              <button type="button" class="btn btn-primary active" data-filter="all">All</button>
+              <button type="button" class="btn btn-outline-primary" data-filter="blocked">Blocked Only</button>
+              <button type="button" class="btn btn-outline-primary" data-filter="warnings">Warnings Only</button>
+            </div>
+            <button type="button" id="download-csv-btn" class="btn btn-sm btn-secondary">
+              <i class="mdi mdi-download"></i>
+              {% trans "Download CSV" %}
+            </button>
+          </div>
         </div>
         <div class="card-body table-responsive">
           {% render_table table %}
@@ -50,6 +57,75 @@
       </div>
       
       <script>
+        // Status filter functionality
+        document.addEventListener('DOMContentLoaded', function() {
+          const filterButtons = document.querySelectorAll('#status-filter-buttons button');
+          const tableRows = document.querySelectorAll('tbody tr');
+          
+          filterButtons.forEach(button => {
+            button.addEventListener('click', function() {
+              // Update button states
+              filterButtons.forEach(btn => {
+                btn.classList.remove('active', 'btn-primary');
+                btn.classList.add('btn-outline-primary');
+              });
+              this.classList.add('active', 'btn-primary');
+              this.classList.remove('btn-outline-primary');
+              
+              // Get filter value
+              const filter = this.getAttribute('data-filter');
+              
+              // Filter rows
+              let visibleCount = 0;
+              tableRows.forEach(row => {
+                const details = row.querySelector('details.deployment-logs');
+                const statusFilter = details ? details.getAttribute('data-status-filter') : '';
+                
+                // Find Overall Status column - it's the 6th column (after Device, Interface, VLAN, Device Status, Interface Status)
+                const cells = row.querySelectorAll('td');
+                let statusText = '';
+                
+                // Try to find status from data attribute first
+                if (statusFilter) {
+                  statusText = statusFilter;
+                } else {
+                  // Fallback: look for badge in cells (Overall Status should be around index 5)
+                  if (cells.length > 5) {
+                    const statusCell = cells[5];
+                    const badge = statusCell.querySelector('.badge');
+                    if (badge) {
+                      const text = badge.textContent.trim().toLowerCase();
+                      if (text === 'pass' || text === 'warn' || text === 'blocked') {
+                        statusText = text;
+                      }
+                    }
+                  }
+                }
+                
+                let show = false;
+                if (filter === 'all') {
+                  show = true;
+                } else if (filter === 'blocked') {
+                  show = statusText === 'blocked';
+                } else if (filter === 'warnings') {
+                  show = statusText === 'warn';
+                }
+                
+                if (show) {
+                  row.style.display = '';
+                  visibleCount++;
+                } else {
+                  row.style.display = 'none';
+                }
+              });
+              
+              // Update summary if needed
+              console.log(`Showing ${visibleCount} of ${tableRows.length} rows`);
+            });
+          });
+        });
+        
+        // CSV download functionality
         document.getElementById('download-csv-btn').addEventListener('click', function() {
           // Get the table
           const table = document.querySelector('table');
@@ -62,18 +138,20 @@
           });
           csv.push(headers.join(','));
           
-          // Get rows
+          // Get rows (only visible ones)
           table.querySelectorAll('tbody tr').forEach(tr => {
-            const row = [];
-            tr.querySelectorAll('td').forEach(td => {
-              // Escape quotes and wrap in quotes if contains comma
-              let value = td.textContent.trim().replace(/"/g, '""');
-              if (value.includes(',') || value.includes('\n') || value.includes('"')) {
-                value = '"' + value + '"';
-              }
-              row.push(value);
-            });
-            csv.push(row.join(','));
+            if (tr.style.display !== 'none') {
+              const row = [];
+              tr.querySelectorAll('td').forEach(td => {
+                // Escape quotes and wrap in quotes if contains comma
+                let value = td.textContent.trim().replace(/"/g, '""');
+                if (value.includes(',') || value.includes('\n') || value.includes('"')) {
+                  value = '"' + value + '"';
+                }
+                row.push(value);
+              });
+              csv.push(row.join(','));
+            }
           });
           
           // Create download

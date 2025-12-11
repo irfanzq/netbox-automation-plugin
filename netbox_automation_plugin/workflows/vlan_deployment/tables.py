@@ -20,32 +20,150 @@ class VLANDeploymentResultTable(NetBoxTable):
         accessor="interface",
         verbose_name=_("Interface"),
     )
+    vlan = tables.Column(
+        accessor="vlan_id",
+        verbose_name=_("VLAN"),
+        orderable=False,
+    )
+    device_status = tables.Column(
+        accessor="device_status",
+        verbose_name=_("Device Status"),
+        orderable=False,
+    )
+    interface_status = tables.Column(
+        accessor="interface_status",
+        verbose_name=_("Interface Status"),
+        orderable=False,
+    )
+    overall_status = tables.Column(
+        accessor="overall_status",
+        verbose_name=_("Overall Status"),
+        orderable=False,
+    )
+    risk_level = tables.Column(
+        accessor="risk_level",
+        verbose_name=_("Risk Level"),
+        orderable=False,
+    )
+    actions = tables.Column(
+        accessor="deployment_logs",
+        verbose_name=_("Actions"),
+        orderable=False,
+    )
+    
+    # Legacy columns (hidden by default but kept for compatibility)
     vlan_id = tables.Column(
         accessor="vlan_id",
         verbose_name=_("VLAN ID"),
+        visible=False,
     )
     vlan_name = tables.Column(
         accessor="vlan_name",
         verbose_name=_("VLAN Name"),
+        visible=False,
     )
     status = tables.Column(
         accessor="status",
         verbose_name=_("Status"),
+        visible=False,
     )
     config_applied = tables.Column(
         accessor="config_applied",
         verbose_name=_("Config Applied"),
+        visible=False,
     )
     netbox_updated = tables.Column(
         accessor="netbox_updated",
         verbose_name=_("NetBox Updated"),
+        visible=False,
     )
     deployment_logs = tables.Column(
         accessor="deployment_logs",
         verbose_name=_("Deployment Logs"),
         orderable=False,
+        visible=False,
     )
 
+    def render_vlan(self, record):
+        """Render VLAN ID and name."""
+        vlan_id = record.get('vlan_id', 'N/A')
+        vlan_name = record.get('vlan_name', '')
+        if vlan_name:
+            return format_html('{} ({})', vlan_id, vlan_name)
+        return format_html('{}', vlan_id)
+    
+    def render_device_status(self, value):
+        """Render device status with color-coded badge."""
+        if value == 'PASS':
+            return format_html('<span class="badge bg-success">{}</span>', value)
+        elif value == 'BLOCK':
+            return format_html('<span class="badge bg-danger">{}</span>', value)
+        return format_html('<span class="badge bg-secondary">{}</span>', value or 'N/A')
+    
+    def render_interface_status(self, value):
+        """Render interface status with color-coded badge."""
+        if value == 'PASS':
+            return format_html('<span class="badge bg-success">{}</span>', value)
+        elif value == 'WARN':
+            return format_html('<span class="badge bg-warning text-dark">{}</span>', value)
+        elif value == 'BLOCK':
+            return format_html('<span class="badge bg-danger">{}</span>', value)
+        return format_html('<span class="badge bg-secondary">{}</span>', value or 'N/A')
+    
+    def render_overall_status(self, value):
+        """Render overall status with color-coded badge."""
+        if value == 'PASS':
+            return format_html('<span class="badge bg-success">{}</span>', value)
+        elif value == 'WARN':
+            return format_html('<span class="badge bg-warning text-dark">{}</span>', value)
+        elif value == 'BLOCKED':
+            return format_html('<span class="badge bg-danger">{}</span>', value)
+        return format_html('<span class="badge bg-secondary">{}</span>', value or 'N/A')
+    
+    def render_risk_level(self, value):
+        """Render risk level with color-coded badge."""
+        if value == 'HIGH':
+            return format_html('<span class="badge bg-danger">{}</span>', value)
+        elif value == 'MEDIUM':
+            return format_html('<span class="badge bg-warning text-dark">{}</span>', value)
+        elif value == 'LOW':
+            return format_html('<span class="badge bg-success">{}</span>', value)
+        return format_html('<span class="badge bg-secondary">{}</span>', value or 'N/A')
+    
+    def render_actions(self, record):
+        """Render expandable detailed logs button."""
+        value = record.get('deployment_logs', '')
+        if not value:
+            return format_html('<span class="text-muted">No logs available</span>')
+
+        # Create expandable log section with unique ID
+        import hashlib
+        log_id = hashlib.md5(str(value).encode()).hexdigest()[:8]
+        
+        # Get status for filtering
+        overall_status = record.get('overall_status', '').lower()
+        if overall_status == 'blocked':
+            status_filter = 'blocked'
+        elif overall_status == 'warn':
+            status_filter = 'warn'
+        else:
+            status_filter = 'pass'
+
+        # Format logs with line breaks and proper styling
+        formatted_logs = value.replace('\n', '<br>')
+
+        html = f'''
+        <details class="deployment-logs" data-status-filter="{status_filter}">
+            <summary style="cursor: pointer; color: #0066cc; font-weight: bold;">
+                View Details ({len(value.split(chr(10)))} lines)
+            </summary>
+            <div style="margin-top: 10px; padding: 10px; background-color: #f5f5f5; border-left: 3px solid #0066cc; font-family: monospace; font-size: 12px; max-height: 400px; overflow-y: auto;">
+                {formatted_logs}
+            </div>
+        </details>
+        '''
+        return format_html(html)
+    
     def render_deployment_logs(self, value):
         """Render deployment logs as expandable HTML with proper formatting."""
         if not value:
@@ -61,7 +179,7 @@ class VLANDeploymentResultTable(NetBoxTable):
         html = f'''
         <details class="deployment-logs">
             <summary style="cursor: pointer; color: #0066cc; font-weight: bold;">
-                📋 View Detailed Logs ({len(value.split(chr(10)))} lines)
+                View Detailed Logs ({len(value.split(chr(10)))} lines)
             </summary>
             <div style="margin-top: 10px; padding: 10px; background-color: #f5f5f5; border-left: 3px solid #0066cc; font-family: monospace; font-size: 12px; max-height: 400px; overflow-y: auto;">
                 {formatted_logs}
@@ -75,6 +193,13 @@ class VLANDeploymentResultTable(NetBoxTable):
         fields = (
             "device",
             "interface",
+            "vlan",
+            "device_status",
+            "interface_status",
+            "overall_status",
+            "risk_level",
+            "actions",
+            # Legacy fields (hidden)
             "vlan_id",
             "vlan_name",
             "status",
@@ -85,11 +210,11 @@ class VLANDeploymentResultTable(NetBoxTable):
         default_columns = (
             "device",
             "interface",
-            "vlan_id",
-            "vlan_name",
-            "status",
-            "config_applied",
-            "netbox_updated",
-            "deployment_logs",
+            "vlan",
+            "device_status",
+            "interface_status",
+            "overall_status",
+            "risk_level",
+            "actions",
         )
 
