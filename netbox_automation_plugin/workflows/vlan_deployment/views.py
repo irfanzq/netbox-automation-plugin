@@ -89,6 +89,10 @@ class VLANDeploymentView(View):
 
         table = VLANDeploymentResultTable(results, orderable=True)
         summary = self._build_summary(results, len(devices))
+        
+        # Calculate device summaries and status counts
+        device_summaries = self._build_device_summaries(results)
+        status_counts = self._calculate_status_counts(results)
 
         # Get excluded devices info
         excluded_devices = form.cleaned_data.get('excluded_devices', [])
@@ -101,6 +105,8 @@ class VLANDeploymentView(View):
             "form": form,
             "table": table,
             "summary": summary,
+            "device_summaries": device_summaries,
+            "status_counts": status_counts,
             "excluded_devices": excluded_device_names,
             "excluded_count": len(excluded_devices),
             "tagging_warnings": tagging_warnings,
@@ -293,18 +299,106 @@ class VLANDeploymentView(View):
             return True
         return False
 
+    def _interface_matches_range(self, interface_name, range_key):
+        """
+        Check if an interface name matches a range pattern.
+        Examples:
+        - swp6 matches swp1-32 -> True
+        - swp6 matches swp6 -> True
+        - swp6 matches bond6 -> False
+        - swp6 matches swp1-5 -> False
+        """
+        import re
+        # Exact match
+        if interface_name == range_key:
+            return True
+        
+        # Range pattern: swp1-32, bond3-6, etc.
+        range_match = re.match(r'^([a-zA-Z]+)(\d+)-(\d+)$', range_key)
+        if range_match:
+            prefix = range_match.group(1)
+            start = int(range_match.group(2))
+            end = int(range_match.group(3))
+            
+            # Check if interface matches the prefix and is in range
+            interface_match = re.match(r'^([a-zA-Z]+)(\d+)$', interface_name)
+            if interface_match:
+                iface_prefix = interface_match.group(1)
+                iface_num = int(interface_match.group(2))
+                
+                if iface_prefix == prefix and start <= iface_num <= end:
+                    return True
+        
+        # Comma-separated list: bond3,5-6
+        if ',' in range_key:
+            parts = range_key.split(',')
+            for part in parts:
+                if self._interface_matches_range(interface_name, part.strip()):
+                    return True
+        
+        return False
+
+    def _find_interface_config_in_json(self, config_data, interface_name):
+        """
+        Find interface configuration in JSON, handling ranges and bond members.
+        Extracts from the "interface" key in the JSON structure:
+        [{"header": {...}}, {"set": {"interface": {...}}}]
+        
+        Returns the interface config dict if found, None otherwise.
+        No hardcoding - shows whatever is defined in interface configs.
+        """
+        # Navigate to interface section - extract from "interface" key
+        interfaces = None
+        for item in config_data:
+            if isinstance(item, dict) and 'set' in item:
+                set_data = item['set']
+                if isinstance(set_data, dict) and 'interface' in set_data:
+                    interfaces = set_data['interface']  # Extract from "interface" key
+                    break
+        
+        if not interfaces or not isinstance(interfaces, dict):
+            return None
+        
+        # First, try exact match
+        if interface_name in interfaces:
+            return interfaces[interface_name]
+        
+        # Check if interface is in a range (e.g., swp6 in swp1-32)
+        for range_key, range_config in interfaces.items():
+            if self._interface_matches_range(interface_name, range_key) and interface_name != range_key:
+                # Interface is in a range - return the range config
+                # Mark it as inherited by adding a note to the config dict
+                if isinstance(range_config, dict):
+                    range_config = range_config.copy()
+                    range_config['_inherited_from'] = range_key
+                return range_config
+        
+        # Check if interface is a bond member
+        for bond_name, bond_config in interfaces.items():
+            if isinstance(bond_config, dict) and 'bond' in bond_config:
+                bond_members = bond_config.get('bond', {}).get('member', {})
+                if isinstance(bond_members, dict) and interface_name in bond_members:
+                    # Interface is a bond member - return bond config with note
+                    if isinstance(bond_config, dict):
+                        bond_config = bond_config.copy()
+                        bond_config['_bond_member_of'] = bond_name
+                    return bond_config
+        
+        return None
+
     def _parse_json_to_nv_commands(self, config_dict, base_path, interface_name):
         """
         Recursively parse JSON structure from nv config show -o json and generate nv set commands.
-        This is a generic parser that doesn't hardcode specific fields - it parses whatever is present.
+        This is a fully generic parser with NO hardcoding - it parses and displays whatever is 
+        present in the interface configuration (ranges, individual interfaces, bond members, etc.).
         
         Args:
-            config_dict: Dictionary from JSON (interface configuration)
-            base_path: Current path prefix (e.g., "ip", "bridge domain")
+            config_dict: Dictionary from JSON (interface configuration from "interface" key)
+            base_path: Current path prefix (e.g., "ip", "bridge domain", "link state")
             interface_name: Interface name for the nv set command
             
         Returns:
-            List of nv set command strings
+            List of nv set command strings - shows all configs as-is, no filtering/hardcoding
         """
         commands = []
         
@@ -317,9 +411,11 @@ class VLANDeploymentView(View):
             
             # Check if value is a dict (nested structure)
             if isinstance(value, dict):
-                # Check if dict is empty {} - this means the key itself might be a value
+                # Check if dict is empty {} - this means the key itself might be a value or a boolean flag
                 if not value:
-                    # Empty dict - key might be a value (e.g., IP address as key: "172.19.1.29/23": {})
+                    # Empty dict - could be:
+                    # 1. Key is a value (e.g., IP address as key: "172.19.1.29/23": {})
+                    # 2. Key is a boolean flag (e.g., "up": {}, "on": {}, "enable": {})
                     if self._looks_like_value(key):
                         # Key is the value - use it directly
                         if base_path:
@@ -328,6 +424,10 @@ class VLANDeploymentView(View):
                                 pass  # Skip link-local
                             else:
                                 commands.append(f"nv set interface {interface_name} {base_path} {key}")
+                    else:
+                        # Empty dict with a key - this is a boolean flag or config option
+                        # Show it regardless - no hardcoding, just show what's there
+                        commands.append(f"nv set interface {interface_name} {path}")
                 else:
                     # Non-empty dict - recurse into nested structure
                     nested_commands = self._parse_json_to_nv_commands(value, path, interface_name)
@@ -479,12 +579,27 @@ class VLANDeploymentView(View):
                         # Add retry logic in case command fails if sent too early
                         current_config = None
                         device_connected = True  # Track if device is actually connected
+                        device_uptime = None  # Track device uptime for connection verification
                         try:
                             if hasattr(connection, 'cli'):
+                                # Check device uptime to verify connection
+                                try:
+                                    uptime_output = connection.cli(['uptime'])
+                                    if uptime_output:
+                                        if isinstance(uptime_output, dict):
+                                            device_uptime = list(uptime_output.values())[0] if uptime_output else None
+                                        else:
+                                            device_uptime = str(uptime_output).strip() if uptime_output else None
+                                        if device_uptime:
+                                            logger.debug(f"Device {device.name} uptime: {device_uptime}")
+                                except Exception as e_uptime:
+                                    logger.debug(f"Could not get uptime for {device.name}: {e_uptime}")
+                                
                                 # Primary: Use nv config show -o json (more reliable than YAML parsing)
                                 # Retry up to 3 times with 1 second delay between retries
+                                # Initialize config_json_str before loop to ensure it's always in scope
                                 config_show_output = None
-                                config_json = None
+                                config_json_str = None  # Initialize to None - will be set in loop if successful
                                 max_retries = 3
                                 for attempt in range(max_retries):
                                     try:
@@ -516,6 +631,7 @@ class VLANDeploymentView(View):
                                             logger.warning(f"nv config show failed after {max_retries} attempts: {e_retry}")
                                 
                                 # Parse JSON config if we got it
+                                # config_json_str is initialized to None before the loop, so it's always defined
                                 if config_json_str and config_json_str.strip():
                                     import json
                                     command_lines = []
@@ -524,33 +640,53 @@ class VLANDeploymentView(View):
                                         # Parse JSON
                                         config_data = json.loads(config_json_str)
                                         
-                                        # Navigate to interface section
-                                        # Structure: [{"header": {...}}, {"set": {"interface": {...}}}]
-                                        interface_config = None
-                                        for item in config_data:
-                                            if isinstance(item, dict) and 'set' in item:
-                                                set_data = item['set']
-                                                if isinstance(set_data, dict) and 'interface' in set_data:
-                                                    interfaces = set_data['interface']
-                                                    if isinstance(interfaces, dict) and interface_name in interfaces:
-                                                        interface_config = interfaces[interface_name]
-                                                        break
+                                        # Find interface config (handles ranges and bond members)
+                                        interface_config = self._find_interface_config_in_json(config_data, interface_name)
+                                        
+                                        # Check if config is inherited from range or bond
+                                        inherited_from = None
+                                        bond_member_of = None
+                                        if isinstance(interface_config, dict):
+                                            inherited_from = interface_config.pop('_inherited_from', None)
+                                            bond_member_of = interface_config.pop('_bond_member_of', None)
                                         
                                         if interface_config:
                                             # Convert JSON structure to nv set commands
                                             parsed_commands = self._parse_json_to_nv_commands(interface_config, "", interface_name)
                                             command_lines.extend(parsed_commands)
+                                            
+                                            # Add note if inherited from range
+                                            if inherited_from:
+                                                command_lines.insert(0, f"# Note: Interface {interface_name} inherits config from range {inherited_from}")
+                                            # Add note if bond member
+                                            if bond_member_of:
+                                                command_lines.insert(0, f"# Note: Interface {interface_name} is a member of bond {bond_member_of}")
                                         
                                         if command_lines:
                                             current_config = '\n'.join(command_lines)
                                         else:
                                             # Interface not found in config or has no configuration commands
-                                            current_config = None  # Will try grep fallback
+                                            # But still show minimal config if it exists (like link state up)
+                                            if interface_config:
+                                                # Interface exists but has minimal/no config - show that
+                                                note_parts = []
+                                                if inherited_from:
+                                                    note_parts.append(f"inherits from range {inherited_from}")
+                                                if bond_member_of:
+                                                    note_parts.append(f"member of bond {bond_member_of}")
+                                                note = f" ({', '.join(note_parts)})" if note_parts else ""
+                                                current_config = f"(interface {interface_name} exists but has minimal configuration{note})"
+                                            else:
+                                                current_config = None  # Will try grep fallback
                                     except json.JSONDecodeError as e:
                                         logger.warning(f"Failed to parse JSON config for {device.name}:{interface_name}: {e}")
                                         current_config = None  # Will try grep fallback
                                     except Exception as e:
-                                        logger.warning(f"Error processing JSON config for {device.name}:{interface_name}: {e}")
+                                        error_msg = str(e)
+                                        logger.warning(f"Error processing JSON config for {device.name}:{interface_name}: {error_msg}")
+                                        # If it's a variable error, provide more context
+                                        if 'cannot access local variable' in error_msg or 'not associated with a value' in error_msg:
+                                            logger.error(f"Variable scope error in config parsing - config_json_str may not be initialized. Error: {error_msg}")
                                         current_config = None  # Will try grep fallback
                                 
                                 # Fallback: If nv config show -o json didn't find interface, try YAML grep
@@ -657,17 +793,20 @@ class VLANDeploymentView(View):
                                 'success': True,
                                 'current_config': current_config if current_config is not None else f"(no output from device for interface {interface_name})",
                                 'source': 'device',
-                                'timestamp': timestamp
+                                'timestamp': timestamp,
+                                'device_uptime': device_uptime
                             }
                         except Exception as e2:
                             logger.warning(f"Could not get interface config for {device.name}:{interface_name}: {e2}")
                             napalm_manager.disconnect()
+                            # Device was connected but config retrieval failed - not "unreachable"
                             return {
                                 'success': False,
                                 'current_config': f"ERROR: Could not retrieve config from device: {str(e2)}",
                                 'source': 'error',
                                 'timestamp': timestamp,
-                                'error': str(e2)
+                                'error': str(e2),
+                                'device_connected': True  # Device was connected, but config retrieval failed
                             }
                 except Exception as e:
                     logger.error(f"Could not connect to device {device.name}:{interface_name}: {e}")
@@ -732,12 +871,14 @@ class VLANDeploymentView(View):
                         except Exception as e2:
                             logger.warning(f"Could not get interface config for {device.name}:{interface_name}: {e2}")
                             napalm_manager.disconnect()
+                            # Device was connected but config retrieval failed - not "unreachable"
                             return {
                                 'success': False,
                                 'current_config': f"interface {interface_name} - ERROR: Could not retrieve config from device: {str(e2)}",
                                 'source': 'error',
                                 'timestamp': timestamp,
-                                'error': str(e2)
+                                'error': str(e2),
+                                'device_connected': True  # Device was connected, but config retrieval failed
                             }
                 except Exception as e:
                     logger.error(f"Could not connect to device {device.name}:{interface_name}: {e}")
@@ -1650,6 +1791,7 @@ class VLANDeploymentView(View):
                     current_device_config = device_config_result.get('current_config', 'Unable to fetch')
                     config_source = device_config_result.get('source', 'error')
                     config_timestamp = device_config_result.get('timestamp', 'N/A')
+                    device_uptime = device_config_result.get('device_uptime', None)
                     
                     # Generate config diff
                     config_diff = self._generate_config_diff(current_device_config, proposed_config, platform)
@@ -1741,13 +1883,36 @@ class VLANDeploymentView(View):
                     logs.append("--- Device Config Source ---")
                     if config_source == 'device':
                         logs.append(f"[OK] Connected to device successfully")
+                        if device_uptime:
+                            logs.append(f"Device uptime: {device_uptime}")
                         if config_timestamp != 'N/A':
                             logs.append(f"Config fetched at: {config_timestamp}")
                     elif config_source == 'netbox':
                         logs.append(f"[WARN] Device unreachable - using NetBox inference")
                         logs.append(f"Note: Actual device config may differ from NetBox state")
                     else:
-                        logs.append(f"[FAIL] Unable to fetch config (device unreachable and NetBox inference failed)")
+                        # config_source == 'error'
+                        device_was_connected = device_config_result.get('device_connected', False)
+                        if device_was_connected:
+                            # Device was connected but config retrieval failed (parsing error, etc.)
+                            logs.append(f"[FAIL] Device connected but config retrieval failed")
+                            if 'ERROR:' in current_device_config:
+                                # Extract error message
+                                error_msg = current_device_config.replace('ERROR: Could not retrieve config from device: ', '')
+                                logs.append(f"Error: {error_msg}")
+                            else:
+                                error_details = device_config_result.get('error', 'Unknown error')
+                                logs.append(f"Error: {error_details}")
+                        else:
+                            # Device was not connected and NetBox inference also failed
+                            logs.append(f"[FAIL] Device unreachable and NetBox inference failed")
+                            if 'ERROR:' in current_device_config:
+                                error_msg = current_device_config.replace('ERROR: Could not retrieve config from device: ', '')
+                                logs.append(f"Error details: {error_msg}")
+                            else:
+                                error_details = device_config_result.get('error', 'Unknown error')
+                                if error_details:
+                                    logs.append(f"Error: {error_details}")
                     logs.append("")
                     
                     # Current Device Configuration (Always shown - useful for troubleshooting)
@@ -2466,6 +2631,76 @@ class VLANDeploymentView(View):
                 summary["error"] += 1
 
         return summary
+
+    def _build_device_summaries(self, results):
+        """Build per-device summary statistics."""
+        device_data = {}
+        
+        for r in results:
+            device = r.get("device")
+            if not device:
+                continue
+            
+            device_name = device.name if hasattr(device, 'name') else str(device)
+            
+            if device_name not in device_data:
+                device_data[device_name] = {
+                    "device": device,
+                    "device_name": device_name,
+                    "total": 0,
+                    "pass": 0,
+                    "warn": 0,
+                    "blocked": 0,
+                }
+            
+            device_data[device_name]["total"] += 1
+            
+            overall_status = r.get("overall_status", "").upper()
+            if overall_status == "PASS":
+                device_data[device_name]["pass"] += 1
+            elif overall_status == "WARN":
+                device_data[device_name]["warn"] += 1
+            elif overall_status == "BLOCKED":
+                device_data[device_name]["blocked"] += 1
+        
+        # Convert to list and determine overall device status
+        device_summaries = []
+        for device_name, data in device_data.items():
+            # Determine device overall status
+            if data["blocked"] > 0:
+                device_status = "blocked"
+            elif data["warn"] > 0:
+                device_status = "warn"
+            else:
+                device_status = "pass"
+            
+            data["device_status"] = device_status
+            device_summaries.append(data)
+        
+        # Sort by device name
+        device_summaries.sort(key=lambda x: x["device_name"])
+        
+        return device_summaries
+
+    def _calculate_status_counts(self, results):
+        """Calculate counts for each status type."""
+        counts = {
+            "pass": 0,
+            "warn": 0,
+            "blocked": 0,
+            "total": len(results),
+        }
+        
+        for r in results:
+            overall_status = r.get("overall_status", "").upper()
+            if overall_status == "PASS":
+                counts["pass"] += 1
+            elif overall_status == "WARN":
+                counts["warn"] += 1
+            elif overall_status == "BLOCKED":
+                counts["blocked"] += 1
+        
+        return counts
 
     def _parse_interface_list(self, interfaces_str):
         """

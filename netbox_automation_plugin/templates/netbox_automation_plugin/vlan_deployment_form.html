@@ -6,7 +6,7 @@
 
 {% block content %}
   <div class="row">
-    <div class="col-md-8">
+    <div class="col-md-12">
       <div class="card">
         <div class="card-header">
           <h5 class="card-title mb-0">{% trans "VLAN Deployment" %}</h5>
@@ -153,25 +153,28 @@
               {% endif %}
             </div>
 
-            {# VLAN ID - Text input with autocomplete #}
+            {# VLAN ID - Text input with autocomplete dropdown #}
             <div class="mb-3">
               <label for="id_vlan_id" class="form-label required">{{ form.vlan_id.label }}</label>
-              <input
-                type="number"
-                id="id_vlan_id"
-                name="vlan_id"
-                class="form-control"
-                list="vlan_datalist"
-                placeholder="Type VLAN ID (e.g., 100)"
-                min="1"
-                max="4094"
-                required
-                value="{{ form.vlan_id.value|default:'' }}"
-              />
-              <datalist id="vlan_datalist">
-                <!-- Will be populated dynamically with VLANs from device's location -->
-              </datalist>
-              <div class="form-text">{{ form.vlan_id.help_text }} Click on the input field to see available VLANs in the dropdown.</div>
+              <div style="position: relative; max-width: 500px; margin: 0 auto;">
+                <input
+                  type="text"
+                  id="id_vlan_id"
+                  name="vlan_id"
+                  class="form-control"
+                  list="vlan_datalist"
+                  placeholder="Type VLAN ID (e.g., 100) or click to see dropdown"
+                  min="1"
+                  max="4094"
+                  required
+                  value="{{ form.vlan_id.value|default:'' }}"
+                  autocomplete="off"
+                />
+                <datalist id="vlan_datalist">
+                  <!-- Will be populated dynamically with VLANs from device's location -->
+                </datalist>
+              </div>
+              <div class="form-text text-center">Click on the input field above to see available VLANs in the dropdown menu.</div>
               
               {% if form.vlan_id.errors %}
                 <div class="invalid-feedback d-block">{{ form.vlan_id.errors }}</div>
@@ -202,11 +205,11 @@
             <div class="mt-3">
               <button type="submit" class="btn btn-primary" id="deploy-btn" name="deploy" value="1">
                 <i class="mdi mdi-upload-network"></i>
-                {% trans "Deploy VLAN" %}
+                <span id="deploy-btn-text">{% trans "Deploy VLAN" %}</span>
               </button>
               <button type="submit" name="export_csv" value="1" class="btn btn-secondary" id="deploy-csv-btn">
                 <i class="mdi mdi-download"></i>
-                {% trans "Deploy & Download CSV" %}
+                {% trans "Deploy VLAN" %}
               </button>
             </div>
           </form>
@@ -443,6 +446,23 @@
                 });
             }
 
+            // Update deploy button text based on selected mode
+            function updateDeployButtonText() {
+              const dryRunCheckbox = document.getElementById('id_dry_run');
+              const deployCheckbox = document.getElementById('id_deploy_changes');
+              const deployBtnText = document.getElementById('deploy-btn-text');
+
+              if (dryRunCheckbox && deployCheckbox && deployBtnText) {
+                if (dryRunCheckbox.checked) {
+                  deployBtnText.textContent = 'Deploy VLAN Dryrun';
+                } else if (deployCheckbox.checked) {
+                  deployBtnText.textContent = 'Deploy VLAN';
+                } else {
+                  deployBtnText.textContent = 'Deploy VLAN';
+                }
+              }
+            }
+
             // Make Dry Run and Deploy Changes mutually exclusive
             function setupMutuallyExclusiveCheckboxes() {
               const dryRunCheckbox = document.getElementById('id_dry_run');
@@ -458,6 +478,7 @@
                     deployCheckbox.disabled = false;
                     deployCheckbox.parentElement.style.opacity = '1';
                   }
+                  updateDeployButtonText();
                 });
 
                 deployCheckbox.addEventListener('change', function() {
@@ -469,6 +490,7 @@
                     dryRunCheckbox.disabled = false;
                     dryRunCheckbox.parentElement.style.opacity = '1';
                   }
+                  updateDeployButtonText();
                 });
 
                 // Initialize state on page load
@@ -479,6 +501,9 @@
                   dryRunCheckbox.disabled = true;
                   dryRunCheckbox.parentElement.style.opacity = '0.5';
                 }
+                
+                // Update button text on page load
+                updateDeployButtonText();
               }
             }
 

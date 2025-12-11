@@ -6,6 +6,22 @@
 {% block title %}{% trans "VLAN Deployment Results" %}{% endblock %}
 
 {% block content %}
+<style>
+  .device-summary-card {
+    transition: all 0.2s ease;
+  }
+  .device-summary-card:hover {
+    box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+    transform: translateY(-2px);
+  }
+  .device-summary-card h6 a {
+    text-decoration: none;
+    color: inherit;
+  }
+  .device-summary-card h6 a:hover {
+    text-decoration: underline;
+  }
+</style>
   <div class="row mb-3">
     <div class="col-md-12">
       <div class="card">
@@ -34,6 +50,46 @@
     </div>
   </div>
 
+  {# Device Summary Cards #}
+  {% if device_summaries %}
+  <div class="row mb-3">
+    <div class="col-md-12">
+      <div class="card">
+        <div class="card-header">
+          <h5 class="card-title mb-0">{% trans "Device Summary" %}</h5>
+        </div>
+        <div class="card-body">
+          <div class="row">
+            {% for device_summary in device_summaries %}
+            <div class="col-md-3 mb-2">
+              <div class="card device-summary-card" 
+                   data-device-name="{{ device_summary.device_name }}"
+                   style="cursor: pointer; border-left: 4px solid {% if device_summary.device_status == 'pass' %}#198754{% elif device_summary.device_status == 'warn' %}#ffc107{% else %}#dc3545{% endif %};">
+                <div class="card-body p-2">
+                  <h6 class="mb-1">
+                    <a href="{% url 'dcim:device' pk=device_summary.device.pk %}" onclick="event.stopPropagation();">{{ device_summary.device_name }}</a>
+                  </h6>
+                  <div class="small">
+                    <span class="badge bg-secondary">{{ device_summary.total }} total</span>
+                    <span class="badge bg-success">{{ device_summary.pass }} pass</span>
+                    {% if device_summary.warn > 0 %}
+                    <span class="badge bg-warning text-dark">{{ device_summary.warn }} warn</span>
+                    {% endif %}
+                    {% if device_summary.blocked > 0 %}
+                    <span class="badge bg-danger">{{ device_summary.blocked }} blocked</span>
+                    {% endif %}
+                  </div>
+                </div>
+              </div>
+            </div>
+            {% endfor %}
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+  {% endif %}
+
   <div class="row mb-3">
     <div class="col-md-12">
       <div class="card">
@@ -41,9 +97,26 @@
           <h5 class="card-title mb-0">{% trans "VLAN Deployment Results" %}</h5>
           <div>
             <div class="btn-group btn-group-sm me-2" role="group" id="status-filter-buttons">
-              <button type="button" class="btn btn-primary active" data-filter="all">All</button>
-              <button type="button" class="btn btn-outline-primary" data-filter="blocked">Blocked Only</button>
-              <button type="button" class="btn btn-outline-primary" data-filter="warnings">Warnings Only</button>
+              <button type="button" class="btn btn-primary active" data-filter="all">
+                All{% if status_counts.total %} ({{ status_counts.total }}){% endif %}
+              </button>
+              <button type="button" class="btn btn-outline-primary" data-filter="pass">
+                Pass Only{% if status_counts.pass %} ({{ status_counts.pass }}){% endif %}
+              </button>
+              <button type="button" class="btn btn-outline-primary" data-filter="warnings">
+                Warnings Only{% if status_counts.warn %} ({{ status_counts.warn }}){% endif %}
+              </button>
+              <button type="button" class="btn btn-outline-primary" data-filter="blocked">
+                Blocked Only{% if status_counts.blocked %} ({{ status_counts.blocked }}){% endif %}
+              </button>
+            </div>
+            <div class="btn-group btn-group-sm me-2" role="group" id="bulk-action-buttons">
+              <button type="button" class="btn btn-outline-secondary" id="expand-all-btn" title="Expand all details">
+                <i class="mdi mdi-unfold-more-horizontal"></i> Expand All
+              </button>
+              <button type="button" class="btn btn-outline-secondary" id="collapse-all-btn" title="Collapse all details">
+                <i class="mdi mdi-unfold-less-horizontal"></i> Collapse All
+              </button>
             </div>
             <button type="button" id="download-csv-btn" class="btn btn-sm btn-secondary">
               <i class="mdi mdi-download"></i>
@@ -61,6 +134,99 @@
         document.addEventListener('DOMContentLoaded', function() {
           const filterButtons = document.querySelectorAll('#status-filter-buttons button');
           const tableRows = document.querySelectorAll('tbody tr');
+          let currentDeviceFilter = null; // Track device filter
+          
+          // Device card filtering
+          const deviceCards = document.querySelectorAll('.device-summary-card');
+          deviceCards.forEach(card => {
+            card.addEventListener('click', function() {
+              const deviceName = this.getAttribute('data-device-name');
+              
+              // Toggle device filter
+              if (currentDeviceFilter === deviceName) {
+                // Deselect - show all devices
+                currentDeviceFilter = null;
+                deviceCards.forEach(c => c.style.opacity = '1');
+                deviceCards.forEach(c => c.style.borderLeftWidth = '4px');
+              } else {
+                // Select this device
+                currentDeviceFilter = deviceName;
+                deviceCards.forEach(c => {
+                  if (c.getAttribute('data-device-name') === deviceName) {
+                    c.style.opacity = '1';
+                    c.style.borderLeftWidth = '6px';
+                  } else {
+                    c.style.opacity = '0.5';
+                    c.style.borderLeftWidth = '4px';
+                  }
+                });
+              }
+              
+              // Apply filters
+              applyFilters();
+            });
+          });
+          
+          function applyFilters() {
+            let visibleCount = 0;
+            tableRows.forEach(row => {
+              const details = row.querySelector('details.deployment-logs');
+              const statusFilter = details ? details.getAttribute('data-status-filter') : '';
+              
+              // Get device name from first cell
+              const cells = row.querySelectorAll('td');
+              const deviceCell = cells[0];
+              const deviceLink = deviceCell.querySelector('a');
+              const rowDeviceName = deviceLink ? deviceLink.textContent.trim() : '';
+              
+              // Find Overall Status column
+              let statusText = '';
+              if (statusFilter) {
+                statusText = statusFilter;
+              } else {
+                if (cells.length > 5) {
+                  const statusCell = cells[5];
+                  const badge = statusCell.querySelector('.badge');
+                  if (badge) {
+                    const text = badge.textContent.trim().toLowerCase();
+                    if (text === 'pass' || text === 'warn' || text === 'blocked') {
+                      statusText = text;
+                    }
+                  }
+                }
+              }
+              
+              // Get active status filter
+              const activeStatusFilter = document.querySelector('#status-filter-buttons button.active');
+              const statusFilterValue = activeStatusFilter ? activeStatusFilter.getAttribute('data-filter') : 'all';
+              
+              // Apply status filter
+              let show = false;
+              if (statusFilterValue === 'all') {
+                show = true;
+              } else if (statusFilterValue === 'pass') {
+                show = statusText === 'pass';
+              } else if (statusFilterValue === 'warnings') {
+                show = statusText === 'warn';
+              } else if (statusFilterValue === 'blocked') {
+                show = statusText === 'blocked';
+              }
+              
+              // Apply device filter
+              if (show && currentDeviceFilter) {
+                show = (rowDeviceName === currentDeviceFilter);
+              }
+              
+              if (show) {
+                row.style.display = '';
+                visibleCount++;
+              } else {
+                row.style.display = 'none';
+              }
+            });
+            
+            console.log(`Showing ${visibleCount} of ${tableRows.length} rows`);
+          }
           
           filterButtons.forEach(button => {
             button.addEventListener('click', function() {
@@ -72,55 +238,30 @@
               this.classList.add('active', 'btn-primary');
               this.classList.remove('btn-outline-primary');
               
-              // Get filter value
-              const filter = this.getAttribute('data-filter');
-              
-              // Filter rows
-              let visibleCount = 0;
-              tableRows.forEach(row => {
+              // Apply filters
+              applyFilters();
+            });
+          });
+          
+          // Bulk actions: Expand All
+          document.getElementById('expand-all-btn').addEventListener('click', function() {
+            tableRows.forEach(row => {
+              if (row.style.display !== 'none') {
                 const details = row.querySelector('details.deployment-logs');
-                const statusFilter = details ? details.getAttribute('data-status-filter') : '';
-                
-                // Find Overall Status column - it's the 6th column (after Device, Interface, VLAN, Device Status, Interface Status)
-                const cells = row.querySelectorAll('td');
-                let statusText = '';
-                
-                // Try to find status from data attribute first
-                if (statusFilter) {
-                  statusText = statusFilter;
-                } else {
-                  // Fallback: look for badge in cells (Overall Status should be around index 5)
-                  if (cells.length > 5) {
-                    const statusCell = cells[5];
-                    const badge = statusCell.querySelector('.badge');
-                    if (badge) {
-                      const text = badge.textContent.trim().toLowerCase();
-                      if (text === 'pass' || text === 'warn' || text === 'blocked') {
-                        statusText = text;
-                      }
-                    }
-                  }
+                if (details) {
+                  details.open = true;
                 }
-                
-                let show = false;
-                if (filter === 'all') {
-                  show = true;
-                } else if (filter === 'blocked') {
-                  show = statusText === 'blocked';
-                } else if (filter === 'warnings') {
-                  show = statusText === 'warn';
-                }
-                
-                if (show) {
-                  row.style.display = '';
-                  visibleCount++;
-                } else {
-                  row.style.display = 'none';
-                }
-              });
-              
-              // Update summary if needed
-              console.log(`Showing ${visibleCount} of ${tableRows.length} rows`);
+              }
+            });
+          });
+          
+          // Bulk actions: Collapse All
+          document.getElementById('collapse-all-btn').addEventListener('click', function() {
+            tableRows.forEach(row => {
+              const details = row.querySelector('details.deployment-logs');
+              if (details) {
+                details.open = false;
+              }
             });
           });
         });
@@ -167,6 +308,18 @@
           window.URL.revokeObjectURL(url);
         });
       </script>
+    </div>
+  </div>
+  
+  {# Back to Form Button #}
+  <div class="row mb-3">
+    <div class="col-md-12">
+      <div class="text-center">
+        <a href="{% url 'plugins:netbox_automation_plugin:vlan_deployment' %}" class="btn btn-primary">
+          <i class="mdi mdi-arrow-left"></i>
+          {% trans "Back to Form" %}
+        </a>
+      </div>
     </div>
   </div>
 {% endblock %}

@@ -15,35 +15,37 @@ class VLANDeploymentResultTable(NetBoxTable):
         accessor="device",
         verbose_name=_("Device"),
         linkify=True,
+        orderable=True,
     )
     interface = tables.Column(
         accessor="interface",
         verbose_name=_("Interface"),
+        orderable=True,
     )
     vlan = tables.Column(
         accessor="vlan_id",
         verbose_name=_("VLAN"),
-        orderable=False,
+        orderable=True,
     )
     device_status = tables.Column(
         accessor="device_status",
         verbose_name=_("Device Status"),
-        orderable=False,
+        orderable=True,
     )
     interface_status = tables.Column(
         accessor="interface_status",
         verbose_name=_("Interface Status"),
-        orderable=False,
+        orderable=True,
     )
     overall_status = tables.Column(
         accessor="overall_status",
         verbose_name=_("Overall Status"),
-        orderable=False,
+        orderable=True,
     )
     risk_level = tables.Column(
         accessor="risk_level",
         verbose_name=_("Risk Level"),
-        orderable=False,
+        orderable=True,
     )
     actions = tables.Column(
         accessor="deployment_logs",
