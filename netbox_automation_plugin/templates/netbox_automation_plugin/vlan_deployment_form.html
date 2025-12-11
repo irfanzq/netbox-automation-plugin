@@ -171,15 +171,7 @@
               <datalist id="vlan_datalist">
                 <!-- Will be populated dynamically with VLANs from device's location -->
               </datalist>
-              <div class="form-text">{{ form.vlan_id.help_text }} Autocomplete suggestions will appear based on device location.</div>
-              
-              {# Visible VLAN list container - shown under input box #}
-              <div id="vlan-list-container" class="mt-2" style="display: none;">
-                <label class="form-label text-muted small">Available VLANs:</label>
-                <div id="vlan-list" style="max-height: 300px; overflow-y: auto; border: 1px solid #dee2e6; padding: 10px; border-radius: 4px; background-color: #f8f9fa;">
-                  <p class="text-muted mb-0">Select devices/site first to load VLANs</p>
-                </div>
-              </div>
+              <div class="form-text">{{ form.vlan_id.help_text }} Click on the input field to see available VLANs in the dropdown.</div>
               
               {% if form.vlan_id.errors %}
                 <div class="invalid-feedback d-block">{{ form.vlan_id.errors }}</div>
@@ -366,65 +358,15 @@
                 });
             }
 
-            // Helper function to render VLAN list
-            function renderVLANList(vlans, container) {
-                container.innerHTML = '';
-                
-                if (vlans.length === 0) {
-                    container.innerHTML = '<p class="text-muted mb-0">No VLANs found for this location. You can still type a custom VLAN ID.</p>';
-                    return;
-                }
-                
-                // Create a list of clickable VLAN items
-                vlans.forEach(vlan => {
-                    const div = document.createElement('div');
-                    div.className = 'mb-2 p-2 border-bottom';
-                    div.style.cursor = 'pointer';
-                    div.style.transition = 'background-color 0.2s';
-                    
-                    // Hover effect
-                    div.addEventListener('mouseenter', function() {
-                        this.style.backgroundColor = '#e9ecef';
-                    });
-                    div.addEventListener('mouseleave', function() {
-                        this.style.backgroundColor = 'transparent';
-                    });
-                    
-                    // Click to select VLAN ID
-                    div.addEventListener('click', function() {
-                        const vlanInput = document.getElementById('id_vlan_id');
-                        vlanInput.value = vlan.vid;
-                        vlanInput.focus();
-                    });
-                    
-                    const vidSpan = document.createElement('span');
-                    vidSpan.className = 'fw-bold text-primary';
-                    vidSpan.textContent = vlan.vid;
-                    vidSpan.style.marginRight = '10px';
-                    
-                    const nameSpan = document.createElement('span');
-                    nameSpan.className = 'text-muted';
-                    nameSpan.textContent = vlan.name || '';
-                    
-                    div.appendChild(vidSpan);
-                    div.appendChild(nameSpan);
-                    container.appendChild(div);
-                });
-            }
-
             // Filter VLANs by site when devices are selected (single mode)
             function filterVLANsByDevices(deviceIds) {
               console.log('filterVLANsByDevices called with:', deviceIds);
 
               const datalist = document.getElementById('vlan_datalist');
-              const vlanListContainer = document.getElementById('vlan-list-container');
-              const vlanList = document.getElementById('vlan-list');
 
               if (deviceIds.length === 0) {
-                // Reset VLAN datalist and hide list
+                // Reset VLAN datalist
                 datalist.innerHTML = '';
-                vlanListContainer.style.display = 'none';
-                vlanList.innerHTML = '<p class="text-muted mb-0">Select devices first to load VLANs</p>';
                 return;
               }
 
@@ -435,10 +377,6 @@
               const url = `/plugins/automation/vlan-deployment/get-vlans/?${params.toString()}`;
               console.log('Fetching VLANs from:', url);
 
-              // Show loading
-              vlanListContainer.style.display = 'block';
-              vlanList.innerHTML = '<p class="text-muted mb-0">Loading VLANs...</p>';
-
               // Fetch VLANs for the site of selected devices
               fetch(url)
                 .then(response => {
@@ -448,7 +386,7 @@
                 .then(data => {
                   console.log('VLAN data received:', data);
 
-                  // Populate datalist with VLAN suggestions (for autocomplete)
+                  // Populate datalist with VLAN suggestions (for dropdown)
                   datalist.innerHTML = ''; // Clear existing options
 
                   if (data.vlans && data.vlans.length > 0) {
@@ -458,18 +396,13 @@
                       option.textContent = vlan.name ? `${vlan.vid} - ${vlan.name}` : vlan.vid;
                       datalist.appendChild(option);
                     });
-                    console.log(`Populated datalist with ${data.vlans.length} VLANs from device location`);
-                    
-                    // Populate visible VLAN list
-                    renderVLANList(data.vlans, vlanList);
+                    console.log(`Populated datalist dropdown with ${data.vlans.length} VLANs from device location`);
                   } else {
                     console.log('No VLANs found for this location, user can still type custom VLAN ID');
-                    vlanList.innerHTML = '<p class="text-muted mb-0">No VLANs found for this location. You can still type a custom VLAN ID.</p>';
                   }
                 })
                 .catch(error => {
                   console.error('Error loading VLANs:', error);
-                  vlanList.innerHTML = '<p class="text-danger mb-0">Error loading VLANs</p>';
                 });
             }
 
@@ -479,26 +412,18 @@
               const siteId = siteSelect.value;
               
               const datalist = document.getElementById('vlan_datalist');
-              const vlanListContainer = document.getElementById('vlan-list-container');
-              const vlanList = document.getElementById('vlan-list');
 
               if (!siteId) {
-                // Hide list if no site selected
-                vlanListContainer.style.display = 'none';
+                // Clear datalist if no site selected
                 datalist.innerHTML = '';
-                vlanList.innerHTML = '<p class="text-muted mb-0">Select site first to load VLANs</p>';
                 return;
               }
-
-              // Show loading
-              vlanListContainer.style.display = 'block';
-              vlanList.innerHTML = '<p class="text-muted mb-0">Loading VLANs...</p>';
 
               // Fetch VLANs for this site
               fetch(`/plugins/automation/vlan-deployment/get-vlans/?site_id=${siteId}`)
                 .then(response => response.json())
                 .then(data => {
-                  // Populate datalist with VLAN suggestions (for autocomplete)
+                  // Populate datalist with VLAN suggestions (for dropdown)
                   datalist.innerHTML = ''; // Clear existing options
 
                   if (data.vlans && data.vlans.length > 0) {
@@ -508,18 +433,13 @@
                       option.textContent = vlan.name ? `${vlan.vid} - ${vlan.name}` : vlan.vid;
                       datalist.appendChild(option);
                     });
-                    console.log(`Populated datalist with ${data.vlans.length} VLANs from site`);
-                    
-                    // Populate visible VLAN list
-                    renderVLANList(data.vlans, vlanList);
+                    console.log(`Populated datalist dropdown with ${data.vlans.length} VLANs from site`);
                   } else {
                     console.log('No VLANs found for this site, user can still type custom VLAN ID');
-                    vlanList.innerHTML = '<p class="text-muted mb-0">No VLANs found for this site. You can still type a custom VLAN ID.</p>';
                   }
                 })
                 .catch(error => {
                   console.error('Error loading VLANs:', error);
-                  vlanList.innerHTML = '<p class="text-danger mb-0">Error loading VLANs</p>';
                 });
             }
 
