@@ -156,7 +156,7 @@
             {# VLAN ID - Text input with autocomplete dropdown #}
             <div class="mb-3">
               <label for="id_vlan_id" class="form-label required">{{ form.vlan_id.label }}</label>
-              <div style="position: relative; max-width: 500px; margin: 0 auto;">
+              <div style="position: relative; max-width: 500px;">
                 <input
                   type="text"
                   id="id_vlan_id"
@@ -174,7 +174,7 @@
                   <!-- Will be populated dynamically with VLANs from device's location -->
                 </datalist>
               </div>
-              <div class="form-text text-center">Click on the input field above to see available VLANs in the dropdown menu.</div>
+              <div class="form-text">Click on the input field above to see available VLANs in the dropdown menu.</div>
               
               {% if form.vlan_id.errors %}
                 <div class="invalid-feedback d-block">{{ form.vlan_id.errors }}</div>
@@ -206,10 +206,6 @@
               <button type="submit" class="btn btn-primary" id="deploy-btn" name="deploy" value="1">
                 <i class="mdi mdi-upload-network"></i>
                 <span id="deploy-btn-text">{% trans "Deploy VLAN" %}</span>
-              </button>
-              <button type="submit" name="export_csv" value="1" class="btn btn-secondary" id="deploy-csv-btn">
-                <i class="mdi mdi-download"></i>
-                {% trans "Deploy VLAN" %}
               </button>
             </div>
           </form>
@@ -561,9 +557,8 @@
               const overlay = document.getElementById('loading-overlay');
               overlay.style.display = 'flex';
 
-              // Disable form buttons
+              // Disable form button
               document.getElementById('deploy-btn').disabled = true;
-              document.getElementById('deploy-csv-btn').disabled = true;
             });
           </script>
         </div>

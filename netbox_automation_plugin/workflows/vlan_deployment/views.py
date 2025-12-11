@@ -604,6 +604,16 @@ class VLANDeploymentView(View):
                                 for attempt in range(max_retries):
                                     try:
                                         config_show_output = connection.cli(['nv config show -o json'])
+                                        
+                                        # If cli() returns None, try Netmiko fallback (Cumulus driver may not implement cli() properly)
+                                        if config_show_output is None and hasattr(connection, 'device') and hasattr(connection.device, 'send_command'):
+                                            logger.debug(f"cli() returned None, falling back to Netmiko send_command() for {device.name}")
+                                            try:
+                                                config_show_output = connection.device.send_command('nv config show -o json', read_timeout=60)
+                                            except Exception as netmiko_error:
+                                                logger.debug(f"Netmiko fallback also failed: {netmiko_error}")
+                                                config_show_output = None
+                                        
                                         if config_show_output:
                                             # Extract output (might be keyed by command)
                                             if isinstance(config_show_output, dict):
@@ -614,7 +624,8 @@ class VLANDeploymentView(View):
                                                 else:
                                                     config_json_str = list(config_show_output.values())[0] if config_show_output else None
                                             else:
-                                                config_json_str = str(config_show_output)
+                                                # Netmiko returns string directly
+                                                config_json_str = str(config_show_output).strip()
                                             
                                             if config_json_str and config_json_str.strip():
                                                 break  # Success, exit retry loop
@@ -632,6 +643,7 @@ class VLANDeploymentView(View):
                                 
                                 # Parse JSON config if we got it
                                 # config_json_str is initialized to None before the loop, so it's always defined
+                                json_parsed_successfully = False
                                 if config_json_str and config_json_str.strip():
                                     import json
                                     command_lines = []
@@ -639,6 +651,7 @@ class VLANDeploymentView(View):
                                     try:
                                         # Parse JSON
                                         config_data = json.loads(config_json_str)
+                                        json_parsed_successfully = True  # Mark that we successfully parsed JSON
                                         
                                         # Find interface config (handles ranges and bond members)
                                         interface_config = self._find_interface_config_in_json(config_data, interface_name)
@@ -677,19 +690,21 @@ class VLANDeploymentView(View):
                                                 note = f" ({', '.join(note_parts)})" if note_parts else ""
                                                 current_config = f"(interface {interface_name} exists but has minimal configuration{note})"
                                             else:
-                                                current_config = None  # Will try grep fallback
+                                                # Interface not found in JSON - try grep fallback
+                                                current_config = None
                                     except json.JSONDecodeError as e:
                                         logger.warning(f"Failed to parse JSON config for {device.name}:{interface_name}: {e}")
-                                        current_config = None  # Will try grep fallback
+                                        current_config = None  # JSON parse failed - will try grep fallback
                                     except Exception as e:
                                         error_msg = str(e)
                                         logger.warning(f"Error processing JSON config for {device.name}:{interface_name}: {error_msg}")
                                         # If it's a variable error, provide more context
                                         if 'cannot access local variable' in error_msg or 'not associated with a value' in error_msg:
                                             logger.error(f"Variable scope error in config parsing - config_json_str may not be initialized. Error: {error_msg}")
-                                        current_config = None  # Will try grep fallback
+                                        current_config = None  # Processing error - will try grep fallback
                                 
-                                # Fallback: If nv config show -o json didn't find interface, try YAML grep
+                                # Fallback: If interface not found (even if JSON parsed successfully) or JSON parsing failed
+                                # Try grep fallback to catch interfaces that might be in ranges we didn't match properly
                                 if not current_config:
                                     logger.debug(f"nv config show -o json didn't find {interface_name} or returned empty. Trying YAML grep fallback...")
                                     try:
@@ -719,7 +734,9 @@ class VLANDeploymentView(View):
                                                 interface_found = False
                                                 interface_block_lines = []
                                                 interface_indent = None
+                                                range_key_found = None
                                                 
+                                                # First, try exact match
                                                 for i, line in enumerate(grep_lines):
                                                     stripped = line.strip()
                                                     if stripped.startswith(f'{interface_name}:'):
@@ -739,9 +756,51 @@ class VLANDeploymentView(View):
                                                             interface_block_lines.append(next_line)
                                                         break
                                                 
+                                                # If exact match not found, try to find range that contains this interface
+                                                if not interface_found:
+                                                    # Extract interface prefix and number
+                                                    interface_match = re.match(r'^([a-zA-Z]+)(\d+)$', interface_name)
+                                                    if interface_match:
+                                                        iface_prefix = interface_match.group(1)
+                                                        iface_num = int(interface_match.group(2))
+                                                        
+                                                        # Look for range patterns like swp1-32, swp1-2, etc.
+                                                        for i, line in enumerate(grep_lines):
+                                                            stripped = line.strip()
+                                                            # Check if this line is a range that might contain our interface
+                                                            # Pattern: swp1-32:, bond3-6:, etc.
+                                                            range_match = re.match(r'^([a-zA-Z]+)(\d+)-(\d+):\s*$', stripped)
+                                                            if range_match:
+                                                                range_prefix = range_match.group(1)
+                                                                range_start = int(range_match.group(2))
+                                                                range_end = int(range_match.group(3))
+                                                                
+                                                                # Check if our interface is in this range
+                                                                if iface_prefix == range_prefix and range_start <= iface_num <= range_end:
+                                                                    range_key_found = f"{range_prefix}{range_start}-{range_end}"
+                                                                    interface_found = True
+                                                                    interface_indent = len(line) - len(line.lstrip())
+                                                                    # Start collecting from this line
+                                                                    interface_block_lines.append(line)
+                                                                    # Collect following lines until we hit another interface or section
+                                                                    for j in range(i + 1, len(grep_lines)):
+                                                                        next_line = grep_lines[j]
+                                                                        if not next_line.strip():
+                                                                            continue
+                                                                        next_indent = len(next_line) - len(next_line.lstrip())
+                                                                        # Stop if we hit a line at same or less indent with colon (new interface/section)
+                                                                        if next_indent <= interface_indent and ':' in next_line.strip():
+                                                                            break
+                                                                        interface_block_lines.append(next_line)
+                                                                    break
+                                                
                                                 if interface_found and interface_block_lines:
                                                     # Use the same generic parser for grep output
                                                     parsed_commands = self._parse_yaml_to_nv_commands(interface_block_lines, "", interface_name)
+                                                    
+                                                    # Add note if found in range
+                                                    if range_key_found:
+                                                        parsed_commands.insert(0, f"# Note: Interface {interface_name} inherits config from range {range_key_found}")
                                                     
                                                     # Add all parsed commands (link-local IPv6 already filtered in parser)
                                                     command_lines.extend(parsed_commands)
