@@ -148,6 +148,15 @@ class VLANDeploymentView(View):
         Validate tags for dry run mode - shows what would block/warn/pass.
         Returns validation results without blocking.
         
+        Tagging Priority Hierarchy (highest to lowest):
+        1. Device: automation-ready:vlan (required for deployment)
+        2. Interface tags (checked in priority order):
+           - vlan-mode:routed (if IP address or VRF - BLOCKS, highest priority)
+           - vlan-mode:uplink (if connected to Spine or same role - BLOCKS)
+           - vlan-mode:tagged (if connected to Host AND has tagged/untagged VLANs - ALLOWS)
+           - vlan-mode:access (if connected to Host AND has only untagged VLAN - ALLOWS)
+           - vlan-mode:needs-review (if unclear or conflicts - WARNS but allows, lowest priority)
+        
         Returns:
             dict: {
                 'device_validation': {device_name: {'status': 'pass'|'block'|'warn', 'message': str}},
@@ -172,6 +181,7 @@ class VLANDeploymentView(View):
             'routed': 'vlan-mode:routed',
             'needs-review': 'vlan-mode:needs-review',
             'access': 'vlan-mode:access',
+            'tagged': 'vlan-mode:tagged',
         }
         interface_tags = {}
         for key, tag_name in interface_tag_names.items():
@@ -205,12 +215,27 @@ class VLANDeploymentView(View):
                     interface_tag_list = list(interface.tags.all())
                     interface_tag_names_list = [t.name for t in interface_tag_list]
                     
-                    # CRITICAL CHECK: Interface with IP address is a routed port (BLOCKING)
-                    # This must be checked BEFORE tag checks, as IP address is a stronger signal
-                    if interface.ip_addresses.exists():
+                    # CRITICAL CHECK: Interface with IP address or VRF is a routed port (BLOCKING)
+                    # Priority 1: vlan-mode:routed (if interface has IP address or in VRF, it's routed - highest priority)
+                    # This must be checked BEFORE tag checks, as IP address/VRF is a stronger signal
+                    has_ip = interface.ip_addresses.exists()
+                    has_vrf = hasattr(interface, 'vrf') and interface.vrf is not None
+                    # Also check VRF on IP addresses
+                    if not has_vrf:
+                        for ip_addr in interface.ip_addresses.all():
+                            if hasattr(ip_addr, 'vrf') and ip_addr.vrf:
+                                has_vrf = True
+                                break
+                    
+                    if has_ip or has_vrf:
+                        reason = []
+                        if has_ip:
+                            reason.append("IP address configured")
+                        if has_vrf:
+                            reason.append("VRF configured")
                         results['interface_validation'][key] = {
                             'status': 'block',
-                            'message': f"Interface has IP address configured (routed port) - would block deployment"
+                            'message': f"Interface has {' and '.join(reason)} (routed port) - would block deployment"
                         }
                         continue  # Skip further checks for this interface
                     
@@ -266,15 +291,22 @@ class VLANDeploymentView(View):
                             'status': 'warn',
                             'message': f"Interface marked as 'vlan-mode:needs-review' - would warn but allow"
                         }
+                    # REQUIRED: Interface must be tagged as 'access' or 'tagged' to allow deployment
                     elif interface_tags.get('access') and interface_tags['access'].name in interface_tag_names_list:
                         results['interface_validation'][key] = {
                             'status': 'pass',
                             'message': f"Interface tagged as 'vlan-mode:access' - would pass"
                         }
-                    else:
+                    elif interface_tags.get('tagged') and interface_tags['tagged'].name in interface_tag_names_list:
                         results['interface_validation'][key] = {
-                            'status': 'warn',
-                            'message': f"Interface not tagged - would warn but allow"
+                            'status': 'pass',
+                            'message': f"Interface tagged as 'vlan-mode:tagged' - would pass"
+                        }
+                    else:
+                        # BLOCK: Interface must be tagged as 'access' or 'tagged' for VLAN deployment
+                        results['interface_validation'][key] = {
+                            'status': 'block',
+                            'message': f"Interface not tagged as 'vlan-mode:access' or 'vlan-mode:tagged' - would block deployment"
                         }
                 
                 except Interface.DoesNotExist:
@@ -1325,9 +1357,16 @@ class VLANDeploymentView(View):
                 'has_changes': True
             }
     
-    def _generate_config_diff(self, current_config, proposed_config, platform):
+    def _generate_config_diff(self, current_config, proposed_config, platform, device=None, interface_name=None):
         """
         Generate a diff between current and proposed config.
+        
+        Args:
+            current_config: Current device configuration
+            proposed_config: Proposed configuration command
+            platform: Platform type ('cumulus' or 'eos')
+            device: Device object (optional, for bridge-level VLAN checks)
+            interface_name: Interface name (optional, for bridge-level VLAN checks)
         
         Returns:
             str: Formatted diff showing changes
@@ -1342,44 +1381,91 @@ class VLANDeploymentView(View):
         diff_lines.append("")
         
         if platform == 'cumulus':
-            # For Cumulus, show NVUE commands being removed vs added
+            # For Cumulus, show what's currently configured vs what commands will be executed
             if "no current config" in current_config.lower() or "no config found" in current_config.lower() or "(no configuration" in current_config.lower():
-                diff_lines.append("Added:")
-                diff_lines.append(f"  + {proposed_config}")
+                diff_lines.append("Commands to Execute:")
+                diff_lines.append(f"  {proposed_config}")
+                diff_lines.append("")
+                diff_lines.append("Note: This interface has no current VLAN configuration.")
             else:
-                # Parse current config commands to show what will be removed
+                # Parse current config commands
                 current_lines = [line.strip() for line in current_config.split('\n') if line.strip()]
-                removed_items = []
-                added_items = [proposed_config]
+                current_bridge_configs = []
+                has_ip_or_vrf = False
                 
-                # All current commands will be removed/replaced (since we're changing from routed to bridged)
+                # Find current bridge domain configs (these will be replaced)
+                # IMPORTANT: We only show bridge domain configs as "removed/replaced"
+                # We do NOT show link state, type, or other non-VLAN configs (these are preserved)
+                # Safety check: IP/VRF configs should be blocked by validation and should not appear here
                 for line in current_lines:
                     if line.startswith('nv set'):
-                        removed_items.append(line)
+                        # Skip comments
+                        if line.startswith('# Note:'):
+                            continue
+                        # Skip link state and type - these are NOT VLAN-related and will be preserved
+                        if 'link state' in line or 'type ' in line:
+                            continue  # These are preserved, not removed
+                        # Track bridge domain configs (these will be replaced by new VLAN config)
+                        # Note: In Cumulus, tagged VLANs are configured at the bridge level, not per interface
+                        # So we only see interface-level access VLAN configs here:
+                        # - bridge domain br_default access <vlan> (old untagged/access VLAN)
+                        # Tagged VLANs are on the bridge itself (nv set bridge domain br_default vlan <vlans>)
+                        # and are NOT configured per interface, so they won't appear in interface configs
+                        if 'bridge domain' in line:
+                            current_bridge_configs.append(line)
+                        # Safety check: IP/VRF configs should be blocked by validation
+                        elif 'ip address' in line or 'ip gateway' in line or 'ip vrf' in line:
+                            has_ip_or_vrf = True
                 
-                # Show removed items
-                if removed_items:
-                    diff_lines.append("Removed/Replaced:")
-                    for item in removed_items:
+                # Warn if IP/VRF detected (indicates validation bug - these ports should be blocked)
+                if has_ip_or_vrf:
+                    diff_lines.append("[WARN] Interface has IP address or VRF configuration.")
+                    diff_lines.append("      This interface should have been blocked by validation.")
+                    diff_lines.append("      Deployment will NOT proceed for interfaces with IP/VRF.")
+                    diff_lines.append("")
+                
+                # Show what will happen (old configs replaced by new config)
+                if current_bridge_configs:
+                    diff_lines.append("Removed/Replaced (automatic):")
+                    for item in current_bridge_configs:
                         diff_lines.append(f"  - {item}")
                     diff_lines.append("")
                 
-                # Show added items
+                # Show actual deployment command that will be executed
+                # Note: NVUE automatically replaces old bridge domain config when setting new one
+                # The 'nv set' command internally handles removing the old config automatically
                 diff_lines.append("Added:")
-                for item in added_items:
-                    diff_lines.append(f"  + {item}")
+                diff_lines.append(f"  + {proposed_config}")
+                # Extract VLAN ID from proposed config for bridge command
+                import re
+                vlan_match = re.search(r'access\s+(\d+)', proposed_config)
+                if vlan_match:
+                    vlan_id_from_config = vlan_match.group(1)
+                    diff_lines.append(f"  + nv set bridge domain br_default vlan {vlan_id_from_config}")
+                diff_lines.append("")
+                diff_lines.append("Note: The interface 'nv set' command automatically replaces any existing")
+                diff_lines.append("      bridge domain configuration (no explicit 'nv unset' needed).")
+                diff_lines.append("      The bridge 'nv set' command is additive - it adds the VLAN to the")
+                diff_lines.append("      existing bridge VLAN list without replacing it.")
+                
         elif platform == 'eos':
-            # For EOS, show interface config differences
-            current_lines = current_config.split('\n')
-            proposed_lines = proposed_config.split('\n')
+            # For EOS, show what's currently configured vs what commands will be executed
+            current_lines = [line.strip() for line in current_config.split('\n') if line.strip()]
+            proposed_lines = [line.strip() for line in proposed_config.split('\n') if line.strip()]
             
-            # Simple line-by-line diff
-            for line in current_lines:
-                if line.strip() and line not in proposed_lines:
-                    diff_lines.append(f"- {line}")
+            # Show what's currently configured (for reference)
+            if current_lines:
+                diff_lines.append("Currently Configured (will be replaced):")
+                for line in current_lines:
+                    if line.strip():
+                        diff_lines.append(f"  {line}")
+                diff_lines.append("")
+            
+            # Show actual deployment commands that will be executed
+            diff_lines.append("Commands to Execute:")
             for line in proposed_lines:
-                if line.strip() and line not in current_lines:
-                    diff_lines.append(f"+ {line}")
+                if line.strip():
+                    diff_lines.append(f"  {line}")
         
         return '\n'.join(diff_lines)
     
@@ -1642,6 +1728,15 @@ class VLANDeploymentView(View):
         Final validation before deployment - double-check tags and interface eligibility.
         This is a safety check that runs even after form validation.
         
+        Tagging Priority Hierarchy (highest to lowest):
+        1. Device: automation-ready:vlan (required for deployment)
+        2. Interface tags (checked in priority order):
+           - vlan-mode:routed (if IP address or VRF - BLOCKS, highest priority)
+           - vlan-mode:uplink (if connected to Spine or same role - BLOCKS)
+           - vlan-mode:tagged (if connected to Host AND has tagged/untagged VLANs - ALLOWS)
+           - vlan-mode:access (if connected to Host AND has only untagged VLAN - ALLOWS)
+           - vlan-mode:needs-review (if unclear or conflicts - WARNS but allows, lowest priority)
+        
         Returns list of error messages (empty if all valid).
         """
         errors = []
@@ -1656,6 +1751,8 @@ class VLANDeploymentView(View):
         interface_tag_names = {
             'uplink': 'vlan-mode:uplink',
             'routed': 'vlan-mode:routed',
+            'access': 'vlan-mode:access',
+            'tagged': 'vlan-mode:tagged',
         }
         interface_tags = {}
         for key, tag_name in interface_tag_names.items():
@@ -1684,11 +1781,26 @@ class VLANDeploymentView(View):
                     interface_tag_list = list(interface.tags.all())
                     interface_tag_names_list = [t.name for t in interface_tag_list]
                     
-                    # CRITICAL CHECK: Interface with IP address is a routed port (BLOCKING)
-                    # This must be checked BEFORE tag checks, as IP address is a stronger signal
-                    if interface.ip_addresses.exists():
+                    # CRITICAL CHECK: Interface with IP address or VRF is a routed port (BLOCKING)
+                    # Priority 1: vlan-mode:routed (if interface has IP address or in VRF, it's routed - highest priority)
+                    # This must be checked BEFORE tag checks, as IP address/VRF is a stronger signal
+                    has_ip = interface.ip_addresses.exists()
+                    has_vrf = hasattr(interface, 'vrf') and interface.vrf is not None
+                    # Also check VRF on IP addresses
+                    if not has_vrf:
+                        for ip_addr in interface.ip_addresses.all():
+                            if hasattr(ip_addr, 'vrf') and ip_addr.vrf:
+                                has_vrf = True
+                                break
+                    
+                    if has_ip or has_vrf:
+                        reason = []
+                        if has_ip:
+                            reason.append("IP address configured")
+                        if has_vrf:
+                            reason.append("VRF configured")
                         errors.append(
-                            f"Interface '{iface_name}' on device '{device.name}' has IP address configured (routed port) - cannot modify routed interfaces."
+                            f"Interface '{iface_name}' on device '{device.name}' has {' and '.join(reason)} (routed port) - cannot modify routed interfaces."
                         )
                         continue  # Skip further checks for this interface
                     
@@ -1733,6 +1845,16 @@ class VLANDeploymentView(View):
                                 continue
                     except Exception as e:
                         logger.warning(f"Could not get connected endpoints for {device.name}:{iface_name}: {e}")
+                    
+                    # REQUIRED: Interface must be tagged as 'access' or 'tagged' to allow deployment (BLOCKING)
+                    has_access_tag = interface_tags.get('access') and interface_tags['access'].name in interface_tag_names_list
+                    has_tagged_tag = interface_tags.get('tagged') and interface_tags['tagged'].name in interface_tag_names_list
+                    if not has_access_tag and not has_tagged_tag:
+                        errors.append(
+                            f"Interface '{iface_name}' on device '{device.name}' is not tagged as 'vlan-mode:access' or 'vlan-mode:tagged' - "
+                            f"cannot deploy VLAN. Please run the Tagging Workflow to properly tag this interface."
+                        )
+                        continue
                 
                 except Interface.DoesNotExist:
                     errors.append(
@@ -1853,7 +1975,7 @@ class VLANDeploymentView(View):
                     device_uptime = device_config_result.get('device_uptime', None)
                     
                     # Generate config diff
-                    config_diff = self._generate_config_diff(current_device_config, proposed_config, platform)
+                    config_diff = self._generate_config_diff(current_device_config, proposed_config, platform, device=device, interface_name=interface_name)
                     
                     # Get NetBox current and proposed state
                     netbox_state = self._get_netbox_current_state(device, interface_name, vlan_id)
@@ -2380,6 +2502,16 @@ class VLANDeploymentView(View):
             napalm_manager = NAPALMDeviceManager(device)
             logger.info(f"Initialized NAPALM manager for {device.name} (platform: {platform})")
             logs.append(f"[OK] NAPALM manager initialized")
+            
+            # For Cumulus, also add VLAN to bridge domain
+            # NVUE's 'nv set bridge domain br_default vlan <vlan_id>' is additive - it adds the VLAN
+            # to the existing list without replacing it. No need to query current VLANs first.
+            if platform == 'cumulus':
+                # Add bridge VLAN command - NVUE will add it to existing VLANs automatically
+                bridge_vlan_cmd = f"nv set bridge domain br_default vlan {vlan_id}"
+                config_text = f"{config_text}\n{bridge_vlan_cmd}"
+                logs.append(f"[2.3.1] Bridge VLAN command added: {bridge_vlan_cmd}")
+                logger.info(f"Adding VLAN {vlan_id} to bridge domain br_default on {device.name} (additive command)")
 
             # Deploy using safe deployment with post-checks
             # Both EOS and Cumulus support commit-confirm workflow:
