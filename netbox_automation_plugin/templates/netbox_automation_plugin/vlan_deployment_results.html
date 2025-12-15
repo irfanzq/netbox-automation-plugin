@@ -9,17 +9,45 @@
 <style>
   .device-summary-card {
     transition: all 0.2s ease;
+    background-color: #343a40 !important; /* Dark grey background */
+    color: #ffffff !important; /* White text */
   }
   .device-summary-card:hover {
     box-shadow: 0 2px 8px rgba(0,0,0,0.15);
     transform: translateY(-2px);
   }
+  .device-summary-card h6 {
+    color: #ffffff !important; /* White text for headings */
+  }
   .device-summary-card h6 a {
     text-decoration: none;
-    color: inherit;
+    color: #ffffff !important; /* White text for links */
   }
   .device-summary-card h6 a:hover {
     text-decoration: underline;
+    color: #e0e0e0 !important; /* Lighter white on hover */
+  }
+  .device-summary-card .badge {
+    color: #ffffff !important; /* White text for all badges */
+  }
+  .device-summary-card .badge.bg-secondary {
+    background-color: #6c757d !important; /* Grey badge with white text */
+    color: #ffffff !important;
+  }
+  .device-summary-card .badge.bg-success {
+    background-color: #198754 !important; /* Green badge with white text */
+    color: #ffffff !important;
+  }
+  .device-summary-card .badge.bg-warning {
+    background-color: #ffc107 !important; /* Yellow badge */
+    color: #000000 !important; /* Black text on yellow for readability */
+  }
+  .device-summary-card .badge.bg-danger {
+    background-color: #dc3545 !important; /* Red badge with white text */
+    color: #ffffff !important;
+  }
+  .device-summary-card .small {
+    color: #ffffff !important; /* White text for small text */
   }
 </style>
   <div class="row mb-3">

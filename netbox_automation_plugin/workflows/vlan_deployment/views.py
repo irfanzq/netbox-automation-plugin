@@ -1594,9 +1594,18 @@ class VLANDeploymentView(View):
                 'port_channel_member': False,
             }
     
-    def _generate_rollback_info(self, device, interface_name, vlan_id, platform, timeout=90):
+    def _generate_rollback_info(self, device, interface_name, vlan_id, platform, timeout=90, current_config=None):
         """
         Generate comprehensive rollback information for both Cumulus and EOS.
+        Includes previous running config for manual rollback if auto-rollback fails.
+        
+        Args:
+            device: Device object
+            interface_name: Interface name
+            vlan_id: VLAN ID being deployed
+            platform: Platform type ('cumulus' or 'eos')
+            timeout: Rollback timer in seconds
+            current_config: Current device configuration (for manual rollback)
         
         Returns:
             str: Formatted rollback information
@@ -1605,18 +1614,92 @@ class VLANDeploymentView(View):
         rollback_lines.append("Rollback Plan:")
         rollback_lines.append("")
         
+        # Show captured interface-specific running config for reference (in case auto-rollback fails)
+        if current_config and not ('ERROR' in current_config or 'Unable to fetch' in current_config or 'no configuration' in current_config.lower()):
+            rollback_lines.append("Captured Interface Config (before deployment):")
+            rollback_lines.append("  This is the interface configuration that was active before deployment.")
+            rollback_lines.append("  Use these commands to manually restore if auto-rollback fails.")
+            rollback_lines.append("")
+            
+            # Extract interface-specific configs (same logic as dry run mode)
+            config_lines = current_config.split('\n')
+            interface_config_found = False
+            
+            if platform == 'cumulus':
+                # For Cumulus, show all nv set/unset commands for this interface
+                for line in config_lines:
+                    if line.strip():
+                        # Show interface-specific commands (nv set/unset interface <name> ...)
+                        if interface_name in line and ('nv set interface' in line or 'nv unset interface' in line):
+                            rollback_lines.append(f"  {line.strip()}")
+                            interface_config_found = True
+                        # Also show notes/comments about this interface
+                        elif line.strip().startswith('#') and interface_name in line:
+                            rollback_lines.append(f"  {line.strip()}")
+            elif platform == 'eos':
+                # For EOS, show all interface config lines
+                in_interface_section = False
+                for line in config_lines:
+                    stripped = line.strip()
+                    if f"interface {interface_name}" in stripped:
+                        in_interface_section = True
+                        rollback_lines.append(f"  {line.strip()}")
+                        interface_config_found = True
+                    elif in_interface_section:
+                        # Stop at next interface or end of config
+                        if stripped.startswith('interface ') and interface_name not in stripped:
+                            break
+                        if stripped:  # Skip empty lines
+                            rollback_lines.append(f"  {line.strip()}")
+                            interface_config_found = True
+            
+            if not interface_config_found:
+                rollback_lines.append("  # No previous VLAN configuration found for this interface")
+            rollback_lines.append("")
+        
         if platform == 'cumulus':
             rollback_lines.append("Platform: Cumulus Linux (NVUE)")
             rollback_lines.append("")
-            rollback_lines.append("Auto-Rollback:")
+            rollback_lines.append("Option 1: Auto-Rollback (PRIMARY - happens automatically):")
             rollback_lines.append(f"  [OK] Supported: Yes (native commit-confirm)")
             rollback_lines.append(f"  • Method: nv config apply --confirm {timeout}s")
             rollback_lines.append(f"  • Timer: {timeout} seconds")
             rollback_lines.append(f"  • Behavior: Automatically rolls back if not confirmed within {timeout}s")
+            rollback_lines.append(f"  • Status: ACTIVE - rollback will happen automatically if deployment fails")
             rollback_lines.append("")
-            rollback_lines.append("Manual Rollback (if needed):")
-            rollback_lines.append(f"  nv unset interface {interface_name} bridge domain br_default access")
-            rollback_lines.append(f"  nv config apply")
+            rollback_lines.append("Manual Rollback Options (only if auto-rollback fails or timer expires):")
+            rollback_lines.append("")
+            rollback_lines.append("  Option 2: Abort pending config (before timer expires):")
+            rollback_lines.append("    nv config abort")
+            rollback_lines.append("")
+            rollback_lines.append("  Option 3: Remove VLAN config and restore previous state:")
+            # Extract previous config commands from current_config
+            if current_config and 'nv set' in current_config:
+                rollback_lines.append("    # Previous configuration commands (restore these):")
+                config_lines = current_config.split('\n')
+                for line in config_lines:
+                    if line.strip() and ('nv set' in line or 'nv unset' in line):
+                        # Only show interface-specific configs
+                        if interface_name in line:
+                            rollback_lines.append(f"    {line.strip()}")
+                # If no previous config found, show generic unset
+                if not any(interface_name in line for line in config_lines if 'nv set' in line or 'nv unset' in line):
+                    rollback_lines.append(f"    nv unset interface {interface_name} bridge domain br_default access")
+                    rollback_lines.append("    # Note: Interface had no previous VLAN config")
+            else:
+                rollback_lines.append(f"    nv unset interface {interface_name} bridge domain br_default access")
+            rollback_lines.append("    nv config apply")
+            rollback_lines.append("")
+            rollback_lines.append("  Option 4: Rollback using NVUE config history (recommended if auto-rollback failed):")
+            rollback_lines.append("    # Step 1: View config history to find previous revision")
+            rollback_lines.append("    nv config history")
+            rollback_lines.append("")
+            rollback_lines.append("    # Step 2: View diff to see what changed (replace <rev_id> with previous revision)")
+            rollback_lines.append("    nv config diff <rev_id>")
+            rollback_lines.append("")
+            rollback_lines.append("    # Step 3: Apply previous revision (replace <rev_id> with previous revision)")
+            rollback_lines.append("    nv config apply <rev_id>")
+            rollback_lines.append("    # Note: This will prompt for confirmation. Type 'y' to confirm.")
             rollback_lines.append("")
             rollback_lines.append("To Confirm (prevent rollback):")
             rollback_lines.append("  nv config confirm")
@@ -1624,19 +1707,58 @@ class VLANDeploymentView(View):
         elif platform == 'eos':
             rollback_lines.append("Platform: Arista EOS")
             rollback_lines.append("")
-            rollback_lines.append("Auto-Rollback:")
+            rollback_lines.append("Option 1: Auto-Rollback (PRIMARY - happens automatically):")
             timer_minutes = max(2, min(120, timeout // 60))
             rollback_lines.append(f"  [OK] Supported: Yes (configure session with commit timer)")
             rollback_lines.append(f"  • Method: configure session <name> + commit timer {timer_minutes}:00:00")
             rollback_lines.append(f"  • Timer: {timer_minutes} minutes")
             rollback_lines.append(f"  • Behavior: Automatically rolls back when timer expires if not confirmed")
+            rollback_lines.append(f"  • Status: ACTIVE - rollback will happen automatically if deployment fails")
             rollback_lines.append("")
-            rollback_lines.append("Manual Rollback (if needed):")
-            rollback_lines.append("  # Before timer expires:")
-            rollback_lines.append("  configure session <session_name>")
-            rollback_lines.append("  abort")
+            rollback_lines.append("Manual Rollback Options (only if auto-rollback fails or timer expires):")
             rollback_lines.append("")
-            rollback_lines.append("  # Or wait for timer to expire (automatic rollback)")
+            rollback_lines.append("  Option 2: Abort session (before timer expires):")
+            rollback_lines.append("    configure session <session_name>")
+            rollback_lines.append("    abort")
+            rollback_lines.append("    # Or wait for timer to expire (automatic rollback)")
+            rollback_lines.append("")
+            rollback_lines.append("  Option 3: Remove VLAN config and restore previous state:")
+            # Extract previous config commands from current_config
+            if current_config and ('interface' in current_config.lower() or 'switchport' in current_config.lower()):
+                rollback_lines.append("    # Previous configuration commands (restore these):")
+                config_lines = current_config.split('\n')
+                in_interface = False
+                for line in config_lines:
+                    stripped = line.strip()
+                    if f"interface {interface_name}" in stripped:
+                        in_interface = True
+                        rollback_lines.append(f"    {line.strip()}")
+                    elif in_interface:
+                        # Stop at next interface
+                        if stripped.startswith('interface ') and interface_name not in stripped:
+                            break
+                        if stripped:
+                            rollback_lines.append(f"    {line.strip()}")
+                # If no previous config found, show generic removal
+                if not in_interface:
+                    rollback_lines.append(f"    interface {interface_name}")
+                    rollback_lines.append("    no switchport access vlan")
+                    rollback_lines.append("    # Note: Interface had no previous VLAN config")
+            else:
+                rollback_lines.append(f"    interface {interface_name}")
+                rollback_lines.append("    no switchport access vlan")
+            rollback_lines.append("")
+            rollback_lines.append("  Option 4: Rollback using EOS configuration archive (if enabled and auto-rollback failed):")
+            rollback_lines.append("    # EOS can maintain configuration archives if configured")
+            rollback_lines.append("    # Step 1: View configuration archive (if available)")
+            rollback_lines.append("    show archive")
+            rollback_lines.append("")
+            rollback_lines.append("    # Step 2: Compare with previous config (if archive exists)")
+            rollback_lines.append("    show archive config differences <archive_number>")
+            rollback_lines.append("")
+            rollback_lines.append("    # Step 3: Load previous config from archive (if archive exists)")
+            rollback_lines.append("    configure replace <archive_file>")
+            rollback_lines.append("    # Note: Configuration archive must be enabled on device")
             rollback_lines.append("")
             rollback_lines.append("To Confirm (prevent rollback):")
             rollback_lines.append("  commit")
@@ -1988,8 +2110,8 @@ class VLANDeploymentView(View):
                     current_vlan = netbox_state['current']['untagged_vlan']
                     risk_assessment = self._generate_risk_assessment(device_validation, interface_validation, current_vlan, vlan_id)
                     
-                    # Generate rollback info
-                    rollback_info = self._generate_rollback_info(device, interface_name, vlan_id, platform, timeout=90)
+                    # Generate rollback info (include current config for manual rollback)
+                    rollback_info = self._generate_rollback_info(device, interface_name, vlan_id, platform, timeout=90, current_config=current_device_config)
                     
                     # Determine overall status
                     is_blocked = (device_validation.get('status') == 'block' or interface_validation.get('status') == 'block')
@@ -2846,13 +2968,29 @@ class VLANDeploymentView(View):
             
             device_data[device_name]["total"] += 1
             
+            # Check both overall_status (dry run) and status (deployment)
             overall_status = r.get("overall_status", "").upper()
-            if overall_status == "PASS":
-                device_data[device_name]["pass"] += 1
-            elif overall_status == "WARN":
-                device_data[device_name]["warn"] += 1
-            elif overall_status == "BLOCKED":
-                device_data[device_name]["blocked"] += 1
+            status = r.get("status", "").lower()
+            
+            # Determine status: prefer overall_status, fallback to status
+            if overall_status:
+                if overall_status == "PASS":
+                    device_data[device_name]["pass"] += 1
+                elif overall_status == "WARN":
+                    device_data[device_name]["warn"] += 1
+                elif overall_status == "BLOCKED":
+                    device_data[device_name]["blocked"] += 1
+            elif status:
+                # For deployment results: "success" = PASS, "error" = BLOCKED
+                if status == "success":
+                    device_data[device_name]["pass"] += 1
+                elif status == "error":
+                    device_data[device_name]["blocked"] += 1
+                # Check message for WARN indicators
+                message = r.get("message", "").upper()
+                if "WARN" in message and status == "success":
+                    device_data[device_name]["warn"] += 1
+                    device_data[device_name]["pass"] -= 1  # Adjust: WARN takes precedence
         
         # Convert to list and determine overall device status
         device_summaries = []
