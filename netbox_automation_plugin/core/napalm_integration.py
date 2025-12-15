@@ -824,6 +824,49 @@ class NAPALMDeviceManager:
             'checks': checks
         }
     
+    def _verify_rollback(self, driver_name):
+        """
+        Verify if auto-rollback actually happened by checking device state.
+        
+        Returns:
+            tuple: (rollback_successful: bool, message: str)
+        """
+        try:
+            if driver_name == 'cumulus':
+                if hasattr(self.connection, 'device') and hasattr(self.connection.device, 'send_command'):
+                    # Check if there's still a pending commit
+                    pending_check = self.connection.device.send_command('nv config pending', read_timeout=10)
+                    if pending_check:
+                        # If pending shows nothing or "No pending changes", rollback worked
+                        if 'no pending' in pending_check.lower() or 'no changes' in pending_check.lower() or not pending_check.strip():
+                            return True, "Rollback verified: No pending changes detected"
+                        else:
+                            return False, f"Rollback may have failed: Pending changes still exist - {pending_check[:100]}"
+                    else:
+                        # Can't verify, assume it worked
+                        return True, "Rollback assumed successful (could not verify)"
+                return None, "Could not verify rollback (device connection unavailable)"
+            elif driver_name == 'eos':
+                # For EOS, check if session still exists
+                if hasattr(self, '_eos_session_name') and hasattr(self, '_eos_netmiko_conn'):
+                    try:
+                        session_name = self._eos_session_name
+                        netmiko_conn = self._eos_netmiko_conn
+                        # Check if session still exists
+                        sessions_output = netmiko_conn.send_command('show configuration sessions', read_timeout=10)
+                        if session_name in sessions_output:
+                            return False, f"Rollback may have failed: Session {session_name} still exists"
+                        else:
+                            return True, "Rollback verified: Session no longer exists"
+                    except:
+                        return True, "Rollback assumed successful (session check failed)"
+                return True, "Rollback assumed successful (no session tracking)"
+            else:
+                return None, "Rollback verification not supported for this platform"
+        except Exception as e:
+            logger.warning(f"Error verifying rollback: {e}")
+            return None, f"Could not verify rollback: {str(e)}"
+    
     def deploy_config_safe(self, config, replace=True, timeout=60, 
                           checks=['connectivity', 'interfaces', 'lldp'],
                           critical_interfaces=None, min_neighbors=0, 
@@ -1015,12 +1058,7 @@ class NAPALMDeviceManager:
 
                 logs.append(f"")
                 logs.append(f"[Phase 1] Configuration Loading")
-                logs.append(f"  Commands to execute:")
-                # Show each command on a separate line for clarity
-                config_lines = config.split('\n')
-                for line in config_lines:
-                    if line.strip():
-                        logs.append(f"    {line.strip()}")
+                logs.append(f"  Config to load: {config}")
                 logs.append(f"  Mode: {'Replace (full config)' if replace else 'Merge (incremental)'}")
                 logs.append(f"  Loading configuration...")
 
@@ -1039,21 +1077,81 @@ class NAPALMDeviceManager:
                 try:
                     logs.append(f"  Generating configuration diff...")
                     diff = self.connection.compare_config()
+                    
+                    # For Cumulus, if compare_config() returns a command string instead of diff output,
+                    # try to execute it manually to get actual diff
+                    if diff and driver_name == 'cumulus' and diff.strip().startswith('diff <'):
+                        logger.debug(f"compare_config() returned command string, executing manually...")
+                        try:
+                            if hasattr(self.connection, 'device') and hasattr(self.connection.device, 'send_command'):
+                                # Get the current revision number (pending/candidate)
+                                rev_output = self.connection.device.send_command('nv config history | head -1', read_timeout=10)
+                                if rev_output:
+                                    import re
+                                    # Extract revision number (format: "Revision: 270" or "270 * pending")
+                                    rev_match = re.search(r'Revision:\s*(\d+)', rev_output)
+                                    if not rev_match:
+                                        rev_match = re.search(r'^\s*(\d+)\s*\*', rev_output)
+                                    if rev_match:
+                                        rev_num = rev_match.group(1)
+                                        # Execute diff command manually to get actual diff output
+                                        diff_cmd = f'nv config diff {rev_num}'
+                                        diff_output = self.connection.device.send_command(diff_cmd, read_timeout=30)
+                                        if diff_output and diff_output.strip() and not diff_output.strip().startswith('diff <'):
+                                            # Got actual diff output, use it
+                                            diff = diff_output
+                                            logger.info(f"Got diff output manually: {len(diff)} chars")
+                                        else:
+                                            # Still got command, try alternative: get applied revision and diff
+                                            try:
+                                                applied_output = self.connection.device.send_command('nv config history | grep -i applied | head -1', read_timeout=10)
+                                                if applied_output:
+                                                    applied_match = re.search(r'Revision:\s*(\d+)', applied_output)
+                                                    if not applied_match:
+                                                        applied_match = re.search(r'^\s*(\d+)', applied_output)
+                                                    if applied_match:
+                                                        applied_rev = applied_match.group(1)
+                                                        # Get diff between applied and current
+                                                        diff_cmd2 = f'nv config diff {applied_rev}'
+                                                        diff_output2 = self.connection.device.send_command(diff_cmd2, read_timeout=30)
+                                                        if diff_output2 and diff_output2.strip():
+                                                            diff = diff_output2
+                                                            logger.info(f"Got diff output using applied revision: {len(diff)} chars")
+                                            except:
+                                                pass
+                        except Exception as manual_diff_error:
+                            logger.debug(f"Could not get diff manually: {manual_diff_error}")
+                            # Fall back to showing the command (which is what we have)
+                    
                     if diff:
                         logger.info(f"Configuration diff preview:")
                         logger.info(diff)  # Log full diff
-                        logs.append(f"  ✓ Configuration diff (full):")
+                        logs.append(f"  ✓ Configuration diff:")
                         logs.append(f"    Note: '-' lines show what's being removed from running config")
                         logs.append(f"          '+' lines show what's being added in candidate config")
-                        logs.append(f"    ⚠️  IMPORTANT: When you see a range command being replaced (e.g.,")
-                        logs.append(f"          '-nv set interface swp1-31,swp1s0-1,... bridge domain br_default'),")
-                        logs.append(f"          this means ONE interface is being removed from the range, NOT")
-                        logs.append(f"          that all interfaces are losing their bridge domain config.")
-                        logs.append(f"          The interface gets its own specific config (access VLAN) instead.")
+                        
                         # Show full diff (not truncated)
                         diff_lines = diff.split('\n')
                         for line in diff_lines:
                             logs.append(f"    {line}")
+                        
+                        # Only show range command warning if range commands are actually in the diff
+                        # Check for patterns like: swp1-32, swp1s0-1, bond3-6, etc. in diff lines
+                        import re
+                        has_range_commands = False
+                        for line in diff_lines:
+                            # Look for interface range patterns: swp1-32, swp1s0-1, bond3-6, etc.
+                            if re.search(r'(swp|bond|eth)\d+[s\d]*-?\d+', line) and ('-' in line or '+' in line):
+                                has_range_commands = True
+                                break
+                        
+                        if has_range_commands:
+                            logs.append(f"    ... (additional lines)")
+                            logs.append(f"    ⚠️  IMPORTANT: When you see a range command being replaced (e.g.,")
+                            logs.append(f"          '-nv set interface swp1-31,swp1s0-1,... bridge domain br_default'),")
+                            logs.append(f"          this means ONE interface is being removed from the range, NOT")
+                            logs.append(f"          that all interfaces are losing their bridge domain config.")
+                            logs.append(f"          The interface gets its own specific config (access VLAN) instead.")
                     else:
                         logger.warning(f"No configuration differences detected - config may already be applied")
                         logs.append(f"  ⚠ No configuration differences detected")
@@ -1244,6 +1342,27 @@ class NAPALMDeviceManager:
                 logs.append(f"  ✓ Configuration discarded")
             except:
                 logs.append(f"  ⚠ Could not discard configuration")
+            
+            # Add rollback information for failed commit
+            logs.append(f"")
+            logs.append(f"--- Rollback Information ---")
+            logs.append(f"Platform: {driver_name.upper()}")
+            logs.append(f"Status: Configuration discarded automatically")
+            logs.append(f"")
+            logs.append(f"If you need to manually restore or verify previous configuration:")
+            if driver_name == 'cumulus':
+                logs.append(f"  nv config history")
+                logs.append(f"  nv config diff <previous_revision>")
+                logs.append(f"  nv config apply <previous_revision>")
+            elif driver_name == 'eos':
+                logs.append(f"  show archive")
+                logs.append(f"  show archive config differences <archive_number>")
+                logs.append(f"  configure replace <archive_file>")
+            logs.append(f"")
+            logs.append(f"=== Deployment Completed ===")
+            logs.append(f"Final Status: ERROR")
+            logs.append(f"Config Applied: Failed")
+            
             result['logs'] = logs
             return result
         
@@ -1359,10 +1478,62 @@ class NAPALMDeviceManager:
                     logs.append(f"  ✗ Failed to confirm commit: {str(e)}")
                     logs.append(f"  ⚠ Waiting {timeout}s for automatic rollback...")
                     time.sleep(timeout + 5)
-                    result['rolled_back'] = True
-                    result['message'] += f" - Auto-rollback completed"
-                    logger.info(f"Auto-rollback completed")
-                    logs.append(f"  ✓ Auto-rollback completed - changes reverted")
+                    
+                    # Verify if rollback actually happened
+                    rollback_status, rollback_message = self._verify_rollback(driver_name)
+                    result['rolled_back'] = rollback_status if rollback_status is not None else True
+                    
+                    if rollback_status is True:
+                        result['message'] += f" - Auto-rollback completed"
+                        logger.info(f"Auto-rollback completed: {rollback_message}")
+                        logs.append(f"  ✓ Auto-rollback completed - changes reverted")
+                        logs.append(f"  ✓ Verification: {rollback_message}")
+                    elif rollback_status is False:
+                        result['message'] += f" - Auto-rollback may have failed"
+                        logger.warning(f"Auto-rollback verification failed: {rollback_message}")
+                        logs.append(f"  ⚠ Auto-rollback completed but verification failed")
+                        logs.append(f"  ⚠ Warning: {rollback_message}")
+                    else:
+                        result['message'] += f" - Auto-rollback completed (could not verify)"
+                        logger.info(f"Auto-rollback completed: {rollback_message}")
+                        logs.append(f"  ✓ Auto-rollback completed - changes reverted")
+                        logs.append(f"  ⚠ Note: {rollback_message}")
+                    
+                    logs.append(f"")
+                    
+                    # Add rollback information based on verification
+                    logs.append(f"--- Rollback Information ---")
+                    logs.append(f"Platform: {driver_name.upper()}")
+                    if rollback_status is True:
+                        logs.append(f"Auto-Rollback: VERIFIED - Changes have been automatically reverted")
+                        logs.append(f"  Status: {rollback_message}")
+                        # Don't show manual steps when rollback is verified successful
+                    elif rollback_status is False:
+                        logs.append(f"Auto-Rollback: FAILED or INCOMPLETE - Manual intervention required")
+                        logs.append(f"  Warning: {rollback_message}")
+                        logs.append(f"")
+                        logs.append(f"Manual rollback steps:")
+                        if driver_name == 'cumulus':
+                            logs.append(f"  nv config history")
+                            logs.append(f"  nv config diff <previous_revision>")
+                            logs.append(f"  nv config apply <previous_revision>")
+                        elif driver_name == 'eos':
+                            logs.append(f"  show archive")
+                            logs.append(f"  show archive config differences <archive_number>")
+                            logs.append(f"  configure replace <archive_file>")
+                    else:
+                        logs.append(f"Auto-Rollback: COMPLETED (verification unavailable)")
+                        logs.append(f"  Note: {rollback_message}")
+                        logs.append(f"")
+                        logs.append(f"Manual rollback steps (if auto-rollback failed or to restore to different state):")
+                        if driver_name == 'cumulus':
+                            logs.append(f"  nv config history")
+                            logs.append(f"  nv config diff <previous_revision>")
+                            logs.append(f"  nv config apply <previous_revision>")
+                        elif driver_name == 'eos':
+                            logs.append(f"  show archive")
+                            logs.append(f"  show archive config differences <archive_number>")
+                            logs.append(f"  configure replace <archive_file>")
                     logs.append(f"")
                     logs.append(f"=== DEPLOYMENT ROLLED BACK ===")
                     result['logs'] = logs
@@ -1414,6 +1585,23 @@ class NAPALMDeviceManager:
                     logger.error(f"Traceback: {traceback.format_exc()}")
                     logs.append(f"  ✗ Failed to confirm EOS session: {str(e)}")
                     logs.append(f"  ⚠ Session will auto-rollback after timer expires")
+                    logs.append(f"")
+                    
+                    # Add rollback information
+                    logs.append(f"--- Rollback Information ---")
+                    logs.append(f"Platform: EOS")
+                    logs.append(f"Auto-Rollback: PENDING - EOS commit timer will expire and rollback automatically")
+                    logs.append(f"  Timer: {self._eos_session_timer} minutes")
+                    logs.append(f"")
+                    logs.append(f"If you need to manually rollback before timer expires or verify restoration:")
+                    logs.append(f"  show archive")
+                    logs.append(f"  show archive config differences <archive_number>")
+                    logs.append(f"  configure replace <archive_file>")
+                    logs.append(f"")
+                    logs.append(f"=== Deployment Completed ===")
+                    logs.append(f"Final Status: ERROR (will auto-rollback)")
+                    logs.append(f"Config Applied: Pending (will rollback)")
+                    
                     result['logs'] = logs
                     return result
             else:
@@ -1458,12 +1646,71 @@ class NAPALMDeviceManager:
                 logger.warning(f"NOT calling confirm_commit() - waiting {timeout}s for automatic rollback...")
                 logs.append(f"  ⚠ NOT confirming commit - waiting {timeout}s for auto-rollback...")
                 time.sleep(timeout + 5)
-                result['rolled_back'] = True
-                result['message'] += f" - Auto-rollback completed"
-                logger.info(f"{'='*60}")
-                logger.info(f"AUTO-ROLLBACK: Device returned to previous state")
-                logger.info(f"{'='*60}")
-                logs.append(f"  ✓ Auto-rollback completed - device returned to previous state")
+                
+                # Verify if rollback actually happened
+                rollback_status, rollback_message = self._verify_rollback(driver_name)
+                result['rolled_back'] = rollback_status if rollback_status is not None else True
+                
+                if rollback_status is True:
+                    result['message'] += f" - Auto-rollback completed"
+                    logger.info(f"{'='*60}")
+                    logger.info(f"AUTO-ROLLBACK: Device returned to previous state")
+                    logger.info(f"Verification: {rollback_message}")
+                    logger.info(f"{'='*60}")
+                    logs.append(f"  ✓ Auto-rollback completed - device returned to previous state")
+                    logs.append(f"  ✓ Verification: {rollback_message}")
+                elif rollback_status is False:
+                    result['message'] += f" - Auto-rollback may have failed"
+                    logger.warning(f"{'='*60}")
+                    logger.warning(f"AUTO-ROLLBACK: Verification failed")
+                    logger.warning(f"Warning: {rollback_message}")
+                    logger.warning(f"{'='*60}")
+                    logs.append(f"  ⚠ Auto-rollback completed but verification failed")
+                    logs.append(f"  ⚠ Warning: {rollback_message}")
+                else:
+                    result['message'] += f" - Auto-rollback completed (could not verify)"
+                    logger.info(f"{'='*60}")
+                    logger.info(f"AUTO-ROLLBACK: Device returned to previous state")
+                    logger.info(f"Note: {rollback_message}")
+                    logger.info(f"{'='*60}")
+                    logs.append(f"  ✓ Auto-rollback completed - device returned to previous state")
+                    logs.append(f"  ⚠ Note: {rollback_message}")
+                
+                logs.append(f"")
+                
+                # Add rollback information based on verification
+                logs.append(f"--- Rollback Information ---")
+                logs.append(f"Platform: {driver_name.upper()}")
+                if rollback_status is True:
+                    logs.append(f"Auto-Rollback: VERIFIED - Changes have been automatically reverted due to verification failure")
+                    logs.append(f"  Status: {rollback_message}")
+                    # Don't show manual steps when rollback is verified successful
+                elif rollback_status is False:
+                    logs.append(f"Auto-Rollback: FAILED or INCOMPLETE - Manual intervention required")
+                    logs.append(f"  Warning: {rollback_message}")
+                    logs.append(f"")
+                    logs.append(f"Manual rollback steps:")
+                    if driver_name == 'cumulus':
+                        logs.append(f"  nv config history")
+                        logs.append(f"  nv config diff <previous_revision>")
+                        logs.append(f"  nv config apply <previous_revision>")
+                    elif driver_name == 'eos':
+                        logs.append(f"  show archive")
+                        logs.append(f"  show archive config differences <archive_number>")
+                        logs.append(f"  configure replace <archive_file>")
+                else:
+                    logs.append(f"Auto-Rollback: COMPLETED (verification unavailable)")
+                    logs.append(f"  Note: {rollback_message}")
+                    logs.append(f"")
+                    logs.append(f"Manual rollback steps (if auto-rollback failed or to restore to different state):")
+                    if driver_name == 'cumulus':
+                        logs.append(f"  nv config history")
+                        logs.append(f"  nv config diff <previous_revision>")
+                        logs.append(f"  nv config apply <previous_revision>")
+                    elif driver_name == 'eos':
+                        logs.append(f"  show archive")
+                        logs.append(f"  show archive config differences <archive_number>")
+                        logs.append(f"  configure replace <archive_file>")
                 logs.append(f"")
                 logs.append(f"=== DEPLOYMENT ROLLED BACK ===")
                 result['logs'] = logs
@@ -1492,12 +1739,60 @@ class NAPALMDeviceManager:
                 logger.info(f"Waiting {timer_minutes} minutes for EOS timer to expire...")
                 time.sleep(timer_minutes * 60 + 10)
                 
-                result['rolled_back'] = True
-                result['message'] += f" - Auto-rollback completed (timer expired)"
-                logger.info(f"{'='*60}")
-                logger.info(f"AUTO-ROLLBACK: EOS timer expired, device returned to previous state")
-                logger.info(f"{'='*60}")
-                logs.append(f"  ✓ Timer expired - device automatically rolled back to previous state")
+                # Verify if rollback actually happened
+                rollback_status, rollback_message = self._verify_rollback(driver_name)
+                result['rolled_back'] = rollback_status if rollback_status is not None else True
+                
+                if rollback_status is True:
+                    result['message'] += f" - Auto-rollback completed (timer expired)"
+                    logger.info(f"{'='*60}")
+                    logger.info(f"AUTO-ROLLBACK: EOS timer expired, device returned to previous state")
+                    logger.info(f"Verification: {rollback_message}")
+                    logger.info(f"{'='*60}")
+                    logs.append(f"  ✓ Timer expired - device automatically rolled back to previous state")
+                    logs.append(f"  ✓ Verification: {rollback_message}")
+                elif rollback_status is False:
+                    result['message'] += f" - Auto-rollback may have failed (timer expired)"
+                    logger.warning(f"{'='*60}")
+                    logger.warning(f"AUTO-ROLLBACK: Timer expired but verification failed")
+                    logger.warning(f"Warning: {rollback_message}")
+                    logger.warning(f"{'='*60}")
+                    logs.append(f"  ⚠ Timer expired but rollback verification failed")
+                    logs.append(f"  ⚠ Warning: {rollback_message}")
+                else:
+                    result['message'] += f" - Auto-rollback completed (timer expired, could not verify)"
+                    logger.info(f"{'='*60}")
+                    logger.info(f"AUTO-ROLLBACK: EOS timer expired, device returned to previous state")
+                    logger.info(f"Note: {rollback_message}")
+                    logger.info(f"{'='*60}")
+                    logs.append(f"  ✓ Timer expired - device automatically rolled back to previous state")
+                    logs.append(f"  ⚠ Note: {rollback_message}")
+                
+                logs.append(f"")
+                
+                # Add rollback information based on verification
+                logs.append(f"--- Rollback Information ---")
+                logs.append(f"Platform: EOS")
+                if rollback_status is True:
+                    logs.append(f"Auto-Rollback: VERIFIED - EOS commit timer expired, changes have been automatically reverted")
+                    logs.append(f"  Status: {rollback_message}")
+                    # Don't show manual steps when rollback is verified successful
+                elif rollback_status is False:
+                    logs.append(f"Auto-Rollback: FAILED or INCOMPLETE - Manual intervention required")
+                    logs.append(f"  Warning: {rollback_message}")
+                    logs.append(f"")
+                    logs.append(f"Manual rollback steps:")
+                    logs.append(f"  show archive")
+                    logs.append(f"  show archive config differences <archive_number>")
+                    logs.append(f"  configure replace <archive_file>")
+                else:
+                    logs.append(f"Auto-Rollback: COMPLETED (verification unavailable)")
+                    logs.append(f"  Note: {rollback_message}")
+                    logs.append(f"")
+                    logs.append(f"Manual rollback steps (if auto-rollback failed or to restore to different state):")
+                    logs.append(f"  show archive")
+                    logs.append(f"  show archive config differences <archive_number>")
+                    logs.append(f"  configure replace <archive_file>")
                 logs.append(f"")
                 logs.append(f"=== DEPLOYMENT ROLLED BACK ===")
                 result['logs'] = logs
@@ -1517,6 +1812,27 @@ class NAPALMDeviceManager:
                 logger.warning(f"Platform doesn't support auto-rollback - manual intervention may be needed")
                 logger.warning(f"{'='*60}")
                 logs.append(f"")
+                
+                # Add rollback information for platforms without rollback support
+                logs.append(f"--- Rollback Information ---")
+                logs.append(f"Platform: {driver_name.upper()}")
+                logs.append(f"⚠️  WARNING: Platform does not support automatic rollback")
+                logs.append(f"  Status: Configuration has been committed and is PERMANENT")
+                logs.append(f"  Manual intervention required to revert changes")
+                logs.append(f"")
+                logs.append(f"Manual rollback steps:")
+                if driver_name == 'cumulus':
+                    logs.append(f"  nv config history")
+                    logs.append(f"  nv config diff <previous_revision>")
+                    logs.append(f"  nv config apply <previous_revision>")
+                elif driver_name == 'eos':
+                    logs.append(f"  show archive")
+                    logs.append(f"  show archive config differences <archive_number>")
+                    logs.append(f"  configure replace <archive_file>")
+                logs.append(f"")
+                logs.append(f"=== Deployment Completed ===")
+                logs.append(f"Final Status: ERROR (verification failed, manual rollback required)")
+                logs.append(f"Config Applied: Yes (but verification failed)")
                 logs.append(f"=== DEPLOYMENT COMPLETED WITH WARNINGS ===")
                 result['logs'] = logs
                 return result

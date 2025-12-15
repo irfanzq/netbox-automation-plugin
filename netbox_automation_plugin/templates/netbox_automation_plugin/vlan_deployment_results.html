@@ -210,15 +210,20 @@
               // Find Overall Status column
               let statusText = '';
               if (statusFilter) {
-                statusText = statusFilter;
+                statusText = statusFilter.toLowerCase(); // Normalize to lowercase
               } else {
                 if (cells.length > 5) {
                   const statusCell = cells[5];
                   const badge = statusCell.querySelector('.badge');
                   if (badge) {
                     const text = badge.textContent.trim().toLowerCase();
-                    if (text === 'pass' || text === 'warn' || text === 'blocked') {
-                      statusText = text;
+                    // Check for common status values (case-insensitive)
+                    if (text.includes('pass') || text === 'pass' || text === 'success') {
+                      statusText = 'pass';
+                    } else if (text.includes('warn') || text === 'warn' || text === 'warning') {
+                      statusText = 'warn';
+                    } else if (text.includes('block') || text === 'blocked' || text === 'error' || text === 'fail') {
+                      statusText = 'blocked';
                     }
                   }
                 }
@@ -228,16 +233,16 @@
               const activeStatusFilter = document.querySelector('#status-filter-buttons button.active');
               const statusFilterValue = activeStatusFilter ? activeStatusFilter.getAttribute('data-filter') : 'all';
               
-              // Apply status filter
+              // Apply status filter (case-insensitive comparison)
               let show = false;
               if (statusFilterValue === 'all') {
                 show = true;
               } else if (statusFilterValue === 'pass') {
-                show = statusText === 'pass';
+                show = statusText === 'pass' || statusText === 'success';
               } else if (statusFilterValue === 'warnings') {
-                show = statusText === 'warn';
+                show = statusText === 'warn' || statusText === 'warning';
               } else if (statusFilterValue === 'blocked') {
-                show = statusText === 'blocked';
+                show = statusText === 'blocked' || statusText === 'block' || statusText === 'error' || statusText === 'fail';
               }
               
               // Apply device filter

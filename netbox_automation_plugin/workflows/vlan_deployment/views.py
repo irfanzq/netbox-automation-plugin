@@ -339,13 +339,16 @@ class VLANDeploymentView(View):
         - swp6 matches swp6 -> True
         - swp6 matches bond6 -> False
         - swp6 matches swp1-5 -> False
+        - swp1s0 matches swp1s0-1 -> True
+        - swp2s1 matches swp1s0-3,swp2s0-3 -> True
         """
         import re
         # Exact match
         if interface_name == range_key:
             return True
         
-        # Range pattern: swp1-32, bond3-6, etc.
+        # Range pattern: swp1-32, bond3-6, swp1s0-1, etc.
+        # Pattern 1: Simple range like swp1-32
         range_match = re.match(r'^([a-zA-Z]+)(\d+)-(\d+)$', range_key)
         if range_match:
             prefix = range_match.group(1)
@@ -353,6 +356,7 @@ class VLANDeploymentView(View):
             end = int(range_match.group(3))
             
             # Check if interface matches the prefix and is in range
+            # Try simple pattern first: swp5
             interface_match = re.match(r'^([a-zA-Z]+)(\d+)$', interface_name)
             if interface_match:
                 iface_prefix = interface_match.group(1)
@@ -361,7 +365,32 @@ class VLANDeploymentView(View):
                 if iface_prefix == prefix and start <= iface_num <= end:
                     return True
         
-        # Comma-separated list: bond3,5-6
+        # Pattern 2: Complex range like swp1s0-1, swp2s0-3
+        # Match pattern: prefix + digits + suffix + digits - digits
+        range_match_complex = re.match(r'^([a-zA-Z]+)(\d+)([a-zA-Z]+)(\d+)-(\d+)$', range_key)
+        if range_match_complex:
+            prefix = range_match_complex.group(1)
+            prefix_num = int(range_match_complex.group(2))
+            suffix = range_match_complex.group(3)
+            start = int(range_match_complex.group(4))
+            end = int(range_match_complex.group(5))
+            
+            # Check if interface matches: swp1s0, swp2s1, etc.
+            interface_match_complex = re.match(r'^([a-zA-Z]+)(\d+)([a-zA-Z]+)(\d+)$', interface_name)
+            if interface_match_complex:
+                iface_prefix = interface_match_complex.group(1)
+                iface_prefix_num = int(interface_match_complex.group(2))
+                iface_suffix = interface_match_complex.group(3)
+                iface_suffix_num = int(interface_match_complex.group(4))
+                
+                # Match prefix, prefix number, suffix, and suffix number in range
+                if (iface_prefix == prefix and 
+                    iface_prefix_num == prefix_num and 
+                    iface_suffix == suffix and 
+                    start <= iface_suffix_num <= end):
+                    return True
+        
+        # Comma-separated list: bond3,5-6 or swp1s0-1,swp2s0-3
         if ',' in range_key:
             parts = range_key.split(',')
             for part in parts:
@@ -790,7 +819,7 @@ class VLANDeploymentView(View):
                                                 
                                                 # If exact match not found, try to find range that contains this interface
                                                 if not interface_found:
-                                                    # Extract interface prefix and number
+                                                    # Try simple pattern first: swp5
                                                     interface_match = re.match(r'^([a-zA-Z]+)(\d+)$', interface_name)
                                                     if interface_match:
                                                         iface_prefix = interface_match.group(1)
@@ -825,6 +854,49 @@ class VLANDeploymentView(View):
                                                                             break
                                                                         interface_block_lines.append(next_line)
                                                                     break
+                                                    
+                                                    # Try complex pattern: swp1s0
+                                                    if not interface_found:
+                                                        interface_match_complex = re.match(r'^([a-zA-Z]+)(\d+)([a-zA-Z]+)(\d+)$', interface_name)
+                                                        if interface_match_complex:
+                                                            iface_prefix = interface_match_complex.group(1)
+                                                            iface_prefix_num = int(interface_match_complex.group(2))
+                                                            iface_suffix = interface_match_complex.group(3)
+                                                            iface_suffix_num = int(interface_match_complex.group(4))
+                                                            
+                                                            # Look for range patterns like swp1s0-1:, swp2s0-3:, etc.
+                                                            for i, line in enumerate(grep_lines):
+                                                                stripped = line.strip()
+                                                                # Pattern: swp1s0-1:, swp2s0-3:, etc.
+                                                                range_match_complex = re.match(r'^([a-zA-Z]+)(\d+)([a-zA-Z]+)(\d+)-(\d+):\s*$', stripped)
+                                                                if range_match_complex:
+                                                                    range_prefix = range_match_complex.group(1)
+                                                                    range_prefix_num = int(range_match_complex.group(2))
+                                                                    range_suffix = range_match_complex.group(3)
+                                                                    range_start = int(range_match_complex.group(4))
+                                                                    range_end = int(range_match_complex.group(5))
+                                                                    
+                                                                    # Check if our interface is in this range
+                                                                    if (iface_prefix == range_prefix and 
+                                                                        iface_prefix_num == range_prefix_num and 
+                                                                        iface_suffix == range_suffix and 
+                                                                        range_start <= iface_suffix_num <= range_end):
+                                                                        range_key_found = f"{range_prefix}{range_prefix_num}{range_suffix}{range_start}-{range_end}"
+                                                                        interface_found = True
+                                                                        interface_indent = len(line) - len(line.lstrip())
+                                                                        # Start collecting from this line
+                                                                        interface_block_lines.append(line)
+                                                                        # Collect following lines until we hit another interface or section
+                                                                        for j in range(i + 1, len(grep_lines)):
+                                                                            next_line = grep_lines[j]
+                                                                            if not next_line.strip():
+                                                                                continue
+                                                                            next_indent = len(next_line) - len(next_line.lstrip())
+                                                                            # Stop if we hit a line at same or less indent with colon (new interface/section)
+                                                                            if next_indent <= interface_indent and ':' in next_line.strip():
+                                                                                break
+                                                                            interface_block_lines.append(next_line)
+                                                                        break
                                                 
                                                 if interface_found and interface_block_lines:
                                                     # Use the same generic parser for grep output
@@ -2250,18 +2322,56 @@ class VLANDeploymentView(View):
                     device_config_has_ip = 'ip address' in current_device_config.lower() if current_device_config else False
                     device_config_has_vrf = 'vrf' in current_device_config.lower() if current_device_config else False
                     
+                    # Check if device has VLAN config
+                    device_config_has_vlan = False
+                    device_vlan_id = None
+                    if current_device_config:
+                        # Check for access VLAN in config
+                        import re
+                        vlan_match = re.search(r'access\s+(\d+)', current_device_config.lower())
+                        if vlan_match:
+                            device_config_has_vlan = True
+                            device_vlan_id = int(vlan_match.group(1))
+                    
+                    # NetBox has VLAN configured?
+                    netbox_has_vlan = netbox_current.get('untagged_vlan') is not None
+                    netbox_vlan_id = netbox_current.get('untagged_vlan')
+                    
                     conflict_detected = False
-                    if device_config_has_ip != device_has_ip or device_config_has_vrf != device_has_vrf:
+                    conflict_reasons = []
+                    
+                    # Check IP/VRF conflicts
+                    if device_config_has_ip != device_has_ip:
                         conflict_detected = True
+                        conflict_reasons.append("IP address mismatch")
+                    if device_config_has_vrf != device_has_vrf:
+                        conflict_detected = True
+                        conflict_reasons.append("VRF mismatch")
+                    
+                    # Check VLAN conflicts: NetBox has VLAN but device doesn't, or different VLAN
+                    if netbox_has_vlan and not device_config_has_vlan:
+                        conflict_detected = True
+                        conflict_reasons.append(f"NetBox has VLAN {netbox_vlan_id} configured but device has no VLAN config")
+                    elif netbox_has_vlan and device_config_has_vlan and netbox_vlan_id != device_vlan_id:
+                        conflict_detected = True
+                        conflict_reasons.append(f"VLAN mismatch: NetBox has {netbox_vlan_id}, device has {device_vlan_id}")
+                    elif not netbox_has_vlan and device_config_has_vlan:
+                        conflict_detected = True
+                        conflict_reasons.append(f"Device has VLAN {device_vlan_id} configured but NetBox has no VLAN")
                     
                     logs.append("--- Configuration Conflict Detection ---")
                     if conflict_detected:
-                        logs.append("[WARN] Device config differs from NetBox config")
+                        logs.append(f"[WARN] Device config differs from NetBox config")
+                        if conflict_reasons:
+                            logs.append(f"  Conflicts detected: {', '.join(conflict_reasons)}")
                         logs.append("")
                         logs.append("Device Currently Has (from device):")
-                        for line in current_device_config.split('\n'):
-                            if line.strip():
-                                logs.append(f"  {line}")
+                        if current_device_config and current_device_config.strip() and not "(no configuration" in current_device_config:
+                            for line in current_device_config.split('\n'):
+                                if line.strip():
+                                    logs.append(f"  {line}")
+                        else:
+                            logs.append("  (no configuration found)")
                         logs.append("")
                         logs.append("Device Should Have (According to NetBox):")
                         if netbox_current['ip_addresses']:
