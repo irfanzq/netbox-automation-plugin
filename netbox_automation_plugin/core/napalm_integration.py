@@ -1015,7 +1015,12 @@ class NAPALMDeviceManager:
 
                 logs.append(f"")
                 logs.append(f"[Phase 1] Configuration Loading")
-                logs.append(f"  Config to load: {config[:200]}{'...' if len(config) > 200 else ''}")
+                logs.append(f"  Commands to execute:")
+                # Show each command on a separate line for clarity
+                config_lines = config.split('\n')
+                for line in config_lines:
+                    if line.strip():
+                        logs.append(f"    {line.strip()}")
                 logs.append(f"  Mode: {'Replace (full config)' if replace else 'Merge (incremental)'}")
                 logs.append(f"  Loading configuration...")
 
@@ -1036,14 +1041,19 @@ class NAPALMDeviceManager:
                     diff = self.connection.compare_config()
                     if diff:
                         logger.info(f"Configuration diff preview:")
-                        logger.info(diff[:500])  # Log first 500 chars
-                        logs.append(f"  ✓ Configuration diff:")
-                        # Add first few lines of diff
-                        diff_lines = diff.split('\n')[:10]
+                        logger.info(diff)  # Log full diff
+                        logs.append(f"  ✓ Configuration diff (full):")
+                        logs.append(f"    Note: '-' lines show what's being removed from running config")
+                        logs.append(f"          '+' lines show what's being added in candidate config")
+                        logs.append(f"    ⚠️  IMPORTANT: When you see a range command being replaced (e.g.,")
+                        logs.append(f"          '-nv set interface swp1-31,swp1s0-1,... bridge domain br_default'),")
+                        logs.append(f"          this means ONE interface is being removed from the range, NOT")
+                        logs.append(f"          that all interfaces are losing their bridge domain config.")
+                        logs.append(f"          The interface gets its own specific config (access VLAN) instead.")
+                        # Show full diff (not truncated)
+                        diff_lines = diff.split('\n')
                         for line in diff_lines:
                             logs.append(f"    {line}")
-                        if len(diff.split('\n')) > 10:
-                            logs.append(f"    ... ({len(diff.split('\n')) - 10} more lines)")
                     else:
                         logger.warning(f"No configuration differences detected - config may already be applied")
                         logs.append(f"  ⚠ No configuration differences detected")
