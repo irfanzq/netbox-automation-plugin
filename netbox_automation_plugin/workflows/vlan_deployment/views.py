@@ -1648,13 +1648,14 @@ class VLANDeploymentView(View):
                         # Skip link state and type - these are NOT VLAN-related and will be preserved
                         if 'link state' in line or 'type ' in line:
                             continue  # These are preserved, not removed
-                        # Track bridge domain configs (these will be replaced by new VLAN config)
-                        # Note: In Cumulus, tagged VLANs are configured at the bridge level, not per interface
-                        # So we only see interface-level access VLAN configs here:
-                        # - bridge domain br_default access <vlan> (old untagged/access VLAN)
-                        # Tagged VLANs are on the bridge itself (nv set bridge domain br_default vlan <vlans>)
-                        # and are NOT configured per interface, so they won't appear in interface configs
-                        if 'bridge domain' in line:
+                        # Track bridge domain access VLAN configs (these will be replaced by new VLAN config)
+                        # IMPORTANT: In Cumulus, an interface can be part of br_default AND have an access VLAN
+                        # So we only remove/replace lines with "access" - NOT the base "bridge domain br_default" line
+                        # - bridge domain br_default access <vlan> (old untagged/access VLAN) -> REMOVE/REPLACE
+                        # - bridge domain br_default (base membership) -> KEEP (not removed)
+                        # Note: Tagged VLANs are configured at the bridge level, not per interface
+                        if 'bridge domain' in line and 'access' in line:
+                            # Only track lines with "access" - these are the ones being replaced
                             current_bridge_configs.append(line)
                         # Safety check: IP/VRF configs should be blocked by validation
                         elif 'ip address' in line or 'ip gateway' in line or 'ip vrf' in line:
@@ -1675,8 +1676,8 @@ class VLANDeploymentView(View):
                     diff_lines.append("")
                 
                 # Show actual deployment command that will be executed
-                # Note: NVUE automatically replaces old bridge domain config when setting new one
-                # The 'nv set' command internally handles removing the old config automatically
+                # Note: NVUE replaces the access VLAN when setting a new one
+                # The base "bridge domain br_default" membership is preserved (not removed)
                 diff_lines.append("Added:")
                 diff_lines.append(f"  + {proposed_config}")
                 # Extract VLAN ID from proposed config for bridge command
@@ -1694,8 +1695,8 @@ class VLANDeploymentView(View):
                     else:
                         diff_lines.append(f"  # Note: VLAN {vlan_id_from_config} already exists on bridge br_default (no bridge command needed)")
                 diff_lines.append("")
-                diff_lines.append("Note: The interface 'nv set' command automatically replaces any existing")
-                diff_lines.append("      bridge domain configuration (no explicit 'nv unset' needed).")
+                diff_lines.append("Note: The interface can be part of 'br_default' bridge domain AND have an access VLAN.")
+                diff_lines.append("      Only the access VLAN is replaced - bridge domain membership is preserved.")
                 diff_lines.append("      The bridge 'nv set' command is additive - it adds the VLAN to the")
                 diff_lines.append("      existing bridge VLAN list without replacing it.")
                 
@@ -2468,6 +2469,16 @@ class VLANDeploymentView(View):
                                 error_details = device_config_result.get('error', 'Unknown error')
                                 if error_details:
                                     logs.append(f"Error: {error_details}")
+                    logs.append("")
+                    
+                    # Current Device Configuration (Always shown - collected from device)
+                    logs.append("--- Current Device Configuration (Real from Device) ---")
+                    if current_device_config and current_device_config.strip() and not "(no configuration" in current_device_config and not "ERROR:" in current_device_config:
+                        for line in current_device_config.split('\n'):
+                            if line.strip():
+                                logs.append(f"  {line}")
+                    else:
+                        logs.append("  (no configuration found or unable to retrieve)")
                     logs.append("")
                     
                     # Current NetBox Configuration (Always shown - source of truth)
