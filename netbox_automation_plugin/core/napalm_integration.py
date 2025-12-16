@@ -1083,6 +1083,71 @@ class NAPALMDeviceManager:
 
                 # Phase 1.5: Compare/Preview changes (optional, if supported by driver)
                 try:
+                    # First, get the full running config to display before diff
+                    running_config_commands = None
+                    if driver_name == 'cumulus':
+                        try:
+                            if hasattr(self.connection, 'device') and hasattr(self.connection.device, 'send_command'):
+                                # Try multiple methods to get running config
+                                # Method 1: nv config show -r applied -o commands
+                                try:
+                                    running_config_output = self.connection.device.send_command('nv config show -r applied -o commands', read_timeout=30)
+                                    if running_config_output and running_config_output.strip():
+                                        running_config_commands = running_config_output.strip()
+                                        logger.info(f"Got running config via method 1: {len(running_config_commands)} chars")
+                                except Exception as method1_error:
+                                    logger.debug(f"Method 1 failed: {method1_error}")
+                                    # Method 2: nv config show -o commands (without revision flag)
+                                    try:
+                                        running_config_output = self.connection.device.send_command('nv config show -o commands', read_timeout=30)
+                                        if running_config_output and running_config_output.strip():
+                                            running_config_commands = running_config_output.strip()
+                                            logger.info(f"Got running config via method 2: {len(running_config_commands)} chars")
+                                    except Exception as method2_error:
+                                        logger.debug(f"Method 2 failed: {method2_error}")
+                                        # Method 3: Use cli() if available
+                                        try:
+                                            if hasattr(self.connection, 'cli'):
+                                                cli_output = self.connection.cli(['nv config show -r applied -o commands'])
+                                                if cli_output:
+                                                    if isinstance(cli_output, dict):
+                                                        running_config_commands = list(cli_output.values())[0] if cli_output else None
+                                                    else:
+                                                        running_config_commands = str(cli_output).strip()
+                                                    if running_config_commands:
+                                                        logger.info(f"Got running config via method 3: {len(running_config_commands)} chars")
+                                        except Exception as method3_error:
+                                            logger.debug(f"Method 3 failed: {method3_error}")
+                        except Exception as running_config_error:
+                            logger.warning(f"Could not get running config: {running_config_error}")
+                            logs.append(f"  ⚠ Could not retrieve full running config: {running_config_error}")
+                    elif driver_name == 'eos':
+                        try:
+                            # For EOS, get running config
+                            running_config = self.connection.get_config(retrieve='running')
+                            if running_config and 'running' in running_config:
+                                running_config_commands = running_config['running']
+                                logger.info(f"Got EOS running config: {len(running_config_commands)} chars")
+                        except Exception as running_config_error:
+                            logger.warning(f"Could not get EOS running config: {running_config_error}")
+                            logs.append(f"  ⚠ Could not retrieve full running config: {running_config_error}")
+                    
+                    # Show full running config before diff
+                    if running_config_commands:
+                        logs.append(f"")
+                        logs.append(f"  Current running configuration:")
+                        running_lines = running_config_commands.split('\n')
+                        line_count = 0
+                        for line in running_lines:
+                            if line.strip():
+                                logs.append(f"    {line}")
+                                line_count += 1
+                        logger.info(f"Displayed {line_count} lines of running config")
+                    else:
+                        logs.append(f"")
+                        logs.append(f"  ⚠ Could not retrieve full running configuration (will show diff only)")
+                    
+                    logs.append(f"")
                     logs.append(f"  Generating configuration diff...")
                     diff = self.connection.compare_config()
                     
@@ -1201,21 +1266,12 @@ class NAPALMDeviceManager:
                                 if len(added_commands) > 10:
                                     logs.append(f"      ... ({len(added_commands) - 10} more commands)")
                         
-                        # Show full diff (but limit to relevant lines)
+                        # Show full diff (no filtering)
                         logs.append(f"")
-                        logs.append(f"    Full diff (showing relevant changes only):")
-                        relevant_lines = []
+                        logs.append(f"    Full diff:")
                         for line in diff_lines:
-                            # Show diff context lines and actual changes
-                            if (line.strip().startswith('-') or line.strip().startswith('+') or 
-                                line.strip().startswith('@@') or 'bridge domain' in line or 'access' in line):
-                                relevant_lines.append(line)
-                                if len(relevant_lines) >= 50:  # Limit to 50 lines
-                                    relevant_lines.append("    ... (truncated - see full diff above)")
-                                    break
-                        
-                        for line in relevant_lines:
-                            logs.append(f"    {line}")
+                            if line.strip():  # Only skip completely empty lines
+                                logs.append(f"    {line}")
                     else:
                         logger.warning(f"No configuration differences detected - config may already be applied")
                         logs.append(f"  ⚠ No configuration differences detected")
