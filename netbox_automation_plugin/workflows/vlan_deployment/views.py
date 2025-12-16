@@ -925,20 +925,8 @@ class VLANDeploymentView(View):
                                             parsed_commands = self._parse_json_to_nv_commands(interface_config, "", interface_name)
                                             command_lines.extend(parsed_commands)
                                             
-                                            # Add note if inherited from range(s) - can be a list now
-                                            if inherited_from:
-                                                if isinstance(inherited_from, list):
-                                                    if len(inherited_from) == 1:
-                                                        command_lines.insert(0, f"# Note: Interface {interface_name} inherits config from range {inherited_from[0]}")
-                                                    else:
-                                                        ranges_str = ', '.join(inherited_from)
-                                                        command_lines.insert(0, f"# Note: Interface {interface_name} inherits config from ranges: {ranges_str}")
-                                                else:
-                                                    # Backward compatibility - single string
-                                                    command_lines.insert(0, f"# Note: Interface {interface_name} inherits config from range {inherited_from}")
-                                            # Add note if bond member
-                                            if bond_member_of:
-                                                command_lines.insert(0, f"# Note: Interface {interface_name} is a member of bond {bond_member_of}")
+                                            # Don't add inheritance notes - just show actual configs
+                                            # (inheritance info is metadata, not actual config)
                                         
                                         if command_lines:
                                             current_config = '\n'.join(command_lines)
@@ -948,20 +936,8 @@ class VLANDeploymentView(View):
                                             # But still show minimal config if it exists (like link state up)
                                             if interface_config:
                                                 # Interface exists but has minimal/no config - show that
-                                                note_parts = []
-                                                if inherited_from:
-                                                    if isinstance(inherited_from, list):
-                                                        if len(inherited_from) == 1:
-                                                            note_parts.append(f"inherits from range {inherited_from[0]}")
-                                                        else:
-                                                            ranges_str = ', '.join(inherited_from)
-                                                            note_parts.append(f"inherits from ranges: {ranges_str}")
-                                                    else:
-                                                        note_parts.append(f"inherits from range {inherited_from}")
-                                                if bond_member_of:
-                                                    note_parts.append(f"member of bond {bond_member_of}")
-                                                note = f" ({', '.join(note_parts)})" if note_parts else ""
-                                                current_config = f"(interface {interface_name} exists but has minimal configuration{note})"
+                                                # Don't add inheritance notes - just show actual configs
+                                                current_config = f"(interface {interface_name} exists but has minimal configuration)"
                                             else:
                                                 # Interface not found in JSON - try grep fallback
                                                 current_config = None
@@ -1114,10 +1090,7 @@ class VLANDeploymentView(View):
                                                     # Use the same generic parser for grep output
                                                     parsed_commands = self._parse_yaml_to_nv_commands(interface_block_lines, "", interface_name)
                                                     
-                                                    # Add note if found in range
-                                                    if range_key_found:
-                                                        parsed_commands.insert(0, f"# Note: Interface {interface_name} inherits config from range {range_key_found}")
-                                                    
+                                                    # Don't add inheritance notes - just show actual configs
                                                     # Add all parsed commands (link-local IPv6 already filtered in parser)
                                                     command_lines.extend(parsed_commands)
                                                 
@@ -2856,6 +2829,18 @@ class VLANDeploymentView(View):
                     logs.append(f"Config Applied: {config_applied}")
                     logs.append(f"NetBox Updated: {netbox_updated}")
                     
+                    # Determine status fields for table display (similar to dry run)
+                    device_status_text = "PASS"  # In deployment, device is already validated
+                    interface_status_text = "PASS" if status == "success" else "BLOCK"
+                    overall_status_text = "PASS" if status == "success" else "BLOCKED"
+                    
+                    # Determine risk level based on deployment result
+                    risk_level = "LOW"
+                    if status == "error":
+                        risk_level = "HIGH"
+                    elif not netbox_updated or netbox_updated == "Failed":
+                        risk_level = "MEDIUM"
+                    
                     results.append({
                         "device": device,
                         "interface": interface_name,
@@ -2866,6 +2851,11 @@ class VLANDeploymentView(View):
                         "netbox_updated": netbox_updated,
                         "message": message,
                         "deployment_logs": '\n'.join(logs) if logs else message,
+                        # Status fields for table badges
+                        "device_status": device_status_text,
+                        "interface_status": interface_status_text,
+                        "overall_status": overall_status_text,
+                        "risk_level": risk_level,
                     })
 
         return results
@@ -3076,55 +3066,28 @@ class VLANDeploymentView(View):
             # Set timeout to 90 seconds for rollback timer
             # Check connectivity and interfaces (the interface we're configuring should stay up)
             # Get current config before deployment (for display in logs)
+            # Use same logic as dry run mode - handles ranges, retries, fallbacks properly
             logs.append(f"[2.4] Collecting current configuration...")
             current_config_before = None
             bridge_vlans_before = []
             try:
-                if napalm_manager.connect():
-                    connection = napalm_manager.connection
-                    try:
-                        # Get current interface config
-                        if hasattr(connection, 'cli'):
-                            if platform == 'cumulus':
-                                config_show_output = connection.cli(['nv config show -o json'])
-                            elif platform == 'eos':
-                                config_show_output = connection.cli([f'show running-config interface {interface_name}'])
-                            else:
-                                config_show_output = None
-                        else:
-                            config_show_output = None
-                        
-                        if config_show_output:
-                            if platform == 'cumulus':
-                                # Extract JSON and parse
-                                if isinstance(config_show_output, dict):
-                                    config_json_str = config_show_output.get('nv config show -o json') or list(config_show_output.values())[0] if config_show_output else None
-                                else:
-                                    config_json_str = str(config_show_output).strip()
-                                
-                                if config_json_str:
-                                    import json
-                                    config_data = json.loads(config_json_str)
-                                    bridge_vlans_before = self._get_bridge_vlans_from_json(config_data)
-                                    interface_config = self._find_interface_config_in_json(config_data, interface_name)
-                                    if interface_config:
-                                        # Remove metadata
-                                        if isinstance(interface_config, dict):
-                                            interface_config.pop('_inherited_from', None)
-                                            interface_config.pop('_bond_member_of', None)
-                                        parsed_commands = self._parse_json_to_nv_commands(interface_config, "", interface_name)
-                                        current_config_before = '\n'.join(parsed_commands) if parsed_commands else None
-                            elif platform == 'eos':
-                                if isinstance(config_show_output, dict):
-                                    current_config_before = list(config_show_output.values())[0] if config_show_output else None
-                                else:
-                                    current_config_before = str(config_show_output).strip() if config_show_output else None
-                    except Exception as e:
-                        logger.debug(f"Could not get current config before deployment: {e}")
-                    finally:
-                        napalm_manager.disconnect()
+                # Use the same _get_current_device_config function as dry run mode
+                # This handles all the complexity: retries, Netmiko fallback, grep fallback, range parsing, bond members
+                device_config_result = self._get_current_device_config(device, interface_name, platform)
+                current_config_before = device_config_result.get('current_config', None)
+                bridge_vlans_before = device_config_result.get('_bridge_vlans', [])  # Get bridge VLANs if available
+                
+                # Clean up the config string (remove error messages if any)
+                if current_config_before and isinstance(current_config_before, str):
+                    if current_config_before.startswith('ERROR:'):
+                        current_config_before = None
+                    elif "(no configuration" in current_config_before or "(interface" in current_config_before:
+                        # Keep minimal config messages but don't treat as full config
+                        pass
             except Exception as e:
-                logger.debug(f"Could not connect to get current config: {e}")
+                logger.debug(f"Could not get current config before deployment: {e}")
+                current_config_before = None
+                bridge_vlans_before = []
             
             # Display current configuration (similar to dry run)
             if current_config_before or bridge_vlans_before:
@@ -3132,23 +3095,70 @@ class VLANDeploymentView(View):
                 logs.append(f"--- Current Device Configuration (Before Deployment) ---")
                 logs.append(f"")
                 logs.append(f"Interface-Level Configuration:")
-                if current_config_before and current_config_before.strip():
+                if current_config_before and current_config_before.strip() and not "(no configuration" in current_config_before and not "ERROR:" in current_config_before:
                     for line in current_config_before.split('\n'):
                         if line.strip():
                             logs.append(f"  {line}")
                 else:
-                    logs.append(f"  (no interface configuration found)")
+                    logs.append(f"  (no configuration found or unable to retrieve)")
                 logs.append(f"")
                 
-                # Bridge-Level Configuration (for Cumulus)
+                # Bridge-Level Configuration (for Cumulus - shows VLANs on br_default)
                 if platform == 'cumulus' and bridge_vlans_before:
                     logs.append(f"Bridge-Level Configuration (br_default):")
                     if len(bridge_vlans_before) > 0:
+                        # Format VLAN list nicely - show ranges if possible (as it appears in config)
                         vlan_list_str = self._format_vlan_list(bridge_vlans_before)
+                        # Show actual NVUE command that configures this
                         logs.append(f"  nv set bridge domain br_default vlan {vlan_list_str}")
                     else:
                         logs.append(f"  (no VLANs configured on bridge br_default)")
                     logs.append(f"")
+                elif platform == 'cumulus' and not bridge_vlans_before:
+                    logs.append(f"Bridge-Level Configuration (br_default):")
+                    logs.append(f"  (bridge VLAN information not available)")
+                    logs.append(f"")
+            
+            # Show what will be added/replaced (only VLAN-related configs)
+            logs.append(f"--- Configuration Changes (What Will Be Applied) ---")
+            logs.append(f"")
+            logs.append(f"Note: Only VLAN-related configurations will be changed.")
+            logs.append(f"      Other configurations (link state, type, breakout, etc.) are preserved.")
+            logs.append(f"")
+            
+            # Determine what's being replaced
+            if current_config_before:
+                # Check if interface has existing access VLAN
+                import re
+                old_vlan_match = re.search(r'access\s+(\d+)', current_config_before)
+                if old_vlan_match:
+                    old_vlan = old_vlan_match.group(1)
+                    logs.append(f"Removed/Replaced:")
+                    logs.append(f"  - nv set interface {interface_name} bridge domain br_default access {old_vlan}")
+                else:
+                    logs.append(f"Removed/Replaced:")
+                    logs.append(f"  (no existing access VLAN to replace)")
+            else:
+                logs.append(f"Removed/Replaced:")
+                logs.append(f"  (no existing configuration to replace)")
+            logs.append(f"")
+            
+            # Show what's being added
+            logs.append(f"Added:")
+            if platform == 'cumulus':
+                # Check if bridge VLAN command is needed (only if VLAN not already on bridge)
+                bridge_vlan_needed = (vlan_id not in bridge_vlans_before) if bridge_vlans_before else True
+                if bridge_vlan_needed:
+                    logs.append(f"  + nv set bridge domain br_default vlan {vlan_id}")
+                else:
+                    logs.append(f"  # Note: VLAN {vlan_id} already exists on br_default (bridge command not needed)")
+                # Interface access VLAN command is always added
+                logs.append(f"  + nv set interface {interface_name} bridge domain br_default access {vlan_id}")
+            elif platform == 'eos':
+                logs.append(f"  + interface {interface_name}")
+                logs.append(f"  +   switchport mode access")
+                logs.append(f"  +   switchport access vlan {vlan_id}")
+            logs.append(f"")
             
             logs.append(f"[2.5] Starting safe deployment with 90s rollback timer...")
             logs.append(f"      Mode: Merge (incremental changes)")
