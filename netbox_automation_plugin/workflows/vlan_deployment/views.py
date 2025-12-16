@@ -2529,12 +2529,12 @@ class VLANDeploymentView(View):
                     if platform == 'cumulus' and bridge_vlans:
                         logs.append("Bridge-Level Configuration (br_default):")
                         if len(bridge_vlans) > 0:
-                            # Format VLAN list nicely - show ranges if possible
+                            # Format VLAN list nicely - show ranges if possible (as it appears in config)
                             vlan_list_str = self._format_vlan_list(bridge_vlans)
-                            logs.append(f"  VLANs on bridge br_default: {vlan_list_str}")
-                            logs.append(f"  Total VLANs: {len(bridge_vlans)}")
+                            # Show actual NVUE command that configures this
+                            logs.append(f"  nv set bridge domain br_default vlan {vlan_list_str}")
                         else:
-                            logs.append("  No VLANs configured on bridge br_default")
+                            logs.append("  (no VLANs configured on bridge br_default)")
                         logs.append("")
                     elif platform == 'cumulus' and not bridge_vlans:
                         logs.append("Bridge-Level Configuration (br_default):")
