@@ -2769,7 +2769,7 @@ class VLANDeploymentView(View):
                     netbox_diff = self._generate_netbox_diff(netbox_state, netbox_state['proposed'])
                     
                     # Generate proposed config and config diff (same as dry run)
-                    proposed_config = self._generate_vlan_config(device, interface_name, vlan_id, platform)
+                    proposed_config = self._generate_vlan_config(interface_name, vlan_id, platform)
                     config_diff = self._generate_config_diff(current_config_before, proposed_config, platform, device=device, interface_name=interface_name, bridge_vlans=bridge_vlans_before)
                     
                     # Build all the sections (same as dry run)
@@ -3307,7 +3307,7 @@ class VLANDeploymentView(View):
             netbox_diff = self._generate_netbox_diff(netbox_state, netbox_state['proposed'])
             
             # Generate proposed config and config diff (same as dry run)
-            proposed_config = self._generate_vlan_config(device, interface_name, vlan_id, platform)
+            proposed_config = self._generate_vlan_config(interface_name, vlan_id, platform)
             config_diff = self._generate_config_diff(current_config_before, proposed_config, platform, device=device, interface_name=interface_name, bridge_vlans=bridge_vlans_before)
             
             # Display current configuration (Always shown - same as dry run)
