@@ -100,7 +100,7 @@ class VLANDeploymentView(View):
 
         # Get tagging warnings if any
         tagging_warnings = form.cleaned_data.get('_tagging_warnings', [])
-        
+
         context = {
             "form": form,
             "table": table,
@@ -2993,8 +2993,10 @@ class VLANDeploymentView(View):
             logs.append(f"[OK] NAPALM manager initialized")
             
             # For Cumulus, check if VLAN already exists on bridge before adding
+            # IMPORTANT: Order matters - bridge VLAN must be added BEFORE interface access VLAN
             if platform == 'cumulus':
                 bridge_vlans = []
+                bridge_vlan_needed = False
                 try:
                     # Connect to device to get current bridge VLANs
                     if napalm_manager.connect():
@@ -3029,15 +3031,42 @@ class VLANDeploymentView(View):
                     logger.warning(f"Could not connect to {device.name} to check bridge VLANs: {e}")
                     # Continue without bridge VLAN check - will add command anyway (idempotent)
                 
-                # Only add bridge VLAN command if VLAN doesn't already exist
-                if vlan_id not in bridge_vlans:
+                # Check if bridge VLAN command is needed by checking device config
+                bridge_vlan_needed = (vlan_id not in bridge_vlans)
+                
+                # Build config_text in correct order: bridge VLAN first (if needed), then interface access VLAN
+                commands_to_run = []
+                
+                if bridge_vlan_needed:
+                    # Command 1: Add VLAN to bridge domain (must be first)
+                    # This is needed because VLAN is NOT part of br_default - we checked device config
                     bridge_vlan_cmd = f"nv set bridge domain br_default vlan {vlan_id}"
-                    config_text = f"{config_text}\n{bridge_vlan_cmd}"
-                    logs.append(f"[2.3.1] Bridge VLAN command added: {bridge_vlan_cmd}")
-                    logger.info(f"Adding VLAN {vlan_id} to bridge domain br_default on {device.name}")
+                    commands_to_run.append(bridge_vlan_cmd)
+                    logs.append(f"[2.3.1] Command 1: Bridge VLAN command needed")
+                    logs.append(f"           Reason: VLAN {vlan_id} is NOT part of br_default (checked device config)")
+                    logs.append(f"           Action: Adding VLAN {vlan_id} to bridge domain br_default")
+                    logs.append(f"           Command: {bridge_vlan_cmd}")
+                    logger.info(f"VLAN {vlan_id} not on bridge - will add to bridge domain br_default")
                 else:
-                    logs.append(f"[2.3.1] Bridge VLAN {vlan_id} already exists on br_default - skipping bridge command")
-                    logger.info(f"VLAN {vlan_id} already exists on bridge br_default for {device.name} - skipping bridge command")
+                    logs.append(f"[2.3.1] Command 1: Bridge VLAN command skipped")
+                    logs.append(f"           Reason: VLAN {vlan_id} already exists on br_default (checked device config)")
+                    logs.append(f"           Action: Skipping bridge VLAN command (not needed)")
+                    logger.info(f"VLAN {vlan_id} already exists on bridge br_default - skipping bridge command")
+                
+                # Command 2: Add access VLAN to interface (always needed)
+                interface_access_cmd = config_command  # This is already the interface access command
+                commands_to_run.append(interface_access_cmd)
+                logs.append(f"[2.3.2] Command 2: Interface access VLAN command")
+                logs.append(f"           {interface_access_cmd}")
+                
+                # Combine commands in correct order
+                config_text = "\n".join(commands_to_run)
+                
+                # Log summary of commands that will be executed
+                logs.append(f"[2.3.3] Commands to be executed (in order):")
+                for i, cmd in enumerate(commands_to_run, 1):
+                    logs.append(f"           {i}. {cmd}")
+                logs.append(f"")
 
             # Deploy using safe deployment with post-checks
             # Both EOS and Cumulus support commit-confirm workflow:
@@ -3046,7 +3075,82 @@ class VLANDeploymentView(View):
             # Use merge mode (replace=False) since we're only adding VLAN config
             # Set timeout to 90 seconds for rollback timer
             # Check connectivity and interfaces (the interface we're configuring should stay up)
-            logs.append(f"[2.4] Starting safe deployment with 90s rollback timer...")
+            # Get current config before deployment (for display in logs)
+            logs.append(f"[2.4] Collecting current configuration...")
+            current_config_before = None
+            bridge_vlans_before = []
+            try:
+                if napalm_manager.connect():
+                    connection = napalm_manager.connection
+                    try:
+                        # Get current interface config
+                        if hasattr(connection, 'cli'):
+                            if platform == 'cumulus':
+                                config_show_output = connection.cli(['nv config show -o json'])
+                            elif platform == 'eos':
+                                config_show_output = connection.cli([f'show running-config interface {interface_name}'])
+                            else:
+                                config_show_output = None
+                        else:
+                            config_show_output = None
+                        
+                        if config_show_output:
+                            if platform == 'cumulus':
+                                # Extract JSON and parse
+                                if isinstance(config_show_output, dict):
+                                    config_json_str = config_show_output.get('nv config show -o json') or list(config_show_output.values())[0] if config_show_output else None
+                                else:
+                                    config_json_str = str(config_show_output).strip()
+                                
+                                if config_json_str:
+                                    import json
+                                    config_data = json.loads(config_json_str)
+                                    bridge_vlans_before = self._get_bridge_vlans_from_json(config_data)
+                                    interface_config = self._find_interface_config_in_json(config_data, interface_name)
+                                    if interface_config:
+                                        # Remove metadata
+                                        if isinstance(interface_config, dict):
+                                            interface_config.pop('_inherited_from', None)
+                                            interface_config.pop('_bond_member_of', None)
+                                        parsed_commands = self._parse_json_to_nv_commands(interface_config, "", interface_name)
+                                        current_config_before = '\n'.join(parsed_commands) if parsed_commands else None
+                            elif platform == 'eos':
+                                if isinstance(config_show_output, dict):
+                                    current_config_before = list(config_show_output.values())[0] if config_show_output else None
+                                else:
+                                    current_config_before = str(config_show_output).strip() if config_show_output else None
+                    except Exception as e:
+                        logger.debug(f"Could not get current config before deployment: {e}")
+                    finally:
+                        napalm_manager.disconnect()
+            except Exception as e:
+                logger.debug(f"Could not connect to get current config: {e}")
+            
+            # Display current configuration (similar to dry run)
+            if current_config_before or bridge_vlans_before:
+                logs.append(f"")
+                logs.append(f"--- Current Device Configuration (Before Deployment) ---")
+                logs.append(f"")
+                logs.append(f"Interface-Level Configuration:")
+                if current_config_before and current_config_before.strip():
+                    for line in current_config_before.split('\n'):
+                        if line.strip():
+                            logs.append(f"  {line}")
+                else:
+                    logs.append(f"  (no interface configuration found)")
+                logs.append(f"")
+                
+                # Bridge-Level Configuration (for Cumulus)
+                if platform == 'cumulus' and bridge_vlans_before:
+                    logs.append(f"Bridge-Level Configuration (br_default):")
+                    if len(bridge_vlans_before) > 0:
+                        vlan_list_str = self._format_vlan_list(bridge_vlans_before)
+                        logs.append(f"  nv set bridge domain br_default vlan {vlan_list_str}")
+                    else:
+                        logs.append(f"  (no VLANs configured on bridge br_default)")
+                    logs.append(f"")
+            
+            logs.append(f"[2.5] Starting safe deployment with 90s rollback timer...")
             logs.append(f"      Mode: Merge (incremental changes)")
             logs.append(f"      Checks: connectivity")
             logs.append(f"      Interface: {interface_name}")
@@ -3066,14 +3170,14 @@ class VLANDeploymentView(View):
 
             # Extract detailed logs from deploy_result if available
             if deploy_result.get("logs"):
-                logs.append(f"[2.5] Deployment execution logs:")
+                logs.append(f"[2.6] Deployment execution logs:")
                 for log_line in deploy_result["logs"]:
                     logs.append(f"      {log_line}")
 
             logger.info(f"Deployment result for {device.name}: success={deploy_result.get('success')}, "
                        f"committed={deploy_result.get('committed')}, rolled_back={deploy_result.get('rolled_back')}")
 
-            logs.append(f"[2.6] Deployment completed:")
+            logs.append(f"[2.7] Deployment completed:")
             logs.append(f"      Success: {deploy_result.get('success', False)}")
             logs.append(f"      Committed: {deploy_result.get('committed', False)}")
             logs.append(f"      Rolled Back: {deploy_result.get('rolled_back', False)}")

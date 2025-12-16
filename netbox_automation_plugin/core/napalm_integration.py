@@ -1155,7 +1155,16 @@ class NAPALMDeviceManager:
                             if line.strip().startswith('-') and not line.strip().startswith('---'):
                                 cmd = line.strip()[1:].strip()  # Remove the - prefix
                                 if cmd and ('nv set' in cmd or 'nv unset' in cmd):
-                                    # Capture all nv commands
+                                    # Filter out base bridge domain br_default removals (only show access VLAN changes)
+                                    # In Cumulus, interface can be part of br_default AND have access VLAN
+                                    # We only want to show access VLAN removals, not base bridge domain membership
+                                    # Also filter out bridge domain vlan removals (these are just NVUE reorganizing)
+                                    if 'bridge domain br_default' in cmd:
+                                        if 'access' not in cmd:
+                                            # Skip base bridge domain membership removals (these are just NVUE reorganizing interface groups)
+                                            continue
+                                        # For access VLAN removals, keep them
+                                    # Capture all other nv commands
                                     removed_commands.append(cmd)
                             
                             # Extract added commands (lines starting with +)
@@ -1186,7 +1195,7 @@ class NAPALMDeviceManager:
                                     logs.append(f"      ... ({len(removed_commands) - 10} more commands)")
                             if added_commands:
                                 logs.append(f"    New configuration commands that will be added:")
-                                logs.append(f"      (These will configure the new VLAN on the interface)")
+                                logs.append(f"      (These will configure the new VLAN - bridge VLAN first, then interface access)")
                                 for cmd in added_commands[:10]:  # Limit to first 10
                                     logs.append(f"      + {cmd}")
                                 if len(added_commands) > 10:
