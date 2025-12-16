@@ -506,6 +506,48 @@ class VLANDeploymentView(View):
         
         return vlan_ids
     
+    def _format_vlan_list(self, vlan_list):
+        """
+        Format a list of VLAN IDs into a readable string with ranges.
+        Example: [10, 3000, 3001, 3002, ..., 3199] -> "10,3000-3199"
+        """
+        if not vlan_list:
+            return "None"
+        
+        # Sort the list
+        sorted_vlans = sorted(set(vlan_list))
+        
+        if len(sorted_vlans) == 0:
+            return "None"
+        if len(sorted_vlans) == 1:
+            return str(sorted_vlans[0])
+        
+        # Group consecutive VLANs into ranges
+        result = []
+        start = sorted_vlans[0]
+        end = sorted_vlans[0]
+        
+        for i in range(1, len(sorted_vlans)):
+            if sorted_vlans[i] == end + 1:
+                # Consecutive, extend range
+                end = sorted_vlans[i]
+            else:
+                # Gap found, add current range/individual
+                if start == end:
+                    result.append(str(start))
+                else:
+                    result.append(f"{start}-{end}")
+                start = sorted_vlans[i]
+                end = sorted_vlans[i]
+        
+        # Add the last range/individual
+        if start == end:
+            result.append(str(start))
+        else:
+            result.append(f"{start}-{end}")
+        
+        return ",".join(result)
+    
     def _deep_merge_dicts(self, base_dict, override_dict):
         """
         Deep merge two dictionaries. Values from override_dict take precedence.
@@ -2473,6 +2515,8 @@ class VLANDeploymentView(View):
                     
                     # Current Device Configuration (Always shown - collected from device)
                     logs.append("--- Current Device Configuration (Real from Device) ---")
+                    logs.append("")
+                    logs.append("Interface-Level Configuration:")
                     if current_device_config and current_device_config.strip() and not "(no configuration" in current_device_config and not "ERROR:" in current_device_config:
                         for line in current_device_config.split('\n'):
                             if line.strip():
@@ -2480,6 +2524,22 @@ class VLANDeploymentView(View):
                     else:
                         logs.append("  (no configuration found or unable to retrieve)")
                     logs.append("")
+                    
+                    # Bridge-Level Configuration (for Cumulus - shows VLANs on br_default)
+                    if platform == 'cumulus' and bridge_vlans:
+                        logs.append("Bridge-Level Configuration (br_default):")
+                        if len(bridge_vlans) > 0:
+                            # Format VLAN list nicely - show ranges if possible
+                            vlan_list_str = self._format_vlan_list(bridge_vlans)
+                            logs.append(f"  VLANs on bridge br_default: {vlan_list_str}")
+                            logs.append(f"  Total VLANs: {len(bridge_vlans)}")
+                        else:
+                            logs.append("  No VLANs configured on bridge br_default")
+                        logs.append("")
+                    elif platform == 'cumulus' and not bridge_vlans:
+                        logs.append("Bridge-Level Configuration (br_default):")
+                        logs.append("  (bridge VLAN information not available)")
+                        logs.append("")
                     
                     # Current NetBox Configuration (Always shown - source of truth)
                     logs.append("--- Current NetBox Configuration (Source of Truth) ---")
