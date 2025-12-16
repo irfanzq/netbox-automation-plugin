@@ -364,6 +364,18 @@ class VLANDeploymentView(View):
                 
                 if iface_prefix == prefix and start <= iface_num <= end:
                     return True
+            
+            # Also check complex interfaces like swp1s0 against parent range swp1-64
+            # Extract base number from complex interface (e.g., swp1s0 -> 1)
+            interface_match_complex = re.match(r'^([a-zA-Z]+)(\d+)([a-zA-Z]+)(\d+)$', interface_name)
+            if interface_match_complex:
+                iface_prefix = interface_match_complex.group(1)
+                iface_base_num = int(interface_match_complex.group(2))
+                
+                # If prefix matches and base number is in range, it's a match
+                # Example: swp1s0 matches swp1-64 (base number 1 is in range 1-64)
+                if iface_prefix == prefix and start <= iface_base_num <= end:
+                    return True
         
         # Pattern 2: Complex range like swp1s0-1, swp2s0-3
         # Match pattern: prefix + digits + suffix + digits - digits
@@ -399,14 +411,134 @@ class VLANDeploymentView(View):
         
         return False
 
+    def _get_bridge_vlans_from_json(self, config_data):
+        """
+        Extract bridge domain br_default VLAN list from JSON config.
+        Handles VLAN ranges and comma-separated values.
+        Example: "10,3000-3199" -> [10, 3000, 3001, ..., 3199]
+        Returns list of VLAN IDs that are already on the bridge.
+        """
+        bridge_vlans = []
+        try:
+            # Navigate to bridge section
+            for item in config_data:
+                if isinstance(item, dict) and 'set' in item:
+                    set_data = item['set']
+                    if isinstance(set_data, dict) and 'bridge' in set_data:
+                        bridge_data = set_data['bridge']
+                        if isinstance(bridge_data, dict) and 'domain' in bridge_data:
+                            domain_data = bridge_data['domain']
+                            if isinstance(domain_data, dict) and 'br_default' in domain_data:
+                                br_default_data = domain_data['br_default']
+                                if isinstance(br_default_data, dict) and 'vlan' in br_default_data:
+                                    vlan_data = br_default_data['vlan']
+                                    
+                                    # VLAN data structure: {"10,3000-3199": {}}
+                                    # The keys are the VLAN strings we need to parse
+                                    if isinstance(vlan_data, dict):
+                                        # Parse each key (VLAN string)
+                                        for vlan_key in vlan_data.keys():
+                                            bridge_vlans.extend(self._parse_vlan_string(vlan_key))
+                                    elif isinstance(vlan_data, list):
+                                        # If it's a list, parse each item
+                                        for vlan_item in vlan_data:
+                                            if isinstance(vlan_item, str):
+                                                bridge_vlans.extend(self._parse_vlan_string(vlan_item))
+                                            elif isinstance(vlan_item, (int, float)):
+                                                bridge_vlans.append(int(vlan_item))
+                                    elif isinstance(vlan_data, str):
+                                        # Single string value
+                                        bridge_vlans.extend(self._parse_vlan_string(vlan_data))
+                                    elif isinstance(vlan_data, (int, float)):
+                                        # Single numeric value
+                                        bridge_vlans.append(int(vlan_data))
+        except Exception as e:
+            logger.debug(f"Could not extract bridge VLANs from JSON: {e}")
+        
+        # Remove duplicates and sort
+        bridge_vlans = sorted(list(set(bridge_vlans)))
+        return bridge_vlans
+    
+    def _parse_vlan_string(self, vlan_string):
+        """
+        Parse VLAN string that can contain:
+        - Single VLANs: "10"
+        - Comma-separated: "10,20,30"
+        - Ranges: "3000-3199"
+        - Mixed: "10,3000-3199,4000"
+        
+        Returns list of VLAN IDs.
+        """
+        vlan_ids = []
+        if not vlan_string:
+            return vlan_ids
+        
+        try:
+            # Split by comma to handle multiple VLANs/ranges
+            parts = str(vlan_string).split(',')
+            for part in parts:
+                part = part.strip()
+                if not part:
+                    continue
+                
+                # Check if it's a range (e.g., "3000-3199")
+                if '-' in part:
+                    try:
+                        start_str, end_str = part.split('-', 1)
+                        start = int(start_str.strip())
+                        end = int(end_str.strip())
+                        # Add all VLANs in the range
+                        vlan_ids.extend(range(start, end + 1))
+                    except (ValueError, IndexError):
+                        # If parsing fails, try to parse as single VLAN
+                        try:
+                            vlan_ids.append(int(part))
+                        except ValueError:
+                            pass
+                else:
+                    # Single VLAN
+                    try:
+                        vlan_ids.append(int(part))
+                    except ValueError:
+                        pass
+        except Exception as e:
+            logger.debug(f"Error parsing VLAN string '{vlan_string}': {e}")
+        
+        return vlan_ids
+    
+    def _deep_merge_dicts(self, base_dict, override_dict):
+        """
+        Deep merge two dictionaries. Values from override_dict take precedence.
+        Used to merge configs from multiple sources (exact match, ranges, etc.).
+        """
+        if not isinstance(base_dict, dict) or not isinstance(override_dict, dict):
+            # If either is not a dict, return override (or base if override is None)
+            return override_dict if override_dict is not None else base_dict
+        
+        result = base_dict.copy()
+        for key, value in override_dict.items():
+            if key in result and isinstance(result[key], dict) and isinstance(value, dict):
+                # Recursively merge nested dicts
+                result[key] = self._deep_merge_dicts(result[key], value)
+            else:
+                # Override with new value
+                result[key] = value
+        return result
+    
     def _find_interface_config_in_json(self, config_data, interface_name):
         """
-        Find interface configuration in JSON, handling ranges and bond members.
-        Extracts from the "interface" key in the JSON structure:
-        [{"header": {...}}, {"set": {"interface": {...}}}]
+        Find ALL interface configurations in JSON that apply to the interface.
+        Collects configs from:
+        1. Direct/exact match (e.g., swp1s0: {...})
+        2. Range matches (e.g., swp1-64: {...}, swp1s0-1: {...})
+        3. Bond member configs (if interface is a bond member)
         
-        Returns the interface config dict if found, None otherwise.
-        No hardcoding - shows whatever is defined in interface configs.
+        Handles complex ranges like:
+        - swp1-64 (simple range)
+        - swp1s0-1 (split range)
+        - swp1-31,33-64,swp1s0-1,swp2s0-1 (comma-separated ranges)
+        
+        Returns merged config dict with all applicable configs, or None if not found.
         """
         # Navigate to interface section - extract from "interface" key
         interfaces = None
@@ -420,30 +552,48 @@ class VLANDeploymentView(View):
         if not interfaces or not isinstance(interfaces, dict):
             return None
         
-        # First, try exact match
+        merged_config = {}
+        inherited_from = []
+        bond_member_of = None
+        
+        # 1. Check for exact match (highest priority - most specific)
         if interface_name in interfaces:
-            return interfaces[interface_name]
+            exact_config = interfaces[interface_name]
+            if isinstance(exact_config, dict):
+                merged_config = self._deep_merge_dicts(merged_config, exact_config)
         
-        # Check if interface is in a range (e.g., swp6 in swp1-32)
+        # 2. Check ALL range matches (collect all, don't stop at first)
+        # This handles cases where interface matches multiple ranges
         for range_key, range_config in interfaces.items():
-            if self._interface_matches_range(interface_name, range_key) and interface_name != range_key:
-                # Interface is in a range - return the range config
-                # Mark it as inherited by adding a note to the config dict
+            # Skip exact match (already handled above)
+            if range_key == interface_name:
+                continue
+            
+            # Check if interface matches this range
+            if self._interface_matches_range(interface_name, range_key):
                 if isinstance(range_config, dict):
-                    range_config = range_config.copy()
-                    range_config['_inherited_from'] = range_key
-                return range_config
+                    # Merge range config into merged_config
+                    merged_config = self._deep_merge_dicts(merged_config, range_config)
+                    inherited_from.append(range_key)
         
-        # Check if interface is a bond member
+        # 3. Check if interface is a bond member
         for bond_name, bond_config in interfaces.items():
             if isinstance(bond_config, dict) and 'bond' in bond_config:
                 bond_members = bond_config.get('bond', {}).get('member', {})
                 if isinstance(bond_members, dict) and interface_name in bond_members:
-                    # Interface is a bond member - return bond config with note
+                    # Interface is a bond member - merge bond config
                     if isinstance(bond_config, dict):
-                        bond_config = bond_config.copy()
-                        bond_config['_bond_member_of'] = bond_name
-                    return bond_config
+                        merged_config = self._deep_merge_dicts(merged_config, bond_config)
+                        bond_member_of = bond_name
+        
+        # If we found any config, add metadata and return
+        if merged_config:
+            # Add metadata about inheritance
+            if inherited_from:
+                merged_config['_inherited_from'] = inherited_from
+            if bond_member_of:
+                merged_config['_bond_member_of'] = bond_member_of
+            return merged_config
         
         return None
 
@@ -641,6 +791,7 @@ class VLANDeploymentView(View):
                         current_config = None
                         device_connected = True  # Track if device is actually connected
                         device_uptime = None  # Track device uptime for connection verification
+                        bridge_vlans = []  # Track bridge VLANs extracted from config
                         try:
                             if hasattr(connection, 'cli'):
                                 # Check device uptime to verify connection
@@ -714,6 +865,9 @@ class VLANDeploymentView(View):
                                         config_data = json.loads(config_json_str)
                                         json_parsed_successfully = True  # Mark that we successfully parsed JSON
                                         
+                                        # Extract bridge VLANs for later use (to check if VLAN already exists)
+                                        bridge_vlans = self._get_bridge_vlans_from_json(config_data)
+                                        
                                         # Find interface config (handles ranges and bond members)
                                         interface_config = self._find_interface_config_in_json(config_data, interface_name)
                                         
@@ -729,15 +883,24 @@ class VLANDeploymentView(View):
                                             parsed_commands = self._parse_json_to_nv_commands(interface_config, "", interface_name)
                                             command_lines.extend(parsed_commands)
                                             
-                                            # Add note if inherited from range
+                                            # Add note if inherited from range(s) - can be a list now
                                             if inherited_from:
-                                                command_lines.insert(0, f"# Note: Interface {interface_name} inherits config from range {inherited_from}")
+                                                if isinstance(inherited_from, list):
+                                                    if len(inherited_from) == 1:
+                                                        command_lines.insert(0, f"# Note: Interface {interface_name} inherits config from range {inherited_from[0]}")
+                                                    else:
+                                                        ranges_str = ', '.join(inherited_from)
+                                                        command_lines.insert(0, f"# Note: Interface {interface_name} inherits config from ranges: {ranges_str}")
+                                                else:
+                                                    # Backward compatibility - single string
+                                                    command_lines.insert(0, f"# Note: Interface {interface_name} inherits config from range {inherited_from}")
                                             # Add note if bond member
                                             if bond_member_of:
                                                 command_lines.insert(0, f"# Note: Interface {interface_name} is a member of bond {bond_member_of}")
                                         
                                         if command_lines:
                                             current_config = '\n'.join(command_lines)
+                                            # bridge_vlans is already extracted and stored in the variable above
                                         else:
                                             # Interface not found in config or has no configuration commands
                                             # But still show minimal config if it exists (like link state up)
@@ -745,7 +908,14 @@ class VLANDeploymentView(View):
                                                 # Interface exists but has minimal/no config - show that
                                                 note_parts = []
                                                 if inherited_from:
-                                                    note_parts.append(f"inherits from range {inherited_from}")
+                                                    if isinstance(inherited_from, list):
+                                                        if len(inherited_from) == 1:
+                                                            note_parts.append(f"inherits from range {inherited_from[0]}")
+                                                        else:
+                                                            ranges_str = ', '.join(inherited_from)
+                                                            note_parts.append(f"inherits from ranges: {ranges_str}")
+                                                    else:
+                                                        note_parts.append(f"inherits from range {inherited_from}")
                                                 if bond_member_of:
                                                     note_parts.append(f"member of bond {bond_member_of}")
                                                 note = f" ({', '.join(note_parts)})" if note_parts else ""
@@ -957,7 +1127,8 @@ class VLANDeploymentView(View):
                                 'current_config': current_config if current_config is not None else f"(no output from device for interface {interface_name})",
                                 'source': 'device',
                                 'timestamp': timestamp,
-                                'device_uptime': device_uptime
+                                'device_uptime': device_uptime,
+                                '_bridge_vlans': bridge_vlans  # Include bridge VLANs for checking if VLAN already exists
                             }
                         except Exception as e2:
                             logger.warning(f"Could not get interface config for {device.name}:{interface_name}: {e2}")
@@ -1429,7 +1600,7 @@ class VLANDeploymentView(View):
                 'has_changes': True
             }
     
-    def _generate_config_diff(self, current_config, proposed_config, platform, device=None, interface_name=None):
+    def _generate_config_diff(self, current_config, proposed_config, platform, device=None, interface_name=None, bridge_vlans=None):
         """
         Generate a diff between current and proposed config.
         
@@ -1509,11 +1680,19 @@ class VLANDeploymentView(View):
                 diff_lines.append("Added:")
                 diff_lines.append(f"  + {proposed_config}")
                 # Extract VLAN ID from proposed config for bridge command
+                # Only add bridge VLAN command if VLAN doesn't already exist on bridge
                 import re
                 vlan_match = re.search(r'access\s+(\d+)', proposed_config)
                 if vlan_match:
-                    vlan_id_from_config = vlan_match.group(1)
-                    diff_lines.append(f"  + nv set bridge domain br_default vlan {vlan_id_from_config}")
+                    vlan_id_from_config = int(vlan_match.group(1))
+                    # Check if VLAN already exists on bridge
+                    if bridge_vlans is None:
+                        bridge_vlans = []
+                    
+                    if vlan_id_from_config not in bridge_vlans:
+                        diff_lines.append(f"  + nv set bridge domain br_default vlan {vlan_id_from_config}")
+                    else:
+                        diff_lines.append(f"  # Note: VLAN {vlan_id_from_config} already exists on bridge br_default (no bridge command needed)")
                 diff_lines.append("")
                 diff_lines.append("Note: The interface 'nv set' command automatically replaces any existing")
                 diff_lines.append("      bridge domain configuration (no explicit 'nv unset' needed).")
@@ -2167,9 +2346,10 @@ class VLANDeploymentView(View):
                     config_source = device_config_result.get('source', 'error')
                     config_timestamp = device_config_result.get('timestamp', 'N/A')
                     device_uptime = device_config_result.get('device_uptime', None)
+                    bridge_vlans = device_config_result.get('_bridge_vlans', [])  # Get bridge VLANs if available
                     
-                    # Generate config diff
-                    config_diff = self._generate_config_diff(current_device_config, proposed_config, platform, device=device, interface_name=interface_name)
+                    # Generate config diff (pass bridge VLANs to check if VLAN already exists)
+                    config_diff = self._generate_config_diff(current_device_config, proposed_config, platform, device=device, interface_name=interface_name, bridge_vlans=bridge_vlans)
                     
                     # Get NetBox current and proposed state
                     netbox_state = self._get_netbox_current_state(device, interface_name, vlan_id)
@@ -2290,13 +2470,6 @@ class VLANDeploymentView(View):
                                     logs.append(f"Error: {error_details}")
                     logs.append("")
                     
-                    # Current Device Configuration (Always shown - useful for troubleshooting)
-                    logs.append("--- Current Device Configuration (Real from Device) ---")
-                    for line in current_device_config.split('\n'):
-                        if line.strip():
-                            logs.append(f"  {line}")
-                    logs.append("")
-                    
                     # Current NetBox Configuration (Always shown - source of truth)
                     logs.append("--- Current NetBox Configuration (Source of Truth) ---")
                     netbox_current = netbox_state['current']
@@ -2394,7 +2567,16 @@ class VLANDeploymentView(View):
                     
                     # OPTION D: Conditional display based on validation status
                     if is_blocked:
-                        # When BLOCKED: Show deployment status message, hide proposed changes
+                        # When BLOCKED: Show current configuration for reference, hide proposed changes
+                        logs.append("--- Current Device Configuration (Real from Device) ---")
+                        if current_device_config and current_device_config.strip() and not "(no configuration" in current_device_config and not "ERROR:" in current_device_config:
+                            for line in current_device_config.split('\n'):
+                                if line.strip():
+                                    logs.append(f"  {line}")
+                        else:
+                            logs.append("  (no configuration found or unable to retrieve)")
+                        logs.append("")
+                        
                         logs.append("--- Deployment Status ---")
                         logs.append(f"[BLOCKED] Deployment will not proceed due to validation failures above.")
                         logs.append("")
@@ -2405,7 +2587,7 @@ class VLANDeploymentView(View):
                         logs.append("because deployment is blocked. These will be shown once validation passes.")
                         logs.append("")
                     else:
-                        # When PASS/WARN: Show everything (deployment would proceed)
+                        # When PASS/WARN: Show proposed configs and diffs (current config already shown in conflict section if needed)
                         logs.append("--- Deployment Status ---")
                         logs.append(f"[{status_message}] Deployment would proceed. Changes shown below.")
                         logs.append("")
@@ -2414,7 +2596,22 @@ class VLANDeploymentView(View):
                         logs.append("--- Proposed Configuration (VLAN Deployment) ---")
                         logs.append("")
                         logs.append("Device Config:")
-                        for line in proposed_config.split('\n'):
+                        # For Cumulus, include bridge VLAN command in proposed config to match diff
+                        # But only if the VLAN doesn't already exist on the bridge
+                        proposed_config_display = proposed_config
+                        if platform == 'cumulus':
+                            import re
+                            vlan_match = re.search(r'access\s+(\d+)', proposed_config)
+                            if vlan_match:
+                                vlan_id_from_config = int(vlan_match.group(1))
+                                # Check if VLAN already exists on bridge
+                                if vlan_id_from_config not in bridge_vlans:
+                                    proposed_config_display = f"{proposed_config}\nnv set bridge domain br_default vlan {vlan_id_from_config}"
+                                else:
+                                    # VLAN already exists, add note
+                                    proposed_config_display = f"{proposed_config}\n# Note: VLAN {vlan_id_from_config} already exists on bridge br_default (no bridge command needed)"
+                        
+                        for line in proposed_config_display.split('\n'):
                             if line.strip():
                                 logs.append(f"  {line}")
                         logs.append("")
@@ -2425,19 +2622,19 @@ class VLANDeploymentView(View):
                         logs.append("")
                         
                         # Config Diff (Only shown when deployment would proceed)
+                        # Note: Current config is NOT shown here again to avoid redundancy
+                        # (it's already shown in conflict detection section if conflicts exist, or user can see changes in the diff)
                         logs.append("--- Configuration Comparison ---")
                         logs.append("")
-                        logs.append("Current Configuration:")
-                        for line in current_device_config.split('\n'):
-                            if line.strip():
-                                logs.append(f"  {line}")
-                        logs.append("")
                         logs.append("Proposed Configuration:")
-                        for line in proposed_config.split('\n'):
+                        # Use the same display format as above
+                        for line in proposed_config_display.split('\n'):
                             if line.strip():
                                 logs.append(f"  {line}")
                         logs.append("")
                         logs.append("--- Config Diff ---")
+                        logs.append("(Shows what will be removed/replaced and what will be added)")
+                        logs.append("")
                         for line in config_diff.split('\n'):
                             logs.append(f"  {line}")
                         logs.append("")
@@ -2448,9 +2645,7 @@ class VLANDeploymentView(View):
                             logs.append(f"  {line}")
                         logs.append("")
                         
-                        # Rollback Information (Only shown when deployment would proceed)
-                        logs.append(rollback_info)
-                        logs.append("")
+                        # Rollback Information - NOT shown in dry run (only relevant for actual deployment)
                     
                     # Summary Statistics (for first interface only, to avoid repetition)
                     if interface_name == interface_list[0]:

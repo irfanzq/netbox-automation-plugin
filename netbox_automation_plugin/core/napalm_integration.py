@@ -1072,6 +1072,14 @@ class NAPALMDeviceManager:
 
                 logger.info(f"Phase 1: Configuration loaded successfully")
                 logs.append(f"  ✓ Configuration loaded to candidate config")
+                
+                # Show commands that will be executed
+                logs.append(f"")
+                logs.append(f"  Commands to be executed:")
+                config_lines = config.split('\n')
+                for line in config_lines:
+                    if line.strip():
+                        logs.append(f"    + {line.strip()}")
 
                 # Phase 1.5: Compare/Preview changes (optional, if supported by driver)
                 try:
@@ -1080,7 +1088,7 @@ class NAPALMDeviceManager:
                     
                     # For Cumulus, if compare_config() returns a command string instead of diff output,
                     # try to execute it manually to get actual diff
-                    if diff and driver_name == 'cumulus' and diff.strip().startswith('diff <'):
+                    if diff and driver_name == 'cumulus' and ('diff <' in diff or diff.strip().startswith('diff <')):
                         logger.debug(f"compare_config() returned command string, executing manually...")
                         try:
                             if hasattr(self.connection, 'device') and hasattr(self.connection.device, 'send_command'):
@@ -1097,7 +1105,7 @@ class NAPALMDeviceManager:
                                         # Execute diff command manually to get actual diff output
                                         diff_cmd = f'nv config diff {rev_num}'
                                         diff_output = self.connection.device.send_command(diff_cmd, read_timeout=30)
-                                        if diff_output and diff_output.strip() and not diff_output.strip().startswith('diff <'):
+                                        if diff_output and diff_output.strip() and 'diff <' not in diff_output:
                                             # Got actual diff output, use it
                                             diff = diff_output
                                             logger.info(f"Got diff output manually: {len(diff)} chars")
@@ -1114,11 +1122,11 @@ class NAPALMDeviceManager:
                                                         # Get diff between applied and current
                                                         diff_cmd2 = f'nv config diff {applied_rev}'
                                                         diff_output2 = self.connection.device.send_command(diff_cmd2, read_timeout=30)
-                                                        if diff_output2 and diff_output2.strip():
+                                                        if diff_output2 and diff_output2.strip() and 'diff <' not in diff_output2:
                                                             diff = diff_output2
                                                             logger.info(f"Got diff output using applied revision: {len(diff)} chars")
-                                            except:
-                                                pass
+                                            except Exception as alt_error:
+                                                logger.debug(f"Alternative diff method failed: {alt_error}")
                         except Exception as manual_diff_error:
                             logger.debug(f"Could not get diff manually: {manual_diff_error}")
                             # Fall back to showing the command (which is what we have)
@@ -1130,28 +1138,75 @@ class NAPALMDeviceManager:
                         logs.append(f"    Note: '-' lines show what's being removed from running config")
                         logs.append(f"          '+' lines show what's being added in candidate config")
                         
-                        # Show full diff (not truncated)
+                        # Parse diff to extract removed and added commands
                         diff_lines = diff.split('\n')
+                        removed_commands = []
+                        added_commands = []
+                        in_diff_section = False
+                        
                         for line in diff_lines:
+                            # Skip diff header lines
+                            if line.strip().startswith('---') or line.strip().startswith('+++') or line.strip().startswith('@@'):
+                                continue
+                            if line.strip().startswith('diff <') or line.strip().startswith('Note:'):
+                                continue
+                            
+                            # Extract removed commands (lines starting with -)
+                            if line.strip().startswith('-') and not line.strip().startswith('---'):
+                                cmd = line.strip()[1:].strip()  # Remove the - prefix
+                                if cmd and ('nv set' in cmd or 'nv unset' in cmd):
+                                    # Capture all nv commands
+                                    removed_commands.append(cmd)
+                            
+                            # Extract added commands (lines starting with +)
+                            elif line.strip().startswith('+') and not line.strip().startswith('+++'):
+                                cmd = line.strip()[1:].strip()  # Remove the + prefix
+                                if cmd and ('nv set' in cmd or 'nv unset' in cmd):
+                                    # Capture all nv commands
+                                    added_commands.append(cmd)
+                        
+                        # Store for later use in success message
+                        if '_removed_commands' not in result:
+                            result['_removed_commands'] = []
+                        if '_added_commands' not in result:
+                            result['_added_commands'] = []
+                        result['_removed_commands'] = removed_commands
+                        result['_added_commands'] = added_commands
+                        
+                        # Show summary of commands
+                        if removed_commands or added_commands:
+                            logs.append(f"")
+                            logs.append(f"    Summary of changes:")
+                            if removed_commands:
+                                logs.append(f"    Old configuration commands that will be removed/replaced:")
+                                logs.append(f"      (These will be removed because they conflict with the new VLAN config)")
+                                for cmd in removed_commands[:10]:  # Limit to first 10
+                                    logs.append(f"      - {cmd}")
+                                if len(removed_commands) > 10:
+                                    logs.append(f"      ... ({len(removed_commands) - 10} more commands)")
+                            if added_commands:
+                                logs.append(f"    New configuration commands that will be added:")
+                                logs.append(f"      (These will configure the new VLAN on the interface)")
+                                for cmd in added_commands[:10]:  # Limit to first 10
+                                    logs.append(f"      + {cmd}")
+                                if len(added_commands) > 10:
+                                    logs.append(f"      ... ({len(added_commands) - 10} more commands)")
+                        
+                        # Show full diff (but limit to relevant lines)
+                        logs.append(f"")
+                        logs.append(f"    Full diff (showing relevant changes only):")
+                        relevant_lines = []
+                        for line in diff_lines:
+                            # Show diff context lines and actual changes
+                            if (line.strip().startswith('-') or line.strip().startswith('+') or 
+                                line.strip().startswith('@@') or 'bridge domain' in line or 'access' in line):
+                                relevant_lines.append(line)
+                                if len(relevant_lines) >= 50:  # Limit to 50 lines
+                                    relevant_lines.append("    ... (truncated - see full diff above)")
+                                    break
+                        
+                        for line in relevant_lines:
                             logs.append(f"    {line}")
-                        
-                        # Only show range command warning if range commands are actually in the diff
-                        # Check for patterns like: swp1-32, swp1s0-1, bond3-6, etc. in diff lines
-                        import re
-                        has_range_commands = False
-                        for line in diff_lines:
-                            # Look for interface range patterns: swp1-32, swp1s0-1, bond3-6, etc.
-                            if re.search(r'(swp|bond|eth)\d+[s\d]*-?\d+', line) and ('-' in line or '+' in line):
-                                has_range_commands = True
-                                break
-                        
-                        if has_range_commands:
-                            logs.append(f"    ... (additional lines)")
-                            logs.append(f"    ⚠️  IMPORTANT: When you see a range command being replaced (e.g.,")
-                            logs.append(f"          '-nv set interface swp1-31,swp1s0-1,... bridge domain br_default'),")
-                            logs.append(f"          this means ONE interface is being removed from the range, NOT")
-                            logs.append(f"          that all interfaces are losing their bridge domain config.")
-                            logs.append(f"          The interface gets its own specific config (access VLAN) instead.")
                     else:
                         logger.warning(f"No configuration differences detected - config may already be applied")
                         logs.append(f"  ⚠ No configuration differences detected")
@@ -1467,6 +1522,30 @@ class NAPALMDeviceManager:
                     logger.info(f"{'='*60}")
                     logs.append(f"  ✓ Commit CONFIRMED - changes are now PERMANENT")
                     logs.append(f"")
+                    
+                    # Show summary of commands that were actually applied
+                    removed = result.get('_removed_commands', [])
+                    added = result.get('_added_commands', [])
+                    if removed or added:
+                        logs.append(f"--- Commands Applied ---")
+                        logs.append(f"")
+                        logs.append(f"The following configuration changes were applied to the device:")
+                        logs.append(f"")
+                        
+                        if removed:
+                            logs.append(f"Old configuration commands removed/replaced:")
+                            logs.append(f"  (These commands were removed because they conflicted with the new VLAN config)")
+                            for cmd in removed:
+                                logs.append(f"  - {cmd}")
+                            logs.append(f"")
+                        
+                        if added:
+                            logs.append(f"New configuration commands added:")
+                            logs.append(f"  (These commands configure the new VLAN on the interface)")
+                            for cmd in added:
+                                logs.append(f"  + {cmd}")
+                            logs.append(f"")
+                    
                     logs.append(f"=== DEPLOYMENT SUCCESSFUL ===")
                     result['logs'] = logs
                     return result

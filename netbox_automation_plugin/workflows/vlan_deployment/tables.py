@@ -96,31 +96,40 @@ class VLANDeploymentResultTable(NetBoxTable):
     
     def render_device_status(self, value):
         """Render device status with color-coded badge."""
-        if value == 'PASS':
+        if not value:
+            return format_html('<span class="badge bg-secondary">N/A</span>')
+        value_upper = str(value).upper()
+        if value_upper == 'PASS' or 'PASS' in value_upper:
             return format_html('<span class="badge bg-success">{}</span>', value)
-        elif value == 'BLOCK':
+        elif value_upper == 'BLOCK' or 'BLOCK' in value_upper:
             return format_html('<span class="badge bg-danger">{}</span>', value)
-        return format_html('<span class="badge bg-secondary">{}</span>', value or 'N/A')
+        return format_html('<span class="badge bg-secondary">{}</span>', value)
     
     def render_interface_status(self, value):
         """Render interface status with color-coded badge."""
-        if value == 'PASS':
+        if not value:
+            return format_html('<span class="badge bg-secondary">N/A</span>')
+        value_upper = str(value).upper()
+        if value_upper == 'PASS' or 'PASS' in value_upper:
             return format_html('<span class="badge bg-success">{}</span>', value)
-        elif value == 'WARN':
+        elif value_upper == 'WARN' or 'WARN' in value_upper:
             return format_html('<span class="badge bg-warning text-dark">{}</span>', value)
-        elif value == 'BLOCK':
+        elif value_upper == 'BLOCK' or 'BLOCK' in value_upper:
             return format_html('<span class="badge bg-danger">{}</span>', value)
-        return format_html('<span class="badge bg-secondary">{}</span>', value or 'N/A')
+        return format_html('<span class="badge bg-secondary">{}</span>', value)
     
     def render_overall_status(self, value):
         """Render overall status with color-coded badge."""
-        if value == 'PASS':
+        if not value:
+            return format_html('<span class="badge bg-secondary">N/A</span>')
+        value_upper = str(value).upper()
+        if value_upper == 'PASS' or 'PASS' in value_upper:
             return format_html('<span class="badge bg-success">{}</span>', value)
-        elif value == 'WARN':
+        elif value_upper == 'WARN' or 'WARN' in value_upper:
             return format_html('<span class="badge bg-warning text-dark">{}</span>', value)
-        elif value == 'BLOCKED':
+        elif value_upper == 'BLOCKED' or 'BLOCK' in value_upper:
             return format_html('<span class="badge bg-danger">{}</span>', value)
-        return format_html('<span class="badge bg-secondary">{}</span>', value or 'N/A')
+        return format_html('<span class="badge bg-secondary">{}</span>', value)
     
     def render_risk_level(self, value):
         """Render risk level with color-coded badge."""
