@@ -1184,31 +1184,25 @@ class NAPALMDeviceManager:
                         result['_removed_commands'] = removed_commands
                         result['_added_commands'] = added_commands
                         
-                        # Show summary of commands
-                        if removed_commands or added_commands:
-                            logs.append(f"")
-                            logs.append(f"    Summary of changes:")
-                            if removed_commands:
-                                logs.append(f"    Old configuration commands that will be removed/replaced:")
-                                logs.append(f"      (These will be removed because they conflict with the new VLAN config)")
-                                for cmd in removed_commands[:10]:  # Limit to first 10
-                                    logs.append(f"      - {cmd}")
-                                if len(removed_commands) > 10:
-                                    logs.append(f"      ... ({len(removed_commands) - 10} more commands)")
-                            if added_commands:
-                                logs.append(f"    New configuration commands that will be added:")
-                                logs.append(f"      (These will configure the new VLAN - bridge VLAN first, then interface access)")
-                                for cmd in added_commands[:10]:  # Limit to first 10
-                                    logs.append(f"      + {cmd}")
-                                if len(added_commands) > 10:
-                                    logs.append(f"      ... ({len(added_commands) - 10} more commands)")
-                        
-                        # Show full diff (no filtering)
+                        # Show only removed/added lines from diff (with - and + signs, but no headers)
                         logs.append(f"")
-                        logs.append(f"    Full diff:")
+                        logs.append(f"    Configuration changes:")
+                        # Show diff lines with - and + signs, but filter out headers
+                        diff_shown = False
                         for line in diff_lines:
-                            if line.strip():  # Only skip completely empty lines
+                            stripped = line.strip()
+                            # Skip diff headers and context markers
+                            if (stripped.startswith('---') or stripped.startswith('+++') or 
+                                stripped.startswith('@@') or stripped.startswith('diff <') or 
+                                stripped.startswith('Note:') or not stripped):
+                                continue
+                            # Show lines with - or + (actual changes)
+                            if stripped.startswith('-') or stripped.startswith('+'):
                                 logs.append(f"    {line}")
+                                diff_shown = True
+                        
+                        if not diff_shown:
+                            logs.append(f"    (no changes detected)")
                     else:
                         logger.warning(f"No configuration differences detected - config may already be applied")
                         logs.append(f"  ⚠ No configuration differences detected")
