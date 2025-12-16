@@ -2578,16 +2578,7 @@ class VLANDeploymentView(View):
                     
                     # OPTION D: Conditional display based on validation status
                     if is_blocked:
-                        # When BLOCKED: Show current configuration for reference, hide proposed changes
-                        logs.append("--- Current Device Configuration (Real from Device) ---")
-                        if current_device_config and current_device_config.strip() and not "(no configuration" in current_device_config and not "ERROR:" in current_device_config:
-                            for line in current_device_config.split('\n'):
-                                if line.strip():
-                                    logs.append(f"  {line}")
-                        else:
-                            logs.append("  (no configuration found or unable to retrieve)")
-                        logs.append("")
-                        
+                        # When BLOCKED: Hide proposed changes (current config already shown above for all scenarios)
                         logs.append("--- Deployment Status ---")
                         logs.append(f"[BLOCKED] Deployment will not proceed due to validation failures above.")
                         logs.append("")
