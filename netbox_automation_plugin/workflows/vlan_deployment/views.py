@@ -2737,6 +2737,209 @@ class VLANDeploymentView(View):
                     })
         else:
             # Deploy mode - use Nornir for parallel execution
+            # First, build pre-deployment logs (same sections as dry run) for each device/interface
+            pre_deployment_logs = {}  # {device_name: {interface_name: [logs]}}
+            
+            for device in devices:
+                pre_deployment_logs[device.name] = {}
+                for interface_name in interface_list:
+                    # Build the same comprehensive logs as dry run (before actual deployment)
+                    logs = []
+                    
+                    # Get current config before deployment (same logic as dry run)
+                    current_config_before = None
+                    bridge_vlans_before = []
+                    try:
+                        device_config_result = self._get_current_device_config(device, interface_name, platform)
+                        current_config_before = device_config_result.get('current_config', None)
+                        bridge_vlans_before = device_config_result.get('_bridge_vlans', [])
+                        
+                        if current_config_before and isinstance(current_config_before, str):
+                            if current_config_before.startswith('ERROR:'):
+                                current_config_before = None
+                            elif "(no configuration" in current_config_before or "(interface" in current_config_before:
+                                pass
+                    except Exception as e:
+                        logger.debug(f"Could not get current config before deployment: {e}")
+                        current_config_before = None
+                        bridge_vlans_before = []
+                    
+                    # Get NetBox current state and generate diffs (same as dry run)
+                    netbox_state = self._get_netbox_current_state(device, interface_name, vlan_id)
+                    netbox_diff = self._generate_netbox_diff(netbox_state, netbox_state['proposed'])
+                    
+                    # Generate proposed config and config diff (same as dry run)
+                    proposed_config = self._generate_vlan_config(device, interface_name, vlan_id, platform)
+                    config_diff = self._generate_config_diff(current_config_before, proposed_config, platform, device=device, interface_name=interface_name, bridge_vlans=bridge_vlans_before)
+                    
+                    # Build all the sections (same as dry run)
+                    logs.append("=" * 80)
+                    logs.append("DEPLOYMENT MODE - CONFIGURATION PREVIEW")
+                    logs.append("=" * 80)
+                    logs.append("")
+                    
+                    # Current Device Configuration
+                    logs.append("--- Current Device Configuration (Real from Device) ---")
+                    logs.append("")
+                    logs.append("Interface-Level Configuration:")
+                    if current_config_before and current_config_before.strip() and not "(no configuration" in current_config_before and not "ERROR:" in current_config_before:
+                        for line in current_config_before.split('\n'):
+                            if line.strip():
+                                logs.append(f"  {line}")
+                    else:
+                        logs.append("  (no configuration found or unable to retrieve)")
+                    logs.append("")
+                    
+                    # Bridge-Level Configuration (for Cumulus)
+                    if platform == 'cumulus' and bridge_vlans_before:
+                        logs.append("Bridge-Level Configuration (br_default):")
+                        if len(bridge_vlans_before) > 0:
+                            vlan_list_str = self._format_vlan_list(bridge_vlans_before)
+                            logs.append(f"  nv set bridge domain br_default vlan {vlan_list_str}")
+                        else:
+                            logs.append("  (no VLANs configured on bridge br_default)")
+                        logs.append("")
+                    elif platform == 'cumulus' and not bridge_vlans_before:
+                        logs.append("Bridge-Level Configuration (br_default):")
+                        logs.append("  (bridge VLAN information not available)")
+                        logs.append("")
+                    
+                    # Current NetBox Configuration
+                    logs.append("--- Current NetBox Configuration (Source of Truth) ---")
+                    netbox_current = netbox_state['current']
+                    logs.append(f"802.1Q Mode: {netbox_current['mode'] or 'None'}")
+                    logs.append(f"Untagged VLAN: {netbox_current['untagged_vlan'] or 'None'}")
+                    tagged_vlans_str = ', '.join(map(str, netbox_current['tagged_vlans'])) if netbox_current['tagged_vlans'] else 'None'
+                    logs.append(f"Tagged VLANs: [{tagged_vlans_str}]")
+                    ip_addresses_str = ', '.join(netbox_current['ip_addresses']) if netbox_current['ip_addresses'] else 'None'
+                    logs.append(f"IP Addresses: {ip_addresses_str}")
+                    logs.append(f"VRF: {netbox_current['vrf'] or 'None'}")
+                    logs.append(f"Cable Status: {netbox_current['cable_status']}")
+                    if netbox_current['connected_to']:
+                        logs.append(f"Connected To: {netbox_current['connected_to']}")
+                    logs.append(f"Enabled: {netbox_current['enabled']}")
+                    logs.append(f"Port-Channel Member: {netbox_current['port_channel_member']}")
+                    logs.append("")
+                    
+                    # Configuration Conflict Detection
+                    device_has_ip = bool(netbox_current['ip_addresses'])
+                    device_has_vrf = bool(netbox_current['vrf'])
+                    device_config_has_ip = 'ip address' in current_config_before.lower() if current_config_before else False
+                    device_config_has_vrf = 'vrf' in current_config_before.lower() if current_config_before else False
+                    device_config_has_vlan = False
+                    device_vlan_id = None
+                    if current_config_before:
+                        import re
+                        vlan_match = re.search(r'access\s+(\d+)', current_config_before.lower())
+                        if vlan_match:
+                            device_config_has_vlan = True
+                            device_vlan_id = int(vlan_match.group(1))
+                    netbox_has_vlan = netbox_current.get('untagged_vlan') is not None
+                    netbox_vlan_id = netbox_current.get('untagged_vlan')
+                    conflict_detected = False
+                    conflict_reasons = []
+                    if device_config_has_ip != device_has_ip:
+                        conflict_detected = True
+                        conflict_reasons.append("IP address mismatch")
+                    if device_config_has_vrf != device_has_vrf:
+                        conflict_detected = True
+                        conflict_reasons.append("VRF mismatch")
+                    if netbox_has_vlan and not device_config_has_vlan:
+                        conflict_detected = True
+                        conflict_reasons.append(f"NetBox has VLAN {netbox_vlan_id} configured but device has no VLAN config")
+                    elif netbox_has_vlan and device_config_has_vlan and netbox_vlan_id != device_vlan_id:
+                        conflict_detected = True
+                        conflict_reasons.append(f"VLAN mismatch: NetBox has {netbox_vlan_id}, device has {device_vlan_id}")
+                    elif not netbox_has_vlan and device_config_has_vlan:
+                        conflict_detected = True
+                        conflict_reasons.append(f"Device has VLAN {device_vlan_id} configured but NetBox has no VLAN")
+                    
+                    logs.append("--- Configuration Conflict Detection ---")
+                    if conflict_detected:
+                        logs.append(f"[WARN] Device config differs from NetBox config")
+                        if conflict_reasons:
+                            logs.append(f"  Conflicts detected: {', '.join(conflict_reasons)}")
+                        logs.append("")
+                        logs.append("Device Currently Has (from device):")
+                        if current_config_before and current_config_before.strip() and not "(no configuration" in current_config_before:
+                            for line in current_config_before.split('\n'):
+                                if line.strip():
+                                    logs.append(f"  {line}")
+                        else:
+                            logs.append("  (no configuration found)")
+                        logs.append("")
+                        logs.append("Device Should Have (According to NetBox):")
+                        if netbox_current['ip_addresses']:
+                            for ip in netbox_current['ip_addresses']:
+                                logs.append(f"  ip address {ip}")
+                        if netbox_current['vrf']:
+                            logs.append(f"  vrf: {netbox_current['vrf']}")
+                        if netbox_current['untagged_vlan']:
+                            logs.append(f"  bridge domain br_default access {netbox_current['untagged_vlan']}")
+                        if not netbox_current['ip_addresses'] and not netbox_current['vrf'] and not netbox_current['untagged_vlan']:
+                            logs.append("  (no configuration expected)")
+                        logs.append("")
+                        logs.append("Note: NetBox is the source of truth. Device may have stale/old configuration.")
+                        logs.append("      Any differences will be reconciled during deployment.")
+                    else:
+                        logs.append("[OK] Device config matches NetBox - no conflicts detected")
+                    logs.append("")
+                    
+                    # Proposed Configuration
+                    logs.append("--- Proposed Configuration (VLAN Deployment) ---")
+                    logs.append("")
+                    logs.append("Device Config:")
+                    proposed_config_display = proposed_config
+                    if platform == 'cumulus':
+                        import re
+                        vlan_match = re.search(r'access\s+(\d+)', proposed_config)
+                        if vlan_match:
+                            vlan_id_from_config = int(vlan_match.group(1))
+                            if vlan_id_from_config not in bridge_vlans_before:
+                                proposed_config_display = f"{proposed_config}\nnv set bridge domain br_default vlan {vlan_id_from_config}"
+                            else:
+                                proposed_config_display = f"{proposed_config}\n# Note: VLAN {vlan_id_from_config} already exists on bridge br_default (no bridge command needed)"
+                    for line in proposed_config_display.split('\n'):
+                        if line.strip():
+                            logs.append(f"  {line}")
+                    logs.append("")
+                    logs.append("NetBox Config:")
+                    netbox_proposed = netbox_state['proposed']
+                    logs.append(f"  802.1Q Mode: {netbox_current['mode'] or 'None'} → {netbox_proposed['mode']}")
+                    logs.append(f"  Untagged VLAN: {netbox_current['untagged_vlan'] or 'None'} → {netbox_proposed['untagged_vlan']}")
+                    logs.append("")
+                    
+                    # Configuration Comparison and Config Diff
+                    logs.append("--- Configuration Comparison ---")
+                    logs.append("")
+                    logs.append("Proposed Configuration:")
+                    for line in proposed_config_display.split('\n'):
+                        if line.strip():
+                            logs.append(f"  {line}")
+                    logs.append("")
+                    logs.append("--- Config Diff ---")
+                    logs.append("(Shows what will be removed/replaced and what will be added)")
+                    logs.append("")
+                    for line in config_diff.split('\n'):
+                        if line.strip():
+                            logs.append(f"  {line}")
+                    logs.append("")
+                    
+                    # NetBox Configuration Changes
+                    logs.append("--- NetBox Configuration Changes ---")
+                    for line in netbox_diff.split('\n'):
+                        if line.strip():
+                            logs.append(f"  {line}")
+                    logs.append("")
+                    
+                    logs.append("=" * 80)
+                    logs.append("STARTING DEPLOYMENT")
+                    logs.append("=" * 80)
+                    logs.append("")
+                    
+                    pre_deployment_logs[device.name][interface_name] = logs
+            
+            # Now deploy using Nornir
             nornir_manager = NornirDeviceManager(devices=devices)
             nornir_manager.initialize()
             
@@ -2758,9 +2961,19 @@ class VLANDeploymentView(View):
                         'error': 'No result returned from Nornir'
                     })
                     
-                    # Convert Nornir result to table entry
-                    # Get logs from deployment
-                    logs = interface_result.get('logs', []) if isinstance(interface_result.get('logs'), list) else []
+                    # Start with pre-deployment logs
+                    logs = pre_deployment_logs.get(device.name, {}).get(interface_name, [])
+                    
+                    # Append deployment execution logs from Nornir result
+                    deployment_logs = interface_result.get('logs', []) if isinstance(interface_result.get('logs'), list) else []
+                    if deployment_logs:
+                        logs.append("")
+                        logs.append("=" * 80)
+                        logs.append("DEPLOYMENT EXECUTION LOGS")
+                        logs.append("=" * 80)
+                        logs.append("")
+                        for log_line in deployment_logs:
+                            logs.append(log_line)
                     
                     if interface_result.get('success'):
                         status = "success"
