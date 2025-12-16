@@ -2932,15 +2932,52 @@ class VLANDeploymentView(View):
             logger.info(f"Initialized NAPALM manager for {device.name} (platform: {platform})")
             logs.append(f"[OK] NAPALM manager initialized")
             
-            # For Cumulus, also add VLAN to bridge domain
-            # NVUE's 'nv set bridge domain br_default vlan <vlan_id>' is additive - it adds the VLAN
-            # to the existing list without replacing it. No need to query current VLANs first.
+            # For Cumulus, check if VLAN already exists on bridge before adding
             if platform == 'cumulus':
-                # Add bridge VLAN command - NVUE will add it to existing VLANs automatically
-                bridge_vlan_cmd = f"nv set bridge domain br_default vlan {vlan_id}"
-                config_text = f"{config_text}\n{bridge_vlan_cmd}"
-                logs.append(f"[2.3.1] Bridge VLAN command added: {bridge_vlan_cmd}")
-                logger.info(f"Adding VLAN {vlan_id} to bridge domain br_default on {device.name} (additive command)")
+                bridge_vlans = []
+                try:
+                    # Connect to device to get current bridge VLANs
+                    if napalm_manager.connect():
+                        connection = napalm_manager.connection
+                        try:
+                            # Get bridge VLANs from device config
+                            if hasattr(connection, 'cli'):
+                                config_show_output = connection.cli(['nv config show -o json'])
+                            elif hasattr(connection, 'device') and hasattr(connection.device, 'send_command'):
+                                config_show_output = connection.device.send_command('nv config show -o json', read_timeout=60)
+                            else:
+                                config_show_output = None
+                            
+                            if config_show_output:
+                                # Extract JSON string
+                                if isinstance(config_show_output, dict):
+                                    config_json_str = config_show_output.get('nv config show -o json') or list(config_show_output.values())[0] if config_show_output else None
+                                else:
+                                    config_json_str = str(config_show_output).strip()
+                                
+                                if config_json_str:
+                                    import json
+                                    config_data = json.loads(config_json_str)
+                                    bridge_vlans = self._get_bridge_vlans_from_json(config_data)
+                                    logger.debug(f"Bridge VLANs on {device.name}: {bridge_vlans}")
+                        except Exception as e:
+                            logger.warning(f"Could not get bridge VLANs from {device.name}: {e}")
+                            # Continue without bridge VLAN check - will add command anyway (idempotent)
+                        finally:
+                            napalm_manager.disconnect()
+                except Exception as e:
+                    logger.warning(f"Could not connect to {device.name} to check bridge VLANs: {e}")
+                    # Continue without bridge VLAN check - will add command anyway (idempotent)
+                
+                # Only add bridge VLAN command if VLAN doesn't already exist
+                if vlan_id not in bridge_vlans:
+                    bridge_vlan_cmd = f"nv set bridge domain br_default vlan {vlan_id}"
+                    config_text = f"{config_text}\n{bridge_vlan_cmd}"
+                    logs.append(f"[2.3.1] Bridge VLAN command added: {bridge_vlan_cmd}")
+                    logger.info(f"Adding VLAN {vlan_id} to bridge domain br_default on {device.name}")
+                else:
+                    logs.append(f"[2.3.1] Bridge VLAN {vlan_id} already exists on br_default - skipping bridge command")
+                    logger.info(f"VLAN {vlan_id} already exists on bridge br_default for {device.name} - skipping bridge command")
 
             # Deploy using safe deployment with post-checks
             # Both EOS and Cumulus support commit-confirm workflow:
