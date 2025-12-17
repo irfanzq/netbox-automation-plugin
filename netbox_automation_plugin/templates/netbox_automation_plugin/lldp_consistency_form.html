@@ -7,14 +7,32 @@
 {% block content %}
 <style>
   /* Dark mode compatibility for LLDP Consistency Form */
+  /* Ensure all text is visible - white in dark mode, black in light mode */
+  body,
+  .card-body,
+  .card-header,
   .form-label,
-  .form-check-label {
+  .form-check-label,
+  label,
+  p,
+  div,
+  span {
     color: var(--nbx-color-fg-default, #212529) !important;
   }
   
+  /* Help text should still be visible but can be slightly muted */
   .form-text,
-  .text-muted {
-    color: var(--nbx-color-fg-muted, #6c757d) !important;
+  .text-muted,
+  small {
+    color: var(--nbx-color-fg-default, #212529) !important;
+    opacity: 0.9;
+  }
+  
+  /* Ensure headings are visible */
+  h1, h2, h3, h4, h5, h6,
+  .card-title,
+  .h1, .h2, .h3, .h4, .h5, .h6 {
+    color: var(--nbx-color-fg-default, #212529) !important;
   }
   
   .form-control,
@@ -126,7 +144,7 @@
                 <span class="visually-hidden">Loading...</span>
               </div>
               <h4 style="color: var(--nbx-color-fg-default, #212529);">Running LLDP Consistency Check...</h4>
-              <p class="text-muted mb-0" style="color: var(--nbx-color-fg-muted, #6c757d);">Collecting LLDP data from devices. This may take some time.</p>
+              <p class="text-muted mb-0" style="color: var(--nbx-color-fg-default, #212529); opacity: 0.9;">Collecting LLDP data from devices. This may take some time.</p>
             </div>
           </div>
 

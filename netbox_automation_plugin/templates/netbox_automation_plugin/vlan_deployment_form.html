@@ -7,14 +7,32 @@
 {% block content %}
 <style>
   /* Dark mode compatibility for VLAN Deployment Form */
+  /* Ensure all text is visible - white in dark mode, black in light mode */
+  body,
+  .card-body,
+  .card-header,
   .form-label,
-  .form-check-label {
+  .form-check-label,
+  label,
+  p,
+  div,
+  span {
     color: var(--nbx-color-fg-default, #212529) !important;
   }
   
+  /* Help text should still be visible but can be slightly muted */
   .form-text,
-  .text-muted {
-    color: var(--nbx-color-fg-muted, #6c757d) !important;
+  .text-muted,
+  small {
+    color: var(--nbx-color-fg-default, #212529) !important;
+    opacity: 0.9;
+  }
+  
+  /* Ensure headings are visible */
+  h1, h2, h3, h4, h5, h6,
+  .card-title,
+  .h1, .h2, .h3, .h4, .h5, .h6 {
+    color: var(--nbx-color-fg-default, #212529) !important;
   }
   
   .form-control,
@@ -82,15 +100,17 @@
     color: var(--nbx-color-fg-default, #212529) !important;
   }
   
-  /* Exception for muted text inside container */
+  /* Exception for muted text inside container - make it visible */
   #interfaces-checkbox-container .text-muted,
   #interfaces-checkbox-container p.text-muted {
-    color: var(--nbx-color-fg-muted, #6c757d) !important;
+    color: var(--nbx-color-fg-default, #212529) !important;
+    opacity: 0.9;
   }
   
   /* Label for "Available Interfaces" section - ensure visibility */
   label.form-label.text-muted.small {
-    color: var(--nbx-color-fg-muted, #6c757d) !important;
+    color: var(--nbx-color-fg-default, #212529) !important;
+    opacity: 0.9;
   }
   
   .form-check-label {
@@ -177,7 +197,7 @@
                 <span class="visually-hidden">Loading...</span>
               </div>
               <h4 style="color: var(--nbx-color-fg-default, #212529);">Deploying VLAN Configuration...</h4>
-              <p class="text-muted mb-0" style="color: var(--nbx-color-fg-muted, #6c757d);">Applying configuration to devices. This may take a minute.</p>
+              <p class="text-muted mb-0" style="color: var(--nbx-color-fg-default, #212529); opacity: 0.9;">Applying configuration to devices. This may take a minute.</p>
             </div>
           </div>
 
@@ -268,9 +288,9 @@
 
               {# Field 1: Checkbox list for available interfaces #}
               <div class="mb-2">
-                <label class="form-label text-muted small" style="color: var(--nbx-color-fg-muted, #6c757d) !important;">Available Interfaces (select from device)</label>
+                <label class="form-label text-muted small" style="color: var(--nbx-color-fg-default, #212529) !important; opacity: 0.9;">Available Interfaces (select from device)</label>
                 <div id="interfaces-checkbox-container" style="max-height: 200px; overflow-y: auto; border: 1px solid var(--nbx-color-border-default, #dee2e6); padding: 10px; border-radius: 4px; background-color: var(--nbx-color-bg-secondary, #f8f9fa); color: var(--nbx-color-fg-default, #212529);">
-                  <p class="text-muted mb-0" style="color: var(--nbx-color-fg-muted, #6c757d) !important;">Select devices first to load interfaces</p>
+                  <p class="text-muted mb-0" style="color: var(--nbx-color-fg-default, #212529) !important; opacity: 0.9;">Select devices first to load interfaces</p>
                 </div>
               </div>
 
@@ -382,7 +402,8 @@
               if (interfaces.length === 0) {
                 const p = document.createElement('p');
                 p.className = 'text-muted mb-0';
-                p.style.color = 'var(--nbx-color-fg-muted, #6c757d)';
+                p.style.color = 'var(--nbx-color-fg-default, #212529)';
+                p.style.opacity = '0.9';
                 p.textContent = 'No common interfaces found';
                 container.appendChild(p);
                 return;
@@ -424,7 +445,8 @@
               if (selectedDeviceIds.length === 0) {
                 const p = document.createElement('p');
                 p.className = 'text-muted mb-0';
-                p.style.color = 'var(--nbx-color-fg-muted, #6c757d)';
+                p.style.color = 'var(--nbx-color-fg-default, #212529)';
+                p.style.opacity = '0.9';
                 p.textContent = 'Select devices first to load interfaces';
                 interfacesContainer.innerHTML = '';
                 interfacesContainer.appendChild(p);
@@ -434,7 +456,8 @@
               // Show loading
               const loadingP = document.createElement('p');
               loadingP.className = 'text-muted mb-0';
-              loadingP.style.color = 'var(--nbx-color-fg-muted, #6c757d)';
+              loadingP.style.color = 'var(--nbx-color-fg-default, #212529)';
+              loadingP.style.opacity = '0.9';
               loadingP.textContent = 'Loading interfaces...';
               interfacesContainer.innerHTML = '';
               interfacesContainer.appendChild(loadingP);
@@ -494,7 +517,8 @@
               if (!siteId || !locationId || !manufacturerId || !roleId) {
                 const p = document.createElement('p');
                 p.className = 'text-muted mb-0';
-                p.style.color = 'var(--nbx-color-fg-muted, #6c757d)';
+                p.style.color = 'var(--nbx-color-fg-default, #212529)';
+                p.style.opacity = '0.9';
                 p.textContent = 'Select all filters (Site, Location, Manufacturer, Role) to load interfaces';
                 interfacesContainer.innerHTML = '';
                 interfacesContainer.appendChild(p);
@@ -504,7 +528,8 @@
               // Show loading
               const loadingP = document.createElement('p');
               loadingP.className = 'text-muted mb-0';
-              loadingP.style.color = 'var(--nbx-color-fg-muted, #6c757d)';
+              loadingP.style.color = 'var(--nbx-color-fg-default, #212529)';
+              loadingP.style.opacity = '0.9';
               loadingP.textContent = 'Loading interfaces...';
               interfacesContainer.innerHTML = '';
               interfacesContainer.appendChild(loadingP);

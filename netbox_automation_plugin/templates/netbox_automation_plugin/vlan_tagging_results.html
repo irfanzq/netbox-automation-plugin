@@ -6,18 +6,31 @@
 {% block content %}
 <style>
   /* Dark mode compatibility for VLAN Tagging Results */
+  /* Ensure all text is visible - white in dark mode, black in light mode */
+  body,
+  .card-body,
+  .card-header,
   .form-label,
   .form-check-label,
+  label,
+  p,
+  div,
+  span,
+  h1, h2, h3, h4, h5, h6,
+  .card-title,
+  .h1, .h2, .h3, .h4, .h5, .h6,
   h6,
   dt,
   dd {
     color: var(--nbx-color-fg-default, #212529) !important;
   }
   
+  /* Help text should still be visible but can be slightly muted */
   .form-text,
   .text-muted,
   small {
-    color: var(--nbx-color-fg-muted, #6c757d) !important;
+    color: var(--nbx-color-fg-default, #212529) !important;
+    opacity: 0.9;
   }
   
   .table {
