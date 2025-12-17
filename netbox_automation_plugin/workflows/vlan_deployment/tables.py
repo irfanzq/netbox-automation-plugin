@@ -165,10 +165,10 @@ class VLANDeploymentResultTable(NetBoxTable):
 
         html = f'''
         <details class="deployment-logs" data-status-filter="{status_filter}">
-            <summary style="cursor: pointer; color: #0066cc; font-weight: bold;">
+            <summary style="cursor: pointer; color: var(--nbx-color-fg-link, #0066cc); font-weight: bold;">
                 View Details ({len(value.split(chr(10)))} lines)
             </summary>
-            <div style="margin-top: 10px; padding: 10px; background-color: #f5f5f5; border-left: 3px solid #0066cc; font-family: monospace; font-size: 12px; max-height: 400px; overflow-y: auto;">
+            <div style="margin-top: 10px; padding: 10px; background-color: var(--nbx-color-bg-secondary, #f5f5f5); color: var(--nbx-color-fg-default, #212529); border-left: 3px solid var(--nbx-color-border-primary, #0066cc); font-family: monospace; font-size: 12px; max-height: 400px; overflow-y: auto;">
                 {formatted_logs}
             </div>
         </details>
@@ -189,10 +189,10 @@ class VLANDeploymentResultTable(NetBoxTable):
 
         html = f'''
         <details class="deployment-logs">
-            <summary style="cursor: pointer; color: #0066cc; font-weight: bold;">
+            <summary style="cursor: pointer; color: var(--nbx-color-fg-link, #0066cc); font-weight: bold;">
                 View Detailed Logs ({len(value.split(chr(10)))} lines)
             </summary>
-            <div style="margin-top: 10px; padding: 10px; background-color: #f5f5f5; border-left: 3px solid #0066cc; font-family: monospace; font-size: 12px; max-height: 400px; overflow-y: auto;">
+            <div style="margin-top: 10px; padding: 10px; background-color: var(--nbx-color-bg-secondary, #f5f5f5); color: var(--nbx-color-fg-default, #212529); border-left: 3px solid var(--nbx-color-border-primary, #0066cc); font-family: monospace; font-size: 12px; max-height: 400px; overflow-y: auto;">
                 {formatted_logs}
             </div>
         </details>

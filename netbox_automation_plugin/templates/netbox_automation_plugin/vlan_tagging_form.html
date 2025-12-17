@@ -5,6 +5,85 @@
 {% block title %}{% trans "NetBox VLAN Tagging" %}{% endblock %}
 
 {% block content %}
+<style>
+  /* Dark mode compatibility for VLAN Tagging Form */
+  .form-label,
+  .form-check-label {
+    color: var(--nbx-color-fg-default, #212529) !important;
+  }
+  
+  .form-text,
+  .text-muted {
+    color: var(--nbx-color-fg-muted, #6c757d) !important;
+  }
+  
+  .form-control,
+  .form-select,
+  select.form-control,
+  select.form-select,
+  textarea.form-control {
+    background-color: var(--nbx-color-bg-input, #fff) !important;
+    color: var(--nbx-color-fg-input, #212529) !important;
+    border-color: var(--nbx-color-border-input, #ced4da) !important;
+  }
+  
+  .form-control::placeholder {
+    color: var(--nbx-color-fg-muted, #6c757d) !important;
+    opacity: 0.7;
+  }
+  
+  .form-control:focus,
+  .form-select:focus,
+  select.form-control:focus,
+  select.form-select:focus,
+  textarea.form-control:focus {
+    background-color: var(--nbx-color-bg-input, #fff) !important;
+    color: var(--nbx-color-fg-input, #212529) !important;
+    border-color: var(--nbx-color-border-input-focus, #86b7fe) !important;
+  }
+  
+  /* Checkbox and radio button styling for dark mode */
+  .form-check-input {
+    background-color: var(--nbx-color-bg-input, #fff) !important;
+    border-color: var(--nbx-color-border-input, #ced4da) !important;
+  }
+  
+  .form-check-input:checked {
+    background-color: var(--nbx-color-primary, #0d6efd) !important;
+    border-color: var(--nbx-color-primary, #0d6efd) !important;
+  }
+  
+  .form-check-input:focus {
+    border-color: var(--nbx-color-border-input-focus, #86b7fe) !important;
+    box-shadow: 0 0 0 0.25rem rgba(13, 110, 253, 0.25);
+  }
+  
+  .form-check-label {
+    color: var(--nbx-color-fg-default, #212529) !important;
+  }
+  
+  /* Datalist dropdown styling */
+  datalist option {
+    background-color: var(--nbx-color-bg-input, #fff) !important;
+    color: var(--nbx-color-fg-input, #212529) !important;
+  }
+  
+  /* Select dropdown options */
+  select option {
+    background-color: var(--nbx-color-bg-input, #fff) !important;
+    color: var(--nbx-color-fg-input, #212529) !important;
+  }
+  
+  .invalid-feedback {
+    color: var(--nbx-color-danger, #dc3545) !important;
+  }
+  
+  .alert-danger {
+    background-color: var(--nbx-color-bg-danger-subtle, #f8d7da) !important;
+    color: var(--nbx-color-fg-danger, #721c24) !important;
+    border-color: var(--nbx-color-border-danger, #f5c2c7) !important;
+  }
+</style>
   <div class="row">
     <div class="col-md-8">
       <div class="card">

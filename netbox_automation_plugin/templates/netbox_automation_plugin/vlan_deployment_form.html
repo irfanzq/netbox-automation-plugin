@@ -5,6 +5,154 @@
 {% block title %}{% trans "VLAN Deployment" %}{% endblock %}
 
 {% block content %}
+<style>
+  /* Dark mode compatibility for VLAN Deployment Form */
+  .form-label,
+  .form-check-label {
+    color: var(--nbx-color-fg-default, #212529) !important;
+  }
+  
+  .form-text,
+  .text-muted {
+    color: var(--nbx-color-fg-muted, #6c757d) !important;
+  }
+  
+  .form-control,
+  .form-select,
+  select.form-control,
+  select.form-select,
+  textarea.form-control {
+    background-color: var(--nbx-color-bg-input, #fff) !important;
+    color: var(--nbx-color-fg-input, #212529) !important;
+    border-color: var(--nbx-color-border-input, #ced4da) !important;
+  }
+  
+  .form-control::placeholder {
+    color: var(--nbx-color-fg-muted, #6c757d) !important;
+    opacity: 0.7;
+  }
+  
+  .form-control:focus,
+  .form-select:focus,
+  select.form-control:focus,
+  select.form-select:focus,
+  textarea.form-control:focus {
+    background-color: var(--nbx-color-bg-input, #fff) !important;
+    color: var(--nbx-color-fg-input, #212529) !important;
+    border-color: var(--nbx-color-border-input-focus, #86b7fe) !important;
+  }
+  
+  /* Checkbox and radio button styling for dark mode */
+  .form-check-input {
+    background-color: var(--nbx-color-bg-input, #fff) !important;
+    border-color: var(--nbx-color-border-input, #ced4da) !important;
+  }
+  
+  .form-check-input:checked {
+    background-color: var(--nbx-color-primary, #0d6efd) !important;
+    border-color: var(--nbx-color-primary, #0d6efd) !important;
+  }
+  
+  .form-check-input:focus {
+    border-color: var(--nbx-color-border-input-focus, #86b7fe) !important;
+    box-shadow: 0 0 0 0.25rem rgba(13, 110, 253, 0.25);
+  }
+  
+  /* Datalist dropdown styling */
+  datalist option {
+    background-color: var(--nbx-color-bg-input, #fff) !important;
+    color: var(--nbx-color-fg-input, #212529) !important;
+  }
+  
+  /* Select dropdown options */
+  select option {
+    background-color: var(--nbx-color-bg-input, #fff) !important;
+    color: var(--nbx-color-fg-input, #212529) !important;
+  }
+  
+  #interfaces-checkbox-container {
+    background-color: var(--nbx-color-bg-secondary, #f8f9fa) !important;
+    border-color: var(--nbx-color-border-default, #dee2e6) !important;
+    color: var(--nbx-color-fg-default, #212529) !important;
+  }
+  
+  /* Ensure all text inside the interfaces container is visible */
+  #interfaces-checkbox-container,
+  #interfaces-checkbox-container * {
+    color: var(--nbx-color-fg-default, #212529) !important;
+  }
+  
+  /* Exception for muted text inside container */
+  #interfaces-checkbox-container .text-muted,
+  #interfaces-checkbox-container p.text-muted {
+    color: var(--nbx-color-fg-muted, #6c757d) !important;
+  }
+  
+  /* Label for "Available Interfaces" section - ensure visibility */
+  label.form-label.text-muted.small {
+    color: var(--nbx-color-fg-muted, #6c757d) !important;
+  }
+  
+  .form-check-label {
+    color: var(--nbx-color-fg-default, #212529) !important;
+  }
+  
+  /* Ensure form-check elements inside container are visible */
+  #interfaces-checkbox-container .form-check {
+    color: var(--nbx-color-fg-default, #212529) !important;
+  }
+  
+  #interfaces-checkbox-container .form-check-label {
+    color: var(--nbx-color-fg-default, #212529) !important;
+  }
+  
+  #interfaces-checkbox-container .form-check-input {
+    background-color: var(--nbx-color-bg-input, #fff) !important;
+    border-color: var(--nbx-color-border-input, #ced4da) !important;
+  }
+  
+  #interfaces-checkbox-container .form-check-input:checked {
+    background-color: var(--nbx-color-primary, #0d6efd) !important;
+    border-color: var(--nbx-color-primary, #0d6efd) !important;
+  }
+  
+  .invalid-feedback {
+    color: var(--nbx-color-danger, #dc3545) !important;
+  }
+  
+  .alert-danger {
+    background-color: var(--nbx-color-bg-danger-subtle, #f8d7da) !important;
+    color: var(--nbx-color-fg-danger, #721c24) !important;
+    border-color: var(--nbx-color-border-danger, #f5c2c7) !important;
+  }
+  
+  /* Loading overlay - dark mode compatible */
+  #loading-overlay {
+    background: rgba(0, 0, 0, 0.7) !important;
+  }
+  
+  #loading-overlay > div {
+    background: var(--nbx-color-bg-default, #fff) !important;
+    color: var(--nbx-color-fg-default, #212529) !important;
+  }
+  
+  #loading-overlay h4 {
+    color: var(--nbx-color-fg-default, #212529) !important;
+  }
+  
+  #loading-overlay .text-muted {
+    color: var(--nbx-color-fg-muted, #6c757d) !important;
+  }
+  
+  /* Disabled button styling */
+  #deploy-btn:disabled {
+    background-color: var(--nbx-color-bg-tertiary, #6c757d) !important;
+    border-color: var(--nbx-color-bg-tertiary, #6c757d) !important;
+    color: var(--nbx-color-fg-muted, #ffffff) !important;
+    opacity: 0.6;
+    cursor: not-allowed !important;
+  }
+</style>
   <div class="row">
     <div class="col-md-12">
       <div class="card">
@@ -23,13 +171,13 @@
           {% endif %}
 
           <!-- Loading overlay -->
-          <div id="loading-overlay" style="display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); z-index: 9999; align-items: center; justify-content: center;">
-            <div style="background: white; padding: 30px; border-radius: 8px; text-align: center; max-width: 400px;">
+          <div id="loading-overlay" style="display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.7); z-index: 9999; align-items: center; justify-content: center;">
+            <div style="background: var(--nbx-color-bg-default, #fff); padding: 30px; border-radius: 8px; text-align: center; max-width: 400px; color: var(--nbx-color-fg-default, #212529);">
               <div class="spinner-border text-primary mb-3" role="status" style="width: 3rem; height: 3rem;">
                 <span class="visually-hidden">Loading...</span>
               </div>
-              <h4>Deploying VLAN Configuration...</h4>
-              <p class="text-muted mb-0">Applying configuration to devices. This may take a minute.</p>
+              <h4 style="color: var(--nbx-color-fg-default, #212529);">Deploying VLAN Configuration...</h4>
+              <p class="text-muted mb-0" style="color: var(--nbx-color-fg-muted, #6c757d);">Applying configuration to devices. This may take a minute.</p>
             </div>
           </div>
 
@@ -120,9 +268,9 @@
 
               {# Field 1: Checkbox list for available interfaces #}
               <div class="mb-2">
-                <label class="form-label text-muted small">Available Interfaces (select from device)</label>
-                <div id="interfaces-checkbox-container" style="max-height: 200px; overflow-y: auto; border: 1px solid #dee2e6; padding: 10px; border-radius: 4px; background-color: #f8f9fa;">
-                  <p class="text-muted mb-0">Select devices first to load interfaces</p>
+                <label class="form-label text-muted small" style="color: var(--nbx-color-fg-muted, #6c757d) !important;">Available Interfaces (select from device)</label>
+                <div id="interfaces-checkbox-container" style="max-height: 200px; overflow-y: auto; border: 1px solid var(--nbx-color-border-default, #dee2e6); padding: 10px; border-radius: 4px; background-color: var(--nbx-color-bg-secondary, #f8f9fa); color: var(--nbx-color-fg-default, #212529);">
+                  <p class="text-muted mb-0" style="color: var(--nbx-color-fg-muted, #6c757d) !important;">Select devices first to load interfaces</p>
                 </div>
               </div>
 
@@ -232,7 +380,11 @@
               container.innerHTML = '';
               
               if (interfaces.length === 0) {
-                container.innerHTML = '<p class="text-muted mb-0">No common interfaces found</p>';
+                const p = document.createElement('p');
+                p.className = 'text-muted mb-0';
+                p.style.color = 'var(--nbx-color-fg-muted, #6c757d)';
+                p.textContent = 'No common interfaces found';
+                container.appendChild(p);
                 return;
               }
               
@@ -250,6 +402,7 @@
 
                 const label = document.createElement('label');
                 label.className = 'form-check-label';
+                label.style.color = 'var(--nbx-color-fg-default, #212529)';
                 label.htmlFor = `interface_${iface}`;
                 label.textContent = iface;
 
@@ -269,12 +422,22 @@
               console.log('Selected device IDs:', selectedDeviceIds);
 
               if (selectedDeviceIds.length === 0) {
-                interfacesContainer.innerHTML = '<p class="text-muted mb-0">Select devices first to load interfaces</p>';
+                const p = document.createElement('p');
+                p.className = 'text-muted mb-0';
+                p.style.color = 'var(--nbx-color-fg-muted, #6c757d)';
+                p.textContent = 'Select devices first to load interfaces';
+                interfacesContainer.innerHTML = '';
+                interfacesContainer.appendChild(p);
                 return;
               }
 
               // Show loading
-              interfacesContainer.innerHTML = '<p class="text-muted mb-0">Loading interfaces...</p>';
+              const loadingP = document.createElement('p');
+              loadingP.className = 'text-muted mb-0';
+              loadingP.style.color = 'var(--nbx-color-fg-muted, #6c757d)';
+              loadingP.textContent = 'Loading interfaces...';
+              interfacesContainer.innerHTML = '';
+              interfacesContainer.appendChild(loadingP);
 
               // Build query string
               const params = new URLSearchParams();
@@ -301,7 +464,12 @@
                 })
                 .catch(error => {
                   console.error('Error loading interfaces:', error);
-                  interfacesContainer.innerHTML = '<p class="text-danger mb-0">Error loading interfaces</p>';
+                  const errorP = document.createElement('p');
+                  errorP.className = 'text-danger mb-0';
+                  errorP.style.color = 'var(--nbx-color-danger, #dc3545)';
+                  errorP.textContent = 'Error loading interfaces';
+                  interfacesContainer.innerHTML = '';
+                  interfacesContainer.appendChild(errorP);
                 });
             }
 
@@ -324,12 +492,22 @@
               
               // Only load interfaces if ALL filters are selected
               if (!siteId || !locationId || !manufacturerId || !roleId) {
-                interfacesContainer.innerHTML = '<p class="text-muted mb-0">Select all filters (Site, Location, Manufacturer, Role) to load interfaces</p>';
+                const p = document.createElement('p');
+                p.className = 'text-muted mb-0';
+                p.style.color = 'var(--nbx-color-fg-muted, #6c757d)';
+                p.textContent = 'Select all filters (Site, Location, Manufacturer, Role) to load interfaces';
+                interfacesContainer.innerHTML = '';
+                interfacesContainer.appendChild(p);
                 return;
               }
               
               // Show loading
-              interfacesContainer.innerHTML = '<p class="text-muted mb-0">Loading interfaces...</p>';
+              const loadingP = document.createElement('p');
+              loadingP.className = 'text-muted mb-0';
+              loadingP.style.color = 'var(--nbx-color-fg-muted, #6c757d)';
+              loadingP.textContent = 'Loading interfaces...';
+              interfacesContainer.innerHTML = '';
+              interfacesContainer.appendChild(loadingP);
               
               // Build query string with filter parameters
               const url = `/plugins/automation/vlan-deployment/get-interfaces/?site_id=${siteId}&location_id=${locationId}&manufacturer_id=${manufacturerId}&role_id=${roleId}`;
@@ -353,7 +531,12 @@
                 })
                 .catch(error => {
                   console.error('Error loading interfaces:', error);
-                  interfacesContainer.innerHTML = '<p class="text-danger mb-0">Error loading interfaces</p>';
+                  const errorP = document.createElement('p');
+                  errorP.className = 'text-danger mb-0';
+                  errorP.style.color = 'var(--nbx-color-danger, #dc3545)';
+                  errorP.textContent = 'Error loading interfaces';
+                  interfacesContainer.innerHTML = '';
+                  interfacesContainer.appendChild(errorP);
                 });
             }
 
@@ -442,13 +625,20 @@
                 });
             }
 
-            // Update deploy button text based on selected mode
-            function updateDeployButtonText() {
+            // Update deploy button state (enabled/disabled and text)
+            function updateDeployButtonState() {
               const dryRunCheckbox = document.getElementById('id_dry_run');
               const deployCheckbox = document.getElementById('id_deploy_changes');
+              const deployBtn = document.getElementById('deploy-btn');
               const deployBtnText = document.getElementById('deploy-btn-text');
 
-              if (dryRunCheckbox && deployCheckbox && deployBtnText) {
+              if (dryRunCheckbox && deployCheckbox && deployBtn && deployBtnText) {
+                const isAnySelected = dryRunCheckbox.checked || deployCheckbox.checked;
+                
+                // Enable/disable button based on selection
+                deployBtn.disabled = !isAnySelected;
+                
+                // Update button text
                 if (dryRunCheckbox.checked) {
                   deployBtnText.textContent = 'Deploy VLAN Dryrun';
                 } else if (deployCheckbox.checked) {
@@ -458,6 +648,11 @@
                 }
               }
             }
+            
+            // Update deploy button text based on selected mode (legacy function name for compatibility)
+            function updateDeployButtonText() {
+              updateDeployButtonState();
+            }
 
             // Make Dry Run and Deploy Changes mutually exclusive
             function setupMutuallyExclusiveCheckboxes() {
@@ -465,7 +660,8 @@
               const deployCheckbox = document.getElementById('id_deploy_changes');
 
               if (dryRunCheckbox && deployCheckbox) {
-                dryRunCheckbox.addEventListener('change', function() {
+                // Handler for dry run checkbox changes
+                const handleDryRunChange = function() {
                   if (this.checked) {
                     deployCheckbox.checked = false;
                     deployCheckbox.disabled = true;
@@ -474,10 +670,11 @@
                     deployCheckbox.disabled = false;
                     deployCheckbox.parentElement.style.opacity = '1';
                   }
-                  updateDeployButtonText();
-                });
-
-                deployCheckbox.addEventListener('change', function() {
+                  updateDeployButtonState();
+                };
+                
+                // Handler for deploy changes checkbox changes
+                const handleDeployChange = function() {
                   if (this.checked) {
                     dryRunCheckbox.checked = false;
                     dryRunCheckbox.disabled = true;
@@ -486,8 +683,11 @@
                     dryRunCheckbox.disabled = false;
                     dryRunCheckbox.parentElement.style.opacity = '1';
                   }
-                  updateDeployButtonText();
-                });
+                  updateDeployButtonState();
+                };
+                
+                dryRunCheckbox.addEventListener('change', handleDryRunChange);
+                deployCheckbox.addEventListener('change', handleDeployChange);
 
                 // Initialize state on page load
                 if (dryRunCheckbox.checked) {
@@ -498,8 +698,8 @@
                   dryRunCheckbox.parentElement.style.opacity = '0.5';
                 }
                 
-                // Update button text on page load
-                updateDeployButtonText();
+                // Update button state on page load
+                updateDeployButtonState();
               }
             }
 

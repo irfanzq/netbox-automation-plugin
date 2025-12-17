@@ -4,6 +4,42 @@
 {% block title %}{% trans "VLAN Tagging Results" %}{% endblock %}
 
 {% block content %}
+<style>
+  /* Dark mode compatibility for VLAN Tagging Results */
+  .form-label,
+  .form-check-label,
+  h6,
+  dt,
+  dd {
+    color: var(--nbx-color-fg-default, #212529) !important;
+  }
+  
+  .form-text,
+  .text-muted,
+  small {
+    color: var(--nbx-color-fg-muted, #6c757d) !important;
+  }
+  
+  .table {
+    color: var(--nbx-color-fg-default, #212529) !important;
+  }
+  
+  .table td,
+  .table th {
+    color: var(--nbx-color-fg-default, #212529) !important;
+  }
+  
+  .alert-info {
+    background-color: var(--nbx-color-bg-info-subtle, #d1ecf1) !important;
+    color: var(--nbx-color-fg-info, #0c5460) !important;
+    border-color: var(--nbx-color-border-info, #bee5eb) !important;
+  }
+  
+  code {
+    background-color: var(--nbx-color-bg-secondary, #f8f9fa) !important;
+    color: var(--nbx-color-fg-default, #212529) !important;
+  }
+</style>
   <div class="row mb-3">
     <div class="col-md-12">
       <div class="card">
