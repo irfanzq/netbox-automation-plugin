@@ -332,6 +332,20 @@
               applyThemeColors();
             }
             
+            // Use MutationObserver to catch dynamically added elements
+            const observer = new MutationObserver(function(mutations) {
+              applyThemeColors();
+            });
+            
+            // Start observing when DOM is ready
+            if (document.readyState === 'loading') {
+              document.addEventListener('DOMContentLoaded', function() {
+                observer.observe(document.body, { childList: true, subtree: true });
+              });
+            } else {
+              observer.observe(document.body, { childList: true, subtree: true });
+            }
+            
             // Make function available globally for dynamic elements
             window.getNetBoxTextColor = function() {
               return isDarkMode() ? '#ffffff' : '#212529';
