@@ -274,17 +274,26 @@
               const textColor = darkMode ? '#ffffff' : '#212529';
               const bgColor = darkMode ? '#2a2a2a' : '#f8f9fa';
               
-              // Apply to all text elements in card-body
-              document.querySelectorAll('.card-body p, .card-body label, .card-body span, .card-body small, .card-body div:not(.form-control):not(.form-select), .card-body .form-text, .card-body .text-muted, .card-body h1, .card-body h2, .card-body h3, .card-body h4, .card-body h5, .card-body h6').forEach(el => {
-                el.style.setProperty('color', textColor, 'important');
-                if (el.classList.contains('text-muted') || el.classList.contains('form-text')) {
-                  el.style.setProperty('opacity', '1', 'important');
-                }
-              });
+              // Apply to ALL text elements in card-body (more comprehensive)
+              const cardBody = document.querySelector('.card-body');
+              if (cardBody) {
+                const allTextElements = cardBody.querySelectorAll('p, label, span, small, div, h1, h2, h3, h4, h5, h6, dt, dd, li, td, th, .form-text, .text-muted, .form-label, .form-check-label');
+                allTextElements.forEach(el => {
+                  // Skip form controls
+                  if (!el.closest('input') && !el.closest('select') && !el.closest('textarea') && !el.closest('button') && !el.classList.contains('form-control') && !el.classList.contains('form-select') && !el.classList.contains('btn')) {
+                    el.style.setProperty('color', textColor, 'important');
+                    if (el.classList.contains('text-muted') || el.classList.contains('form-text')) {
+                      el.style.setProperty('opacity', '1', 'important');
+                    }
+                  }
+                });
+              }
               
               // Apply to card header
               document.querySelectorAll('.card-header, .card-header *').forEach(el => {
-                el.style.setProperty('color', textColor, 'important');
+                if (!el.closest('input') && !el.closest('select') && !el.closest('textarea') && !el.closest('button')) {
+                  el.style.setProperty('color', textColor, 'important');
+                }
               });
               
               // Apply to loading overlay
@@ -295,9 +304,11 @@
               }
               
               // Apply to form text elements globally
-              document.querySelectorAll('.form-text, .text-muted, small').forEach(el => {
-                el.style.setProperty('color', textColor, 'important');
-                el.style.setProperty('opacity', '1', 'important');
+              document.querySelectorAll('.form-text, .text-muted, small, .form-label, .form-check-label').forEach(el => {
+                if (!el.closest('input') && !el.closest('select') && !el.closest('textarea') && !el.closest('button')) {
+                  el.style.setProperty('color', textColor, 'important');
+                  el.style.setProperty('opacity', '1', 'important');
+                }
               });
             }
             
@@ -314,12 +325,18 @@
               setInterval(applyThemeColors, 2000);
             });
             
+            // Run immediately (in case DOM is already loaded)
+            if (document.readyState === 'loading') {
+              document.addEventListener('DOMContentLoaded', applyThemeColors);
+            } else {
+              applyThemeColors();
+            }
+            
             // Make function available globally for dynamic elements
             window.getNetBoxTextColor = function() {
               return isDarkMode() ? '#ffffff' : '#212529';
             };
             
-          <script>
             document.getElementById('lldp-form').addEventListener('submit', function(e) {
               // Show loading overlay
               const overlay = document.getElementById('loading-overlay');
