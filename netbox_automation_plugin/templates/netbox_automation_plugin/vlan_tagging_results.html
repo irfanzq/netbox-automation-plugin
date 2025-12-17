@@ -6,31 +6,59 @@
 {% block content %}
 <style>
   /* Dark mode compatibility for VLAN Tagging Results */
-  /* Ensure all text is visible - white in dark mode, black in light mode */
-  body,
+  /* FORCE all text: WHITE in dark mode, BLACK in light mode - NO GREY! */
+  
+  /* Light mode: Black text */
   .card-body,
+  .card-body *:not(input):not(select):not(textarea):not(button):not(.form-control):not(.form-select):not(.btn):not(.badge),
   .card-header,
-  .form-label,
-  .form-check-label,
-  label,
-  p,
-  div,
-  span,
+  .card-header *,
   h1, h2, h3, h4, h5, h6,
   .card-title,
-  .h1, .h2, .h3, .h4, .h5, .h6,
-  h6,
   dt,
   dd {
-    color: var(--nbx-color-fg-default, #212529) !important;
+    color: #212529 !important; /* Pure black for light mode */
   }
   
-  /* Help text should still be visible but can be slightly muted */
+  /* Dark mode: White text */
+  @media (prefers-color-scheme: dark) {
+    .card-body,
+    .card-body *:not(input):not(select):not(textarea):not(button):not(.form-control):not(.form-select):not(.btn):not(.badge),
+    .card-header,
+    .card-header *,
+    h1, h2, h3, h4, h5, h6,
+    .card-title,
+    dt,
+    dd {
+      color: #ffffff !important; /* Pure white for dark mode */
+    }
+  }
+  
+  /* Help text - NO GREY: Black in light, White in dark */
   .form-text,
   .text-muted,
-  small {
-    color: var(--nbx-color-fg-default, #212529) !important;
-    opacity: 0.9;
+  small,
+  p.text-muted,
+  label.text-muted,
+  small.text-muted,
+  td.text-muted,
+  span.text-muted {
+    color: #212529 !important; /* Black for light mode */
+    opacity: 1 !important;
+  }
+  
+  @media (prefers-color-scheme: dark) {
+    .form-text,
+    .text-muted,
+    small,
+    p.text-muted,
+    label.text-muted,
+    small.text-muted,
+    td.text-muted,
+    span.text-muted {
+      color: #ffffff !important; /* White for dark mode */
+      opacity: 1 !important;
+    }
   }
   
   .table {

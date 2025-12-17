@@ -7,32 +7,50 @@
 {% block content %}
 <style>
   /* Dark mode compatibility for VLAN Tagging Form */
-  /* Ensure all text is visible - white in dark mode, black in light mode */
-  body,
+  /* FORCE all text: WHITE in dark mode, BLACK in light mode - NO GREY! */
+  
+  /* Light mode: Black text */
   .card-body,
-  .card-header,
-  .form-label,
-  .form-check-label,
-  label,
-  p,
-  div,
-  span {
-    color: var(--nbx-color-fg-default, #212529) !important;
+  .card-body *:not(input):not(select):not(textarea):not(button):not(.form-control):not(.form-select):not(.btn) {
+    color: #212529 !important; /* Pure black for light mode */
   }
   
-  /* Help text should still be visible but can be slightly muted */
+  /* Dark mode: White text */
+  @media (prefers-color-scheme: dark) {
+    .card-body,
+    .card-body *:not(input):not(select):not(textarea):not(button):not(.form-control):not(.form-select):not(.btn) {
+      color: #ffffff !important; /* Pure white for dark mode */
+    }
+  }
+  
+  /* Help text - NO GREY: Black in light, White in dark */
   .form-text,
   .text-muted,
   small {
-    color: var(--nbx-color-fg-default, #212529) !important;
-    opacity: 0.9;
+    color: #212529 !important; /* Black for light mode */
+    opacity: 1 !important;
   }
   
-  /* Ensure headings are visible */
-  h1, h2, h3, h4, h5, h6,
-  .card-title,
-  .h1, .h2, .h3, .h4, .h5, .h6 {
-    color: var(--nbx-color-fg-default, #212529) !important;
+  @media (prefers-color-scheme: dark) {
+    .form-text,
+    .text-muted,
+    small {
+      color: #ffffff !important; /* White for dark mode */
+      opacity: 1 !important;
+    }
+  }
+  
+  /* Card header text */
+  .card-header,
+  .card-header * {
+    color: #212529 !important; /* Black for light mode */
+  }
+  
+  @media (prefers-color-scheme: dark) {
+    .card-header,
+    .card-header * {
+      color: #ffffff !important; /* White for dark mode */
+    }
   }
   
   .form-control,
@@ -41,13 +59,31 @@
   select.form-select,
   textarea.form-control {
     background-color: var(--nbx-color-bg-input, #fff) !important;
-    color: var(--nbx-color-fg-input, #212529) !important;
+    color: #212529 !important; /* Black for light mode */
     border-color: var(--nbx-color-border-input, #ced4da) !important;
   }
   
+  @media (prefers-color-scheme: dark) {
+    .form-control,
+    .form-select,
+    select.form-control,
+    select.form-select,
+    textarea.form-control {
+      background-color: var(--nbx-color-bg-input, #2a2a2a) !important; /* Dark background for dark mode */
+      color: #ffffff !important; /* White for dark mode */
+    }
+  }
+  
   .form-control::placeholder {
-    color: var(--nbx-color-fg-muted, #6c757d) !important;
+    color: #212529 !important; /* Black for light mode */
     opacity: 0.7;
+  }
+  
+  @media (prefers-color-scheme: dark) {
+    .form-control::placeholder {
+      color: #ffffff !important; /* White for dark mode */
+      opacity: 0.7;
+    }
   }
   
   .form-control:focus,
@@ -56,14 +92,31 @@
   select.form-select:focus,
   textarea.form-control:focus {
     background-color: var(--nbx-color-bg-input, #fff) !important;
-    color: var(--nbx-color-fg-input, #212529) !important;
+    color: #212529 !important; /* Black for light mode */
     border-color: var(--nbx-color-border-input-focus, #86b7fe) !important;
+  }
+  
+  @media (prefers-color-scheme: dark) {
+    .form-control:focus,
+    .form-select:focus,
+    select.form-control:focus,
+    select.form-select:focus,
+    textarea.form-control:focus {
+      background-color: var(--nbx-color-bg-input, #2a2a2a) !important; /* Dark background for dark mode */
+      color: #ffffff !important; /* White for dark mode */
+    }
   }
   
   /* Checkbox and radio button styling for dark mode */
   .form-check-input {
     background-color: var(--nbx-color-bg-input, #fff) !important;
     border-color: var(--nbx-color-border-input, #ced4da) !important;
+  }
+  
+  @media (prefers-color-scheme: dark) {
+    .form-check-input {
+      background-color: var(--nbx-color-bg-input, #2a2a2a) !important; /* Dark background for dark mode */
+    }
   }
   
   .form-check-input:checked {
@@ -83,13 +136,27 @@
   /* Datalist dropdown styling */
   datalist option {
     background-color: var(--nbx-color-bg-input, #fff) !important;
-    color: var(--nbx-color-fg-input, #212529) !important;
+    color: #212529 !important; /* Black for light mode */
+  }
+  
+  @media (prefers-color-scheme: dark) {
+    datalist option {
+      background-color: var(--nbx-color-bg-input, #2a2a2a) !important; /* Dark background for dark mode */
+      color: #ffffff !important; /* White for dark mode */
+    }
   }
   
   /* Select dropdown options */
   select option {
     background-color: var(--nbx-color-bg-input, #fff) !important;
-    color: var(--nbx-color-fg-input, #212529) !important;
+    color: #212529 !important; /* Black for light mode */
+  }
+  
+  @media (prefers-color-scheme: dark) {
+    select option {
+      background-color: var(--nbx-color-bg-input, #2a2a2a) !important; /* Dark background for dark mode */
+      color: #ffffff !important; /* White for dark mode */
+    }
   }
   
   .invalid-feedback {

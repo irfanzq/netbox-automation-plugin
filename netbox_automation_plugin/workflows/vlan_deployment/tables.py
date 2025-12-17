@@ -168,9 +168,17 @@ class VLANDeploymentResultTable(NetBoxTable):
             <summary style="cursor: pointer; color: var(--nbx-color-fg-link, #0066cc); font-weight: bold;">
                 View Details ({len(value.split(chr(10)))} lines)
             </summary>
-            <div style="margin-top: 10px; padding: 10px; background-color: var(--nbx-color-bg-secondary, #f5f5f5); color: var(--nbx-color-fg-default, #212529); border-left: 3px solid var(--nbx-color-border-primary, #0066cc); font-family: monospace; font-size: 12px; max-height: 400px; overflow-y: auto;">
+            <div style="margin-top: 10px; padding: 10px; background-color: var(--nbx-color-bg-secondary, #f5f5f5); color: #212529; border-left: 3px solid var(--nbx-color-border-primary, #0066cc); font-family: monospace; font-size: 12px; max-height: 400px; overflow-y: auto;">
                 {formatted_logs}
             </div>
+            <style>
+                @media (prefers-color-scheme: dark) {{
+                    .deployment-logs[data-status-filter="{status_filter}"] div {{
+                        background-color: #2a2a2a !important; /* Dark background in dark mode */
+                        color: #ffffff !important; /* White in dark mode */
+                    }}
+                }}
+            </style>
         </details>
         '''
         return format_html(html)
@@ -192,9 +200,16 @@ class VLANDeploymentResultTable(NetBoxTable):
             <summary style="cursor: pointer; color: var(--nbx-color-fg-link, #0066cc); font-weight: bold;">
                 View Detailed Logs ({len(value.split(chr(10)))} lines)
             </summary>
-            <div style="margin-top: 10px; padding: 10px; background-color: var(--nbx-color-bg-secondary, #f5f5f5); color: var(--nbx-color-fg-default, #212529); border-left: 3px solid var(--nbx-color-border-primary, #0066cc); font-family: monospace; font-size: 12px; max-height: 400px; overflow-y: auto;">
+            <div style="margin-top: 10px; padding: 10px; background-color: var(--nbx-color-bg-secondary, #f5f5f5); color: #212529; border-left: 3px solid var(--nbx-color-border-primary, #0066cc); font-family: monospace; font-size: 12px; max-height: 400px; overflow-y: auto;">
                 {formatted_logs}
             </div>
+            <style>
+                @media (prefers-color-scheme: dark) {{
+                    .deployment-logs div {{
+                        color: #ffffff !important; /* White in dark mode */
+                    }}
+                }}
+            </style>
         </details>
         '''
         return format_html(html)

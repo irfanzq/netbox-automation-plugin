@@ -7,32 +7,103 @@
 {% block content %}
 <style>
   /* Dark mode compatibility for VLAN Deployment Form */
-  /* Ensure all text is visible - white in dark mode, black in light mode */
-  body,
+  /* FORCE all text: WHITE in dark mode, BLACK in light mode - NO GREY! */
+  
+  /* Light mode: Black text */
   .card-body,
-  .card-header,
-  .form-label,
-  .form-check-label,
-  label,
-  p,
-  div,
-  span {
-    color: var(--nbx-color-fg-default, #212529) !important;
+  .card-body *:not(input):not(select):not(textarea):not(button):not(.form-control):not(.form-select):not(.btn):not(.badge) {
+    color: #212529 !important; /* Pure black for light mode */
   }
   
-  /* Help text should still be visible but can be slightly muted */
+  /* Dark mode: White text */
+  @media (prefers-color-scheme: dark) {
+    .card-body,
+    .card-body *:not(input):not(select):not(textarea):not(button):not(.form-control):not(.form-select):not(.btn):not(.badge) {
+      color: #ffffff !important; /* Pure white for dark mode */
+    }
+  }
+  
+  /* Specific overrides for common text elements - Light mode */
+  .card-body .form-label,
+  .card-body label:not(.form-check-label),
+  .card-body .form-check-label,
+  .card-body p,
+  .card-body div.form-text,
+  .card-body span,
+  .card-body small,
+  .card-body h1,
+  .card-body h2,
+  .card-body h3,
+  .card-body h4,
+  .card-body h5,
+  .card-body h6,
+  .card-body .card-title {
+    color: #212529 !important; /* Black for light mode */
+  }
+  
+  @media (prefers-color-scheme: dark) {
+    .card-body .form-label,
+    .card-body label:not(.form-check-label),
+    .card-body .form-check-label,
+    .card-body p,
+    .card-body div.form-text,
+    .card-body span,
+    .card-body small,
+    .card-body h1,
+    .card-body h2,
+    .card-body h3,
+    .card-body h4,
+    .card-body h5,
+    .card-body h6,
+    .card-body .card-title {
+      color: #ffffff !important; /* White for dark mode */
+    }
+  }
+  
+  /* Help text and muted text - NO GREY: Black in light, White in dark */
+  .card-body .form-text,
+  .card-body .text-muted,
+  .card-body p.text-muted,
+  .card-body label.text-muted,
+  .card-body small.text-muted,
   .form-text,
   .text-muted,
+  p.text-muted,
+  label.text-muted,
+  small.text-muted,
   small {
-    color: var(--nbx-color-fg-default, #212529) !important;
-    opacity: 0.9;
+    color: #212529 !important; /* Black for light mode */
+    opacity: 1 !important;
   }
   
-  /* Ensure headings are visible */
-  h1, h2, h3, h4, h5, h6,
-  .card-title,
-  .h1, .h2, .h3, .h4, .h5, .h6 {
-    color: var(--nbx-color-fg-default, #212529) !important;
+  @media (prefers-color-scheme: dark) {
+    .card-body .form-text,
+    .card-body .text-muted,
+    .card-body p.text-muted,
+    .card-body label.text-muted,
+    .card-body small.text-muted,
+    .form-text,
+    .text-muted,
+    p.text-muted,
+    label.text-muted,
+    small.text-muted,
+    small {
+      color: #ffffff !important; /* White for dark mode */
+      opacity: 1 !important;
+    }
+  }
+  
+  /* Card header text */
+  .card-header,
+  .card-header * {
+    color: #212529 !important; /* Black for light mode */
+  }
+  
+  @media (prefers-color-scheme: dark) {
+    .card-header,
+    .card-header * {
+      color: #ffffff !important; /* White for dark mode */
+    }
   }
   
   .form-control,
@@ -41,13 +112,31 @@
   select.form-select,
   textarea.form-control {
     background-color: var(--nbx-color-bg-input, #fff) !important;
-    color: var(--nbx-color-fg-input, #212529) !important;
+    color: #212529 !important; /* Black for light mode */
     border-color: var(--nbx-color-border-input, #ced4da) !important;
   }
   
+  @media (prefers-color-scheme: dark) {
+    .form-control,
+    .form-select,
+    select.form-control,
+    select.form-select,
+    textarea.form-control {
+      background-color: var(--nbx-color-bg-input, #2a2a2a) !important; /* Dark background for dark mode */
+      color: #ffffff !important; /* White for dark mode */
+    }
+  }
+  
   .form-control::placeholder {
-    color: var(--nbx-color-fg-muted, #6c757d) !important;
+    color: #212529 !important; /* Black for light mode */
     opacity: 0.7;
+  }
+  
+  @media (prefers-color-scheme: dark) {
+    .form-control::placeholder {
+      color: #ffffff !important; /* White for dark mode */
+      opacity: 0.7;
+    }
   }
   
   .form-control:focus,
@@ -56,14 +145,31 @@
   select.form-select:focus,
   textarea.form-control:focus {
     background-color: var(--nbx-color-bg-input, #fff) !important;
-    color: var(--nbx-color-fg-input, #212529) !important;
+    color: #212529 !important; /* Black for light mode */
     border-color: var(--nbx-color-border-input-focus, #86b7fe) !important;
+  }
+  
+  @media (prefers-color-scheme: dark) {
+    .form-control:focus,
+    .form-select:focus,
+    select.form-control:focus,
+    select.form-select:focus,
+    textarea.form-control:focus {
+      background-color: var(--nbx-color-bg-input, #2a2a2a) !important; /* Dark background for dark mode */
+      color: #ffffff !important; /* White for dark mode */
+    }
   }
   
   /* Checkbox and radio button styling for dark mode */
   .form-check-input {
     background-color: var(--nbx-color-bg-input, #fff) !important;
     border-color: var(--nbx-color-border-input, #ced4da) !important;
+  }
+  
+  @media (prefers-color-scheme: dark) {
+    .form-check-input {
+      background-color: var(--nbx-color-bg-input, #2a2a2a) !important; /* Dark background for dark mode */
+    }
   }
   
   .form-check-input:checked {
@@ -79,38 +185,79 @@
   /* Datalist dropdown styling */
   datalist option {
     background-color: var(--nbx-color-bg-input, #fff) !important;
-    color: var(--nbx-color-fg-input, #212529) !important;
+    color: #212529 !important; /* Black for light mode */
+  }
+  
+  @media (prefers-color-scheme: dark) {
+    datalist option {
+      background-color: var(--nbx-color-bg-input, #2a2a2a) !important; /* Dark background for dark mode */
+      color: #ffffff !important; /* White for dark mode */
+    }
   }
   
   /* Select dropdown options */
   select option {
     background-color: var(--nbx-color-bg-input, #fff) !important;
-    color: var(--nbx-color-fg-input, #212529) !important;
+    color: #212529 !important; /* Black for light mode */
+  }
+  
+  @media (prefers-color-scheme: dark) {
+    select option {
+      background-color: var(--nbx-color-bg-input, #2a2a2a) !important; /* Dark background for dark mode */
+      color: #ffffff !important; /* White for dark mode */
+    }
   }
   
   #interfaces-checkbox-container {
     background-color: var(--nbx-color-bg-secondary, #f8f9fa) !important;
     border-color: var(--nbx-color-border-default, #dee2e6) !important;
-    color: var(--nbx-color-fg-default, #212529) !important;
+    color: #212529 !important; /* Black for light mode */
+  }
+  
+  @media (prefers-color-scheme: dark) {
+    #interfaces-checkbox-container {
+      background-color: var(--nbx-color-bg-secondary, #2a2a2a) !important; /* Dark background for dark mode */
+      color: #ffffff !important; /* White for dark mode */
+    }
   }
   
   /* Ensure all text inside the interfaces container is visible */
   #interfaces-checkbox-container,
   #interfaces-checkbox-container * {
-    color: var(--nbx-color-fg-default, #212529) !important;
+    color: #212529 !important; /* Black for light mode */
   }
   
-  /* Exception for muted text inside container - make it visible */
+  @media (prefers-color-scheme: dark) {
+    #interfaces-checkbox-container,
+    #interfaces-checkbox-container * {
+      color: #ffffff !important; /* White for dark mode */
+    }
+  }
+  
+  /* Exception for muted text inside container - NO GREY, fully visible */
   #interfaces-checkbox-container .text-muted,
   #interfaces-checkbox-container p.text-muted {
-    color: var(--nbx-color-fg-default, #212529) !important;
-    opacity: 0.9;
+    color: #212529 !important; /* Black for light mode */
+    opacity: 1 !important;
   }
   
-  /* Label for "Available Interfaces" section - ensure visibility */
+  @media (prefers-color-scheme: dark) {
+    #interfaces-checkbox-container .text-muted,
+    #interfaces-checkbox-container p.text-muted {
+      color: #ffffff !important; /* White for dark mode */
+    }
+  }
+  
+  /* Label for "Available Interfaces" section - NO GREY, fully visible */
   label.form-label.text-muted.small {
-    color: var(--nbx-color-fg-default, #212529) !important;
-    opacity: 0.9;
+    color: #212529 !important; /* Black for light mode */
+    opacity: 1 !important;
+  }
+  
+  @media (prefers-color-scheme: dark) {
+    label.form-label.text-muted.small {
+      color: #ffffff !important; /* White for dark mode */
+    }
   }
   
   .form-check-label {
@@ -153,24 +300,49 @@
   
   #loading-overlay > div {
     background: var(--nbx-color-bg-default, #fff) !important;
-    color: var(--nbx-color-fg-default, #212529) !important;
+    color: #212529 !important; /* Black for light mode */
+  }
+  
+  @media (prefers-color-scheme: dark) {
+    #loading-overlay > div {
+      background: var(--nbx-color-bg-default, #2a2a2a) !important; /* Dark background for dark mode */
+      color: #ffffff !important; /* White for dark mode */
+    }
   }
   
   #loading-overlay h4 {
-    color: var(--nbx-color-fg-default, #212529) !important;
+    color: #212529 !important; /* Black for light mode */
+  }
+  
+  @media (prefers-color-scheme: dark) {
+    #loading-overlay h4 {
+      color: #ffffff !important; /* White for dark mode */
+    }
   }
   
   #loading-overlay .text-muted {
-    color: var(--nbx-color-fg-muted, #6c757d) !important;
+    color: #212529 !important; /* Black for light mode */
   }
   
-  /* Disabled button styling */
+  @media (prefers-color-scheme: dark) {
+    #loading-overlay .text-muted {
+      color: #ffffff !important; /* White for dark mode */
+    }
+  }
+  
+  /* Disabled button styling - NO GREY text */
   #deploy-btn:disabled {
     background-color: var(--nbx-color-bg-tertiary, #6c757d) !important;
     border-color: var(--nbx-color-bg-tertiary, #6c757d) !important;
-    color: var(--nbx-color-fg-muted, #ffffff) !important;
+    color: #212529 !important; /* Black for light mode */
     opacity: 0.6;
     cursor: not-allowed !important;
+  }
+  
+  @media (prefers-color-scheme: dark) {
+    #deploy-btn:disabled {
+      color: #ffffff !important; /* White for dark mode */
+    }
   }
 </style>
   <div class="row">
@@ -180,9 +352,16 @@
           <h5 class="card-title mb-0">{% trans "VLAN Deployment" %}</h5>
         </div>
         <div class="card-body">
-          <p class="text-muted">
+          <p class="text-muted" style="color: #212529 !important;">
             {% trans "Deploy VLAN configurations to network devices and update NetBox interface assignments. Phase 1: Access mode (untagged) only." %}
           </p>
+          <style>
+            @media (prefers-color-scheme: dark) {
+              p.text-muted {
+                color: #ffffff !important; /* White in dark mode */
+              }
+            }
+          </style>
 
           {% if form.non_field_errors %}
             <div class="alert alert-danger" role="alert">
@@ -192,12 +371,23 @@
 
           <!-- Loading overlay -->
           <div id="loading-overlay" style="display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.7); z-index: 9999; align-items: center; justify-content: center;">
-            <div style="background: var(--nbx-color-bg-default, #fff); padding: 30px; border-radius: 8px; text-align: center; max-width: 400px; color: var(--nbx-color-fg-default, #212529);">
+            <div style="background: var(--nbx-color-bg-default, #fff); padding: 30px; border-radius: 8px; text-align: center; max-width: 400px; color: #212529;">
               <div class="spinner-border text-primary mb-3" role="status" style="width: 3rem; height: 3rem;">
                 <span class="visually-hidden">Loading...</span>
               </div>
-              <h4 style="color: var(--nbx-color-fg-default, #212529);">Deploying VLAN Configuration...</h4>
-              <p class="text-muted mb-0" style="color: var(--nbx-color-fg-default, #212529); opacity: 0.9;">Applying configuration to devices. This may take a minute.</p>
+              <h4 style="color: #212529;">Deploying VLAN Configuration...</h4>
+              <p class="text-muted mb-0" style="color: #212529 !important; opacity: 1 !important;">Applying configuration to devices. This may take a minute.</p>
+              <style>
+                @media (prefers-color-scheme: dark) {
+                  #loading-overlay > div {
+                    background: #2a2a2a !important; /* Dark background in dark mode */
+                  }
+                  #loading-overlay h4,
+                  #loading-overlay .text-muted {
+                    color: #ffffff !important; /* White in dark mode */
+                  }
+                }
+              </style>
             </div>
           </div>
 
@@ -207,7 +397,7 @@
             {# Deployment Scope - Always visible #}
             <div class="mb-3">
               <label class="form-label">{{ form.deployment_scope.label }}</label>
-              <div class="form-text">{{ form.deployment_scope.help_text }}</div>
+              <div class="form-text" style="color: var(--nbx-color-fg-default) !important;">{{ form.deployment_scope.help_text }}</div>
               {% for radio in form.deployment_scope %}
                 <div class="form-check">
                   {{ radio.tag }}
@@ -226,7 +416,7 @@
               <div class="mb-3">
                 <label for="{{ form.devices.id_for_label }}" class="form-label required">{{ form.devices.label }}</label>
                 {{ form.devices }}
-                <div class="form-text">{{ form.devices.help_text }}</div>
+                <div class="form-text" style="color: var(--nbx-color-fg-default) !important;">{{ form.devices.help_text }}</div>
                 {% if form.devices.errors %}
                   <div class="invalid-feedback d-block">{{ form.devices.errors }}</div>
                 {% endif %}
@@ -238,7 +428,7 @@
               <div class="mb-3">
                 <label for="{{ form.site.id_for_label }}" class="form-label required">{{ form.site.label }}</label>
                 {{ form.site }}
-                <div class="form-text">{{ form.site.help_text }}</div>
+                <div class="form-text" style="color: var(--nbx-color-fg-default) !important;">{{ form.site.help_text }}</div>
                 {% if form.site.errors %}
                   <div class="invalid-feedback d-block">{{ form.site.errors }}</div>
                 {% endif %}
@@ -247,7 +437,7 @@
               <div class="mb-3">
                 <label for="{{ form.location.id_for_label }}" class="form-label required">{{ form.location.label }}</label>
                 {{ form.location }}
-                <div class="form-text">{{ form.location.help_text }}</div>
+                <div class="form-text" style="color: var(--nbx-color-fg-default) !important;">{{ form.location.help_text }}</div>
                 {% if form.location.errors %}
                   <div class="invalid-feedback d-block">{{ form.location.errors }}</div>
                 {% endif %}
@@ -256,7 +446,7 @@
               <div class="mb-3">
                 <label for="{{ form.manufacturer.id_for_label }}" class="form-label required">{{ form.manufacturer.label }}</label>
                 {{ form.manufacturer }}
-                <div class="form-text">{{ form.manufacturer.help_text }}</div>
+                <div class="form-text" style="color: var(--nbx-color-fg-default) !important;">{{ form.manufacturer.help_text }}</div>
                 {% if form.manufacturer.errors %}
                   <div class="invalid-feedback d-block">{{ form.manufacturer.errors }}</div>
                 {% endif %}
@@ -265,7 +455,7 @@
               <div class="mb-3">
                 <label for="{{ form.role.id_for_label }}" class="form-label required">{{ form.role.label }}</label>
                 {{ form.role }}
-                <div class="form-text">{{ form.role.help_text }}</div>
+                <div class="form-text" style="color: var(--nbx-color-fg-default) !important;">{{ form.role.help_text }}</div>
                 {% if form.role.errors %}
                   <div class="invalid-feedback d-block">{{ form.role.errors }}</div>
                 {% endif %}
@@ -275,7 +465,7 @@
               <div class="mb-3">
                 <label for="{{ form.excluded_devices.id_for_label }}" class="form-label">{{ form.excluded_devices.label }}</label>
                 {{ form.excluded_devices }}
-                <div class="form-text">{{ form.excluded_devices.help_text }}</div>
+                <div class="form-text" style="color: var(--nbx-color-fg-default) !important;">{{ form.excluded_devices.help_text }}</div>
                 {% if form.excluded_devices.errors %}
                   <div class="invalid-feedback d-block">{{ form.excluded_devices.errors }}</div>
                 {% endif %}
@@ -288,10 +478,22 @@
 
               {# Field 1: Checkbox list for available interfaces #}
               <div class="mb-2">
-                <label class="form-label text-muted small" style="color: var(--nbx-color-fg-default, #212529) !important; opacity: 0.9;">Available Interfaces (select from device)</label>
-                <div id="interfaces-checkbox-container" style="max-height: 200px; overflow-y: auto; border: 1px solid var(--nbx-color-border-default, #dee2e6); padding: 10px; border-radius: 4px; background-color: var(--nbx-color-bg-secondary, #f8f9fa); color: var(--nbx-color-fg-default, #212529);">
-                  <p class="text-muted mb-0" style="color: var(--nbx-color-fg-default, #212529) !important; opacity: 0.9;">Select devices first to load interfaces</p>
+                <label class="form-label text-muted small" style="color: #212529 !important; opacity: 1 !important;">Available Interfaces (select from device)</label>
+                <div id="interfaces-checkbox-container" style="max-height: 200px; overflow-y: auto; border: 1px solid var(--nbx-color-border-default, #dee2e6); padding: 10px; border-radius: 4px; background-color: var(--nbx-color-bg-secondary, #f8f9fa); color: #212529;">
+                  <p class="text-muted mb-0" style="color: #212529 !important; opacity: 1 !important;">Select devices first to load interfaces</p>
                 </div>
+                <style>
+                  @media (prefers-color-scheme: dark) {
+                    #interfaces-checkbox-container {
+                      background-color: #2a2a2a !important; /* Dark background in dark mode */
+                    }
+                    label.form-label.text-muted,
+                    #interfaces-checkbox-container,
+                    #interfaces-checkbox-container .text-muted {
+                      color: #ffffff !important; /* White in dark mode */
+                    }
+                  }
+                </style>
               </div>
 
               {# Field 2: Manual text input for custom interfaces #}
@@ -304,12 +506,12 @@
                   rows="2"
                   placeholder="Optional: Add custom interfaces (e.g., swp100, swp200 or swp1-48)"
                 >{{ form.interfaces_manual.value|default:'' }}</textarea>
-                <div class="form-text">
+                <div class="form-text" style="color: var(--nbx-color-fg-default) !important;">
                   Enter additional interface names separated by commas or use ranges (e.g., swp1-48, Ethernet1-24).
                 </div>
               </div>
 
-              <div class="form-text">
+              <div class="form-text" style="color: var(--nbx-color-fg-default) !important;">
                 <strong>Combined selection:</strong> Both checkbox selections and manual entries will be combined and validated against NetBox.
               </div>
 
@@ -342,7 +544,7 @@
                   <!-- Will be populated dynamically with VLANs from device's location -->
                 </datalist>
               </div>
-              <div class="form-text">Click on the input field above to see available VLANs in the dropdown menu.</div>
+              <div class="form-text" style="color: var(--nbx-color-fg-default) !important;">Click on the input field above to see available VLANs in the dropdown menu.</div>
               
               {% if form.vlan_id.errors %}
                 <div class="invalid-feedback d-block">{{ form.vlan_id.errors }}</div>
@@ -358,7 +560,7 @@
                 <label class="form-check-label" for="{{ form.dry_run.id_for_label }}">
                   {{ form.dry_run.label }}
                 </label>
-                <div class="form-text">{{ form.dry_run.help_text }}</div>
+                <div class="form-text" style="color: var(--nbx-color-fg-default) !important;">{{ form.dry_run.help_text }}</div>
               </div>
 
               <div class="form-check mt-2">
@@ -366,7 +568,7 @@
                 <label class="form-check-label" for="{{ form.deploy_changes.id_for_label }}">
                   {{ form.deploy_changes.label }}
                 </label>
-                <div class="form-text">{{ form.deploy_changes.help_text }}</div>
+                <div class="form-text" style="color: var(--nbx-color-fg-default) !important;">{{ form.deploy_changes.help_text }}</div>
               </div>
             </div>
 
@@ -402,8 +604,8 @@
               if (interfaces.length === 0) {
                 const p = document.createElement('p');
                 p.className = 'text-muted mb-0';
-                p.style.color = 'var(--nbx-color-fg-default, #212529)';
-                p.style.opacity = '0.9';
+                p.style.color = window.matchMedia('(prefers-color-scheme: dark)').matches ? '#ffffff' : '#212529';
+                p.style.opacity = '1';
                 p.textContent = 'No common interfaces found';
                 container.appendChild(p);
                 return;
@@ -423,7 +625,7 @@
 
                 const label = document.createElement('label');
                 label.className = 'form-check-label';
-                label.style.color = 'var(--nbx-color-fg-default, #212529)';
+                label.style.color = window.matchMedia('(prefers-color-scheme: dark)').matches ? '#ffffff' : '#212529';
                 label.htmlFor = `interface_${iface}`;
                 label.textContent = iface;
 
@@ -445,8 +647,8 @@
               if (selectedDeviceIds.length === 0) {
                 const p = document.createElement('p');
                 p.className = 'text-muted mb-0';
-                p.style.color = 'var(--nbx-color-fg-default, #212529)';
-                p.style.opacity = '0.9';
+                p.style.color = window.matchMedia('(prefers-color-scheme: dark)').matches ? '#ffffff' : '#212529';
+                p.style.opacity = '1';
                 p.textContent = 'Select devices first to load interfaces';
                 interfacesContainer.innerHTML = '';
                 interfacesContainer.appendChild(p);
@@ -456,8 +658,8 @@
               // Show loading
               const loadingP = document.createElement('p');
               loadingP.className = 'text-muted mb-0';
-              loadingP.style.color = 'var(--nbx-color-fg-default, #212529)';
-              loadingP.style.opacity = '0.9';
+              loadingP.style.color = window.matchMedia('(prefers-color-scheme: dark)').matches ? '#ffffff' : '#212529';
+              loadingP.style.opacity = '1';
               loadingP.textContent = 'Loading interfaces...';
               interfacesContainer.innerHTML = '';
               interfacesContainer.appendChild(loadingP);
@@ -517,8 +719,8 @@
               if (!siteId || !locationId || !manufacturerId || !roleId) {
                 const p = document.createElement('p');
                 p.className = 'text-muted mb-0';
-                p.style.color = 'var(--nbx-color-fg-default, #212529)';
-                p.style.opacity = '0.9';
+                p.style.color = window.matchMedia('(prefers-color-scheme: dark)').matches ? '#ffffff' : '#212529';
+                p.style.opacity = '1';
                 p.textContent = 'Select all filters (Site, Location, Manufacturer, Role) to load interfaces';
                 interfacesContainer.innerHTML = '';
                 interfacesContainer.appendChild(p);
@@ -528,8 +730,8 @@
               // Show loading
               const loadingP = document.createElement('p');
               loadingP.className = 'text-muted mb-0';
-              loadingP.style.color = 'var(--nbx-color-fg-default, #212529)';
-              loadingP.style.opacity = '0.9';
+              loadingP.style.color = window.matchMedia('(prefers-color-scheme: dark)').matches ? '#ffffff' : '#212529';
+              loadingP.style.opacity = '1';
               loadingP.textContent = 'Loading interfaces...';
               interfacesContainer.innerHTML = '';
               interfacesContainer.appendChild(loadingP);
