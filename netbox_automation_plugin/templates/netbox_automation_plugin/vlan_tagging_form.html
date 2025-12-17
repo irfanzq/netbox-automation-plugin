@@ -496,13 +496,6 @@
       return isDarkMode() ? '#ffffff' : '#212529';
     };
     
-    // Run immediately (in case DOM is already loaded)
-    if (document.readyState === 'loading') {
-      document.addEventListener('DOMContentLoaded', applyThemeColors);
-    } else {
-      applyThemeColors();
-    }
-    
     function toggleDeviceSelectionFields() {
       const deviceSelection = document.querySelector('input[name="device_selection"]:checked');
       const singleFields = document.getElementById('single-device-fields');
