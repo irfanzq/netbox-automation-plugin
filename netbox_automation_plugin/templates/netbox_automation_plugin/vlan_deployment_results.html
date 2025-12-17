@@ -342,6 +342,75 @@
       </div>
       
       <script>
+        // NetBox Theme Detection and Color Application
+        function getNetBoxTheme() {
+          try {
+            return localStorage.getItem('netbox-color-mode') || 'light';
+          } catch (e) {
+            return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+          }
+        }
+        
+        function isDarkMode() {
+          return getNetBoxTheme() === 'dark';
+        }
+        
+        function applyThemeColors() {
+          const darkMode = isDarkMode();
+          const textColor = darkMode ? '#ffffff' : '#212529';
+          const bgColor = darkMode ? '#2a2a2a' : '#f5f5f5';
+          
+          // Apply to all text elements in card-body
+          document.querySelectorAll('.card-body p, .card-body label, .card-body span, .card-body small, .card-body div, .card-body .form-text, .card-body .text-muted, .card-body h1, .card-body h2, .card-body h3, .card-body h4, .card-body h5, .card-body h6, .card-body dt, .card-body dd').forEach(el => {
+            el.style.setProperty('color', textColor, 'important');
+            if (el.classList.contains('text-muted') || el.classList.contains('form-text')) {
+              el.style.setProperty('opacity', '1', 'important');
+            }
+          });
+          
+          // Apply to card header
+          document.querySelectorAll('.card-header, .card-header *').forEach(el => {
+            el.style.setProperty('color', textColor, 'important');
+          });
+          
+          // Apply to deployment logs
+          document.querySelectorAll('.deployment-logs div').forEach(el => {
+            el.style.setProperty('background-color', bgColor, 'important');
+            el.style.setProperty('color', textColor, 'important');
+          });
+          
+          // Apply to code/pre blocks
+          document.querySelectorAll('.deployment-logs div pre, .deployment-logs div code').forEach(el => {
+            el.style.setProperty('background-color', darkMode ? '#1a1a1a' : '#e9ecef', 'important');
+            el.style.setProperty('color', textColor, 'important');
+          });
+          
+          // Apply to table text
+          document.querySelectorAll('.table td, .table th').forEach(el => {
+            el.style.setProperty('color', textColor, 'important');
+          });
+          
+          // Apply to form text elements globally
+          document.querySelectorAll('.form-text, .text-muted, small').forEach(el => {
+            el.style.setProperty('color', textColor, 'important');
+            el.style.setProperty('opacity', '1', 'important');
+          });
+        }
+        
+        // Apply on page load
+        document.addEventListener('DOMContentLoaded', function() {
+          applyThemeColors();
+          
+          // Listen for NetBox theme changes
+          window.addEventListener('netbox.colorModeChanged', function(e) {
+            setTimeout(applyThemeColors, 100);
+          });
+          
+          // Also check periodically in case theme changes
+          setInterval(applyThemeColors, 2000);
+        });
+        
+      <script>
         // Status filter functionality
         document.addEventListener('DOMContentLoaded', function() {
           const filterButtons = document.querySelectorAll('#status-filter-buttons button');

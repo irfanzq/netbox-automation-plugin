@@ -7,23 +7,23 @@
 {% block content %}
 <style>
   /* Dark mode compatibility for VLAN Deployment Form */
-  /* FORCE all text: WHITE in dark mode, BLACK in light mode - NO GREY! */
+  /* Use NetBox CSS variables with explicit fallbacks - NO GREY! */
   
-  /* Light mode: Black text */
+  /* Use NetBox CSS variables - they adapt to theme automatically */
   .card-body,
   .card-body *:not(input):not(select):not(textarea):not(button):not(.form-control):not(.form-select):not(.btn):not(.badge) {
-    color: #212529 !important; /* Pure black for light mode */
+    color: var(--nbx-color-fg-default) !important;
   }
   
-  /* Dark mode: White text */
-  @media (prefers-color-scheme: dark) {
-    .card-body,
-    .card-body *:not(input):not(select):not(textarea):not(button):not(.form-control):not(.form-select):not(.btn):not(.badge) {
-      color: #ffffff !important; /* Pure white for dark mode */
-    }
+  /* Force visibility - ensure text is never grey */
+  .card-body .text-muted,
+  .card-body .form-text,
+  .card-body small {
+    color: var(--nbx-color-fg-default) !important;
+    opacity: 1 !important;
   }
   
-  /* Specific overrides for common text elements - Light mode */
+  /* Specific overrides for common text elements */
   .card-body .form-label,
   .card-body label:not(.form-check-label),
   .card-body .form-check-label,
@@ -38,7 +38,39 @@
   .card-body h5,
   .card-body h6,
   .card-body .card-title {
-    color: #212529 !important; /* Black for light mode */
+    color: var(--nbx-color-fg-default, #212529) !important;
+  }
+  
+  /* Dark mode overrides */
+  html[data-theme="dark"] .card-body .form-label,
+  html[data-theme="dark"] .card-body label:not(.form-check-label),
+  html[data-theme="dark"] .card-body .form-check-label,
+  html[data-theme="dark"] .card-body p,
+  html[data-theme="dark"] .card-body div.form-text,
+  html[data-theme="dark"] .card-body span,
+  html[data-theme="dark"] .card-body small,
+  html[data-theme="dark"] .card-body h1,
+  html[data-theme="dark"] .card-body h2,
+  html[data-theme="dark"] .card-body h3,
+  html[data-theme="dark"] .card-body h4,
+  html[data-theme="dark"] .card-body h5,
+  html[data-theme="dark"] .card-body h6,
+  html[data-theme="dark"] .card-body .card-title,
+  body.dark-mode .card-body .form-label,
+  body.dark-mode .card-body label:not(.form-check-label),
+  body.dark-mode .card-body .form-check-label,
+  body.dark-mode .card-body p,
+  body.dark-mode .card-body div.form-text,
+  body.dark-mode .card-body span,
+  body.dark-mode .card-body small,
+  body.dark-mode .card-body h1,
+  body.dark-mode .card-body h2,
+  body.dark-mode .card-body h3,
+  body.dark-mode .card-body h4,
+  body.dark-mode .card-body h5,
+  body.dark-mode .card-body h6,
+  body.dark-mode .card-body .card-title {
+    color: var(--nbx-color-fg-default, #ffffff) !important; /* White for dark mode */
   }
   
   @media (prefers-color-scheme: dark) {
@@ -56,7 +88,7 @@
     .card-body h5,
     .card-body h6,
     .card-body .card-title {
-      color: #ffffff !important; /* White for dark mode */
+      color: var(--nbx-color-fg-default, #ffffff) !important; /* White for dark mode */
     }
   }
   
@@ -581,6 +613,67 @@
           </form>
 
           <script>
+            // NetBox Theme Detection and Color Application
+            function getNetBoxTheme() {
+              try {
+                return localStorage.getItem('netbox-color-mode') || 'light';
+              } catch (e) {
+                return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+              }
+            }
+            
+            function isDarkMode() {
+              return getNetBoxTheme() === 'dark';
+            }
+            
+            function applyThemeColors() {
+              const darkMode = isDarkMode();
+              const textColor = darkMode ? '#ffffff' : '#212529';
+              const bgColor = darkMode ? '#2a2a2a' : '#f8f9fa';
+              
+              // Apply to all text elements in card-body
+              document.querySelectorAll('.card-body p, .card-body label, .card-body span, .card-body small, .card-body div, .card-body .form-text, .card-body .text-muted').forEach(el => {
+                el.style.color = textColor + ' !important';
+                el.style.opacity = '1';
+              });
+              
+              // Apply to card header
+              document.querySelectorAll('.card-header, .card-header *').forEach(el => {
+                el.style.color = textColor + ' !important';
+              });
+              
+              // Apply to specific containers
+              const containers = document.querySelectorAll('#interfaces-checkbox-container, .deployment-logs div, #loading-overlay > div');
+              containers.forEach(container => {
+                container.style.backgroundColor = darkMode ? '#2a2a2a' : bgColor;
+                container.style.color = textColor;
+              });
+              
+              // Apply to form text elements
+              document.querySelectorAll('.form-text, .text-muted, small').forEach(el => {
+                el.style.color = textColor + ' !important';
+                el.style.opacity = '1';
+              });
+            }
+            
+            // Apply on page load
+            document.addEventListener('DOMContentLoaded', function() {
+              applyThemeColors();
+              
+              // Listen for NetBox theme changes
+              window.addEventListener('netbox.colorModeChanged', function(e) {
+                setTimeout(applyThemeColors, 100);
+              });
+              
+              // Also check periodically in case theme changes
+              setInterval(applyThemeColors, 2000);
+            });
+            
+            // Make function available globally for dynamic elements
+            window.getNetBoxTextColor = function() {
+              return isDarkMode() ? '#ffffff' : '#212529';
+            };
+            
             // Show/hide fields based on deployment scope
             function updateFieldVisibility() {
               const scope = document.querySelector('input[name="deployment_scope"]:checked').value;
@@ -604,7 +697,7 @@
               if (interfaces.length === 0) {
                 const p = document.createElement('p');
                 p.className = 'text-muted mb-0';
-                p.style.color = window.matchMedia('(prefers-color-scheme: dark)').matches ? '#ffffff' : '#212529';
+                p.style.color = window.getNetBoxTextColor ? window.getNetBoxTextColor() : (window.matchMedia('(prefers-color-scheme: dark)').matches ? '#ffffff' : '#212529');
                 p.style.opacity = '1';
                 p.textContent = 'No common interfaces found';
                 container.appendChild(p);
@@ -625,7 +718,7 @@
 
                 const label = document.createElement('label');
                 label.className = 'form-check-label';
-                label.style.color = window.matchMedia('(prefers-color-scheme: dark)').matches ? '#ffffff' : '#212529';
+                label.style.color = window.getNetBoxTextColor ? window.getNetBoxTextColor() : (window.matchMedia('(prefers-color-scheme: dark)').matches ? '#ffffff' : '#212529');
                 label.htmlFor = `interface_${iface}`;
                 label.textContent = iface;
 
@@ -647,7 +740,7 @@
               if (selectedDeviceIds.length === 0) {
                 const p = document.createElement('p');
                 p.className = 'text-muted mb-0';
-                p.style.color = window.matchMedia('(prefers-color-scheme: dark)').matches ? '#ffffff' : '#212529';
+                p.style.color = window.getNetBoxTextColor ? window.getNetBoxTextColor() : (window.matchMedia('(prefers-color-scheme: dark)').matches ? '#ffffff' : '#212529');
                 p.style.opacity = '1';
                 p.textContent = 'Select devices first to load interfaces';
                 interfacesContainer.innerHTML = '';
@@ -719,7 +812,7 @@
               if (!siteId || !locationId || !manufacturerId || !roleId) {
                 const p = document.createElement('p');
                 p.className = 'text-muted mb-0';
-                p.style.color = window.matchMedia('(prefers-color-scheme: dark)').matches ? '#ffffff' : '#212529';
+                p.style.color = window.getNetBoxTextColor ? window.getNetBoxTextColor() : (window.matchMedia('(prefers-color-scheme: dark)').matches ? '#ffffff' : '#212529');
                 p.style.opacity = '1';
                 p.textContent = 'Select all filters (Site, Location, Manufacturer, Role) to load interfaces';
                 interfacesContainer.innerHTML = '';
