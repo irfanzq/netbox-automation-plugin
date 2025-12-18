@@ -1039,10 +1039,21 @@
                   interfacesContainer.appendChild(p);
                 }
                 // Load VLANs if site is already selected in group mode
-                const siteSelect = document.getElementById('id_site');
-                if (siteSelect && siteSelect.value) {
-                  filterVLANsBySite();
-                }
+                setTimeout(function() {
+                  const siteSelect = document.getElementById('id_site');
+                  if (siteSelect) {
+                    let siteId = '';
+                    if (siteSelect.value) {
+                      siteId = siteSelect.value;
+                    } else if (window.jQuery && jQuery(siteSelect).data('select2')) {
+                      siteId = jQuery(siteSelect).val() || '';
+                    }
+                    if (siteId) {
+                      console.log('Group mode: Site already selected, loading VLANs');
+                      filterVLANsBySite();
+                    }
+                  }
+                }, 1000);
               }
             }
 
@@ -1089,11 +1100,30 @@
               console.log('loadCommonInterfaces called');
               const devicesSelect = document.getElementById('id_devices');
               const interfacesContainer = document.getElementById('interfaces-checkbox-container');
-              const selectedDeviceIds = Array.from(devicesSelect.selectedOptions).map(opt => opt.value);
+              
+              if (!devicesSelect) {
+                console.error('loadCommonInterfaces: devicesSelect not found');
+                return;
+              }
+              
+              if (!interfacesContainer) {
+                console.error('loadCommonInterfaces: interfacesContainer not found');
+                return;
+              }
+              
+              // Handle both native select and Select2
+              let selectedDeviceIds = [];
+              if (devicesSelect.selectedOptions && devicesSelect.selectedOptions.length > 0) {
+                selectedDeviceIds = Array.from(devicesSelect.selectedOptions).map(opt => opt.value);
+              } else if (window.jQuery && jQuery(devicesSelect).data('select2')) {
+                // Select2 is being used
+                selectedDeviceIds = jQuery(devicesSelect).val() || [];
+                console.log('Using Select2 values:', selectedDeviceIds);
+              }
 
               console.log('Selected device IDs:', selectedDeviceIds);
 
-              if (selectedDeviceIds.length === 0) {
+              if (selectedDeviceIds.length === 0 || selectedDeviceIds[0] === '') {
                 const p = document.createElement('p');
                 p.className = 'text-muted mb-0';
                 p.style.color = window.getNetBoxTextColor ? window.getNetBoxTextColor() : (isDarkMode() ? '#ffffff' : '#212529');
@@ -1134,8 +1164,10 @@
 
                   // Also filter VLANs by site of selected devices (VLAN list is independent of interfaces)
                   console.log('About to call filterVLANsByDevices with:', selectedDeviceIds);
-                  if (selectedDeviceIds.length > 0) {
+                  if (selectedDeviceIds && selectedDeviceIds.length > 0 && selectedDeviceIds[0] !== '') {
                     filterVLANsByDevices(selectedDeviceIds);
+                  } else {
+                    console.warn('filterVLANsByDevices: No valid device IDs, skipping VLAN load');
                   }
                 })
                 .catch(error => {
@@ -1223,8 +1255,14 @@
               console.log('filterVLANsByDevices called with:', deviceIds);
 
               const datalist = document.getElementById('vlan_datalist');
+              
+              if (!datalist) {
+                console.error('filterVLANsByDevices: vlan_datalist not found');
+                return;
+              }
 
-              if (deviceIds.length === 0) {
+              if (!deviceIds || deviceIds.length === 0 || (deviceIds.length === 1 && deviceIds[0] === '')) {
+                console.log('filterVLANsByDevices: No device IDs provided, clearing datalist');
                 // Reset VLAN datalist
                 datalist.innerHTML = '';
                 return;
@@ -1268,12 +1306,33 @@
 
             // Filter VLANs by site when site is selected (group mode)
             function filterVLANsBySite() {
+              console.log('filterVLANsBySite called');
               const siteSelect = document.getElementById('id_site');
-              const siteId = siteSelect.value;
+              
+              if (!siteSelect) {
+                console.error('filterVLANsBySite: id_site not found');
+                return;
+              }
+              
+              // Handle both native select and Select2
+              let siteId = '';
+              if (siteSelect.value) {
+                siteId = siteSelect.value;
+              } else if (window.jQuery && jQuery(siteSelect).data('select2')) {
+                siteId = jQuery(siteSelect).val() || '';
+              }
+              
+              console.log('filterVLANsBySite: siteId =', siteId);
               
               const datalist = document.getElementById('vlan_datalist');
+              
+              if (!datalist) {
+                console.error('filterVLANsBySite: vlan_datalist not found');
+                return;
+              }
 
-              if (!siteId) {
+              if (!siteId || siteId === '') {
+                console.log('filterVLANsBySite: No site selected, clearing datalist');
                 // Clear datalist if no site selected
                 datalist.innerHTML = '';
                 return;
@@ -1383,6 +1442,8 @@
 
             // Initialize on page load
             document.addEventListener('DOMContentLoaded', function() {
+              console.log('VLAN Deployment form: DOMContentLoaded fired');
+              
               // Set initial state - default to single mode if nothing is checked
               const checkedRadio = document.querySelector('input[name="deployment_scope"]:checked');
               if (!checkedRadio) {
@@ -1390,9 +1451,11 @@
                 const singleRadio = document.querySelector('input[name="deployment_scope"][value="single"]');
                 if (singleRadio) {
                   singleRadio.checked = true;
+                  console.log('VLAN Deployment form: Defaulted to single mode');
                 }
               }
               
+              console.log('VLAN Deployment form: Calling updateFieldVisibility');
               updateFieldVisibility();
               setupMutuallyExclusiveCheckboxes();
 
@@ -1404,13 +1467,47 @@
               // Listen for device selection changes (single mode)
               const devicesSelect = document.getElementById('id_devices');
               if (devicesSelect) {
-                devicesSelect.addEventListener('change', loadCommonInterfaces);
+                console.log('Setting up device select listeners');
+                
+                // Wait for Select2 to initialize if it exists
+                const setupSelect2Listener = function() {
+                  if (window.jQuery && jQuery(devicesSelect).data('select2')) {
+                    console.log('Select2 detected, setting up Select2 listeners');
+                    jQuery(devicesSelect).off('select2:select select2:unselect').on('select2:select select2:unselect', function() {
+                      console.log('Devices select changed (Select2 event)');
+                      setTimeout(loadCommonInterfaces, 200); // Delay to ensure Select2 updates
+                    });
+                  }
+                };
+                
+                // Try immediately
+                setupSelect2Listener();
+                
+                // Also try after a delay in case Select2 initializes later
+                setTimeout(setupSelect2Listener, 1000);
+                
+                // Handle native change event as fallback
+                devicesSelect.addEventListener('change', function() {
+                  console.log('Devices select changed (native event)');
+                  setTimeout(loadCommonInterfaces, 100);
+                });
 
                 // If devices are already selected (form re-render after error), load interfaces
-                if (devicesSelect.selectedOptions.length > 0) {
-                  console.log('Devices already selected on page load, loading interfaces...');
-                  loadCommonInterfaces();
-                }
+                setTimeout(function() {
+                  let hasSelection = false;
+                  if (devicesSelect.selectedOptions && devicesSelect.selectedOptions.length > 0) {
+                    hasSelection = true;
+                  } else if (window.jQuery && jQuery(devicesSelect).val() && jQuery(devicesSelect).val().length > 0) {
+                    hasSelection = true;
+                  }
+                  
+                  if (hasSelection) {
+                    console.log('Devices already selected on page load, loading interfaces...');
+                    loadCommonInterfaces();
+                  }
+                }, 1000); // Delay to ensure Select2 is initialized
+              } else {
+                console.error('devicesSelect element not found!');
               }
 
               // Listen for group filter changes (group mode - load interfaces and VLANs)
@@ -1420,10 +1517,30 @@
               const roleSelect = document.getElementById('id_role');
               
               if (siteSelect) {
+                // Handle both native change and Select2 change events
                 siteSelect.addEventListener('change', function() {
-                  filterVLANsBySite();  // Load VLANs when site changes (VLAN list is independent of interfaces)
-                  loadInterfacesFromGroupFilters();  // Load interfaces when any filter changes
+                  console.log('Site select changed (native event)');
+                  setTimeout(function() {
+                    filterVLANsBySite();  // Load VLANs when site changes (VLAN list is independent of interfaces)
+                    loadInterfacesFromGroupFilters();  // Load interfaces when any filter changes
+                  }, 100);
                 });
+                
+                // Also listen for Select2 change event if it exists
+                const setupSiteSelect2Listener = function() {
+                  if (window.jQuery && jQuery(siteSelect).data('select2')) {
+                    console.log('Setting up Select2 listener for site select');
+                    jQuery(siteSelect).off('select2:select').on('select2:select', function() {
+                      console.log('Site select changed (Select2 event)');
+                      setTimeout(function() {
+                        filterVLANsBySite();
+                        loadInterfacesFromGroupFilters();
+                      }, 200);
+                    });
+                  }
+                };
+                setupSiteSelect2Listener();
+                setTimeout(setupSiteSelect2Listener, 1000);
               }
               
               if (locationSelect) {
