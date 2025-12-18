@@ -266,9 +266,9 @@ class VLANDeploymentForm(forms.Form):
                     errors.append(error_msg)
 
         if errors:
-            # Join errors into a single string - all messages are already formatted strings
-            error_msg = "\n".join(errors)
-            raise forms.ValidationError(error_msg)
+            # Pass errors as a list to ValidationError to avoid format string issues
+            # Django will handle the list properly without trying to format it
+            raise forms.ValidationError(errors)
     
     def _validate_tags_and_interfaces(self, devices, interface_list, cleaned_data, blocking=True):
         """
@@ -408,20 +408,24 @@ class VLANDeploymentForm(forms.Form):
         
         # Raise blocking errors if any (only if blocking=True)
         if blocking_errors and blocking:
-            # All error messages should already be formatted strings
-            # Join them with dashes - format each line immediately to avoid f-string issues
-            error_lines = []
+            # Format error messages with dashes - all are already strings
+            formatted_errors = []
             for err in blocking_errors:
-                error_lines.append("- " + str(err))
-            error_msg = "The following issues must be resolved before deployment:\n\n" + "\n".join(error_lines)
+                formatted_errors.append("- " + str(err))
+            
+            # Combine with header
             if warnings:
-                # All warning messages should already be formatted strings
-                warning_lines = []
+                # Format warning messages
+                formatted_warnings = []
                 for warn in warnings:
-                    warning_lines.append("- " + str(warn))
-                error_msg += "\n\nWarnings:\n" + "\n".join(warning_lines)
-            # Pass as a single string, not a list, to avoid Django trying to format it
-            raise forms.ValidationError(error_msg)
+                    formatted_warnings.append("- " + str(warn))
+                # Create a list with header and errors/warnings
+                all_messages = ["The following issues must be resolved before deployment:"] + formatted_errors + ["", "Warnings:"] + formatted_warnings
+            else:
+                all_messages = ["The following issues must be resolved before deployment:"] + formatted_errors
+            
+            # Pass as a list to ValidationError - Django handles lists without formatting
+            raise forms.ValidationError(all_messages)
         
         # Store warnings and blocking errors for display (for dry run mode)
         if warnings or (blocking_errors and not blocking):
