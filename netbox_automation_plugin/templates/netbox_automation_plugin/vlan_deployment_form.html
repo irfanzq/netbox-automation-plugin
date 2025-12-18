@@ -616,10 +616,18 @@
             // NetBox Theme Detection and Color Application
             function getNetBoxTheme() {
               try {
-                return localStorage.getItem('netbox-color-mode') || 'light';
-              } catch (e) {
-                return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
-              }
+        return localStorage.getItem('netbox-color-mode') || 'light';
+      } catch (e) {
+        // Fallback: check if NetBox has set data-theme attribute
+        const htmlEl = document.documentElement;
+        if (htmlEl && htmlEl.getAttribute('data-theme') === 'dark') {
+          return 'dark';
+        }
+        if (document.body && document.body.classList.contains('dark-mode')) {
+          return 'dark';
+        }
+        return 'light';
+      }
             }
             
             function isDarkMode() {
@@ -718,7 +726,7 @@
 
                 const label = document.createElement('label');
                 label.className = 'form-check-label';
-                label.style.color = window.getNetBoxTextColor ? window.getNetBoxTextColor() : (window.matchMedia('(prefers-color-scheme: dark)').matches ? '#ffffff' : '#212529');
+                label.style.color = window.getNetBoxTextColor ? window.getNetBoxTextColor() : (isDarkMode() ? '#ffffff' : '#212529');
                 label.htmlFor = `interface_${iface}`;
                 label.textContent = iface;
 
@@ -751,7 +759,7 @@
               // Show loading
               const loadingP = document.createElement('p');
               loadingP.className = 'text-muted mb-0';
-              loadingP.style.color = window.matchMedia('(prefers-color-scheme: dark)').matches ? '#ffffff' : '#212529';
+              loadingP.style.color = window.getNetBoxTextColor ? window.getNetBoxTextColor() : (isDarkMode() ? '#ffffff' : '#212529');
               loadingP.style.opacity = '1';
               loadingP.textContent = 'Loading interfaces...';
               interfacesContainer.innerHTML = '';
@@ -823,7 +831,7 @@
               // Show loading
               const loadingP = document.createElement('p');
               loadingP.className = 'text-muted mb-0';
-              loadingP.style.color = window.matchMedia('(prefers-color-scheme: dark)').matches ? '#ffffff' : '#212529';
+              loadingP.style.color = window.getNetBoxTextColor ? window.getNetBoxTextColor() : (isDarkMode() ? '#ffffff' : '#212529');
               loadingP.style.opacity = '1';
               loadingP.textContent = 'Loading interfaces...';
               interfacesContainer.innerHTML = '';
