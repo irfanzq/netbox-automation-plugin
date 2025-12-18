@@ -388,6 +388,14 @@
               const textColor = darkMode ? '#ffffff' : '#212529';
               const bgColor = darkMode ? '#2a2a2a' : '#f8f9fa';
               
+              // Force white background and black text for ALL input fields in dark mode
+              if (darkMode) {
+                document.querySelectorAll('.form-control, .form-select, input[type="text"], input[type="number"], input[type="email"], input[type="password"], input[type="search"], textarea, select').forEach(el => {
+                  el.style.setProperty('background-color', '#ffffff', 'important');
+                  el.style.setProperty('color', '#212529', 'important');
+                });
+              }
+              
               // Apply to ALL text elements in card-body (more comprehensive)
               const cardBody = document.querySelector('.card-body');
               if (cardBody) {
