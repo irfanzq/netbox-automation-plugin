@@ -7,37 +7,112 @@
 {% block content %}
 <style>
   /* Dark mode compatibility for LLDP Consistency Form */
-  /* FORCE all text: WHITE in dark mode, BLACK in light mode - NO GREY! */
+  /* Use NetBox CSS variables with explicit fallbacks - NO GREY! */
   
-  /* Light mode: Black text */
+  /* Use NetBox CSS variables - they adapt to theme automatically */
   .card-body,
-  .card-body *:not(input):not(select):not(textarea):not(button):not(.form-control):not(.form-select):not(.btn) {
-    color: #212529 !important; /* Pure black for light mode */
+  .card-body *:not(input):not(select):not(textarea):not(button):not(.form-control):not(.form-select):not(.btn):not(.badge) {
+    color: var(--nbx-color-fg-default) !important;
   }
   
-  /* Dark mode: White text */
-  @media (prefers-color-scheme: dark) {
-    .card-body,
-    .card-body *:not(input):not(select):not(textarea):not(button):not(.form-control):not(.form-select):not(.btn) {
-      color: #ffffff !important; /* Pure white for dark mode */
-    }
+  /* Force visibility - ensure text is never grey */
+  .card-body .text-muted,
+  .card-body .form-text,
+  .card-body small {
+    color: var(--nbx-color-fg-default) !important;
+    opacity: 1 !important;
   }
   
-  /* Help text - NO GREY: Black in light, White in dark */
+  /* Specific overrides for common text elements */
+  .card-body .form-label,
+  .card-body label:not(.form-check-label),
+  .card-body .form-check-label,
+  .card-body p,
+  .card-body div.form-text,
+  .card-body span,
+  .card-body small,
+  .card-body h1,
+  .card-body h2,
+  .card-body h3,
+  .card-body h4,
+  .card-body h5,
+  .card-body h6,
+  .card-body .card-title {
+    color: var(--nbx-color-fg-default, #212529) !important;
+  }
+  
+  /* Dark mode overrides */
+  html[data-theme="dark"] .card-body .form-label,
+  html[data-theme="dark"] .card-body label:not(.form-check-label),
+  html[data-theme="dark"] .card-body .form-check-label,
+  html[data-theme="dark"] .card-body p,
+  html[data-theme="dark"] .card-body div.form-text,
+  html[data-theme="dark"] .card-body span,
+  html[data-theme="dark"] .card-body small,
+  html[data-theme="dark"] .card-body h1,
+  html[data-theme="dark"] .card-body h2,
+  html[data-theme="dark"] .card-body h3,
+  html[data-theme="dark"] .card-body h4,
+  html[data-theme="dark"] .card-body h5,
+  html[data-theme="dark"] .card-body h6,
+  html[data-theme="dark"] .card-body .card-title,
+  body.dark-mode .card-body .form-label,
+  body.dark-mode .card-body label:not(.form-check-label),
+  body.dark-mode .card-body .form-check-label,
+  body.dark-mode .card-body p,
+  body.dark-mode .card-body div.form-text,
+  body.dark-mode .card-body span,
+  body.dark-mode .card-body small,
+  body.dark-mode .card-body h1,
+  body.dark-mode .card-body h2,
+  body.dark-mode .card-body h3,
+  body.dark-mode .card-body h4,
+  body.dark-mode .card-body h5,
+  body.dark-mode .card-body h6,
+  body.dark-mode .card-body .card-title {
+    color: #ffffff !important; /* White for dark mode */
+  }
+  
+  /* Help text and muted text - NO GREY: Black in light, White in dark */
+  .card-body .form-text,
+  .card-body .text-muted,
+  .card-body p.text-muted,
+  .card-body label.text-muted,
+  .card-body small.text-muted,
   .form-text,
   .text-muted,
+  p.text-muted,
+  label.text-muted,
+  small.text-muted,
   small {
     color: #212529 !important; /* Black for light mode */
     opacity: 1 !important;
   }
   
-  @media (prefers-color-scheme: dark) {
-    .form-text,
-    .text-muted,
-    small {
-      color: #ffffff !important; /* White for dark mode */
-      opacity: 1 !important;
-    }
+  html[data-theme="dark"] .card-body .form-text,
+  html[data-theme="dark"] .card-body .text-muted,
+  html[data-theme="dark"] .card-body p.text-muted,
+  html[data-theme="dark"] .card-body label.text-muted,
+  html[data-theme="dark"] .card-body small.text-muted,
+  html[data-theme="dark"] .form-text,
+  html[data-theme="dark"] .text-muted,
+  html[data-theme="dark"] p.text-muted,
+  html[data-theme="dark"] label.text-muted,
+  html[data-theme="dark"] small.text-muted,
+  html[data-theme="dark"] small,
+  body.dark-mode .card-body .form-text,
+  body.dark-mode .card-body .text-muted,
+  body.dark-mode .card-body p.text-muted,
+  body.dark-mode .card-body label.text-muted,
+  body.dark-mode .card-body small.text-muted,
+  body.dark-mode .form-text,
+  body.dark-mode .text-muted,
+  body.dark-mode p.text-muted,
+  body.dark-mode label.text-muted,
+  body.dark-mode small.text-muted,
+  body.dark-mode small {
+    color: #ffffff !important; /* White for dark mode */
+    opacity: 1 !important;
   }
   
   /* Card header text */
@@ -46,11 +121,26 @@
     color: #212529 !important; /* Black for light mode */
   }
   
-  @media (prefers-color-scheme: dark) {
-    .card-header,
-    .card-header * {
-      color: #ffffff !important; /* White for dark mode */
-    }
+  html[data-theme="dark"] .card-header,
+  html[data-theme="dark"] .card-header *,
+  body.dark-mode .card-header,
+  body.dark-mode .card-header * {
+    color: #ffffff !important; /* White for dark mode */
+  }
+  
+  html[data-theme="dark"] .form-control,
+  html[data-theme="dark"] .form-select,
+  html[data-theme="dark"] select.form-control,
+  html[data-theme="dark"] select.form-select,
+  html[data-theme="dark"] textarea.form-control,
+  body.dark-mode .form-control,
+  body.dark-mode .form-select,
+  body.dark-mode select.form-control,
+  body.dark-mode select.form-select,
+  body.dark-mode textarea.form-control {
+    background-color: var(--nbx-color-bg-input) !important;
+    color: var(--nbx-color-fg-default) !important;
+    border-color: var(--nbx-color-border-input) !important;
   }
   
   .form-control,
@@ -59,31 +149,34 @@
   select.form-select,
   textarea.form-control {
     background-color: var(--nbx-color-bg-input, #fff) !important;
-    color: #212529 !important; /* Black for light mode */
+    color: var(--nbx-color-fg-default, #212529) !important;
     border-color: var(--nbx-color-border-input, #ced4da) !important;
   }
   
-  @media (prefers-color-scheme: dark) {
-    .form-control,
-    .form-select,
-    select.form-control,
-    select.form-select,
-    textarea.form-control {
-      background-color: var(--nbx-color-bg-input, #2a2a2a) !important; /* Dark background for dark mode */
-      color: #ffffff !important; /* White for dark mode */
-    }
-  }
-  
-  .form-control::placeholder {
-    color: #212529 !important; /* Black for light mode */
+  html[data-theme="dark"] .form-control::placeholder,
+  body.dark-mode .form-control::placeholder {
+    color: var(--nbx-color-fg-default) !important;
     opacity: 0.7;
   }
   
-  @media (prefers-color-scheme: dark) {
-    .form-control::placeholder {
-      color: #ffffff !important; /* White for dark mode */
-      opacity: 0.7;
-    }
+  .form-control::placeholder {
+    color: var(--nbx-color-fg-default, #212529) !important;
+    opacity: 0.7;
+  }
+  
+  html[data-theme="dark"] .form-control:focus,
+  html[data-theme="dark"] .form-select:focus,
+  html[data-theme="dark"] select.form-control:focus,
+  html[data-theme="dark"] select.form-select:focus,
+  html[data-theme="dark"] textarea.form-control:focus,
+  body.dark-mode .form-control:focus,
+  body.dark-mode .form-select:focus,
+  body.dark-mode select.form-control:focus,
+  body.dark-mode select.form-select:focus,
+  body.dark-mode textarea.form-control:focus {
+    background-color: var(--nbx-color-bg-input) !important;
+    color: var(--nbx-color-fg-default) !important;
+    border-color: var(--nbx-color-border-input-focus) !important;
   }
   
   .form-control:focus,
@@ -92,31 +185,19 @@
   select.form-select:focus,
   textarea.form-control:focus {
     background-color: var(--nbx-color-bg-input, #fff) !important;
-    color: #212529 !important; /* Black for light mode */
+    color: var(--nbx-color-fg-default, #212529) !important;
     border-color: var(--nbx-color-border-input-focus, #86b7fe) !important;
   }
   
-  @media (prefers-color-scheme: dark) {
-    .form-control:focus,
-    .form-select:focus,
-    select.form-control:focus,
-    select.form-select:focus,
-    textarea.form-control:focus {
-      background-color: var(--nbx-color-bg-input, #2a2a2a) !important; /* Dark background for dark mode */
-      color: #ffffff !important; /* White for dark mode */
-    }
+  /* Checkbox and radio button styling */
+  html[data-theme="dark"] .form-check-input,
+  body.dark-mode .form-check-input {
+    background-color: var(--nbx-color-bg-input) !important;
   }
   
-  /* Checkbox and radio button styling for dark mode */
   .form-check-input {
     background-color: var(--nbx-color-bg-input, #fff) !important;
     border-color: var(--nbx-color-border-input, #ced4da) !important;
-  }
-  
-  @media (prefers-color-scheme: dark) {
-    .form-check-input {
-      background-color: var(--nbx-color-bg-input, #2a2a2a) !important; /* Dark background for dark mode */
-    }
   }
   
   .form-check-input:checked {
@@ -134,29 +215,27 @@
   }
   
   /* Datalist dropdown styling */
-  datalist option {
-    background-color: var(--nbx-color-bg-input, #fff) !important;
-    color: #212529 !important; /* Black for light mode */
+  html[data-theme="dark"] datalist option,
+  body.dark-mode datalist option {
+    background-color: var(--nbx-color-bg-input) !important;
+    color: var(--nbx-color-fg-default) !important;
   }
   
-  @media (prefers-color-scheme: dark) {
-    datalist option {
-      background-color: var(--nbx-color-bg-input, #2a2a2a) !important; /* Dark background for dark mode */
-      color: #ffffff !important; /* White for dark mode */
-    }
+  datalist option {
+    background-color: var(--nbx-color-bg-input, #fff) !important;
+    color: var(--nbx-color-fg-default, #212529) !important;
   }
   
   /* Select dropdown options */
-  select option {
-    background-color: var(--nbx-color-bg-input, #fff) !important;
-    color: #212529 !important; /* Black for light mode */
+  html[data-theme="dark"] select option,
+  body.dark-mode select option {
+    background-color: var(--nbx-color-bg-input) !important;
+    color: var(--nbx-color-fg-default) !important;
   }
   
-  @media (prefers-color-scheme: dark) {
-    select option {
-      background-color: var(--nbx-color-bg-input, #2a2a2a) !important; /* Dark background for dark mode */
-      color: #ffffff !important; /* White for dark mode */
-    }
+  select option {
+    background-color: var(--nbx-color-bg-input, #fff) !important;
+    color: var(--nbx-color-fg-default, #212529) !important;
   }
   
   .invalid-feedback {
@@ -164,40 +243,35 @@
   }
   
   .alert-danger {
-    background-color: var(--nbx-color-bg-danger-subtle, #f8d7da) !important;
-    color: var(--nbx-color-fg-danger, #721c24) !important;
-    border-color: var(--nbx-color-border-danger, #f5c2c7) !important;
+    background-color: var(--nbx-color-bg-danger-subtle) !important;
+    color: var(--nbx-color-fg-danger) !important;
+    border-color: var(--nbx-color-border-danger) !important;
   }
   
-  /* Loading overlay - dark mode compatible */
+  /* Override for dark mode if NetBox variables don't provide good contrast */
+  html[data-theme="dark"] .alert-danger,
+  body.dark-mode .alert-danger {
+    background-color: #5a1a1a !important; /* Dark red background for better visibility */
+    color: #ffffff !important; /* Light white text for better visibility */
+    border-color: #dc3545 !important;
+  }
+  
+  /* Loading overlay - use NetBox CSS variables */
   #loading-overlay {
     background: rgba(0, 0, 0, 0.7) !important;
   }
   
   #loading-overlay > div {
-    background: var(--nbx-color-bg-default, #fff) !important;
-    color: #212529 !important; /* Black for light mode */
-  }
-  
-  @media (prefers-color-scheme: dark) {
-    #loading-overlay > div {
-      background: var(--nbx-color-bg-default, #2a2a2a) !important; /* Dark background for dark mode */
-      color: #ffffff !important; /* White for dark mode */
-    }
+    background: var(--nbx-color-bg-default) !important;
+    color: var(--nbx-color-fg-default) !important;
   }
   
   #loading-overlay h4 {
-    color: var(--nbx-color-fg-default, #212529) !important;
+    color: var(--nbx-color-fg-default) !important;
   }
   
   #loading-overlay .text-muted {
-    color: #212529 !important; /* Black for light mode */
-  }
-  
-  @media (prefers-color-scheme: dark) {
-    #loading-overlay .text-muted {
-      color: #ffffff !important; /* White for dark mode */
-    }
+    color: var(--nbx-color-fg-default) !important;
   }
 </style>
   <div class="row">
@@ -261,7 +335,15 @@
               try {
                 return localStorage.getItem('netbox-color-mode') || 'light';
               } catch (e) {
-                return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+                // Fallback: check if NetBox has set data-theme attribute
+                const htmlEl = document.documentElement;
+                if (htmlEl && htmlEl.getAttribute('data-theme') === 'dark') {
+                  return 'dark';
+                }
+                if (document.body && document.body.classList.contains('dark-mode')) {
+                  return 'dark';
+                }
+                return 'light';
               }
             }
             
