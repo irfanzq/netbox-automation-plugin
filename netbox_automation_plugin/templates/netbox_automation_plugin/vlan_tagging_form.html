@@ -128,6 +128,7 @@
     color: #ffffff !important; /* White for dark mode */
   }
   
+  /* Force white background and black text in dark mode - highest specificity */
   html[data-theme="dark"] .form-control,
   html[data-theme="dark"] .form-select,
   html[data-theme="dark"] select.form-control,
@@ -140,6 +141,10 @@
   html[data-theme="dark"] input[type="search"],
   html[data-theme="dark"] input.form-control,
   html[data-theme="dark"] textarea,
+  html[data-theme="dark"] .card-body .form-control,
+  html[data-theme="dark"] .card-body input[type="text"],
+  html[data-theme="dark"] .card-body input[type="number"],
+  html[data-theme="dark"] .card-body textarea,
   body.dark-mode .form-control,
   body.dark-mode .form-select,
   body.dark-mode select.form-control,
@@ -151,7 +156,11 @@
   body.dark-mode input[type="password"],
   body.dark-mode input[type="search"],
   body.dark-mode input.form-control,
-  body.dark-mode textarea {
+  body.dark-mode textarea,
+  body.dark-mode .card-body .form-control,
+  body.dark-mode .card-body input[type="text"],
+  body.dark-mode .card-body input[type="number"],
+  body.dark-mode .card-body textarea {
     background-color: #ffffff !important; /* White background in dark mode */
     color: #212529 !important; /* Black text in dark mode - force for readability */
     border-color: var(--nbx-color-border-input, #ced4da) !important;
