@@ -130,13 +130,21 @@
     color: #ffffff !important; /* White for dark mode */
   }
   
+  /* Force dark text in ALL input fields for light mode */
   .form-control,
   .form-select,
   select.form-control,
   select.form-select,
-  textarea.form-control {
-    background-color: var(--nbx-color-bg-input, #fff) !important;
-    color: #212529 !important; /* Black for light mode */
+  textarea.form-control,
+  input[type="text"],
+  input[type="number"],
+  input[type="email"],
+  input[type="password"],
+  input[type="search"],
+  input.form-control,
+  textarea {
+    background-color: #ffffff !important; /* White background in light mode */
+    color: #212529 !important; /* Pure black text for light mode */
     border-color: var(--nbx-color-border-input, #ced4da) !important;
   }
   
@@ -145,13 +153,27 @@
   html[data-theme="dark"] select.form-control,
   html[data-theme="dark"] select.form-select,
   html[data-theme="dark"] textarea.form-control,
+  html[data-theme="dark"] input[type="text"],
+  html[data-theme="dark"] input[type="number"],
+  html[data-theme="dark"] input[type="email"],
+  html[data-theme="dark"] input[type="password"],
+  html[data-theme="dark"] input[type="search"],
+  html[data-theme="dark"] input.form-control,
+  html[data-theme="dark"] textarea,
   body.dark-mode .form-control,
   body.dark-mode .form-select,
   body.dark-mode select.form-control,
   body.dark-mode select.form-select,
-  body.dark-mode textarea.form-control {
-    background-color: var(--nbx-color-bg-input, #2a2a2a) !important;
-    color: #ffffff !important; /* White for dark mode */
+  body.dark-mode textarea.form-control,
+  body.dark-mode input[type="text"],
+  body.dark-mode input[type="number"],
+  body.dark-mode input[type="email"],
+  body.dark-mode input[type="password"],
+  body.dark-mode input[type="search"],
+  body.dark-mode input.form-control,
+  body.dark-mode textarea {
+    background-color: #ffffff !important; /* White background in dark mode */
+    color: #212529 !important; /* Black text in dark mode - force for readability */
   }
   
   .form-control::placeholder {
@@ -180,13 +202,21 @@
   html[data-theme="dark"] select.form-control:focus,
   html[data-theme="dark"] select.form-select:focus,
   html[data-theme="dark"] textarea.form-control:focus,
+  html[data-theme="dark"] input[type="text"]:focus,
+  html[data-theme="dark"] input[type="number"]:focus,
+  html[data-theme="dark"] input.form-control:focus,
+  html[data-theme="dark"] textarea:focus,
   body.dark-mode .form-control:focus,
   body.dark-mode .form-select:focus,
   body.dark-mode select.form-control:focus,
   body.dark-mode select.form-select:focus,
-  body.dark-mode textarea.form-control:focus {
-    background-color: var(--nbx-color-bg-input, #2a2a2a) !important;
-    color: #ffffff !important; /* White for dark mode */
+  body.dark-mode textarea.form-control:focus,
+  body.dark-mode input[type="text"]:focus,
+  body.dark-mode input[type="number"]:focus,
+  body.dark-mode input.form-control:focus,
+  body.dark-mode textarea:focus {
+    background-color: #ffffff !important; /* White background in dark mode */
+    color: #212529 !important; /* Black text in dark mode - force for readability */
   }
   
   /* Checkbox and radio button styling for dark mode */
@@ -311,12 +341,14 @@
     color: var(--nbx-color-danger, #dc3545) !important;
   }
   
+  /* Light mode: Light pink background with dark red text */
   .alert-danger {
-    background-color: var(--nbx-color-bg-danger-subtle, #f8d7da) !important;
-    color: var(--nbx-color-fg-danger, #721c24) !important;
-    border-color: var(--nbx-color-border-danger, #f5c2c7) !important;
+    background-color: #f8d7da !important; /* Light pink background */
+    color: #721c24 !important; /* Dark red text */
+    border-color: #f5c2c7 !important;
   }
   
+  /* Dark mode: Dark red background with white text */
   html[data-theme="dark"] .alert-danger,
   body.dark-mode .alert-danger {
     background-color: #5a1a1a !important; /* Dark red background */

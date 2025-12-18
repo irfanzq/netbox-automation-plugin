@@ -266,7 +266,9 @@ class VLANDeploymentForm(forms.Form):
                     )
 
         if errors:
-            raise forms.ValidationError(errors)
+            # Join errors into a single string to avoid format string issues
+            error_msg = "\n".join(str(err) for err in errors)
+            raise forms.ValidationError(error_msg)
     
     def _validate_tags_and_interfaces(self, devices, interface_list, cleaned_data, blocking=True):
         """
@@ -406,9 +408,13 @@ class VLANDeploymentForm(forms.Form):
         
         # Raise blocking errors if any (only if blocking=True)
         if blocking_errors and blocking:
-            error_msg = "The following issues must be resolved before deployment:\n\n" + "\n".join(f"- {err}" for err in blocking_errors)
+            # Convert all error messages to strings first to avoid format string issues
+            error_list = [str(err) for err in blocking_errors]
+            error_msg = "The following issues must be resolved before deployment:\n\n" + "\n".join(f"- {err}" for err in error_list)
             if warnings:
-                error_msg += "\n\nWarnings:\n" + "\n".join(f"- {warn}" for warn in warnings)
+                # Convert all warning messages to strings first
+                warning_list = [str(warn) for warn in warnings]
+                error_msg += "\n\nWarnings:\n" + "\n".join(f"- {warn}" for warn in warning_list)
             raise forms.ValidationError(error_msg)
         
         # Store warnings and blocking errors for display (for dry run mode)

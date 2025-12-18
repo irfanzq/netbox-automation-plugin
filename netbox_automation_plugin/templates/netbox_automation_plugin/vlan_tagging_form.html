@@ -133,14 +133,28 @@
   html[data-theme="dark"] select.form-control,
   html[data-theme="dark"] select.form-select,
   html[data-theme="dark"] textarea.form-control,
+  html[data-theme="dark"] input[type="text"],
+  html[data-theme="dark"] input[type="number"],
+  html[data-theme="dark"] input[type="email"],
+  html[data-theme="dark"] input[type="password"],
+  html[data-theme="dark"] input[type="search"],
+  html[data-theme="dark"] input.form-control,
+  html[data-theme="dark"] textarea,
   body.dark-mode .form-control,
   body.dark-mode .form-select,
   body.dark-mode select.form-control,
   body.dark-mode select.form-select,
-  body.dark-mode textarea.form-control {
-    background-color: var(--nbx-color-bg-input) !important;
-    color: var(--nbx-color-fg-default) !important;
-    border-color: var(--nbx-color-border-input) !important;
+  body.dark-mode textarea.form-control,
+  body.dark-mode input[type="text"],
+  body.dark-mode input[type="number"],
+  body.dark-mode input[type="email"],
+  body.dark-mode input[type="password"],
+  body.dark-mode input[type="search"],
+  body.dark-mode input.form-control,
+  body.dark-mode textarea {
+    background-color: #ffffff !important; /* White background in dark mode */
+    color: #212529 !important; /* Black text in dark mode - force for readability */
+    border-color: var(--nbx-color-border-input, #ced4da) !important;
   }
   
   .form-control,
@@ -169,14 +183,22 @@
   html[data-theme="dark"] select.form-control:focus,
   html[data-theme="dark"] select.form-select:focus,
   html[data-theme="dark"] textarea.form-control:focus,
+  html[data-theme="dark"] input[type="text"]:focus,
+  html[data-theme="dark"] input[type="number"]:focus,
+  html[data-theme="dark"] input.form-control:focus,
+  html[data-theme="dark"] textarea:focus,
   body.dark-mode .form-control:focus,
   body.dark-mode .form-select:focus,
   body.dark-mode select.form-control:focus,
   body.dark-mode select.form-select:focus,
-  body.dark-mode textarea.form-control:focus {
-    background-color: var(--nbx-color-bg-input) !important;
-    color: var(--nbx-color-fg-default) !important;
-    border-color: var(--nbx-color-border-input-focus) !important;
+  body.dark-mode textarea.form-control:focus,
+  body.dark-mode input[type="text"]:focus,
+  body.dark-mode input[type="number"]:focus,
+  body.dark-mode input.form-control:focus,
+  body.dark-mode textarea:focus {
+    background-color: #ffffff !important; /* White background in dark mode */
+    color: #212529 !important; /* Black text in dark mode - force for readability */
+    border-color: var(--nbx-color-border-input-focus, #86b7fe) !important;
   }
   
   .form-control:focus,
