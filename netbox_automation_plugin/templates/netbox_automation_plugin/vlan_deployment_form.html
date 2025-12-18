@@ -198,6 +198,17 @@
     color: #212529 !important;
   }
   
+  /* NetBox dark mode support - multiple selectors for compatibility */
+  html[data-theme="dark"] .form-control,
+  html[data-theme="dark"] .form-select,
+  html[data-theme="dark"] select.form-control,
+  html[data-theme="dark"] select.form-select,
+  html[data-theme="dark"] textarea.form-control,
+  body.dark-mode .form-control,
+  body.dark-mode .form-select,
+  body.dark-mode select.form-control,
+  body.dark-mode select.form-select,
+  body.dark-mode textarea.form-control,
   @media (prefers-color-scheme: dark) {
     .form-control,
     .form-select,
@@ -209,6 +220,10 @@
     }
     
     /* Select2 dark mode styling - COMPREHENSIVE */
+    html[data-theme="dark"] .select2-container--default .select2-selection--multiple,
+    html[data-theme="dark"] .select2-container--default .select2-selection--single,
+    body.dark-mode .select2-container--default .select2-selection--multiple,
+    body.dark-mode .select2-container--default .select2-selection--single,
     .select2-container--default .select2-selection--multiple,
     .select2-container--default .select2-selection--single {
       background-color: #2a2a2a !important;
@@ -949,14 +964,19 @@
               
               observer.observe(document.body, { childList: true, subtree: true });
               
-              // Listen for Select2 events to reapply colors
-              $(document).on('select2:open select2:select select2:unselect select2:clear', function() {
-                setTimeout(applyThemeColors, 50);
-              });
-              
-              // Also listen for jQuery ready (in case Select2 is initialized after DOMContentLoaded)
-              $(document).ready(function() {
-                setTimeout(applyThemeColors, 100);
+              // Listen for Select2 events to reapply colors (vanilla JS, no jQuery dependency)
+              // Note: Select2 events bubble up, so we listen on document
+              const select2Elements = document.querySelectorAll('select[data-select2-id]');
+              select2Elements.forEach(function(selectEl) {
+                selectEl.addEventListener('select2:open', function() {
+                  setTimeout(applyThemeColors, 50);
+                });
+                selectEl.addEventListener('select2:select', function() {
+                  setTimeout(applyThemeColors, 50);
+                });
+                selectEl.addEventListener('select2:unselect', function() {
+                  setTimeout(applyThemeColors, 50);
+                });
               });
             });
             
