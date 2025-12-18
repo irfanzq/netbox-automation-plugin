@@ -148,14 +148,150 @@
     border-color: var(--nbx-color-border-input, #ced4da) !important;
   }
   
+  /* Select2 styling for ModelMultipleChoiceField (devices field) */
+  .select2-container--default .select2-selection--multiple,
+  .select2-container--default .select2-selection--single {
+    background-color: var(--nbx-color-bg-input, #fff) !important;
+    color: #212529 !important;
+    border-color: var(--nbx-color-border-input, #ced4da) !important;
+  }
+  
+  .select2-container--default .select2-selection--multiple .select2-selection__rendered {
+    color: #212529 !important;
+  }
+  
+  .select2-container--default .select2-selection--multiple .select2-selection__choice {
+    background-color: var(--nbx-color-bg-default, #e9ecef) !important;
+    color: #212529 !important;
+    border-color: var(--nbx-color-border-input, #ced4da) !important;
+  }
+  
+  .select2-container--default .select2-selection--multiple .select2-selection__choice__remove {
+    color: #212529 !important;
+  }
+  
+  .select2-container--default .select2-search--inline .select2-search__field {
+    background-color: transparent !important;
+    color: #212529 !important;
+  }
+  
+  .select2-container--default .select2-results__option {
+    background-color: var(--nbx-color-bg-input, #fff) !important;
+    color: #212529 !important;
+  }
+  
+  .select2-container--default .select2-results__option--highlighted {
+    background-color: var(--nbx-color-primary, #0d6efd) !important;
+    color: #fff !important;
+  }
+  
+  .select2-container--default .select2-results__option[aria-disabled="true"] {
+    color: #6c757d !important;
+  }
+  
+  .select2-dropdown {
+    background-color: var(--nbx-color-bg-input, #fff) !important;
+    border-color: var(--nbx-color-border-input, #ced4da) !important;
+  }
+  
+  .select2-results__message {
+    color: #212529 !important;
+  }
+  
   @media (prefers-color-scheme: dark) {
     .form-control,
     .form-select,
     select.form-control,
     select.form-select,
     textarea.form-control {
-      background-color: var(--nbx-color-bg-input, #2a2a2a) !important; /* Dark background for dark mode */
+      background-color: #2a2a2a !important; /* Dark background for dark mode */
       color: #ffffff !important; /* White for dark mode */
+    }
+    
+    /* Select2 dark mode styling - COMPREHENSIVE */
+    .select2-container--default .select2-selection--multiple,
+    .select2-container--default .select2-selection--single {
+      background-color: #2a2a2a !important;
+      color: #ffffff !important;
+      border-color: #495057 !important;
+    }
+    
+    .select2-container--default .select2-selection--multiple .select2-selection__rendered {
+      color: #ffffff !important;
+    }
+    
+    .select2-container--default .select2-selection--multiple .select2-selection__choice {
+      background-color: #495057 !important;
+      color: #ffffff !important;
+      border-color: #6c757d !important;
+    }
+    
+    .select2-container--default .select2-selection--multiple .select2-selection__choice__display {
+      color: #ffffff !important;
+    }
+    
+    .select2-container--default .select2-selection--multiple .select2-selection__choice__remove {
+      color: #ffffff !important;
+    }
+    
+    .select2-container--default .select2-selection--multiple .select2-selection__choice__remove:hover {
+      color: #ff6b6b !important;
+    }
+    
+    .select2-container--default .select2-search--inline .select2-search__field {
+      background-color: transparent !important;
+      color: #ffffff !important;
+    }
+    
+    .select2-container--default .select2-search--inline .select2-search__field::placeholder {
+      color: #adb5bd !important;
+      opacity: 1 !important;
+    }
+    
+    /* Force dark background for Select2 selection container in dark mode */
+    .select2-container--default.select2-container--focus .select2-selection--multiple,
+    .select2-container--default.select2-container--open .select2-selection--multiple {
+      background-color: #2a2a2a !important;
+    }
+    
+    .select2-container--default .select2-results__option {
+      background-color: #2a2a2a !important;
+      color: #ffffff !important;
+    }
+    
+    .select2-container--default .select2-results__option--highlighted {
+      background-color: #0d6efd !important;
+      color: #fff !important;
+    }
+    
+    .select2-container--default .select2-results__option[aria-disabled="true"] {
+      color: #6c757d !important;
+    }
+    
+    .select2-dropdown {
+      background-color: #2a2a2a !important;
+      border-color: #495057 !important;
+    }
+    
+    .select2-search--dropdown .select2-search__field {
+      background-color: #2a2a2a !important;
+      color: #ffffff !important;
+      border-color: #495057 !important;
+    }
+    
+    .select2-search--dropdown .select2-search__field::placeholder {
+      color: #adb5bd !important;
+      opacity: 1 !important;
+    }
+    
+    .select2-results__message {
+      background-color: #2a2a2a !important;
+      color: #ffffff !important;
+    }
+    
+    .select2-results__option--loading {
+      background-color: #2a2a2a !important;
+      color: #ffffff !important;
     }
   }
   
@@ -323,6 +459,14 @@
     background-color: var(--nbx-color-bg-danger-subtle, #f8d7da) !important;
     color: var(--nbx-color-fg-danger, #721c24) !important;
     border-color: var(--nbx-color-border-danger, #f5c2c7) !important;
+  }
+  
+  @media (prefers-color-scheme: dark) {
+    .alert-danger {
+      background-color: #5a1a1a !important; /* Dark red background */
+      color: #ffffff !important; /* Light white text */
+      border-color: #dc3545 !important;
+    }
   }
   
   /* Loading overlay - dark mode compatible */
@@ -630,29 +774,159 @@
               const darkMode = isDarkMode();
               const textColor = darkMode ? '#ffffff' : '#212529';
               const bgColor = darkMode ? '#2a2a2a' : '#f8f9fa';
+              const inputBgColor = darkMode ? '#2a2a2a' : '#fff';
               
               // Apply to all text elements in card-body
               document.querySelectorAll('.card-body p, .card-body label, .card-body span, .card-body small, .card-body div, .card-body .form-text, .card-body .text-muted').forEach(el => {
-                el.style.color = textColor + ' !important';
-                el.style.opacity = '1';
+                if (!el.closest('input') && !el.closest('select') && !el.closest('textarea') && !el.closest('button')) {
+                  el.style.setProperty('color', textColor, 'important');
+                  el.style.setProperty('opacity', '1', 'important');
+                }
               });
               
               // Apply to card header
               document.querySelectorAll('.card-header, .card-header *').forEach(el => {
-                el.style.color = textColor + ' !important';
+                if (!el.closest('input') && !el.closest('select') && !el.closest('textarea') && !el.closest('button')) {
+                  el.style.setProperty('color', textColor, 'important');
+                }
               });
               
               // Apply to specific containers
               const containers = document.querySelectorAll('#interfaces-checkbox-container, .deployment-logs div, #loading-overlay > div');
               containers.forEach(container => {
-                container.style.backgroundColor = darkMode ? '#2a2a2a' : bgColor;
-                container.style.color = textColor;
+                container.style.setProperty('background-color', darkMode ? '#2a2a2a' : bgColor, 'important');
+                container.style.setProperty('color', textColor, 'important');
               });
               
               // Apply to form text elements
               document.querySelectorAll('.form-text, .text-muted, small').forEach(el => {
-                el.style.color = textColor + ' !important';
-                el.style.opacity = '1';
+                if (!el.closest('input') && !el.closest('select') && !el.closest('textarea') && !el.closest('button')) {
+                  el.style.setProperty('color', textColor, 'important');
+                  el.style.setProperty('opacity', '1', 'important');
+                }
+              });
+              
+              // Apply to Select2 elements (for devices field) - COMPREHENSIVE
+              const select2Selections = document.querySelectorAll('.select2-selection--multiple, .select2-selection--single');
+              select2Selections.forEach(el => {
+                el.style.setProperty('background-color', inputBgColor, 'important');
+                el.style.setProperty('color', textColor, 'important');
+                el.style.setProperty('border-color', darkMode ? '#495057' : '#ced4da', 'important');
+              });
+              
+              const select2Rendered = document.querySelectorAll('.select2-selection__rendered');
+              select2Rendered.forEach(el => {
+                el.style.setProperty('color', textColor, 'important');
+              });
+              
+              const select2Choices = document.querySelectorAll('.select2-selection__choice');
+              select2Choices.forEach(el => {
+                el.style.setProperty('background-color', darkMode ? '#495057' : '#e9ecef', 'important');
+                el.style.setProperty('color', textColor, 'important');
+                el.style.setProperty('border-color', darkMode ? '#6c757d' : '#ced4da', 'important');
+              });
+              
+              const select2ChoiceDisplay = document.querySelectorAll('.select2-selection__choice__display');
+              select2ChoiceDisplay.forEach(el => {
+                el.style.setProperty('color', textColor, 'important');
+              });
+              
+              const select2ChoiceRemove = document.querySelectorAll('.select2-selection__choice__remove');
+              select2ChoiceRemove.forEach(el => {
+                el.style.setProperty('color', textColor, 'important');
+              });
+              
+              const select2SearchInline = document.querySelectorAll('.select2-search--inline .select2-search__field');
+              select2SearchInline.forEach(el => {
+                el.style.setProperty('background-color', 'transparent', 'important');
+                el.style.setProperty('color', textColor, 'important');
+              });
+              
+              const select2Dropdowns = document.querySelectorAll('.select2-dropdown');
+              select2Dropdowns.forEach(el => {
+                el.style.setProperty('background-color', inputBgColor, 'important');
+                el.style.setProperty('border-color', darkMode ? '#495057' : '#ced4da', 'important');
+              });
+              
+              const select2Options = document.querySelectorAll('.select2-results__option');
+              select2Options.forEach(el => {
+                el.style.setProperty('background-color', inputBgColor, 'important');
+                el.style.setProperty('color', textColor, 'important');
+              });
+              
+              const select2SearchFields = document.querySelectorAll('.select2-search__field');
+              select2SearchFields.forEach(el => {
+                el.style.setProperty('background-color', inputBgColor, 'important');
+                el.style.setProperty('color', textColor, 'important');
+                el.style.setProperty('border-color', darkMode ? '#495057' : '#ced4da', 'important');
+              });
+              
+              const select2Messages = document.querySelectorAll('.select2-results__message');
+              select2Messages.forEach(el => {
+                el.style.setProperty('background-color', inputBgColor, 'important');
+                el.style.setProperty('color', textColor, 'important');
+              });
+              
+              // Apply to error messages and alerts
+              const alertDanger = document.querySelectorAll('.alert-danger');
+              alertDanger.forEach(el => {
+                if (darkMode) {
+                  el.style.setProperty('background-color', '#5a1a1a', 'important');
+                  el.style.setProperty('color', '#ffffff', 'important'); // Light white text
+                  el.style.setProperty('border-color', '#dc3545', 'important');
+                }
+              });
+              
+              const invalidFeedback = document.querySelectorAll('.invalid-feedback');
+              invalidFeedback.forEach(el => {
+                if (darkMode) {
+                  el.style.setProperty('color', '#ff6b6b', 'important');
+                }
+              });
+              
+              // Also apply to text-danger class
+              const textDanger = document.querySelectorAll('.text-danger');
+              textDanger.forEach(el => {
+                if (darkMode) {
+                  el.style.setProperty('color', '#ff6b6b', 'important');
+                }
+              });
+              
+              // Force Select2 selection container to have dark background when focused/open
+              const select2Focused = document.querySelectorAll('.select2-container--focus .select2-selection--multiple, .select2-container--open .select2-selection--multiple');
+              select2Focused.forEach(el => {
+                if (darkMode) {
+                  el.style.setProperty('background-color', '#2a2a2a', 'important');
+                }
+              });
+              
+              // Ensure Select2 search field has proper contrast
+              // If background is dark, text should be white; if white, text should be dark
+              const select2SearchFields = document.querySelectorAll('.select2-search--inline .select2-search__field, .select2-search__field');
+              select2SearchFields.forEach(el => {
+                const parent = el.closest('.select2-selection--multiple') || el.closest('.select2-dropdown');
+                if (parent) {
+                  const computedBg = window.getComputedStyle(parent).backgroundColor;
+                  const isDarkBg = computedBg.includes('42') || computedBg.includes('rgb(42') || computedBg.includes('rgba(42') || computedBg.includes('#2a2a2a');
+                  if (darkMode && isDarkBg) {
+                    el.style.setProperty('background-color', 'transparent', 'important');
+                    el.style.setProperty('color', '#ffffff', 'important');
+                  } else if (!darkMode || !isDarkBg) {
+                    // If background is white/light, use dark text
+                    el.style.setProperty('color', '#212529', 'important');
+                  }
+                } else if (darkMode) {
+                  // Default to white text in dark mode
+                  el.style.setProperty('background-color', 'transparent', 'important');
+                  el.style.setProperty('color', '#ffffff', 'important');
+                }
+              });
+              
+              const invalidFeedback = document.querySelectorAll('.invalid-feedback');
+              invalidFeedback.forEach(el => {
+                if (darkMode) {
+                  el.style.setProperty('color', '#ff6b6b', 'important');
+                }
               });
             }
             
@@ -667,7 +941,31 @@
               
               // Also check periodically in case theme changes
               setInterval(applyThemeColors, 2000);
+              
+              // Use MutationObserver to catch dynamically added Select2 elements
+              const observer = new MutationObserver(function(mutations) {
+                applyThemeColors();
+              });
+              
+              observer.observe(document.body, { childList: true, subtree: true });
+              
+              // Listen for Select2 events to reapply colors
+              $(document).on('select2:open select2:select select2:unselect select2:clear', function() {
+                setTimeout(applyThemeColors, 50);
+              });
+              
+              // Also listen for jQuery ready (in case Select2 is initialized after DOMContentLoaded)
+              $(document).ready(function() {
+                setTimeout(applyThemeColors, 100);
+              });
             });
+            
+            // Run immediately (in case DOM is already loaded)
+            if (document.readyState === 'loading') {
+              document.addEventListener('DOMContentLoaded', applyThemeColors);
+            } else {
+              applyThemeColors();
+            }
             
             // Make function available globally for dynamic elements
             window.getNetBoxTextColor = function() {
