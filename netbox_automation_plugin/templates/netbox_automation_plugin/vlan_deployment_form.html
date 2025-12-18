@@ -317,6 +317,110 @@
     border-color: var(--nbx-color-border-danger, #f5c2c7) !important;
   }
   
+  html[data-theme="dark"] .alert-danger,
+  body.dark-mode .alert-danger {
+    background-color: #5a1a1a !important; /* Dark red background */
+    color: #ffffff !important; /* White text */
+    border-color: #8b2635 !important;
+  }
+  
+  /* Select2 styling for dark mode */
+  .select2-container--default .select2-selection--multiple,
+  .select2-container--default .select2-selection--single {
+    background-color: var(--nbx-color-bg-input, #fff) !important;
+    color: #212529 !important; /* Black for light mode */
+    border-color: var(--nbx-color-border-input, #ced4da) !important;
+  }
+  
+  html[data-theme="dark"] .select2-container--default .select2-selection--multiple,
+  html[data-theme="dark"] .select2-container--default .select2-selection--single,
+  body.dark-mode .select2-container--default .select2-selection--multiple,
+  body.dark-mode .select2-container--default .select2-selection--single {
+    background-color: var(--nbx-color-bg-input, #2a2a2a) !important;
+    color: #ffffff !important; /* White for dark mode */
+    border-color: var(--nbx-color-border-input, #495057) !important;
+  }
+  
+  .select2-container--default .select2-selection--multiple .select2-selection__rendered {
+    color: #212529 !important; /* Black for light mode */
+  }
+  
+  html[data-theme="dark"] .select2-container--default .select2-selection--multiple .select2-selection__rendered,
+  body.dark-mode .select2-container--default .select2-selection--multiple .select2-selection__rendered {
+    color: #ffffff !important; /* White for dark mode */
+  }
+  
+  .select2-container--default .select2-selection__choice {
+    background-color: var(--nbx-color-bg-secondary, #e9ecef) !important;
+    color: #212529 !important; /* Black for light mode */
+    border-color: var(--nbx-color-border-default, #ced4da) !important;
+  }
+  
+  html[data-theme="dark"] .select2-container--default .select2-selection__choice,
+  body.dark-mode .select2-container--default .select2-selection__choice {
+    background-color: var(--nbx-color-bg-secondary, #495057) !important;
+    color: #ffffff !important; /* White for dark mode */
+    border-color: var(--nbx-color-border-default, #6c757d) !important;
+  }
+  
+  .select2-container--default .select2-selection__choice__remove {
+    color: #212529 !important; /* Black for light mode */
+  }
+  
+  html[data-theme="dark"] .select2-container--default .select2-selection__choice__remove,
+  body.dark-mode .select2-container--default .select2-selection__choice__remove {
+    color: #ffffff !important; /* White for dark mode */
+  }
+  
+  .select2-dropdown {
+    background-color: var(--nbx-color-bg-input, #fff) !important;
+    border-color: var(--nbx-color-border-input, #ced4da) !important;
+  }
+  
+  html[data-theme="dark"] .select2-dropdown,
+  body.dark-mode .select2-dropdown {
+    background-color: var(--nbx-color-bg-input, #2a2a2a) !important;
+    border-color: var(--nbx-color-border-input, #495057) !important;
+  }
+  
+  .select2-results__option {
+    background-color: var(--nbx-color-bg-input, #fff) !important;
+    color: #212529 !important; /* Black for light mode */
+  }
+  
+  html[data-theme="dark"] .select2-results__option,
+  body.dark-mode .select2-results__option {
+    background-color: var(--nbx-color-bg-input, #2a2a2a) !important;
+    color: #ffffff !important; /* White for dark mode */
+  }
+  
+  .select2-results__option--highlighted {
+    background-color: var(--nbx-color-primary, #0d6efd) !important;
+    color: #ffffff !important;
+  }
+  
+  .select2-search__field {
+    background-color: var(--nbx-color-bg-input, #fff) !important;
+    color: #212529 !important; /* Black for light mode */
+  }
+  
+  html[data-theme="dark"] .select2-search__field,
+  body.dark-mode .select2-search__field {
+    background-color: var(--nbx-color-bg-input, #2a2a2a) !important;
+    color: #ffffff !important; /* White for dark mode */
+  }
+  
+  .select2-search__field::placeholder {
+    color: #212529 !important; /* Black for light mode */
+    opacity: 0.7;
+  }
+  
+  html[data-theme="dark"] .select2-search__field::placeholder,
+  body.dark-mode .select2-search__field::placeholder {
+    color: #ffffff !important; /* White for dark mode */
+    opacity: 0.7;
+  }
+  
   /* Loading overlay - dark mode compatible */
   #loading-overlay {
     background: rgba(0, 0, 0, 0.7) !important;
@@ -484,18 +588,6 @@
                 <div id="interfaces-checkbox-container" style="max-height: 200px; overflow-y: auto; border: 1px solid var(--nbx-color-border-default); padding: 10px; border-radius: 4px; background-color: var(--nbx-color-bg-secondary); color: var(--nbx-color-fg-default);">
                   <p class="text-muted mb-0" style="color: var(--nbx-color-fg-default) !important; opacity: 1 !important;">Select devices first to load interfaces</p>
                 </div>
-                <style>
-                  /* Use NetBox theme - no media query needed */
-                    #interfaces-checkbox-container {
-                      background-color: #2a2a2a !important; /* Dark background in dark mode */
-                    }
-                    label.form-label.text-muted,
-                    #interfaces-checkbox-container,
-                    #interfaces-checkbox-container .text-muted {
-                      color: #ffffff !important; /* White in dark mode */
-                    }
-                  }
-                </style>
               </div>
 
               {# Field 2: Manual text input for custom interfaces #}
@@ -611,40 +703,105 @@
               
               // Apply to all text elements in card-body
               document.querySelectorAll('.card-body p, .card-body label, .card-body span, .card-body small, .card-body div, .card-body .form-text, .card-body .text-muted').forEach(el => {
-                el.style.color = textColor + ' !important';
-                el.style.opacity = '1';
+                el.style.setProperty('color', textColor, 'important');
+                if (el.classList.contains('text-muted') || el.classList.contains('form-text')) {
+                  el.style.setProperty('opacity', '1', 'important');
+                }
               });
               
               // Apply to card header
               document.querySelectorAll('.card-header, .card-header *').forEach(el => {
-                el.style.color = textColor + ' !important';
+                el.style.setProperty('color', textColor, 'important');
               });
               
               // Apply to specific containers
               const containers = document.querySelectorAll('#interfaces-checkbox-container, .deployment-logs div, #loading-overlay > div');
               containers.forEach(container => {
-                container.style.backgroundColor = darkMode ? '#2a2a2a' : bgColor;
-                container.style.color = textColor;
+                container.style.setProperty('background-color', darkMode ? '#2a2a2a' : bgColor, 'important');
+                container.style.setProperty('color', textColor, 'important');
               });
               
               // Apply to form text elements
               document.querySelectorAll('.form-text, .text-muted, small').forEach(el => {
-                el.style.color = textColor + ' !important';
-                el.style.opacity = '1';
+                el.style.setProperty('color', textColor, 'important');
+                el.style.setProperty('opacity', '1', 'important');
+              });
+            }
+            
+            // Apply Select2 dark mode styles to dynamically created elements
+            function applySelect2DarkMode() {
+              const darkMode = isDarkMode();
+              const textColor = darkMode ? '#ffffff' : '#212529';
+              const bgColor = darkMode ? '#2a2a2a' : '#fff';
+              const borderColor = darkMode ? '#495057' : '#ced4da';
+              const choiceBg = darkMode ? '#495057' : '#e9ecef';
+              
+              // Apply to all Select2 elements
+              document.querySelectorAll('.select2-container--default .select2-selection--multiple, .select2-container--default .select2-selection--single').forEach(el => {
+                el.style.setProperty('background-color', bgColor, 'important');
+                el.style.setProperty('color', textColor, 'important');
+                el.style.setProperty('border-color', borderColor, 'important');
+              });
+              
+              document.querySelectorAll('.select2-container--default .select2-selection__rendered').forEach(el => {
+                el.style.setProperty('color', textColor, 'important');
+              });
+              
+              document.querySelectorAll('.select2-container--default .select2-selection__choice').forEach(el => {
+                el.style.setProperty('background-color', choiceBg, 'important');
+                el.style.setProperty('color', textColor, 'important');
+                el.style.setProperty('border-color', borderColor, 'important');
+              });
+              
+              document.querySelectorAll('.select2-container--default .select2-selection__choice__remove').forEach(el => {
+                el.style.setProperty('color', textColor, 'important');
+              });
+              
+              document.querySelectorAll('.select2-dropdown').forEach(el => {
+                el.style.setProperty('background-color', bgColor, 'important');
+                el.style.setProperty('border-color', borderColor, 'important');
+              });
+              
+              document.querySelectorAll('.select2-results__option').forEach(el => {
+                el.style.setProperty('background-color', bgColor, 'important');
+                el.style.setProperty('color', textColor, 'important');
+              });
+              
+              document.querySelectorAll('.select2-search__field').forEach(el => {
+                el.style.setProperty('background-color', bgColor, 'important');
+                el.style.setProperty('color', textColor, 'important');
               });
             }
             
             // Apply on page load
             document.addEventListener('DOMContentLoaded', function() {
               applyThemeColors();
+              // Wait for Select2 to initialize, then apply styles
+              setTimeout(applySelect2DarkMode, 500);
               
               // Listen for NetBox theme changes
               window.addEventListener('netbox.colorModeChanged', function(e) {
-                setTimeout(applyThemeColors, 100);
+                setTimeout(function() {
+                  applyThemeColors();
+                  applySelect2DarkMode();
+                }, 100);
               });
               
               // Also check periodically in case theme changes
-              setInterval(applyThemeColors, 2000);
+              setInterval(function() {
+                applyThemeColors();
+                applySelect2DarkMode();
+              }, 2000);
+              
+              // Use MutationObserver to watch for dynamically added Select2 elements
+              const observer = new MutationObserver(function(mutations) {
+                applySelect2DarkMode();
+              });
+              
+              observer.observe(document.body, {
+                childList: true,
+                subtree: true
+              });
             });
             
             // Make function available globally for dynamic elements
