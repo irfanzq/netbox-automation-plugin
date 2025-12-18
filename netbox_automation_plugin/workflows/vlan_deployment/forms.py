@@ -406,9 +406,9 @@ class VLANDeploymentForm(forms.Form):
         
         # Raise blocking errors if any (only if blocking=True)
         if blocking_errors and blocking:
-            error_msg = "The following issues must be resolved before deployment:\n\n" + "\n".join(f"• {err}" for err in blocking_errors)
+            error_msg = "The following issues must be resolved before deployment:\n\n" + "\n".join(f"- {err}" for err in blocking_errors)
             if warnings:
-                error_msg += "\n\nWarnings:\n" + "\n".join(f"⚠ {warn}" for warn in warnings)
+                error_msg += "\n\nWarnings:\n" + "\n".join(f"- {warn}" for warn in warnings)
             raise forms.ValidationError(error_msg)
         
         # Store warnings and blocking errors for display (for dry run mode)
