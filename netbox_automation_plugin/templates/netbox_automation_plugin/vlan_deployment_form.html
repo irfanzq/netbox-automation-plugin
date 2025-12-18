@@ -993,17 +993,56 @@
             
             // Show/hide fields based on deployment scope
             function updateFieldVisibility() {
-              const scope = document.querySelector('input[name="deployment_scope"]:checked').value;
-
+              const checkedRadio = document.querySelector('input[name="deployment_scope"]:checked');
               const singleFields = document.getElementById('single-device-fields');
               const groupFields = document.getElementById('group-device-fields');
+
+              if (!checkedRadio || !singleFields || !groupFields) {
+                console.warn('updateFieldVisibility: Missing elements', {checkedRadio, singleFields, groupFields});
+                return;
+              }
+
+              const scope = checkedRadio.value;
+              console.log('updateFieldVisibility: Switching to', scope, 'mode');
 
               if (scope === 'single') {
                 singleFields.style.display = 'block';
                 groupFields.style.display = 'none';
+                // Clear interfaces when switching to single mode
+                const interfacesContainer = document.getElementById('interfaces-checkbox-container');
+                if (interfacesContainer) {
+                  const p = document.createElement('p');
+                  p.className = 'text-muted mb-0';
+                  p.style.color = window.getNetBoxTextColor ? window.getNetBoxTextColor() : (isDarkMode() ? '#ffffff' : '#212529');
+                  p.style.opacity = '1';
+                  p.textContent = 'Select devices first to load interfaces';
+                  interfacesContainer.innerHTML = '';
+                  interfacesContainer.appendChild(p);
+                }
+                // Clear VLAN list when switching modes
+                const datalist = document.getElementById('vlan_datalist');
+                if (datalist) {
+                  datalist.innerHTML = '';
+                }
               } else {
                 singleFields.style.display = 'none';
                 groupFields.style.display = 'block';
+                // Clear interfaces when switching to group mode
+                const interfacesContainer = document.getElementById('interfaces-checkbox-container');
+                if (interfacesContainer) {
+                  const p = document.createElement('p');
+                  p.className = 'text-muted mb-0';
+                  p.style.color = window.getNetBoxTextColor ? window.getNetBoxTextColor() : (isDarkMode() ? '#ffffff' : '#212529');
+                  p.style.opacity = '1';
+                  p.textContent = 'Select all filters (Site, Location, Manufacturer, Role) to load interfaces';
+                  interfacesContainer.innerHTML = '';
+                  interfacesContainer.appendChild(p);
+                }
+                // Load VLANs if site is already selected in group mode
+                const siteSelect = document.getElementById('id_site');
+                if (siteSelect && siteSelect.value) {
+                  filterVLANsBySite();
+                }
               }
             }
 
@@ -1093,9 +1132,11 @@
                   // Use helper function to render checkboxes
                   renderInterfaceCheckboxes(data.interfaces, interfacesContainer);
 
-                  // Also filter VLANs by site of selected devices
+                  // Also filter VLANs by site of selected devices (VLAN list is independent of interfaces)
                   console.log('About to call filterVLANsByDevices with:', selectedDeviceIds);
-                  filterVLANsByDevices(selectedDeviceIds);
+                  if (selectedDeviceIds.length > 0) {
+                    filterVLANsByDevices(selectedDeviceIds);
+                  }
                 })
                 .catch(error => {
                   console.error('Error loading interfaces:', error);
@@ -1342,6 +1383,16 @@
 
             // Initialize on page load
             document.addEventListener('DOMContentLoaded', function() {
+              // Set initial state - default to single mode if nothing is checked
+              const checkedRadio = document.querySelector('input[name="deployment_scope"]:checked');
+              if (!checkedRadio) {
+                // Default to single mode
+                const singleRadio = document.querySelector('input[name="deployment_scope"][value="single"]');
+                if (singleRadio) {
+                  singleRadio.checked = true;
+                }
+              }
+              
               updateFieldVisibility();
               setupMutuallyExclusiveCheckboxes();
 
@@ -1362,7 +1413,7 @@
                 }
               }
 
-              // Listen for group filter changes (group mode - load interfaces)
+              // Listen for group filter changes (group mode - load interfaces and VLANs)
               const siteSelect = document.getElementById('id_site');
               const locationSelect = document.getElementById('id_location');
               const manufacturerSelect = document.getElementById('id_manufacturer');
@@ -1370,21 +1421,34 @@
               
               if (siteSelect) {
                 siteSelect.addEventListener('change', function() {
-                  filterVLANsBySite();  // Load VLANs
-                  loadInterfacesFromGroupFilters();  // Load interfaces
+                  filterVLANsBySite();  // Load VLANs when site changes (VLAN list is independent of interfaces)
+                  loadInterfacesFromGroupFilters();  // Load interfaces when any filter changes
                 });
               }
               
               if (locationSelect) {
-                locationSelect.addEventListener('change', loadInterfacesFromGroupFilters);
+                locationSelect.addEventListener('change', function() {
+                  loadInterfacesFromGroupFilters();  // Load interfaces
+                  // VLANs are already loaded when site is selected, no need to reload
+                });
               }
               
               if (manufacturerSelect) {
-                manufacturerSelect.addEventListener('change', loadInterfacesFromGroupFilters);
+                manufacturerSelect.addEventListener('change', function() {
+                  loadInterfacesFromGroupFilters();  // Load interfaces
+                });
               }
               
               if (roleSelect) {
-                roleSelect.addEventListener('change', loadInterfacesFromGroupFilters);
+                roleSelect.addEventListener('change', function() {
+                  loadInterfacesFromGroupFilters();  // Load interfaces
+                });
+              }
+              
+              // If group mode is selected and site is already selected, load VLANs on page load
+              const checkedScope = document.querySelector('input[name="deployment_scope"]:checked');
+              if (checkedScope && checkedScope.value === 'group' && siteSelect && siteSelect.value) {
+                filterVLANsBySite();
               }
             });
 
