@@ -261,13 +261,13 @@ class VLANDeploymentForm(forms.Form):
 
             for iface_name in interface_list:
                 if iface_name not in device_interfaces:
-                    errors.append(
-                        f"Interface '{iface_name}' does not exist on device '{device.name}'"
-                    )
+                    # Format message immediately to avoid format string issues
+                    error_msg = f"Interface '{iface_name}' does not exist on device '{device.name}'"
+                    errors.append(error_msg)
 
         if errors:
-            # Join errors into a single string to avoid format string issues
-            error_msg = "\n".join(str(err) for err in errors)
+            # Join errors into a single string - all messages are already formatted strings
+            error_msg = "\n".join(errors)
             raise forms.ValidationError(error_msg)
     
     def _validate_tags_and_interfaces(self, devices, interface_list, cleaned_data, blocking=True):
@@ -408,13 +408,15 @@ class VLANDeploymentForm(forms.Form):
         
         # Raise blocking errors if any (only if blocking=True)
         if blocking_errors and blocking:
-            # Convert all error messages to strings first to avoid format string issues
-            error_list = [str(err) for err in blocking_errors]
-            error_msg = "The following issues must be resolved before deployment:\n\n" + "\n".join(f"- {err}" for err in error_list)
+            # All error messages should already be formatted strings
+            # Join them with dashes - no additional formatting needed
+            error_lines = [f"- {str(err)}" for err in blocking_errors]
+            error_msg = "The following issues must be resolved before deployment:\n\n" + "\n".join(error_lines)
             if warnings:
-                # Convert all warning messages to strings first
-                warning_list = [str(warn) for warn in warnings]
-                error_msg += "\n\nWarnings:\n" + "\n".join(f"- {warn}" for warn in warning_list)
+                # All warning messages should already be formatted strings
+                warning_lines = [f"- {str(warn)}" for warn in warnings]
+                error_msg += "\n\nWarnings:\n" + "\n".join(warning_lines)
+            # Pass as a single string, not a list, to avoid Django trying to format it
             raise forms.ValidationError(error_msg)
         
         # Store warnings and blocking errors for display (for dry run mode)

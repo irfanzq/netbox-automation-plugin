@@ -264,18 +264,19 @@
     color: var(--nbx-color-danger, #dc3545) !important;
   }
   
+  /* Light mode: Light pink background with dark red text */
   .alert-danger {
-    background-color: var(--nbx-color-bg-danger-subtle) !important;
-    color: var(--nbx-color-fg-danger) !important;
-    border-color: var(--nbx-color-border-danger) !important;
+    background-color: #f8d7da !important; /* Light pink background */
+    color: #721c24 !important; /* Dark red text */
+    border-color: #f5c2c7 !important;
   }
   
-  /* Override for dark mode if NetBox variables don't provide good contrast */
+  /* Dark mode: Dark red background with white text */
   html[data-theme="dark"] .alert-danger,
   body.dark-mode .alert-danger {
-    background-color: #5a1a1a !important; /* Dark red background for better visibility */
-    color: #ffffff !important; /* Light white text for better visibility */
-    border-color: #dc3545 !important;
+    background-color: #5a1a1a !important; /* Dark red background */
+    color: #ffffff !important; /* White text */
+    border-color: #8b2635 !important;
   }
   
   /* Loading overlay - use NetBox CSS variables */
