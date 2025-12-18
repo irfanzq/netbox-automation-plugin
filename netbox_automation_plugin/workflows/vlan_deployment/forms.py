@@ -409,12 +409,16 @@ class VLANDeploymentForm(forms.Form):
         # Raise blocking errors if any (only if blocking=True)
         if blocking_errors and blocking:
             # All error messages should already be formatted strings
-            # Join them with dashes - no additional formatting needed
-            error_lines = [f"- {str(err)}" for err in blocking_errors]
+            # Join them with dashes - format each line immediately to avoid f-string issues
+            error_lines = []
+            for err in blocking_errors:
+                error_lines.append("- " + str(err))
             error_msg = "The following issues must be resolved before deployment:\n\n" + "\n".join(error_lines)
             if warnings:
                 # All warning messages should already be formatted strings
-                warning_lines = [f"- {str(warn)}" for warn in warnings]
+                warning_lines = []
+                for warn in warnings:
+                    warning_lines.append("- " + str(warn))
                 error_msg += "\n\nWarnings:\n" + "\n".join(warning_lines)
             # Pass as a single string, not a list, to avoid Django trying to format it
             raise forms.ValidationError(error_msg)
