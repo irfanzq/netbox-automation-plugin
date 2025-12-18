@@ -73,24 +73,7 @@
     color: var(--nbx-color-fg-default, #ffffff) !important; /* White for dark mode */
   }
   
-  @media (prefers-color-scheme: dark) {
-    .card-body .form-label,
-    .card-body label:not(.form-check-label),
-    .card-body .form-check-label,
-    .card-body p,
-    .card-body div.form-text,
-    .card-body span,
-    .card-body small,
-    .card-body h1,
-    .card-body h2,
-    .card-body h3,
-    .card-body h4,
-    .card-body h5,
-    .card-body h6,
-    .card-body .card-title {
-      color: var(--nbx-color-fg-default, #ffffff) !important; /* White for dark mode */
-    }
-  }
+  /* Already covered by html[data-theme="dark"] and body.dark-mode selectors above - no media query needed */
   
   /* Help text and muted text - NO GREY: Black in light, White in dark */
   .card-body .form-text,
@@ -108,22 +91,7 @@
     opacity: 1 !important;
   }
   
-  @media (prefers-color-scheme: dark) {
-    .card-body .form-text,
-    .card-body .text-muted,
-    .card-body p.text-muted,
-    .card-body label.text-muted,
-    .card-body small.text-muted,
-    .form-text,
-    .text-muted,
-    p.text-muted,
-    label.text-muted,
-    small.text-muted,
-    small {
-      color: #ffffff !important; /* White for dark mode */
-      opacity: 1 !important;
-    }
-  }
+  /* Already covered by html[data-theme="dark"] and body.dark-mode selectors above - no media query needed */
   
   /* Card header text */
   .card-header,
@@ -131,74 +99,21 @@
     color: #212529 !important; /* Black for light mode */
   }
   
-  @media (prefers-color-scheme: dark) {
-    .card-header,
-    .card-header * {
-      color: #ffffff !important; /* White for dark mode */
-    }
-  }
+  /* Already covered by html[data-theme="dark"] and body.dark-mode selectors above - no media query needed */
   
+  /* Use NetBox CSS variables - they automatically adapt to theme */
+  /* Primary: Use NetBox variables (they change automatically) */
   .form-control,
   .form-select,
   select.form-control,
   select.form-select,
   textarea.form-control {
-    background-color: var(--nbx-color-bg-input, #fff) !important;
-    color: #212529 !important; /* Black for light mode */
-    border-color: var(--nbx-color-border-input, #ced4da) !important;
+    background-color: var(--nbx-color-bg-input) !important;
+    color: var(--nbx-color-fg-default) !important;
+    border-color: var(--nbx-color-border-input) !important;
   }
   
-  /* Select2 styling for ModelMultipleChoiceField (devices field) */
-  .select2-container--default .select2-selection--multiple,
-  .select2-container--default .select2-selection--single {
-    background-color: var(--nbx-color-bg-input, #fff) !important;
-    color: #212529 !important;
-    border-color: var(--nbx-color-border-input, #ced4da) !important;
-  }
-  
-  .select2-container--default .select2-selection--multiple .select2-selection__rendered {
-    color: #212529 !important;
-  }
-  
-  .select2-container--default .select2-selection--multiple .select2-selection__choice {
-    background-color: var(--nbx-color-bg-default, #e9ecef) !important;
-    color: #212529 !important;
-    border-color: var(--nbx-color-border-input, #ced4da) !important;
-  }
-  
-  .select2-container--default .select2-selection--multiple .select2-selection__choice__remove {
-    color: #212529 !important;
-  }
-  
-  .select2-container--default .select2-search--inline .select2-search__field {
-    background-color: transparent !important;
-    color: #212529 !important;
-  }
-  
-  .select2-container--default .select2-results__option {
-    background-color: var(--nbx-color-bg-input, #fff) !important;
-    color: #212529 !important;
-  }
-  
-  .select2-container--default .select2-results__option--highlighted {
-    background-color: var(--nbx-color-primary, #0d6efd) !important;
-    color: #fff !important;
-  }
-  
-  .select2-container--default .select2-results__option[aria-disabled="true"] {
-    color: #6c757d !important;
-  }
-  
-  .select2-dropdown {
-    background-color: var(--nbx-color-bg-input, #fff) !important;
-    border-color: var(--nbx-color-border-input, #ced4da) !important;
-  }
-  
-  .select2-results__message {
-    color: #212529 !important;
-  }
-  
-  /* NetBox dark mode support - multiple selectors for compatibility */
+  /* Fallback: Explicit dark mode overrides (in case CSS variables don't work) */
   html[data-theme="dark"] .form-control,
   html[data-theme="dark"] .form-select,
   html[data-theme="dark"] select.form-control,
@@ -208,28 +123,160 @@
   body.dark-mode .form-select,
   body.dark-mode select.form-control,
   body.dark-mode select.form-select,
-  body.dark-mode textarea.form-control,
-  @media (prefers-color-scheme: dark) {
-    .form-control,
-    .form-select,
-    select.form-control,
-    select.form-select,
-    textarea.form-control {
-      background-color: #2a2a2a !important; /* Dark background for dark mode */
-      color: #ffffff !important; /* White for dark mode */
-    }
-    
-    /* Select2 dark mode styling - COMPREHENSIVE */
-    html[data-theme="dark"] .select2-container--default .select2-selection--multiple,
-    html[data-theme="dark"] .select2-container--default .select2-selection--single,
-    body.dark-mode .select2-container--default .select2-selection--multiple,
-    body.dark-mode .select2-container--default .select2-selection--single,
-    .select2-container--default .select2-selection--multiple,
-    .select2-container--default .select2-selection--single {
-      background-color: #2a2a2a !important;
-      color: #ffffff !important;
-      border-color: #495057 !important;
-    }
+  body.dark-mode textarea.form-control {
+    background-color: #2a2a2a !important;
+    color: #ffffff !important;
+    border-color: #495057 !important;
+  }
+  
+  /* Select2 styling - PRIMARY: Use NetBox CSS variables */
+  .select2-container--default .select2-selection--multiple,
+  .select2-container--default .select2-selection--single {
+    background-color: var(--nbx-color-bg-input) !important;
+    color: var(--nbx-color-fg-default) !important;
+    border-color: var(--nbx-color-border-input) !important;
+  }
+  
+  .select2-container--default .select2-selection--multiple .select2-selection__rendered {
+    color: var(--nbx-color-fg-default) !important;
+  }
+  
+  .select2-container--default .select2-selection--multiple .select2-selection__choice {
+    background-color: var(--nbx-color-bg-secondary) !important;
+    color: var(--nbx-color-fg-default) !important;
+    border-color: var(--nbx-color-border-input) !important;
+  }
+  
+  .select2-container--default .select2-selection--multiple .select2-selection__choice__display {
+    color: var(--nbx-color-fg-default) !important;
+  }
+  
+  .select2-container--default .select2-selection--multiple .select2-selection__choice__remove {
+    color: var(--nbx-color-fg-default) !important;
+  }
+  
+  .select2-container--default .select2-search--inline .select2-search__field {
+    background-color: transparent !important;
+    color: var(--nbx-color-fg-default) !important;
+  }
+  
+  .select2-container--default .select2-results__option {
+    background-color: var(--nbx-color-bg-input) !important;
+    color: var(--nbx-color-fg-default) !important;
+  }
+  
+  .select2-container--default .select2-results__option--highlighted {
+    background-color: var(--nbx-color-primary) !important;
+    color: var(--nbx-color-fg-inverse) !important;
+  }
+  
+  .select2-dropdown {
+    background-color: var(--nbx-color-bg-input) !important;
+    border-color: var(--nbx-color-border-input) !important;
+  }
+  
+  .select2-results__message {
+    color: var(--nbx-color-fg-default) !important;
+  }
+  
+  /* Select2 FALLBACK: Explicit dark mode overrides (Select2 may not inherit CSS variables properly) */
+  html[data-theme="dark"] .select2-container--default .select2-selection--multiple,
+  html[data-theme="dark"] .select2-container--default .select2-selection--single,
+  body.dark-mode .select2-container--default .select2-selection--multiple,
+  body.dark-mode .select2-container--default .select2-selection--single {
+    background-color: #2a2a2a !important;
+    color: #ffffff !important;
+    border-color: #495057 !important;
+  }
+  
+  html[data-theme="dark"] .select2-container--default .select2-selection--multiple .select2-selection__rendered,
+  body.dark-mode .select2-container--default .select2-selection--multiple .select2-selection__rendered {
+    color: #ffffff !important;
+  }
+  
+  html[data-theme="dark"] .select2-container--default .select2-selection--multiple .select2-selection__choice,
+  body.dark-mode .select2-container--default .select2-selection--multiple .select2-selection__choice {
+    background-color: #495057 !important;
+    color: #ffffff !important;
+    border-color: #6c757d !important;
+  }
+  
+  html[data-theme="dark"] .select2-container--default .select2-selection--multiple .select2-selection__choice__display,
+  body.dark-mode .select2-container--default .select2-selection--multiple .select2-selection__choice__display {
+    color: #ffffff !important;
+  }
+  
+  html[data-theme="dark"] .select2-container--default .select2-selection--multiple .select2-selection__choice__remove,
+  body.dark-mode .select2-container--default .select2-selection--multiple .select2-selection__choice__remove {
+    color: #ffffff !important;
+  }
+  
+  html[data-theme="dark"] .select2-container--default .select2-selection--multiple .select2-selection__choice__remove:hover,
+  body.dark-mode .select2-container--default .select2-selection--multiple .select2-selection__choice__remove:hover {
+    color: #ff6b6b !important;
+  }
+  
+  html[data-theme="dark"] .select2-container--default .select2-search--inline .select2-search__field,
+  body.dark-mode .select2-container--default .select2-search--inline .select2-search__field {
+    background-color: transparent !important;
+    color: #ffffff !important;
+  }
+  
+  html[data-theme="dark"] .select2-container--default .select2-search--inline .select2-search__field::placeholder,
+  body.dark-mode .select2-container--default .select2-search--inline .select2-search__field::placeholder {
+    color: #adb5bd !important;
+    opacity: 1 !important;
+  }
+  
+  html[data-theme="dark"] .select2-container--default.select2-container--focus .select2-selection--multiple,
+  html[data-theme="dark"] .select2-container--default.select2-container--open .select2-selection--multiple,
+  body.dark-mode .select2-container--default.select2-container--focus .select2-selection--multiple,
+  body.dark-mode .select2-container--default.select2-container--open .select2-selection--multiple {
+    background-color: #2a2a2a !important;
+  }
+  
+  html[data-theme="dark"] .select2-container--default .select2-results__option,
+  body.dark-mode .select2-container--default .select2-results__option {
+    background-color: #2a2a2a !important;
+    color: #ffffff !important;
+  }
+  
+  html[data-theme="dark"] .select2-container--default .select2-results__option--highlighted,
+  body.dark-mode .select2-container--default .select2-results__option--highlighted {
+    background-color: #0d6efd !important;
+    color: #fff !important;
+  }
+  
+  html[data-theme="dark"] .select2-dropdown,
+  body.dark-mode .select2-dropdown {
+    background-color: #2a2a2a !important;
+    border-color: #495057 !important;
+  }
+  
+  html[data-theme="dark"] .select2-search--dropdown .select2-search__field,
+  body.dark-mode .select2-search--dropdown .select2-search__field {
+    background-color: #2a2a2a !important;
+    color: #ffffff !important;
+    border-color: #495057 !important;
+  }
+  
+  html[data-theme="dark"] .select2-search--dropdown .select2-search__field::placeholder,
+  body.dark-mode .select2-search--dropdown .select2-search__field::placeholder {
+    color: #adb5bd !important;
+    opacity: 1 !important;
+  }
+  
+  html[data-theme="dark"] .select2-results__message,
+  body.dark-mode .select2-results__message {
+    background-color: #2a2a2a !important;
+    color: #ffffff !important;
+  }
+  
+  html[data-theme="dark"] .select2-results__option--loading,
+  body.dark-mode .select2-results__option--loading {
+    background-color: #2a2a2a !important;
+    color: #ffffff !important;
+  }
     
     .select2-container--default .select2-selection--multiple .select2-selection__rendered {
       color: #ffffff !important;
@@ -310,16 +357,17 @@
     }
   }
   
+  /* Use NetBox CSS variables for placeholders and focus states */
   .form-control::placeholder {
-    color: #212529 !important; /* Black for light mode */
+    color: var(--nbx-color-fg-muted) !important;
     opacity: 0.7;
   }
   
-  @media (prefers-color-scheme: dark) {
-    .form-control::placeholder {
-      color: #ffffff !important; /* White for dark mode */
-      opacity: 0.7;
-    }
+  /* Fallback for dark mode placeholders */
+  html[data-theme="dark"] .form-control::placeholder,
+  body.dark-mode .form-control::placeholder {
+    color: #adb5bd !important;
+    opacity: 0.7;
   }
   
   .form-control:focus,
@@ -327,20 +375,25 @@
   select.form-control:focus,
   select.form-select:focus,
   textarea.form-control:focus {
-    background-color: var(--nbx-color-bg-input, #fff) !important;
-    color: #212529 !important; /* Black for light mode */
-    border-color: var(--nbx-color-border-input-focus, #86b7fe) !important;
+    background-color: var(--nbx-color-bg-input) !important;
+    color: var(--nbx-color-fg-default) !important;
+    border-color: var(--nbx-color-border-input-focus) !important;
   }
   
-  @media (prefers-color-scheme: dark) {
-    .form-control:focus,
-    .form-select:focus,
-    select.form-control:focus,
-    select.form-select:focus,
-    textarea.form-control:focus {
-      background-color: var(--nbx-color-bg-input, #2a2a2a) !important; /* Dark background for dark mode */
-      color: #ffffff !important; /* White for dark mode */
-    }
+  /* Fallback for dark mode focus states */
+  html[data-theme="dark"] .form-control:focus,
+  html[data-theme="dark"] .form-select:focus,
+  html[data-theme="dark"] select.form-control:focus,
+  html[data-theme="dark"] select.form-select:focus,
+  html[data-theme="dark"] textarea.form-control:focus,
+  body.dark-mode .form-control:focus,
+  body.dark-mode .form-select:focus,
+  body.dark-mode select.form-control:focus,
+  body.dark-mode select.form-select:focus,
+  body.dark-mode textarea.form-control:focus {
+    background-color: #2a2a2a !important;
+    color: #ffffff !important;
+    border-color: #86b7fe !important;
   }
   
   /* Checkbox and radio button styling for dark mode */
@@ -349,10 +402,10 @@
     border-color: var(--nbx-color-border-input, #ced4da) !important;
   }
   
-  @media (prefers-color-scheme: dark) {
-    .form-check-input {
-      background-color: var(--nbx-color-bg-input, #2a2a2a) !important; /* Dark background for dark mode */
-    }
+  /* NetBox dark mode for checkboxes */
+  html[data-theme="dark"] .form-check-input,
+  body.dark-mode .form-check-input {
+    background-color: var(--nbx-color-bg-input) !important;
   }
   
   .form-check-input:checked {
@@ -371,11 +424,11 @@
     color: #212529 !important; /* Black for light mode */
   }
   
-  @media (prefers-color-scheme: dark) {
-    datalist option {
-      background-color: var(--nbx-color-bg-input, #2a2a2a) !important; /* Dark background for dark mode */
-      color: #ffffff !important; /* White for dark mode */
-    }
+  /* NetBox dark mode for datalist */
+  html[data-theme="dark"] datalist option,
+  body.dark-mode datalist option {
+    background-color: var(--nbx-color-bg-input) !important;
+    color: var(--nbx-color-fg-default) !important;
   }
   
   /* Select dropdown options */
@@ -384,11 +437,11 @@
     color: #212529 !important; /* Black for light mode */
   }
   
-  @media (prefers-color-scheme: dark) {
-    select option {
-      background-color: var(--nbx-color-bg-input, #2a2a2a) !important; /* Dark background for dark mode */
-      color: #ffffff !important; /* White for dark mode */
-    }
+  /* NetBox dark mode for select options */
+  html[data-theme="dark"] select option,
+  body.dark-mode select option {
+    background-color: var(--nbx-color-bg-input) !important;
+    color: var(--nbx-color-fg-default) !important;
   }
   
   #interfaces-checkbox-container {
@@ -397,50 +450,30 @@
     color: #212529 !important; /* Black for light mode */
   }
   
-  @media (prefers-color-scheme: dark) {
-    #interfaces-checkbox-container {
-      background-color: var(--nbx-color-bg-secondary, #2a2a2a) !important; /* Dark background for dark mode */
-      color: #ffffff !important; /* White for dark mode */
-    }
+  /* Interfaces checkbox container - use NetBox CSS variables */
+  #interfaces-checkbox-container {
+    background-color: var(--nbx-color-bg-secondary) !important;
+    border-color: var(--nbx-color-border-default) !important;
+    color: var(--nbx-color-fg-default) !important;
   }
   
   /* Ensure all text inside the interfaces container is visible */
   #interfaces-checkbox-container,
   #interfaces-checkbox-container * {
-    color: #212529 !important; /* Black for light mode */
-  }
-  
-  @media (prefers-color-scheme: dark) {
-    #interfaces-checkbox-container,
-    #interfaces-checkbox-container * {
-      color: #ffffff !important; /* White for dark mode */
-    }
+    color: var(--nbx-color-fg-default) !important;
   }
   
   /* Exception for muted text inside container - NO GREY, fully visible */
   #interfaces-checkbox-container .text-muted,
   #interfaces-checkbox-container p.text-muted {
-    color: #212529 !important; /* Black for light mode */
+    color: var(--nbx-color-fg-default) !important;
     opacity: 1 !important;
-  }
-  
-  @media (prefers-color-scheme: dark) {
-    #interfaces-checkbox-container .text-muted,
-    #interfaces-checkbox-container p.text-muted {
-      color: #ffffff !important; /* White for dark mode */
-    }
   }
   
   /* Label for "Available Interfaces" section - NO GREY, fully visible */
   label.form-label.text-muted.small {
-    color: #212529 !important; /* Black for light mode */
+    color: var(--nbx-color-fg-default) !important;
     opacity: 1 !important;
-  }
-  
-  @media (prefers-color-scheme: dark) {
-    label.form-label.text-muted.small {
-      color: #ffffff !important; /* White for dark mode */
-    }
   }
   
   .form-check-label {
@@ -470,18 +503,19 @@
     color: var(--nbx-color-danger, #dc3545) !important;
   }
   
+  /* Use NetBox CSS variables for alerts - they adapt to theme */
   .alert-danger {
-    background-color: var(--nbx-color-bg-danger-subtle, #f8d7da) !important;
-    color: var(--nbx-color-fg-danger, #721c24) !important;
-    border-color: var(--nbx-color-border-danger, #f5c2c7) !important;
+    background-color: var(--nbx-color-bg-danger-subtle) !important;
+    color: var(--nbx-color-fg-danger) !important;
+    border-color: var(--nbx-color-border-danger) !important;
   }
   
-  @media (prefers-color-scheme: dark) {
-    .alert-danger {
-      background-color: #5a1a1a !important; /* Dark red background */
-      color: #ffffff !important; /* Light white text */
-      border-color: #dc3545 !important;
-    }
+  /* Override for dark mode if NetBox variables don't provide good contrast */
+  html[data-theme="dark"] .alert-danger,
+  body.dark-mode .alert-danger {
+    background-color: #5a1a1a !important; /* Dark red background for better visibility */
+    color: #ffffff !important; /* Light white text for better visibility */
+    border-color: #dc3545 !important;
   }
   
   /* Loading overlay - dark mode compatible */
@@ -494,46 +528,27 @@
     color: #212529 !important; /* Black for light mode */
   }
   
-  @media (prefers-color-scheme: dark) {
-    #loading-overlay > div {
-      background: var(--nbx-color-bg-default, #2a2a2a) !important; /* Dark background for dark mode */
-      color: #ffffff !important; /* White for dark mode */
-    }
+  /* Loading overlay - use NetBox CSS variables */
+  #loading-overlay > div {
+    background: var(--nbx-color-bg-default) !important;
+    color: var(--nbx-color-fg-default) !important;
   }
   
   #loading-overlay h4 {
-    color: #212529 !important; /* Black for light mode */
-  }
-  
-  @media (prefers-color-scheme: dark) {
-    #loading-overlay h4 {
-      color: #ffffff !important; /* White for dark mode */
-    }
+    color: var(--nbx-color-fg-default) !important;
   }
   
   #loading-overlay .text-muted {
-    color: #212529 !important; /* Black for light mode */
+    color: var(--nbx-color-fg-default) !important;
   }
   
-  @media (prefers-color-scheme: dark) {
-    #loading-overlay .text-muted {
-      color: #ffffff !important; /* White for dark mode */
-    }
-  }
-  
-  /* Disabled button styling - NO GREY text */
+  /* Disabled button styling - use NetBox CSS variables */
   #deploy-btn:disabled {
-    background-color: var(--nbx-color-bg-tertiary, #6c757d) !important;
-    border-color: var(--nbx-color-bg-tertiary, #6c757d) !important;
-    color: #212529 !important; /* Black for light mode */
+    background-color: var(--nbx-color-bg-tertiary) !important;
+    border-color: var(--nbx-color-bg-tertiary) !important;
+    color: var(--nbx-color-fg-default) !important;
     opacity: 0.6;
     cursor: not-allowed !important;
-  }
-  
-  @media (prefers-color-scheme: dark) {
-    #deploy-btn:disabled {
-      color: #ffffff !important; /* White for dark mode */
-    }
   }
 </style>
   <div class="row">
@@ -547,11 +562,7 @@
             {% trans "Deploy VLAN configurations to network devices and update NetBox interface assignments. Phase 1: Access mode (untagged) only." %}
           </p>
           <style>
-            @media (prefers-color-scheme: dark) {
-              p.text-muted {
-                color: #ffffff !important; /* White in dark mode */
-              }
-            }
+            /* Use NetBox CSS variables - no media query needed */
           </style>
 
           {% if form.non_field_errors %}
@@ -669,22 +680,10 @@
 
               {# Field 1: Checkbox list for available interfaces #}
               <div class="mb-2">
-                <label class="form-label text-muted small" style="color: #212529 !important; opacity: 1 !important;">Available Interfaces (select from device)</label>
-                <div id="interfaces-checkbox-container" style="max-height: 200px; overflow-y: auto; border: 1px solid var(--nbx-color-border-default, #dee2e6); padding: 10px; border-radius: 4px; background-color: var(--nbx-color-bg-secondary, #f8f9fa); color: #212529;">
-                  <p class="text-muted mb-0" style="color: #212529 !important; opacity: 1 !important;">Select devices first to load interfaces</p>
+                <label class="form-label text-muted small">Available Interfaces (select from device)</label>
+                <div id="interfaces-checkbox-container" style="max-height: 200px; overflow-y: auto; border: 1px solid var(--nbx-color-border-default); padding: 10px; border-radius: 4px; background-color: var(--nbx-color-bg-secondary); color: var(--nbx-color-fg-default);">
+                  <p class="text-muted mb-0">Select devices first to load interfaces</p>
                 </div>
-                <style>
-                  @media (prefers-color-scheme: dark) {
-                    #interfaces-checkbox-container {
-                      background-color: #2a2a2a !important; /* Dark background in dark mode */
-                    }
-                    label.form-label.text-muted,
-                    #interfaces-checkbox-container,
-                    #interfaces-checkbox-container .text-muted {
-                      color: #ffffff !important; /* White in dark mode */
-                    }
-                  }
-                </style>
               </div>
 
               {# Field 2: Manual text input for custom interfaces #}
@@ -775,10 +774,18 @@
             // NetBox Theme Detection and Color Application
             function getNetBoxTheme() {
               try {
-                return localStorage.getItem('netbox-color-mode') || 'light';
-              } catch (e) {
-                return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
-              }
+        return localStorage.getItem('netbox-color-mode') || 'light';
+      } catch (e) {
+        // Fallback: check if NetBox has set data-theme attribute
+        const htmlEl = document.documentElement;
+        if (htmlEl && htmlEl.getAttribute('data-theme') === 'dark') {
+          return 'dark';
+        }
+        if (document.body && document.body.classList.contains('dark-mode')) {
+          return 'dark';
+        }
+        return 'light';
+      }
             }
             
             function isDarkMode() {
@@ -1015,7 +1022,7 @@
               if (interfaces.length === 0) {
                 const p = document.createElement('p');
                 p.className = 'text-muted mb-0';
-                p.style.color = window.getNetBoxTextColor ? window.getNetBoxTextColor() : (window.matchMedia('(prefers-color-scheme: dark)').matches ? '#ffffff' : '#212529');
+                p.style.color = window.getNetBoxTextColor ? window.getNetBoxTextColor() : (isDarkMode() ? '#ffffff' : '#212529');
                 p.style.opacity = '1';
                 p.textContent = 'No common interfaces found';
                 container.appendChild(p);
@@ -1036,7 +1043,7 @@
 
                 const label = document.createElement('label');
                 label.className = 'form-check-label';
-                label.style.color = window.getNetBoxTextColor ? window.getNetBoxTextColor() : (window.matchMedia('(prefers-color-scheme: dark)').matches ? '#ffffff' : '#212529');
+                label.style.color = window.getNetBoxTextColor ? window.getNetBoxTextColor() : (isDarkMode() ? '#ffffff' : '#212529');
                 label.htmlFor = `interface_${iface}`;
                 label.textContent = iface;
 
@@ -1058,7 +1065,7 @@
               if (selectedDeviceIds.length === 0) {
                 const p = document.createElement('p');
                 p.className = 'text-muted mb-0';
-                p.style.color = window.getNetBoxTextColor ? window.getNetBoxTextColor() : (window.matchMedia('(prefers-color-scheme: dark)').matches ? '#ffffff' : '#212529');
+                p.style.color = window.getNetBoxTextColor ? window.getNetBoxTextColor() : (isDarkMode() ? '#ffffff' : '#212529');
                 p.style.opacity = '1';
                 p.textContent = 'Select devices first to load interfaces';
                 interfacesContainer.innerHTML = '';
@@ -1069,7 +1076,7 @@
               // Show loading
               const loadingP = document.createElement('p');
               loadingP.className = 'text-muted mb-0';
-              loadingP.style.color = window.matchMedia('(prefers-color-scheme: dark)').matches ? '#ffffff' : '#212529';
+              loadingP.style.color = window.getNetBoxTextColor ? window.getNetBoxTextColor() : (isDarkMode() ? '#ffffff' : '#212529');
               loadingP.style.opacity = '1';
               loadingP.textContent = 'Loading interfaces...';
               interfacesContainer.innerHTML = '';
@@ -1130,7 +1137,7 @@
               if (!siteId || !locationId || !manufacturerId || !roleId) {
                 const p = document.createElement('p');
                 p.className = 'text-muted mb-0';
-                p.style.color = window.getNetBoxTextColor ? window.getNetBoxTextColor() : (window.matchMedia('(prefers-color-scheme: dark)').matches ? '#ffffff' : '#212529');
+                p.style.color = window.getNetBoxTextColor ? window.getNetBoxTextColor() : (isDarkMode() ? '#ffffff' : '#212529');
                 p.style.opacity = '1';
                 p.textContent = 'Select all filters (Site, Location, Manufacturer, Role) to load interfaces';
                 interfacesContainer.innerHTML = '';
@@ -1141,7 +1148,7 @@
               // Show loading
               const loadingP = document.createElement('p');
               loadingP.className = 'text-muted mb-0';
-              loadingP.style.color = window.matchMedia('(prefers-color-scheme: dark)').matches ? '#ffffff' : '#212529';
+              loadingP.style.color = window.getNetBoxTextColor ? window.getNetBoxTextColor() : (isDarkMode() ? '#ffffff' : '#212529');
               loadingP.style.opacity = '1';
               loadingP.textContent = 'Loading interfaces...';
               interfacesContainer.innerHTML = '';
