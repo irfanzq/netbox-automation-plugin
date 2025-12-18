@@ -73,24 +73,7 @@
     color: var(--nbx-color-fg-default, #ffffff) !important; /* White for dark mode */
   }
   
-  @media (prefers-color-scheme: dark) {
-    .card-body .form-label,
-    .card-body label:not(.form-check-label),
-    .card-body .form-check-label,
-    .card-body p,
-    .card-body div.form-text,
-    .card-body span,
-    .card-body small,
-    .card-body h1,
-    .card-body h2,
-    .card-body h3,
-    .card-body h4,
-    .card-body h5,
-    .card-body h6,
-    .card-body .card-title {
-      color: var(--nbx-color-fg-default, #ffffff) !important; /* White for dark mode */
-    }
-  }
+  /* Already covered by html[data-theme="dark"] and body.dark-mode selectors above */
   
   /* Help text and muted text - NO GREY: Black in light, White in dark */
   .card-body .form-text,
@@ -108,21 +91,30 @@
     opacity: 1 !important;
   }
   
-  @media (prefers-color-scheme: dark) {
-    .card-body .form-text,
-    .card-body .text-muted,
-    .card-body p.text-muted,
-    .card-body label.text-muted,
-    .card-body small.text-muted,
-    .form-text,
-    .text-muted,
-    p.text-muted,
-    label.text-muted,
-    small.text-muted,
-    small {
-      color: #ffffff !important; /* White for dark mode */
-      opacity: 1 !important;
-    }
+  html[data-theme="dark"] .card-body .form-text,
+  html[data-theme="dark"] .card-body .text-muted,
+  html[data-theme="dark"] .card-body p.text-muted,
+  html[data-theme="dark"] .card-body label.text-muted,
+  html[data-theme="dark"] .card-body small.text-muted,
+  html[data-theme="dark"] .form-text,
+  html[data-theme="dark"] .text-muted,
+  html[data-theme="dark"] p.text-muted,
+  html[data-theme="dark"] label.text-muted,
+  html[data-theme="dark"] small.text-muted,
+  html[data-theme="dark"] small,
+  body.dark-mode .card-body .form-text,
+  body.dark-mode .card-body .text-muted,
+  body.dark-mode .card-body p.text-muted,
+  body.dark-mode .card-body label.text-muted,
+  body.dark-mode .card-body small.text-muted,
+  body.dark-mode .form-text,
+  body.dark-mode .text-muted,
+  body.dark-mode p.text-muted,
+  body.dark-mode label.text-muted,
+  body.dark-mode small.text-muted,
+  body.dark-mode small {
+    color: #ffffff !important; /* White for dark mode */
+    opacity: 1 !important;
   }
   
   /* Card header text */
@@ -131,11 +123,11 @@
     color: #212529 !important; /* Black for light mode */
   }
   
-  @media (prefers-color-scheme: dark) {
-    .card-header,
-    .card-header * {
-      color: #ffffff !important; /* White for dark mode */
-    }
+  html[data-theme="dark"] .card-header,
+  html[data-theme="dark"] .card-header *,
+  body.dark-mode .card-header,
+  body.dark-mode .card-header * {
+    color: #ffffff !important; /* White for dark mode */
   }
   
   .form-control,
@@ -148,15 +140,18 @@
     border-color: var(--nbx-color-border-input, #ced4da) !important;
   }
   
-  @media (prefers-color-scheme: dark) {
-    .form-control,
-    .form-select,
-    select.form-control,
-    select.form-select,
-    textarea.form-control {
-      background-color: var(--nbx-color-bg-input, #2a2a2a) !important; /* Dark background for dark mode */
-      color: #ffffff !important; /* White for dark mode */
-    }
+  html[data-theme="dark"] .form-control,
+  html[data-theme="dark"] .form-select,
+  html[data-theme="dark"] select.form-control,
+  html[data-theme="dark"] select.form-select,
+  html[data-theme="dark"] textarea.form-control,
+  body.dark-mode .form-control,
+  body.dark-mode .form-select,
+  body.dark-mode select.form-control,
+  body.dark-mode select.form-select,
+  body.dark-mode textarea.form-control {
+    background-color: var(--nbx-color-bg-input, #2a2a2a) !important;
+    color: #ffffff !important; /* White for dark mode */
   }
   
   .form-control::placeholder {
@@ -164,11 +159,10 @@
     opacity: 0.7;
   }
   
-  @media (prefers-color-scheme: dark) {
-    .form-control::placeholder {
-      color: #ffffff !important; /* White for dark mode */
-      opacity: 0.7;
-    }
+  html[data-theme="dark"] .form-control::placeholder,
+  body.dark-mode .form-control::placeholder {
+    color: #ffffff !important; /* White for dark mode */
+    opacity: 0.7;
   }
   
   .form-control:focus,
@@ -181,15 +175,18 @@
     border-color: var(--nbx-color-border-input-focus, #86b7fe) !important;
   }
   
-  @media (prefers-color-scheme: dark) {
-    .form-control:focus,
-    .form-select:focus,
-    select.form-control:focus,
-    select.form-select:focus,
-    textarea.form-control:focus {
-      background-color: var(--nbx-color-bg-input, #2a2a2a) !important; /* Dark background for dark mode */
-      color: #ffffff !important; /* White for dark mode */
-    }
+  html[data-theme="dark"] .form-control:focus,
+  html[data-theme="dark"] .form-select:focus,
+  html[data-theme="dark"] select.form-control:focus,
+  html[data-theme="dark"] select.form-select:focus,
+  html[data-theme="dark"] textarea.form-control:focus,
+  body.dark-mode .form-control:focus,
+  body.dark-mode .form-select:focus,
+  body.dark-mode select.form-control:focus,
+  body.dark-mode select.form-select:focus,
+  body.dark-mode textarea.form-control:focus {
+    background-color: var(--nbx-color-bg-input, #2a2a2a) !important;
+    color: #ffffff !important; /* White for dark mode */
   }
   
   /* Checkbox and radio button styling for dark mode */
@@ -198,10 +195,9 @@
     border-color: var(--nbx-color-border-input, #ced4da) !important;
   }
   
-  @media (prefers-color-scheme: dark) {
-    .form-check-input {
-      background-color: var(--nbx-color-bg-input, #2a2a2a) !important; /* Dark background for dark mode */
-    }
+  html[data-theme="dark"] .form-check-input,
+  body.dark-mode .form-check-input {
+    background-color: var(--nbx-color-bg-input, #2a2a2a) !important;
   }
   
   .form-check-input:checked {
@@ -220,11 +216,10 @@
     color: #212529 !important; /* Black for light mode */
   }
   
-  @media (prefers-color-scheme: dark) {
-    datalist option {
-      background-color: var(--nbx-color-bg-input, #2a2a2a) !important; /* Dark background for dark mode */
-      color: #ffffff !important; /* White for dark mode */
-    }
+  html[data-theme="dark"] datalist option,
+  body.dark-mode datalist option {
+    background-color: var(--nbx-color-bg-input, #2a2a2a) !important;
+    color: #ffffff !important;
   }
   
   /* Select dropdown options */
@@ -233,11 +228,10 @@
     color: #212529 !important; /* Black for light mode */
   }
   
-  @media (prefers-color-scheme: dark) {
-    select option {
-      background-color: var(--nbx-color-bg-input, #2a2a2a) !important; /* Dark background for dark mode */
-      color: #ffffff !important; /* White for dark mode */
-    }
+  html[data-theme="dark"] select option,
+  body.dark-mode select option {
+    background-color: var(--nbx-color-bg-input, #2a2a2a) !important;
+    color: #ffffff !important;
   }
   
   #interfaces-checkbox-container {
@@ -246,11 +240,10 @@
     color: #212529 !important; /* Black for light mode */
   }
   
-  @media (prefers-color-scheme: dark) {
-    #interfaces-checkbox-container {
-      background-color: var(--nbx-color-bg-secondary, #2a2a2a) !important; /* Dark background for dark mode */
-      color: #ffffff !important; /* White for dark mode */
-    }
+  html[data-theme="dark"] #interfaces-checkbox-container,
+  body.dark-mode #interfaces-checkbox-container {
+    background-color: var(--nbx-color-bg-secondary, #2a2a2a) !important;
+    color: #ffffff !important;
   }
   
   /* Ensure all text inside the interfaces container is visible */
@@ -259,11 +252,11 @@
     color: #212529 !important; /* Black for light mode */
   }
   
-  @media (prefers-color-scheme: dark) {
-    #interfaces-checkbox-container,
-    #interfaces-checkbox-container * {
-      color: #ffffff !important; /* White for dark mode */
-    }
+  html[data-theme="dark"] #interfaces-checkbox-container,
+  html[data-theme="dark"] #interfaces-checkbox-container *,
+  body.dark-mode #interfaces-checkbox-container,
+  body.dark-mode #interfaces-checkbox-container * {
+    color: #ffffff !important; /* White for dark mode */
   }
   
   /* Exception for muted text inside container - NO GREY, fully visible */
@@ -273,11 +266,11 @@
     opacity: 1 !important;
   }
   
-  @media (prefers-color-scheme: dark) {
-    #interfaces-checkbox-container .text-muted,
-    #interfaces-checkbox-container p.text-muted {
-      color: #ffffff !important; /* White for dark mode */
-    }
+  html[data-theme="dark"] #interfaces-checkbox-container .text-muted,
+  html[data-theme="dark"] #interfaces-checkbox-container p.text-muted,
+  body.dark-mode #interfaces-checkbox-container .text-muted,
+  body.dark-mode #interfaces-checkbox-container p.text-muted {
+    color: #ffffff !important; /* White for dark mode */
   }
   
   /* Label for "Available Interfaces" section - NO GREY, fully visible */
@@ -286,10 +279,9 @@
     opacity: 1 !important;
   }
   
-  @media (prefers-color-scheme: dark) {
-    label.form-label.text-muted.small {
-      color: #ffffff !important; /* White for dark mode */
-    }
+  html[data-theme="dark"] label.form-label.text-muted.small,
+  body.dark-mode label.form-label.text-muted.small {
+    color: #ffffff !important; /* White for dark mode */
   }
   
   .form-check-label {
@@ -335,31 +327,28 @@
     color: #212529 !important; /* Black for light mode */
   }
   
-  @media (prefers-color-scheme: dark) {
-    #loading-overlay > div {
-      background: var(--nbx-color-bg-default, #2a2a2a) !important; /* Dark background for dark mode */
-      color: #ffffff !important; /* White for dark mode */
-    }
+  html[data-theme="dark"] #loading-overlay > div,
+  body.dark-mode #loading-overlay > div {
+    background: var(--nbx-color-bg-default, #2a2a2a) !important;
+    color: #ffffff !important;
   }
   
   #loading-overlay h4 {
     color: #212529 !important; /* Black for light mode */
   }
   
-  @media (prefers-color-scheme: dark) {
-    #loading-overlay h4 {
-      color: #ffffff !important; /* White for dark mode */
-    }
+  html[data-theme="dark"] #loading-overlay h4,
+  body.dark-mode #loading-overlay h4 {
+    color: #ffffff !important; /* White for dark mode */
   }
   
   #loading-overlay .text-muted {
     color: #212529 !important; /* Black for light mode */
   }
   
-  @media (prefers-color-scheme: dark) {
-    #loading-overlay .text-muted {
-      color: #ffffff !important; /* White for dark mode */
-    }
+  html[data-theme="dark"] #loading-overlay .text-muted,
+  body.dark-mode #loading-overlay .text-muted {
+    color: #ffffff !important; /* White for dark mode */
   }
   
   /* Disabled button styling - NO GREY text */
@@ -371,10 +360,9 @@
     cursor: not-allowed !important;
   }
   
-  @media (prefers-color-scheme: dark) {
-    #deploy-btn:disabled {
-      color: #ffffff !important; /* White for dark mode */
-    }
+  html[data-theme="dark"] #deploy-btn:disabled,
+  body.dark-mode #deploy-btn:disabled {
+    color: #ffffff !important; /* White for dark mode */
   }
 </style>
   <div class="row">
@@ -384,16 +372,9 @@
           <h5 class="card-title mb-0">{% trans "VLAN Deployment" %}</h5>
         </div>
         <div class="card-body">
-          <p class="text-muted" style="color: #212529 !important;">
+          <p class="text-muted" style="color: var(--nbx-color-fg-default) !important;">
             {% trans "Deploy VLAN configurations to network devices and update NetBox interface assignments. Phase 1: Access mode (untagged) only." %}
           </p>
-          <style>
-            @media (prefers-color-scheme: dark) {
-              p.text-muted {
-                color: #ffffff !important; /* White in dark mode */
-              }
-            }
-          </style>
 
           {% if form.non_field_errors %}
             <div class="alert alert-danger" role="alert">
@@ -403,23 +384,12 @@
 
           <!-- Loading overlay -->
           <div id="loading-overlay" style="display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.7); z-index: 9999; align-items: center; justify-content: center;">
-            <div style="background: var(--nbx-color-bg-default, #fff); padding: 30px; border-radius: 8px; text-align: center; max-width: 400px; color: #212529;">
+            <div style="background: var(--nbx-color-bg-default); padding: 30px; border-radius: 8px; text-align: center; max-width: 400px; color: var(--nbx-color-fg-default);">
               <div class="spinner-border text-primary mb-3" role="status" style="width: 3rem; height: 3rem;">
                 <span class="visually-hidden">Loading...</span>
               </div>
-              <h4 style="color: #212529;">Deploying VLAN Configuration...</h4>
-              <p class="text-muted mb-0" style="color: #212529 !important; opacity: 1 !important;">Applying configuration to devices. This may take a minute.</p>
-              <style>
-                @media (prefers-color-scheme: dark) {
-                  #loading-overlay > div {
-                    background: #2a2a2a !important; /* Dark background in dark mode */
-                  }
-                  #loading-overlay h4,
-                  #loading-overlay .text-muted {
-                    color: #ffffff !important; /* White in dark mode */
-                  }
-                }
-              </style>
+              <h4 style="color: var(--nbx-color-fg-default);">Deploying VLAN Configuration...</h4>
+              <p class="text-muted mb-0" style="color: var(--nbx-color-fg-default) !important; opacity: 1 !important;">Applying configuration to devices. This may take a minute.</p>
             </div>
           </div>
 
@@ -510,12 +480,12 @@
 
               {# Field 1: Checkbox list for available interfaces #}
               <div class="mb-2">
-                <label class="form-label text-muted small" style="color: #212529 !important; opacity: 1 !important;">Available Interfaces (select from device)</label>
-                <div id="interfaces-checkbox-container" style="max-height: 200px; overflow-y: auto; border: 1px solid var(--nbx-color-border-default, #dee2e6); padding: 10px; border-radius: 4px; background-color: var(--nbx-color-bg-secondary, #f8f9fa); color: #212529;">
-                  <p class="text-muted mb-0" style="color: #212529 !important; opacity: 1 !important;">Select devices first to load interfaces</p>
+                <label class="form-label text-muted small" style="color: var(--nbx-color-fg-default) !important; opacity: 1 !important;">Available Interfaces (select from device)</label>
+                <div id="interfaces-checkbox-container" style="max-height: 200px; overflow-y: auto; border: 1px solid var(--nbx-color-border-default); padding: 10px; border-radius: 4px; background-color: var(--nbx-color-bg-secondary); color: var(--nbx-color-fg-default);">
+                  <p class="text-muted mb-0" style="color: var(--nbx-color-fg-default) !important; opacity: 1 !important;">Select devices first to load interfaces</p>
                 </div>
                 <style>
-                  @media (prefers-color-scheme: dark) {
+                  /* Use NetBox theme - no media query needed */
                     #interfaces-checkbox-container {
                       background-color: #2a2a2a !important; /* Dark background in dark mode */
                     }
