@@ -7,65 +7,104 @@
 
 {% block content %}
 <style>
-  /* Dark mode compatibility for LLDP Consistency Results */
-  /* FORCE all text: WHITE in dark mode, BLACK in light mode - NO GREY! */
+  /* Dark mode compatible styles - NO GREY TEXT! */
   
-  /* Light mode: Black text */
+  /* Card text - Black in light, White in dark */
   .card-body,
-  .card-body *:not(input):not(select):not(textarea):not(button):not(.form-control):not(.form-select):not(.btn):not(.badge),
-  .card-header,
-  .card-header *,
-  h1, h2, h3, h4, h5, h6,
-  .card-title,
-  dt,
-  dd {
-    color: #212529 !important; /* Pure black for light mode */
+  .card-body *:not(input):not(select):not(textarea):not(button):not(.form-control):not(.form-select):not(.btn):not(.badge) {
+    color: #212529 !important;
   }
   
-  /* Dark mode: White text */
-  @media (prefers-color-scheme: dark) {
-    .card-body,
-    .card-body *:not(input):not(select):not(textarea):not(button):not(.form-control):not(.form-select):not(.btn):not(.badge),
-    .card-header,
-    .card-header *,
-    h1, h2, h3, h4, h5, h6,
-    .card-title,
-    dt,
-    dd {
-      color: #ffffff !important; /* Pure white for dark mode */
-    }
+  html[data-theme="dark"] .card-body,
+  html[data-theme="dark"] .card-body *:not(input):not(select):not(textarea):not(button):not(.form-control):not(.form-select):not(.btn):not(.badge),
+  body.dark-mode .card-body,
+  body.dark-mode .card-body *:not(input):not(select):not(textarea):not(button):not(.form-control):not(.form-select):not(.btn):not(.badge) {
+    color: #ffffff !important;
   }
   
-  /* Help text - NO GREY: Black in light, White in dark */
-  .form-text,
-  .text-muted,
-  small,
-  p.text-muted,
-  label.text-muted,
-  small.text-muted {
-    color: #212529 !important; /* Black for light mode */
+  /* Text elements - NO GREY TEXT! */
+  .card-body .form-label, .card-body label, .card-body p, .card-body div:not(.badge), .card-body span:not(.badge), .card-body small,
+  .card-body h1, .card-body h2, .card-body h3, .card-body h4, .card-body h5, .card-body h6,
+  .card-body .card-title, .card-body dt, .card-body dd,
+  .card-header, .card-header h5, .card-header .card-title {
+    color: #212529 !important;
+  }
+
+  html[data-theme="dark"] .card-body .form-label, html[data-theme="dark"] .card-body label, html[data-theme="dark"] .card-body p,
+  html[data-theme="dark"] .card-body div:not(.badge), html[data-theme="dark"] .card-body span:not(.badge), html[data-theme="dark"] .card-body small,
+  html[data-theme="dark"] .card-body h1, html[data-theme="dark"] .card-body h2, html[data-theme="dark"] .card-body h3,
+  html[data-theme="dark"] .card-body h4, html[data-theme="dark"] .card-body h5, html[data-theme="dark"] .card-body h6,
+  html[data-theme="dark"] .card-body .card-title, html[data-theme="dark"] .card-body dt, html[data-theme="dark"] .card-body dd,
+  html[data-theme="dark"] .card-header, html[data-theme="dark"] .card-header h5, html[data-theme="dark"] .card-header .card-title,
+  body.dark-mode .card-body .form-label, body.dark-mode .card-body label, body.dark-mode .card-body p,
+  body.dark-mode .card-body div:not(.badge), body.dark-mode .card-body span:not(.badge), body.dark-mode .card-body small,
+  body.dark-mode .card-body h1, body.dark-mode .card-body h2, body.dark-mode .card-body h3,
+  body.dark-mode .card-body h4, body.dark-mode .card-body h5, body.dark-mode .card-body h6,
+  body.dark-mode .card-body .card-title, body.dark-mode .card-body dt, body.dark-mode .card-body dd,
+  body.dark-mode .card-header, body.dark-mode .card-header h5, body.dark-mode .card-header .card-title {
+    color: #ffffff !important;
+  }
+  
+  /* text-muted - NO GREY: Black in light, White in dark */
+  .text-muted, p.text-muted, label.text-muted, small.text-muted, td.text-muted, span.text-muted {
+    color: #212529 !important;
     opacity: 1 !important;
   }
   
-  @media (prefers-color-scheme: dark) {
-    .form-text,
-    .text-muted,
-    small,
-    p.text-muted,
-    label.text-muted,
-    small.text-muted {
-      color: #ffffff !important; /* White for dark mode */
-      opacity: 1 !important;
-    }
+  html[data-theme="dark"] .text-muted, html[data-theme="dark"] p.text-muted, html[data-theme="dark"] label.text-muted,
+  html[data-theme="dark"] small.text-muted, html[data-theme="dark"] td.text-muted, html[data-theme="dark"] span.text-muted,
+  body.dark-mode .text-muted, body.dark-mode p.text-muted, body.dark-mode label.text-muted,
+  body.dark-mode small.text-muted, body.dark-mode td.text-muted, body.dark-mode span.text-muted {
+    color: #ffffff !important;
+    opacity: 1 !important;
   }
   
-  .table {
-    color: var(--nbx-color-fg-default, #212529) !important;
+  /* Table text */
+  .table, .table td, .table th {
+    color: #212529 !important;
   }
   
-  .table td,
-  .table th {
-    color: var(--nbx-color-fg-default, #212529) !important;
+  html[data-theme="dark"] .table, html[data-theme="dark"] .table td, html[data-theme="dark"] .table th,
+  body.dark-mode .table, body.dark-mode .table td, body.dark-mode .table th {
+    color: #ffffff !important;
+  }
+  
+  /* Colored text - brighter in dark mode */
+  .text-success { color: #198754 !important; }
+  html[data-theme="dark"] .text-success, body.dark-mode .text-success { color: #75d175 !important; }
+  
+  .text-info { color: #0dcaf0 !important; }
+  html[data-theme="dark"] .text-info, body.dark-mode .text-info { color: #6ec9f0 !important; }
+  
+  .text-danger { color: #dc3545 !important; }
+  html[data-theme="dark"] .text-danger, body.dark-mode .text-danger { color: #ff6b7a !important; }
+  
+  .text-warning { color: #856404 !important; }
+  html[data-theme="dark"] .text-warning, body.dark-mode .text-warning { color: #ffd966 !important; }
+  
+  /* Badges */
+  .badge { color: #ffffff !important; }
+  .badge.bg-warning { color: #000000 !important; }
+  
+  /* Filter buttons - proper visibility with filled dot when active */
+  .btn-outline-primary {
+    color: #0d6efd !important;
+    border-color: #0d6efd !important;
+    background-color: transparent !important;
+  }
+  
+  html[data-theme="dark"] .btn-outline-primary,
+  body.dark-mode .btn-outline-primary {
+    color: #4da6ff !important;
+    border-color: #4da6ff !important;
+  }
+  
+  .btn-outline-primary.active,
+  .btn-primary.active,
+  .btn-primary {
+    background-color: #0d6efd !important;
+    border-color: #0d6efd !important;
+    color: #ffffff !important;
   }
 </style>
   <div class="row mb-3">

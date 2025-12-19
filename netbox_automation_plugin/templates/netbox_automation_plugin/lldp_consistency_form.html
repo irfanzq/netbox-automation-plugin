@@ -298,21 +298,23 @@
   }
   
   /* Loading overlay - use NetBox CSS variables */
-  #loading-overlay {
-    background: rgba(0, 0, 0, 0.7) !important;
-  }
-  
-  #loading-overlay > div {
-    background: var(--nbx-color-bg-default) !important;
-    color: var(--nbx-color-fg-default) !important;
-  }
-  
+  /* Loading overlay - dark mode compatible */
   #loading-overlay h4 {
-    color: var(--nbx-color-fg-default) !important;
+    color: #212529 !important; /* Black for light mode */
   }
-  
-  #loading-overlay .text-muted {
-    color: var(--nbx-color-fg-default) !important;
+
+  html[data-theme="dark"] #loading-overlay h4,
+  body.dark-mode #loading-overlay h4 {
+    color: #ffffff !important; /* White for dark mode */
+  }
+
+  #loading-overlay p {
+    color: #212529 !important; /* Black for light mode */
+  }
+
+  html[data-theme="dark"] #loading-overlay p,
+  body.dark-mode #loading-overlay p {
+    color: #ffffff !important; /* White for dark mode */
   }
 </style>
   <div class="row">

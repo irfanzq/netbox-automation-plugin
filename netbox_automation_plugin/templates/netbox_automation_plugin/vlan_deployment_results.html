@@ -465,27 +465,16 @@
 
   /* Bulk action buttons (Expand All / Collapse All) */
   #bulk-action-buttons .btn {
-    color: var(--nbx-color-fg-default) !important;
-    background-color: var(--nbx-color-bg-subtle) !important;
-    border-color: var(--nbx-color-border-default) !important;
-  }
-
-  #bulk-action-buttons .btn:hover {
-    background-color: var(--nbx-color-bg-hover) !important;
-    border-color: var(--nbx-color-border-hover) !important;
+    color: #212529 !important; /* Dark text for light mode */
+    background-color: #f8f9fa !important; /* Light background */
+    border-color: #dee2e6 !important;
   }
 
   html[data-theme="dark"] #bulk-action-buttons .btn,
   body.dark-mode #bulk-action-buttons .btn {
-    color: var(--nbx-color-fg-default) !important;
-    background-color: var(--nbx-color-bg-subtle) !important;
-    border-color: var(--nbx-color-border-default) !important;
-  }
-
-  html[data-theme="dark"] #bulk-action-buttons .btn:hover,
-  body.dark-mode #bulk-action-buttons .btn:hover {
-    background-color: var(--nbx-color-bg-hover) !important;
-    border-color: var(--nbx-color-border-hover) !important;
+    color: #ffffff !important; /* White text for dark mode */
+    background-color: #343a40 !important; /* Dark background */
+    border-color: #495057 !important;
   }
 </style>
   <div class="row mb-3">
@@ -577,10 +566,10 @@
               </button>
             </div>
             <div class="btn-group btn-group-sm me-2" role="group" id="bulk-action-buttons">
-              <button type="button" class="btn btn-outline-secondary" id="expand-all-btn" title="Expand all details">
+              <button type="button" class="btn" id="expand-all-btn" title="Expand all deployment log details">
                 <i class="mdi mdi-unfold-more-horizontal"></i> Expand All
               </button>
-              <button type="button" class="btn btn-outline-secondary" id="collapse-all-btn" title="Collapse all details">
+              <button type="button" class="btn" id="collapse-all-btn" title="Collapse all deployment log details">
                 <i class="mdi mdi-unfold-less-horizontal"></i> Collapse All
               </button>
             </div>
