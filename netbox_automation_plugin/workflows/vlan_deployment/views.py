@@ -3,7 +3,6 @@ from django.views import View
 from django.http import HttpResponse, JsonResponse
 from django.utils.translation import gettext_lazy as _
 from django.db import transaction
-from django.core.exceptions import ValidationError
 
 from dcim.models import Device, Interface
 from ipam.models import VLAN
@@ -52,8 +51,7 @@ class VLANDeploymentView(View):
         # Get devices based on scope
         devices = self._get_devices(form.cleaned_data)
         if not devices:
-            # Wrap in ValidationError list to prevent string formatting issues
-            form.add_error(None, ValidationError([_("No devices found matching the selection (with primary IP).")]))
+            form.add_error(None, _("No devices found matching the selection (with primary IP)."))
             return render(request, self.template_name_form, {"form": form})
 
         # Filter out excluded devices (only applies to Group mode)
@@ -65,8 +63,7 @@ class VLANDeploymentView(View):
             logger.info(f"Excluded {len(excluded_devices)} devices. Remaining: {len(devices)} devices for deployment")
             
             if not devices:
-                # Wrap in ValidationError list to prevent string formatting issues
-                form.add_error(None, ValidationError([_("All devices were excluded. Please select at least one device for deployment.")]))
+                form.add_error(None, _("All devices were excluded. Please select at least one device for deployment."))
                 return render(request, self.template_name_form, {"form": form})
 
         # Additional tag validation before deployment (even for dry run, to show warnings)
@@ -76,11 +73,8 @@ class VLANDeploymentView(View):
             # For actual deployment, do a final check
             validation_errors = self._validate_tags_before_deployment(devices, form.cleaned_data.get('combined_interfaces', []))
             if validation_errors:
-                # Wrap each error string in ValidationError list to prevent Django from trying to format it
-                # This avoids "unexpected '{' in field name" errors when error messages contain curly braces
-                # Passing as a list tells Django not to interpret the string as a format string
                 for error in validation_errors:
-                    form.add_error(None, ValidationError([error]))
+                    form.add_error(None, error)
                 return render(request, self.template_name_form, {"form": form})
 
         # Run deployment

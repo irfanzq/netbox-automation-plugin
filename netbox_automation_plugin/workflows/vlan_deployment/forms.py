@@ -268,10 +268,9 @@ class VLANDeploymentForm(forms.Form):
                     errors.append(error_msg)
 
         if errors:
-            # Wrap each error in ValidationError to prevent format string issues
-            # This ensures Django doesn't try to format strings containing curly braces
-            error_list = [forms.ValidationError(err) for err in errors]
-            raise forms.ValidationError(error_list)
+            # Join errors into a single string - this is the safest approach
+            # Django doesn't try to format single strings, only lists
+            raise forms.ValidationError("\n".join(errors))
     
     def _validate_tags_and_interfaces(self, devices, interface_list, cleaned_data, blocking=True):
         """
@@ -420,26 +419,12 @@ class VLANDeploymentForm(forms.Form):
         
         # Raise blocking errors if any (only if blocking=True)
         if blocking_errors and blocking:
-            # Format error messages with dashes - all are already strings
-            formatted_errors = []
-            for err in blocking_errors:
-                formatted_errors.append("- " + str(err))
-
-            # Combine with header
+            # Build error message as a single string - this is the safest approach
+            # Django doesn't try to format single strings, only lists
+            error_msg = "The following issues must be resolved before deployment:\n\n" + "\n".join("• " + str(err) for err in blocking_errors)
             if warnings:
-                # Format warning messages
-                formatted_warnings = []
-                for warn in warnings:
-                    formatted_warnings.append("- " + str(warn))
-                # Create a list with header and errors/warnings
-                all_messages = ["The following issues must be resolved before deployment:"] + formatted_errors + ["", "Warnings:"] + formatted_warnings
-            else:
-                all_messages = ["The following issues must be resolved before deployment:"] + formatted_errors
-
-            # Wrap each message in ValidationError to prevent format string issues
-            # This ensures Django doesn't try to format strings containing curly braces
-            error_list = [forms.ValidationError(msg) for msg in all_messages]
-            raise forms.ValidationError(error_list)
+                error_msg += "\n\nWarnings:\n" + "\n".join("⚠ " + str(warn) for warn in warnings)
+            raise forms.ValidationError(error_msg)
         
         # Store warnings and blocking errors for display (for dry run mode)
         if warnings or (blocking_errors and not blocking):

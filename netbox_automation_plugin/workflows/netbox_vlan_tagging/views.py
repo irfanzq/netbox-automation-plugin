@@ -4,7 +4,6 @@ from django.http import HttpResponse, JsonResponse
 from django.utils.translation import gettext_lazy as _
 from django.db import transaction
 from django.db.models import Q
-from django.core.exceptions import ValidationError
 
 from dcim.models import Device, Interface
 from extras.models import Tag
@@ -62,8 +61,7 @@ class VLANTaggingView(View):
                 )
             
             if not devices:
-                # Wrap in ValidationError list to prevent string formatting issues
-                form.add_error(None, ValidationError([_("No devices found matching the selected criteria.")]))
+                form.add_error(None, _("No devices found matching the selected criteria."))
                 return render(request, self.template_name_form, {"form": form})
             
             if workflow_mode == 'analysis':
@@ -90,8 +88,7 @@ class VLANTaggingView(View):
                     delete_interface_tags = form.cleaned_data.get('delete_interface_tags', False)
                     
                     if not (delete_device_tags or delete_interface_tags):
-                        # Wrap in ValidationError list to prevent string formatting issues
-                        form.add_error(None, ValidationError([_("Please select at least one deletion option (Delete Device Tags or Delete Interface Tags).")]))
+                        form.add_error(None, _("Please select at least one deletion option (Delete Device Tags or Delete Interface Tags)."))
                         return render(request, self.template_name_form, {"form": form})
                 else:
                     # Deploy mode: only process tagging
@@ -101,8 +98,7 @@ class VLANTaggingView(View):
                     delete_interface_tags = False
                     
                     if not (tag_devices or tag_interfaces):
-                        # Wrap in ValidationError list to prevent string formatting issues
-                        form.add_error(None, ValidationError([_("Please select at least one tagging option (Tag Devices or Tag Interfaces).")]))
+                        form.add_error(None, _("Please select at least one tagging option (Tag Devices or Tag Interfaces)."))
                         return render(request, self.template_name_form, {"form": form})
                 
                 # Run analysis first (needed for tagging, and useful for deletion preview)
@@ -157,15 +153,13 @@ class VLANTaggingView(View):
                 except Exception as e:
                     logger.error(f"Error applying/deleting tags: {e}")
                     logger.error(traceback.format_exc())
-                    # Wrap in ValidationError list to prevent string formatting issues
-                    form.add_error(None, ValidationError([_(f"Error applying/deleting tags: {str(e)}")]))
+                    form.add_error(None, _(f"Error applying/deleting tags: {str(e)}"))
                     return render(request, self.template_name_form, {"form": form})
 
         except Exception as e:
             logger.error(f"VLAN Tagging workflow error: {e}")
             logger.error(traceback.format_exc())
-            # Wrap in ValidationError list to prevent string formatting issues
-            form.add_error(None, ValidationError([_(f"Error: {str(e)}")]))
+            form.add_error(None, _(f"Error: {str(e)}"))
             return render(request, self.template_name_form, {"form": form})
 
     def _get_devices_from_filters(self, site, location, role, manufacturer):

@@ -2,7 +2,6 @@ from django.http import HttpResponse
 from django.shortcuts import render
 from django.views import View
 from django.utils.translation import gettext_lazy as _
-from django.core.exceptions import ValidationError
 from datetime import datetime
 
 from dcim.models import Device, Interface, FrontPort, RearPort
@@ -42,8 +41,7 @@ class LLDPConsistencyCheckView(View):
             else:
                 # No cached results, show error on form
                 form = LLDPConsistencyCheckForm()
-                # Wrap in ValidationError list to prevent string formatting issues
-                form.add_error(None, ValidationError([_("Results expired. Please run the check again.")]))
+                form.add_error(None, _("Results expired. Please run the check again."))
                 return render(request, self.template_name_form, {"form": form})
 
         # Normal form submission - validate the form
@@ -62,14 +60,12 @@ class LLDPConsistencyCheckView(View):
         )
 
         if not has_selection:
-            # Wrap in ValidationError list to prevent string formatting issues
-            form.add_error(None, ValidationError([_("Please select at least one filter (Manufacturer, Site, Role, or Status) or choose specific devices.")]))
+            form.add_error(None, _("Please select at least one filter (Manufacturer, Site, Role, or Status) or choose specific devices."))
             return render(request, self.template_name_form, {"form": form})
 
         devices = self._get_devices(form.cleaned_data)
         if not devices:
-            # Wrap in ValidationError list to prevent string formatting issues
-            form.add_error(None, ValidationError([_("No devices found matching the selection (with primary IP).")]))
+            form.add_error(None, _("No devices found matching the selection (with primary IP)."))
             return render(request, self.template_name_form, {"form": form})
 
         # Run the consistency check (only on initial form submission)
