@@ -268,9 +268,9 @@ class VLANDeploymentForm(forms.Form):
                     errors.append(error_msg)
 
         if errors:
-            # Join errors into a single string - this is the safest approach
-            # Django doesn't try to format single strings, only lists
-            raise forms.ValidationError("\n".join(errors))
+            # Escape curly braces by doubling them to prevent format string errors
+            escaped_errors = [err.replace('{', '{{').replace('}', '}}') for err in errors]
+            raise forms.ValidationError("\n".join(escaped_errors))
     
     def _validate_tags_and_interfaces(self, devices, interface_list, cleaned_data, blocking=True):
         """
@@ -419,11 +419,12 @@ class VLANDeploymentForm(forms.Form):
         
         # Raise blocking errors if any (only if blocking=True)
         if blocking_errors and blocking:
-            # Build error message as a single string - this is the safest approach
-            # Django doesn't try to format single strings, only lists
-            error_msg = "The following issues must be resolved before deployment:\n\n" + "\n".join("• " + str(err) for err in blocking_errors)
+            # Escape curly braces by doubling them to prevent format string errors
+            escaped_errors = ["• " + str(err).replace('{', '{{').replace('}', '}}') for err in blocking_errors]
+            error_msg = "The following issues must be resolved before deployment:\n\n" + "\n".join(escaped_errors)
             if warnings:
-                error_msg += "\n\nWarnings:\n" + "\n".join("⚠ " + str(warn) for warn in warnings)
+                escaped_warnings = ["⚠ " + str(warn).replace('{', '{{').replace('}', '}}') for warn in warnings]
+                error_msg += "\n\nWarnings:\n" + "\n".join(escaped_warnings)
             raise forms.ValidationError(error_msg)
         
         # Store warnings and blocking errors for display (for dry run mode)
