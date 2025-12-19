@@ -9,6 +9,8 @@ __pycache__/
 venv/
 env/
 ENV/
+test_venv/
+*_venv/
 
 # IDE
 .idea/
@@ -25,3 +27,13 @@ Thumbs.db
 *.log
 *.pid
 
+# Test/analysis files
+analyze_*.py
+check_*.py
+test_*.py
+*_test.html
+color_test.html
+dark_mode_preview.html
+*.md.backup
+RUN_*.md
+VLAN_*.md
