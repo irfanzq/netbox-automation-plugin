@@ -1,6 +1,7 @@
 import django_tables2 as tables
 from django.utils.translation import gettext_lazy as _
 from django.utils.html import format_html
+from django.utils.safestring import mark_safe
 
 from dcim.models import Device, Interface
 from netbox.tables import NetBoxTable, columns
@@ -161,21 +162,23 @@ class VLANDeploymentResultTable(NetBoxTable):
             status_filter = 'pass'
 
         # Format logs with line breaks and proper styling
-        formatted_logs = value.replace('\n', '<br>')
+        # Escape HTML in logs to prevent XSS, but preserve our <br> tags
+        import html as html_module
+        escaped_logs = html_module.escape(value).replace('\n', '<br>')
         line_count = len(value.split('\n'))
 
-        # Use string concatenation instead of f-strings to avoid issues with curly braces in logs
+        # Use mark_safe instead of format_html to avoid issues with curly braces in logs
         html = (
-            '<details class="deployment-logs" data-status-filter="' + status_filter + '">'
+            '<details class="deployment-logs" data-status-filter="' + html_module.escape(status_filter) + '">'
             '<summary style="cursor: pointer; color: var(--nbx-color-fg-link, #0066cc); font-weight: bold;">'
             'View Details (' + str(line_count) + ' lines)'
             '</summary>'
             '<div style="margin-top: 10px; padding: 10px; background-color: var(--nbx-color-bg-secondary, #f5f5f5); color: #212529; border-left: 3px solid var(--nbx-color-border-primary, #0066cc); font-family: monospace; font-size: 12px; max-height: 400px; overflow-y: auto;">'
-            + formatted_logs +
+            + escaped_logs +
             '</div>'
             '<style>'
             '@media (prefers-color-scheme: dark) {'
-            '.deployment-logs[data-status-filter="' + status_filter + '"] div {'
+            '.deployment-logs[data-status-filter="' + html_module.escape(status_filter) + '"] div {'
             'background-color: #2a2a2a !important; /* Dark background in dark mode */'
             'color: #ffffff !important; /* White in dark mode */'
             '}'
@@ -183,7 +186,7 @@ class VLANDeploymentResultTable(NetBoxTable):
             '</style>'
             '</details>'
         )
-        return format_html(html)
+        return mark_safe(html)
     
     def render_deployment_logs(self, value):
         """Render deployment logs as expandable HTML with proper formatting."""
@@ -192,20 +195,22 @@ class VLANDeploymentResultTable(NetBoxTable):
 
         # Create expandable log section with unique ID
         import hashlib
+        import html as html_module
         log_id = hashlib.md5(str(value).encode()).hexdigest()[:8]
 
         # Format logs with line breaks and proper styling
-        formatted_logs = value.replace('\n', '<br>')
+        # Escape HTML in logs to prevent XSS, but preserve our <br> tags
+        escaped_logs = html_module.escape(value).replace('\n', '<br>')
         line_count = len(value.split('\n'))
 
-        # Use string concatenation instead of f-strings to avoid issues with curly braces in logs
+        # Use mark_safe instead of format_html to avoid issues with curly braces in logs
         html = (
             '<details class="deployment-logs">'
             '<summary style="cursor: pointer; color: var(--nbx-color-fg-link, #0066cc); font-weight: bold;">'
             'View Detailed Logs (' + str(line_count) + ' lines)'
             '</summary>'
             '<div style="margin-top: 10px; padding: 10px; background-color: var(--nbx-color-bg-secondary, #f5f5f5); color: #212529; border-left: 3px solid var(--nbx-color-border-primary, #0066cc); font-family: monospace; font-size: 12px; max-height: 400px; overflow-y: auto;">'
-            + formatted_logs +
+            + escaped_logs +
             '</div>'
             '<style>'
             '@media (prefers-color-scheme: dark) {'
@@ -216,7 +221,7 @@ class VLANDeploymentResultTable(NetBoxTable):
             '</style>'
             '</details>'
         )
-        return format_html(html)
+        return mark_safe(html)
 
     class Meta(NetBoxTable.Meta):
         model = Interface
