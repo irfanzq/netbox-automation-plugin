@@ -266,10 +266,14 @@
           const textColor = darkMode ? '#ffffff' : '#212529';
           const bgColor = darkMode ? '#2a2a2a' : '#f5f5f5';
 
-          // Apply to all text elements in card-body (excluding badges)
+          // Apply to all text elements in card-body (excluding badges and colored text classes)
           document.querySelectorAll('.card-body p, .card-body label, .card-body span:not(.badge), .card-body small, .card-body div:not(.badge), .card-body .form-text, .card-body .text-muted, .card-body h1, .card-body h2, .card-body h3, .card-body h4, .card-body h5, .card-body h6, .card-body dt, .card-body dd').forEach(el => {
-            // Skip badges
-            if (!el.classList.contains('badge')) {
+            // Skip badges and colored text classes (they have their own styling)
+            if (!el.classList.contains('badge') && 
+                !el.classList.contains('text-success') && 
+                !el.classList.contains('text-info') && 
+                !el.classList.contains('text-danger') && 
+                !el.classList.contains('text-warning')) {
               el.style.setProperty('color', textColor, 'important');
               if (el.classList.contains('text-muted') || el.classList.contains('form-text')) {
                 el.style.setProperty('opacity', '1', 'important');
@@ -304,27 +308,20 @@
             el.style.setProperty('color', textColor, 'important');
           });
 
-          // Apply to summary section (dt/dd) - override Bootstrap color classes
+          // Apply to summary section (dt/dd) - preserve color classes in both modes
           document.querySelectorAll('dt, dd').forEach(el => {
-            // Don't override if it has a specific color class, but make it brighter in dark mode
-            if (darkMode) {
-              if (el.classList.contains('text-success')) {
-                el.style.setProperty('color', '#75d175', 'important');
-              } else if (el.classList.contains('text-info')) {
-                el.style.setProperty('color', '#6ec9f0', 'important');
-              } else if (el.classList.contains('text-danger')) {
-                el.style.setProperty('color', '#ff6b7a', 'important');
-              } else if (el.classList.contains('text-warning')) {
-                el.style.setProperty('color', '#ffd966', 'important');
-              } else {
-                el.style.setProperty('color', textColor, 'important');
-              }
+            // Apply appropriate colors based on color classes in both light and dark mode
+            if (el.classList.contains('text-success')) {
+              el.style.setProperty('color', darkMode ? '#75d175' : '#198754', 'important');
+            } else if (el.classList.contains('text-info')) {
+              el.style.setProperty('color', darkMode ? '#6ec9f0' : '#0dcaf0', 'important');
+            } else if (el.classList.contains('text-danger')) {
+              el.style.setProperty('color', darkMode ? '#ff6b7a' : '#dc3545', 'important');
+            } else if (el.classList.contains('text-warning')) {
+              el.style.setProperty('color', darkMode ? '#ffd966' : '#856404', 'important');
             } else {
-              // Light mode - use default colors or black
-              if (!el.classList.contains('text-success') && !el.classList.contains('text-info') &&
-                  !el.classList.contains('text-danger') && !el.classList.contains('text-warning')) {
-                el.style.setProperty('color', textColor, 'important');
-              }
+              // No color class - use default text color
+              el.style.setProperty('color', textColor, 'important');
             }
           });
 
