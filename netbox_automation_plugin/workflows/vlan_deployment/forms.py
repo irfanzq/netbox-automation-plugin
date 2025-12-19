@@ -261,16 +261,12 @@ class VLANDeploymentForm(forms.Form):
 
             for iface_name in interface_list:
                 if iface_name not in device_interfaces:
-                    # Use string concatenation to avoid any format string issues
-                    device_name = str(device.name)
-                    iface_name_str = str(iface_name)
-                    error_msg = "Interface '" + iface_name_str + "' does not exist on device '" + device_name + "'"
-                    errors.append(error_msg)
+                    errors.append(
+                        f"Interface '{iface_name}' does not exist on device '{device.name}'"
+                    )
 
         if errors:
-            # Escape curly braces by doubling them to prevent format string errors
-            escaped_errors = [err.replace('{', '{{').replace('}', '}}') for err in errors]
-            raise forms.ValidationError("\n".join(escaped_errors))
+            raise forms.ValidationError(errors)
     
     def _validate_tags_and_interfaces(self, devices, interface_list, cleaned_data, blocking=True):
         """
@@ -323,10 +319,10 @@ class VLANDeploymentForm(forms.Form):
             
             # Check device tag (BLOCKING)
             if device_tag and device_tag not in device_tags:
-                # Format immediately to ensure no curly braces remain
-                device_name = str(device.name)
-                error_msg = "Device '" + device_name + "' is not tagged as 'automation-ready:vlan'. Please run the Tagging Workflow first to tag this device."
-                blocking_errors.append(error_msg)
+                blocking_errors.append(
+                    f"Device '{device.name}' is not tagged as 'automation-ready:vlan'. "
+                    f"Please run the Tagging Workflow first to tag this device."
+                )
             
             # Validate each interface on this device
             for iface_name in interface_list:
@@ -339,42 +335,36 @@ class VLANDeploymentForm(forms.Form):
                     # CRITICAL CHECK: Interface with IP address is a routed port (BLOCKING)
                     # This must be checked BEFORE tag checks, as IP address is a stronger signal
                     if interface.ip_addresses.exists():
-                        device_name = str(device.name)
-                        iface_name_str = str(iface_name)
-                        error_msg = "Interface '" + iface_name_str + "' on device '" + device_name + "' has IP address configured (routed port) - cannot apply VLAN configuration to routed interfaces."
-                        blocking_errors.append(error_msg)
+                        blocking_errors.append(
+                            f"Interface '{iface_name}' on device '{device.name}' has IP address configured (routed port) - cannot apply VLAN configuration to routed interfaces."
+                        )
                         continue  # Skip further checks for this interface
                     
                     # Check for blocking tags (BLOCKING)
                     if interface_tags.get('uplink') and interface_tags['uplink'].name in interface_tag_names_list:
-                        device_name = str(device.name)
-                        iface_name_str = str(iface_name)
-                        error_msg = "Interface '" + iface_name_str + "' on device '" + device_name + "' is marked as 'vlan-mode:uplink' - cannot modify uplink interfaces."
-                        blocking_errors.append(error_msg)
+                        blocking_errors.append(
+                            f"Interface '{iface_name}' on device '{device.name}' is marked as 'vlan-mode:uplink' - cannot modify uplink interfaces."
+                        )
                         continue  # Skip further checks for this interface
                     
                     if interface_tags.get('routed') and interface_tags['routed'].name in interface_tag_names_list:
-                        device_name = str(device.name)
-                        iface_name_str = str(iface_name)
-                        error_msg = "Interface '" + iface_name_str + "' on device '" + device_name + "' is marked as 'vlan-mode:routed' - cannot modify routed interfaces."
-                        blocking_errors.append(error_msg)
+                        blocking_errors.append(
+                            f"Interface '{iface_name}' on device '{device.name}' is marked as 'vlan-mode:routed' - cannot modify routed interfaces."
+                        )
                         continue  # Skip further checks for this interface
                     
                     # Check for port-channel membership (BLOCKING)
                     if hasattr(interface, 'lag') and interface.lag:
-                        device_name = str(device.name)
-                        iface_name_str = str(iface_name)
-                        lag_name = str(interface.lag.name)
-                        error_msg = "Interface '" + iface_name_str + "' on device '" + device_name + "' is a port-channel member - configure on port-channel '" + lag_name + "' instead."
-                        blocking_errors.append(error_msg)
+                        blocking_errors.append(
+                            f"Interface '{iface_name}' on device '{device.name}' is a port-channel member - configure on port-channel '{interface.lag.name}' instead."
+                        )
                         continue  # Skip further checks for this interface
                     
                     # Check if cabled (BLOCKING)
                     if not interface.cable:
-                        device_name = str(device.name)
-                        iface_name_str = str(iface_name)
-                        error_msg = "Interface '" + iface_name_str + "' on device '" + device_name + "' is not cabled in NetBox - please add cable information first."
-                        blocking_errors.append(error_msg)
+                        blocking_errors.append(
+                            f"Interface '{iface_name}' on device '{device.name}' is not cabled in NetBox - please add cable information first."
+                        )
                         continue  # Skip further checks for this interface
                     
                     # Check connected device status (BLOCKING)
@@ -384,12 +374,10 @@ class VLANDeploymentForm(forms.Form):
                             endpoint = endpoints[0]
                             connected_device = endpoint.device
                             if connected_device.status in ['offline', 'decommissioning']:
-                                device_name = str(device.name)
-                                iface_name_str = str(iface_name)
-                                connected_name = str(connected_device.name)
-                                connected_status = str(connected_device.status)
-                                error_msg = "Interface '" + iface_name_str + "' on device '" + device_name + "' is connected to device '" + connected_name + "' with status '" + connected_status + "' - cannot configure VLAN."
-                                blocking_errors.append(error_msg)
+                                blocking_errors.append(
+                                    f"Interface '{iface_name}' on device '{device.name}' is connected to device '{connected_device.name}' "
+                                    f"with status '{connected_device.status}' - cannot configure VLAN."
+                                )
                                 continue  # Skip further checks for this interface
                     except Exception as e:
                         # If we can't get endpoints, log but don't block (cable exists)
@@ -399,32 +387,28 @@ class VLANDeploymentForm(forms.Form):
                     
                     # Check for warning conditions
                     if interface_tags.get('needs-review') and interface_tags['needs-review'].name in interface_tag_names_list:
-                        device_name = str(device.name)
-                        iface_name_str = str(iface_name)
-                        warning_msg = "Interface '" + iface_name_str + "' on device '" + device_name + "' is marked as 'vlan-mode:needs-review' - please review in Tagging Workflow first. Proceeding anyway."
-                        warnings.append(warning_msg)
+                        warnings.append(
+                            f"Interface '{iface_name}' on device '{device.name}' is marked as 'vlan-mode:needs-review' - "
+                            f"please review in Tagging Workflow first. Proceeding anyway."
+                        )
                     elif interface_tags.get('access') and interface_tags['access'].name not in interface_tag_names_list:
                         # Interface is not tagged as access-ready but passes other checks
-                        device_name = str(device.name)
-                        iface_name_str = str(iface_name)
-                        warning_msg = "Interface '" + iface_name_str + "' on device '" + device_name + "' is not tagged as 'vlan-mode:access' - may have conflicts. Consider running Tagging Workflow to tag this interface."
-                        warnings.append(warning_msg)
+                        warnings.append(
+                            f"Interface '{iface_name}' on device '{device.name}' is not tagged as 'vlan-mode:access' - "
+                            f"may have conflicts. Consider running Tagging Workflow to tag this interface."
+                        )
                 
                 except Interface.DoesNotExist:
                     # Interface doesn't exist - this should have been caught earlier, but handle gracefully
-                    device_name = str(device.name)
-                    iface_name_str = str(iface_name)
-                    error_msg = "Interface '" + iface_name_str + "' does not exist on device '" + device_name + "'"
-                    blocking_errors.append(error_msg)
+                    blocking_errors.append(
+                        f"Interface '{iface_name}' does not exist on device '{device.name}'"
+                    )
         
         # Raise blocking errors if any (only if blocking=True)
         if blocking_errors and blocking:
-            # Escape curly braces by doubling them to prevent format string errors
-            escaped_errors = ["• " + str(err).replace('{', '{{').replace('}', '}}') for err in blocking_errors]
-            error_msg = "The following issues must be resolved before deployment:\n\n" + "\n".join(escaped_errors)
+            error_msg = "The following issues must be resolved before deployment:\n\n" + "\n".join(f"• {err}" for err in blocking_errors)
             if warnings:
-                escaped_warnings = ["⚠ " + str(warn).replace('{', '{{').replace('}', '}}') for warn in warnings]
-                error_msg += "\n\nWarnings:\n" + "\n".join(escaped_warnings)
+                error_msg += "\n\nWarnings:\n" + "\n".join(f"⚠ {warn}" for warn in warnings)
             raise forms.ValidationError(error_msg)
         
         # Store warnings and blocking errors for display (for dry run mode)
