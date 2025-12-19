@@ -522,12 +522,15 @@
     color: #ffffff !important; /* White for dark mode */
   }
   
-  #loading-overlay .text-muted {
+  #loading-overlay .text-muted,
+  #loading-overlay p {
     color: #212529 !important; /* Black for light mode */
   }
   
   html[data-theme="dark"] #loading-overlay .text-muted,
-  body.dark-mode #loading-overlay .text-muted {
+  html[data-theme="dark"] #loading-overlay p,
+  body.dark-mode #loading-overlay .text-muted,
+  body.dark-mode #loading-overlay p {
     color: #ffffff !important; /* White for dark mode */
   }
   
