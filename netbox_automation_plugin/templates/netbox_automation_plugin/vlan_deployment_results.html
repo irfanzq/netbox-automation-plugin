@@ -107,18 +107,29 @@
     color: #ffffff !important;
   }
   
-  /* Bulk action buttons (Expand All / Collapse All) - FIXED for light mode */
+  /* Bulk action buttons (Expand All / Collapse All) - Light grey background with dark text */
   #bulk-action-buttons .btn {
-    color: #212529 !important; /* Dark text for light mode */
-    background-color: #e9ecef !important; /* Light grey background */
-    border-color: #ced4da !important;
+    color: var(--nbx-color-fg-default, #212529) !important; /* Dark text for readability */
+    background-color: var(--nbx-color-bg-secondary, #e9ecef) !important; /* Light grey background */
+    border-color: var(--nbx-color-border-default, #ced4da) !important;
   }
 
+  /* In dark mode, keep light grey background but use dark text for contrast */
   html[data-theme="dark"] #bulk-action-buttons .btn,
   body.dark-mode #bulk-action-buttons .btn {
-    color: #ffffff !important; /* White text for dark mode */
-    background-color: #495057 !important; /* Dark background */
-    border-color: #6c757d !important;
+    color: var(--nbx-color-fg-default, #212529) !important; /* Dark text on light grey background */
+    background-color: var(--nbx-color-bg-secondary, #e9ecef) !important; /* Light grey background */
+    border-color: var(--nbx-color-border-default, #ced4da) !important;
+  }
+  
+  /* Ensure icons inside buttons also have dark text */
+  #bulk-action-buttons .btn i {
+    color: var(--nbx-color-fg-default, #212529) !important;
+  }
+  
+  html[data-theme="dark"] #bulk-action-buttons .btn i,
+  body.dark-mode #bulk-action-buttons .btn i {
+    color: var(--nbx-color-fg-default, #212529) !important; /* Dark icon on light grey background */
   }
 </style>
   <div class="row mb-3">
@@ -317,11 +328,27 @@
             }
           });
 
-          // Apply to buttons
-          document.querySelectorAll('.btn:not(.btn-primary):not(.btn-secondary)').forEach(el => {
+          // Apply to buttons (but exclude bulk action buttons which have their own styling)
+          document.querySelectorAll('.btn:not(.btn-primary):not(.btn-secondary):not(#bulk-action-buttons .btn)').forEach(el => {
+            // Skip bulk action buttons - they have light grey background with dark text in both modes
+            if (el.closest('#bulk-action-buttons')) {
+              return;
+            }
             if (!el.classList.contains('btn-outline-primary') && !el.classList.contains('btn-outline-secondary')) {
               el.style.setProperty('color', textColor, 'important');
             }
+          });
+          
+          // Ensure bulk action buttons always have dark text on light grey background
+          document.querySelectorAll('#bulk-action-buttons .btn').forEach(el => {
+            el.style.setProperty('color', '#212529', 'important'); // Dark text
+            el.style.setProperty('background-color', '#e9ecef', 'important'); // Light grey background
+            el.style.setProperty('border-color', '#ced4da', 'important');
+          });
+          
+          // Ensure icons in bulk action buttons also have dark text
+          document.querySelectorAll('#bulk-action-buttons .btn i').forEach(el => {
+            el.style.setProperty('color', '#212529', 'important'); // Dark icon
           });
 
           // Apply to badges (keep their specific colors but ensure text is visible)
