@@ -268,9 +268,10 @@ class VLANDeploymentForm(forms.Form):
                     errors.append(error_msg)
 
         if errors:
-            # Pass errors as a list to ValidationError to avoid format string issues
-            # Django will handle the list properly without trying to format it
-            raise forms.ValidationError(errors)
+            # Wrap each error in ValidationError to prevent format string issues
+            # This ensures Django doesn't try to format strings containing curly braces
+            error_list = [forms.ValidationError(err) for err in errors]
+            raise forms.ValidationError(error_list)
     
     def _validate_tags_and_interfaces(self, devices, interface_list, cleaned_data, blocking=True):
         """
@@ -423,7 +424,7 @@ class VLANDeploymentForm(forms.Form):
             formatted_errors = []
             for err in blocking_errors:
                 formatted_errors.append("- " + str(err))
-            
+
             # Combine with header
             if warnings:
                 # Format warning messages
@@ -434,9 +435,11 @@ class VLANDeploymentForm(forms.Form):
                 all_messages = ["The following issues must be resolved before deployment:"] + formatted_errors + ["", "Warnings:"] + formatted_warnings
             else:
                 all_messages = ["The following issues must be resolved before deployment:"] + formatted_errors
-            
-            # Pass as a list to ValidationError - Django handles lists without formatting
-            raise forms.ValidationError(all_messages)
+
+            # Wrap each message in ValidationError to prevent format string issues
+            # This ensures Django doesn't try to format strings containing curly braces
+            error_list = [forms.ValidationError(msg) for msg in all_messages]
+            raise forms.ValidationError(error_list)
         
         # Store warnings and blocking errors for display (for dry run mode)
         if warnings or (blocking_errors and not blocking):
