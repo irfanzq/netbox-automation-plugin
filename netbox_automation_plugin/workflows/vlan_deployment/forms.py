@@ -197,20 +197,25 @@ class VLANDeploymentForm(forms.Form):
 
         # Validate deployment mode - must select one and only one
         if dry_run and deploy_changes:
-            raise forms.ValidationError(_("Please select either 'Dry Run' OR 'Deploy Changes', not both."))
+            # Wrap in list to prevent Django from trying to format the string
+            raise forms.ValidationError([_("Please select either 'Dry Run' OR 'Deploy Changes', not both.")])
 
         if not dry_run and not deploy_changes:
-            raise forms.ValidationError(_("Please select either 'Dry Run' (preview) or 'Deploy Changes' (apply)."))
+            # Wrap in list to prevent Django from trying to format the string
+            raise forms.ValidationError([_("Please select either 'Dry Run' (preview) or 'Deploy Changes' (apply).")])
 
         # Validate based on scope
         if scope == 'single':
             if not devices:
-                raise forms.ValidationError(_("Please select at least one device for single device deployment."))
+                # Wrap in list to prevent Django from trying to format the string
+                raise forms.ValidationError([_("Please select at least one device for single device deployment.")])
         elif scope == 'group':
             if not site or not location or not role:
-                raise forms.ValidationError(_("Please select Site, Location, and Role for group deployment."))
+                # Wrap in list to prevent Django from trying to format the string
+                raise forms.ValidationError([_("Please select Site, Location, and Role for group deployment.")])
             if not cleaned_data.get('manufacturer'):
-                raise forms.ValidationError(_("Please select Manufacturer for group deployment to prevent mixing incompatible platforms (e.g., EOS and Cumulus)."))
+                # Wrap in list to prevent Django from trying to format the string
+                raise forms.ValidationError([_("Please select Manufacturer for group deployment to prevent mixing incompatible platforms (e.g., EOS and Cumulus).")])
 
         # Combine checkbox selections and manual entries
         combined_interfaces = list(interfaces_select) if interfaces_select else []
@@ -226,7 +231,8 @@ class VLANDeploymentForm(forms.Form):
 
         # Validate that at least one interface is specified (from either field)
         if not combined_interfaces:
-            raise forms.ValidationError(_("Please select at least one interface from the checkbox list or enter manually in the text field."))
+            # Wrap in list to prevent Django from trying to format the string
+            raise forms.ValidationError([_("Please select at least one interface from the checkbox list or enter manually in the text field.")])
 
         # Validate that all interfaces exist on selected devices (only if devices are selected)
         if devices and combined_interfaces:
@@ -266,9 +272,9 @@ class VLANDeploymentForm(forms.Form):
                     )
 
         if errors:
-            # Join errors into a single string to avoid Django template formatting issues
-            error_msg = "\n".join(errors)
-            raise forms.ValidationError(error_msg)
+            # Pass as a list to ValidationError to prevent string formatting issues
+            # Django will handle the list properly without trying to format it
+            raise forms.ValidationError(errors)
     
     def _validate_tags_and_interfaces(self, devices, interface_list, cleaned_data, blocking=True):
         """
@@ -408,11 +414,16 @@ class VLANDeploymentForm(forms.Form):
         
         # Raise blocking errors if any (only if blocking=True)
         if blocking_errors and blocking:
-            # Use string concatenation instead of f-strings to avoid curly brace issues
-            error_msg = "The following issues must be resolved before deployment:\n\n" + "\n".join("• " + str(err) for err in blocking_errors)
+            # Build error messages as a list to prevent Django from trying to format them
+            # This avoids "unexpected '{' in field name" errors
+            error_messages = ["The following issues must be resolved before deployment:"]
+            error_messages.extend("• " + str(err) for err in blocking_errors)
             if warnings:
-                error_msg += "\n\nWarnings:\n" + "\n".join("⚠ " + str(warn) for warn in warnings)
-            raise forms.ValidationError(error_msg)
+                error_messages.append("")
+                error_messages.append("Warnings:")
+                error_messages.extend("⚠ " + str(warn) for warn in warnings)
+            # Pass as a list to ValidationError to prevent string formatting
+            raise forms.ValidationError(error_messages)
         
         # Store warnings and blocking errors for display (for dry run mode)
         if warnings or (blocking_errors and not blocking):
