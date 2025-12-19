@@ -161,12 +161,12 @@
     color: #ffffff !important;
   }
   
-  /* Specific overrides for common text elements */
+  /* Specific overrides for common text elements - NO GREY TEXT! */
   .card-body .form-label,
   .card-body label,
   .card-body p,
-  .card-body div,
-  .card-body span,
+  .card-body div:not(.badge),
+  .card-body span:not(.badge),
   .card-body small,
   .card-body h1,
   .card-body h2,
@@ -176,15 +176,18 @@
   .card-body h6,
   .card-body .card-title,
   .card-body dt,
-  .card-body dd {
-    color: var(--nbx-color-fg-default, #212529) !important;
+  .card-body dd,
+  .card-header,
+  .card-header h5,
+  .card-header .card-title {
+    color: #212529 !important;
   }
-  
+
   html[data-theme="dark"] .card-body .form-label,
   html[data-theme="dark"] .card-body label,
   html[data-theme="dark"] .card-body p,
-  html[data-theme="dark"] .card-body div,
-  html[data-theme="dark"] .card-body span,
+  html[data-theme="dark"] .card-body div:not(.badge),
+  html[data-theme="dark"] .card-body span:not(.badge),
   html[data-theme="dark"] .card-body small,
   html[data-theme="dark"] .card-body h1,
   html[data-theme="dark"] .card-body h2,
@@ -195,11 +198,14 @@
   html[data-theme="dark"] .card-body .card-title,
   html[data-theme="dark"] .card-body dt,
   html[data-theme="dark"] .card-body dd,
+  html[data-theme="dark"] .card-header,
+  html[data-theme="dark"] .card-header h5,
+  html[data-theme="dark"] .card-header .card-title,
   body.dark-mode .card-body .form-label,
   body.dark-mode .card-body label,
   body.dark-mode .card-body p,
-  body.dark-mode .card-body div,
-  body.dark-mode .card-body span,
+  body.dark-mode .card-body div:not(.badge),
+  body.dark-mode .card-body span:not(.badge),
   body.dark-mode .card-body small,
   body.dark-mode .card-body h1,
   body.dark-mode .card-body h2,
@@ -209,7 +215,10 @@
   body.dark-mode .card-body h6,
   body.dark-mode .card-body .card-title,
   body.dark-mode .card-body dt,
-  body.dark-mode .card-body dd {
+  body.dark-mode .card-body dd,
+  body.dark-mode .card-header,
+  body.dark-mode .card-header h5,
+  body.dark-mode .card-header .card-title {
     color: #ffffff !important;
   }
   
@@ -432,6 +441,27 @@
     background-color: var(--nbx-color-warning, #ffc107) !important;
     color: #000000 !important; /* Keep black text on yellow even in dark mode */
   }
+
+  /* Override Bootstrap text color classes in dark mode - make them brighter */
+  html[data-theme="dark"] .text-success,
+  body.dark-mode .text-success {
+    color: #75d175 !important; /* Brighter green for dark mode */
+  }
+
+  html[data-theme="dark"] .text-info,
+  body.dark-mode .text-info {
+    color: #6ec9f0 !important; /* Brighter cyan for dark mode */
+  }
+
+  html[data-theme="dark"] .text-danger,
+  body.dark-mode .text-danger {
+    color: #ff6b7a !important; /* Brighter red for dark mode */
+  }
+
+  html[data-theme="dark"] .text-warning,
+  body.dark-mode .text-warning {
+    color: #ffd966 !important; /* Brighter yellow for dark mode */
+  }
 </style>
   <div class="row mb-3">
     <div class="col-md-12">
@@ -566,49 +596,76 @@
           const darkMode = isDarkMode();
           const textColor = darkMode ? '#ffffff' : '#212529';
           const bgColor = darkMode ? '#2a2a2a' : '#f5f5f5';
-          
-          // Apply to all text elements in card-body
-          document.querySelectorAll('.card-body p, .card-body label, .card-body span, .card-body small, .card-body div, .card-body .form-text, .card-body .text-muted, .card-body h1, .card-body h2, .card-body h3, .card-body h4, .card-body h5, .card-body h6, .card-body dt, .card-body dd').forEach(el => {
-            el.style.setProperty('color', textColor, 'important');
-            if (el.classList.contains('text-muted') || el.classList.contains('form-text')) {
-              el.style.setProperty('opacity', '1', 'important');
+
+          // Apply to all text elements in card-body (excluding badges)
+          document.querySelectorAll('.card-body p, .card-body label, .card-body span:not(.badge), .card-body small, .card-body div:not(.badge), .card-body .form-text, .card-body .text-muted, .card-body h1, .card-body h2, .card-body h3, .card-body h4, .card-body h5, .card-body h6, .card-body dt, .card-body dd').forEach(el => {
+            // Skip badges
+            if (!el.classList.contains('badge')) {
+              el.style.setProperty('color', textColor, 'important');
+              if (el.classList.contains('text-muted') || el.classList.contains('form-text')) {
+                el.style.setProperty('opacity', '1', 'important');
+              }
             }
           });
-          
+
           // Apply to card header
-          document.querySelectorAll('.card-header, .card-header *').forEach(el => {
+          document.querySelectorAll('.card-header, .card-header h5, .card-header .card-title').forEach(el => {
             el.style.setProperty('color', textColor, 'important');
           });
-          
-          // Apply to deployment logs
+
+          // Apply to deployment logs - ALL text inside
           document.querySelectorAll('.deployment-logs div').forEach(el => {
             el.style.setProperty('background-color', bgColor, 'important');
             el.style.setProperty('color', textColor, 'important');
           });
-          
+
+          // Apply to ALL text inside deployment logs
+          document.querySelectorAll('.deployment-logs div *').forEach(el => {
+            el.style.setProperty('color', textColor, 'important');
+          });
+
           // Apply to code/pre blocks
           document.querySelectorAll('.deployment-logs div pre, .deployment-logs div code').forEach(el => {
             el.style.setProperty('background-color', darkMode ? '#1a1a1a' : '#e9ecef', 'important');
             el.style.setProperty('color', textColor, 'important');
           });
-          
+
           // Apply to table text
           document.querySelectorAll('.table td, .table th').forEach(el => {
             el.style.setProperty('color', textColor, 'important');
           });
-          
-          // Apply to summary section (dt/dd)
+
+          // Apply to summary section (dt/dd) - override Bootstrap color classes
           document.querySelectorAll('dt, dd').forEach(el => {
-            el.style.setProperty('color', textColor, 'important');
+            // Don't override if it has a specific color class, but make it brighter in dark mode
+            if (darkMode) {
+              if (el.classList.contains('text-success')) {
+                el.style.setProperty('color', '#75d175', 'important');
+              } else if (el.classList.contains('text-info')) {
+                el.style.setProperty('color', '#6ec9f0', 'important');
+              } else if (el.classList.contains('text-danger')) {
+                el.style.setProperty('color', '#ff6b7a', 'important');
+              } else if (el.classList.contains('text-warning')) {
+                el.style.setProperty('color', '#ffd966', 'important');
+              } else {
+                el.style.setProperty('color', textColor, 'important');
+              }
+            } else {
+              // Light mode - use default colors or black
+              if (!el.classList.contains('text-success') && !el.classList.contains('text-info') &&
+                  !el.classList.contains('text-danger') && !el.classList.contains('text-warning')) {
+                el.style.setProperty('color', textColor, 'important');
+              }
+            }
           });
-          
+
           // Apply to buttons
           document.querySelectorAll('.btn:not(.btn-primary):not(.btn-secondary)').forEach(el => {
             if (!el.classList.contains('btn-outline-primary') && !el.classList.contains('btn-outline-secondary')) {
               el.style.setProperty('color', textColor, 'important');
             }
           });
-          
+
           // Apply to badges (keep their specific colors but ensure text is visible)
           document.querySelectorAll('.badge').forEach(el => {
             if (el.classList.contains('bg-warning')) {
@@ -617,11 +674,13 @@
               el.style.setProperty('color', '#ffffff', 'important'); // White text on colored badges
             }
           });
-          
+
           // Apply to form text elements globally
           document.querySelectorAll('.form-text, .text-muted, small').forEach(el => {
-            el.style.setProperty('color', textColor, 'important');
-            el.style.setProperty('opacity', '1', 'important');
+            if (!el.classList.contains('badge')) {
+              el.style.setProperty('color', textColor, 'important');
+              el.style.setProperty('opacity', '1', 'important');
+            }
           });
         }
         
@@ -637,7 +696,8 @@
           // Also check periodically in case theme changes
           setInterval(applyThemeColors, 2000);
         });
-        
+      </script>
+
       <script>
         // Status filter functionality
         document.addEventListener('DOMContentLoaded', function() {

@@ -1,0 +1,270 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Color Test - Dark Mode Visibility</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: Arial, sans-serif;
+            padding: 20px;
+        }
+        
+        .test-container {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+        
+        h1 {
+            margin-bottom: 30px;
+        }
+        
+        .color-section {
+            margin-bottom: 40px;
+            padding: 20px;
+            border: 2px solid #ccc;
+            border-radius: 8px;
+        }
+        
+        .light-mode {
+            background-color: #ffffff;
+            color: #212529;
+        }
+        
+        .dark-mode {
+            background-color: #1a1a1a;
+            color: #ffffff;
+        }
+        
+        .color-box {
+            display: inline-block;
+            width: 100px;
+            height: 100px;
+            margin: 10px;
+            border: 2px solid #ccc;
+            border-radius: 4px;
+            text-align: center;
+            line-height: 100px;
+            font-weight: bold;
+        }
+        
+        .color-info {
+            margin: 10px 0;
+            padding: 10px;
+            background-color: rgba(0,0,0,0.05);
+            border-radius: 4px;
+        }
+        
+        .text-sample {
+            padding: 10px;
+            margin: 5px 0;
+            border-radius: 4px;
+        }
+        
+        /* CURRENT IMPLEMENTATION: Explicit colors - NO GREY! */
+        /* Light mode: Black text */
+        .test-text-default {
+            color: #212529 !important; /* Pure black */
+        }
+        
+        .test-text-muted {
+            color: #212529 !important; /* Pure black - NO GREY! */
+        }
+        
+        .test-text-input {
+            color: #212529 !important; /* Pure black */
+        }
+        
+        .test-text-inherit {
+            color: inherit;
+        }
+        
+        /* Dark mode: White text */
+        @media (prefers-color-scheme: dark) {
+            .test-text-default,
+            .test-text-muted,
+            .test-text-input {
+                color: #ffffff !important; /* Pure white - NO GREY! */
+            }
+        }
+        
+        /* Show that text-muted class now uses explicit colors */
+        .text-muted {
+            color: #212529 !important; /* Black for light mode */
+            opacity: 1 !important;
+        }
+        
+        @media (prefers-color-scheme: dark) {
+            .text-muted {
+                color: #ffffff !important; /* White for dark mode */
+            }
+        }
+        
+        .toggle-theme {
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            padding: 10px 20px;
+            background-color: #007bff;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 16px;
+        }
+        
+        .toggle-theme:hover {
+            background-color: #0056b3;
+        }
+    </style>
+</head>
+<body>
+    <button class="toggle-theme" onclick="toggleTheme()">Toggle Dark/Light Mode</button>
+    
+    <div class="test-container" id="container">
+        <h1>Color Visibility Test - NetBox Dark Mode</h1>
+        
+        <div class="color-section light-mode">
+            <h2>Light Mode</h2>
+            
+            <div class="color-info">
+                <h3>Colors Used (CURRENT IMPLEMENTATION):</h3>
+                <ul>
+                    <li><strong>Light Mode:</strong> <span style="color: #212529; font-weight: bold;">#212529</span> (PURE BLACK) - <strong>ALL TEXT USES THIS</strong></li>
+                    <li><strong>Dark Mode:</strong> <span style="color: #ffffff; font-weight: bold; background: #1a1a1a; padding: 2px 5px;">#ffffff</span> (PURE WHITE) - <strong>ALL TEXT USES THIS</strong></li>
+                    <li><strong style="color: #28a745;">✅ NO GREY COLORS - ONLY BLACK OR WHITE!</strong></li>
+                </ul>
+            </div>
+            
+            <h3>Text Samples (CURRENT IMPLEMENTATION):</h3>
+            <div class="text-sample test-text-default" style="background: #f8f9fa; padding: 15px; margin: 10px 0;">
+                <strong>Regular text</strong> - Uses <code>#212529</code> (PURE BLACK) in light mode
+            </div>
+            
+            <div class="text-sample test-text-muted text-muted" style="background: #f8f9fa; padding: 15px; margin: 10px 0;">
+                <strong>.text-muted class</strong> - Uses <code>#212529</code> (PURE BLACK) - <strong>NO GREY!</strong> Same as regular text.
+            </div>
+            
+            <div class="text-sample test-text-input" style="background: #ffffff; padding: 15px; margin: 10px 0; border: 1px solid #ccc;">
+                <strong>var(--nbx-color-fg-input)</strong> - This is input text color
+            </div>
+            
+            <div class="text-sample test-text-inherit" style="background: #f8f9fa; padding: 15px; margin: 10px 0;">
+                <strong>color: inherit</strong> - This text inherits from parent (should be visible)
+            </div>
+        </div>
+        
+        <div class="color-section dark-mode" style="display: none;" id="dark-section">
+            <h2>Dark Mode</h2>
+            
+            <div class="color-info" style="background-color: rgba(255,255,255,0.1);">
+                <h3>Colors Used (CURRENT IMPLEMENTATION):</h3>
+                <ul>
+                    <li><strong>Dark Mode:</strong> <span style="color: #ffffff; font-weight: bold; background: #1a1a1a; padding: 2px 5px;">#ffffff</span> (PURE WHITE) - <strong>ALL TEXT USES THIS - FULLY VISIBLE!</strong></li>
+                    <li><strong style="color: #28a745;">✅ NO GREY COLORS - ONLY PURE WHITE IN DARK MODE!</strong></li>
+                </ul>
+            </div>
+            
+            <h3>Text Samples (CURRENT IMPLEMENTATION):</h3>
+            <div class="text-sample test-text-default" style="background: #2a2a2a; padding: 15px; margin: 10px 0;">
+                <strong>Regular text</strong> - Uses <code>#ffffff</code> (PURE WHITE) - <strong>FULLY VISIBLE!</strong>
+            </div>
+            
+            <div class="text-sample test-text-muted text-muted" style="background: #2a2a2a; padding: 15px; margin: 10px 0;">
+                <strong>.text-muted class</strong> - Uses <code>#ffffff</code> (PURE WHITE) - <strong>NO GREY! Same as regular text.</strong>
+            </div>
+            
+            <div class="text-sample test-text-input" style="background: #1a1a1a; padding: 15px; margin: 10px 0; border: 1px solid #444;">
+                <strong>var(--nbx-color-fg-input)</strong> - This is input text color
+            </div>
+            
+            <div class="text-sample test-text-inherit" style="background: #2a2a2a; padding: 15px; margin: 10px 0;">
+                <strong>color: inherit</strong> - This text inherits from parent (should be visible)
+            </div>
+            
+            <div style="background: #dc3545; color: white; padding: 15px; margin: 20px 0; border-radius: 4px;">
+                <h3>⚠️ PROBLEM SCENARIO:</h3>
+                <p>If NetBox doesn't define <code>--nbx-color-fg-default</code> in dark mode, and we use fallback <code>#212529</code>:</p>
+                <div style="background: #1a1a1a; color: #212529; padding: 15px; margin: 10px 0; border: 2px solid red;">
+                    <strong>var(--nbx-color-fg-default, #212529)</strong> - This is DARK text on DARK background - <strong>NOT VISIBLE!</strong>
+                </div>
+            </div>
+        </div>
+        
+        <div class="color-section" style="background: #d1ecf1; border-color: #17a2b8; margin-top: 40px;">
+            <h2>✅ CURRENT IMPLEMENTATION (FIXED - NO GREY!)</h2>
+            <ul style="margin-left: 20px; line-height: 1.8;">
+                <li><strong>✅ Solution:</strong> All text uses explicit colors: <code>#212529</code> (black) in light mode, <code>#ffffff</code> (white) in dark mode</li>
+                <li><strong>✅ Solution:</strong> Uses <code>@media (prefers-color-scheme: dark)</code> to detect dark mode</li>
+                <li><strong>✅ Solution:</strong> All <code>.text-muted</code> classes use same explicit colors - NO GREY!</li>
+                <li><strong>✅ Solution:</strong> All opacity set to <code>1</code> - Full visibility, no transparency</li>
+                <li><strong>✅ Solution:</strong> Removed all grey/muted color references</li>
+            </ul>
+            
+            <h3 style="margin-top: 20px;">Implementation Details:</h3>
+            <div style="background: #ffffff; padding: 15px; border-radius: 4px; margin-top: 10px; border: 1px solid #17a2b8;">
+                <p><strong>All text elements use explicit colors:</strong></p>
+                <pre style="background: #f8f9fa; padding: 10px; border-radius: 4px; overflow-x: auto; margin-top: 10px;"><code>/* Light mode: Black text */
+.text-muted,
+.form-text,
+small {
+  color: #212529 !important; /* Pure black */
+  opacity: 1 !important;
+}
+
+/* Dark mode: White text */
+@media (prefers-color-scheme: dark) {
+  .text-muted,
+  .form-text,
+  small {
+    color: #ffffff !important; /* Pure white */
+    opacity: 1 !important;
+  }
+}</code></pre>
+                <p style="margin-top: 15px;"><strong>Result:</strong></p>
+                <ul style="margin-left: 20px; margin-top: 10px;">
+                    <li>Light Mode: <strong>Pure black</strong> text (#212529) on white/light background</li>
+                    <li>Dark Mode: <strong>Pure white</strong> text (#ffffff) on dark background</li>
+                    <li><strong>NO grey colors anywhere!</strong></li>
+                    <li>All text fully visible with opacity: 1</li>
+                </ul>
+            </div>
+        </div>
+    </div>
+    
+    <script>
+        let isDark = false;
+        
+        function toggleTheme() {
+            isDark = !isDark;
+            const container = document.getElementById('container');
+            const darkSection = document.getElementById('dark-section');
+            const lightSections = document.querySelectorAll('.light-mode');
+            
+            if (isDark) {
+                document.body.style.backgroundColor = '#1a1a1a';
+                document.body.style.color = '#ffffff';
+                darkSection.style.display = 'block';
+                lightSections.forEach(el => el.style.display = 'none');
+                document.documentElement.setAttribute('data-theme', 'dark');
+            } else {
+                document.body.style.backgroundColor = '#ffffff';
+                document.body.style.color = '#212529';
+                darkSection.style.display = 'none';
+                lightSections.forEach(el => el.style.display = 'block');
+                document.documentElement.removeAttribute('data-theme');
+            }
+        }
+        
+        // Initialize
+        document.documentElement.setAttribute('data-theme', 'light');
+    </script>
+</body>
+</html>
+
