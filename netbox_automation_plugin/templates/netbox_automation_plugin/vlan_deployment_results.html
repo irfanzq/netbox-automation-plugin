@@ -462,6 +462,31 @@
   body.dark-mode .text-warning {
     color: #ffd966 !important; /* Brighter yellow for dark mode */
   }
+
+  /* Bulk action buttons (Expand All / Collapse All) */
+  #bulk-action-buttons .btn {
+    color: var(--nbx-color-fg-default) !important;
+    background-color: var(--nbx-color-bg-subtle) !important;
+    border-color: var(--nbx-color-border-default) !important;
+  }
+
+  #bulk-action-buttons .btn:hover {
+    background-color: var(--nbx-color-bg-hover) !important;
+    border-color: var(--nbx-color-border-hover) !important;
+  }
+
+  html[data-theme="dark"] #bulk-action-buttons .btn,
+  body.dark-mode #bulk-action-buttons .btn {
+    color: var(--nbx-color-fg-default) !important;
+    background-color: var(--nbx-color-bg-subtle) !important;
+    border-color: var(--nbx-color-border-default) !important;
+  }
+
+  html[data-theme="dark"] #bulk-action-buttons .btn:hover,
+  body.dark-mode #bulk-action-buttons .btn:hover {
+    background-color: var(--nbx-color-bg-hover) !important;
+    border-color: var(--nbx-color-border-hover) !important;
+  }
 </style>
   <div class="row mb-3">
     <div class="col-md-12">
