@@ -233,9 +233,11 @@ class VLANDeploymentView(View):
                             reason.append("IP address configured")
                         if has_vrf:
                             reason.append("VRF configured")
+                        # Pre-evaluate join to avoid curly braces in f-string (prevents ValueError)
+                        reason_str = ' and '.join(reason)
                         results['interface_validation'][key] = {
                             'status': 'block',
-                            'message': f"Interface has {' and '.join(reason)} (routed port) - would block deployment"
+                            'message': f"Interface has {reason_str} (routed port) - would block deployment"
                         }
                         continue  # Skip further checks for this interface
                     
@@ -2188,8 +2190,10 @@ class VLANDeploymentView(View):
                             reason.append("IP address configured")
                         if has_vrf:
                             reason.append("VRF configured")
+                        # Pre-evaluate join to avoid curly braces in f-string (prevents ValueError)
+                        reason_str = ' and '.join(reason)
                         errors.append(
-                            f"Interface '{iface_name}' on device '{device.name}' has {' and '.join(reason)} (routed port) - cannot modify routed interfaces."
+                            f"Interface '{iface_name}' on device '{device.name}' has {reason_str} (routed port) - cannot modify routed interfaces."
                         )
                         continue  # Skip further checks for this interface
                     

@@ -10,26 +10,54 @@
   /* Dark mode compatible styles for VLAN Deployment Results */
   .device-summary-card {
     transition: all 0.2s ease;
-    background-color: var(--nbx-color-bg-secondary, #343a40) !important;
-    color: var(--nbx-color-fg-default, #ffffff) !important;
+    background-color: var(--nbx-color-bg-secondary, #f8f9fa) !important;
+    color: var(--nbx-color-fg-default, #212529) !important;
+  }
+  
+  html[data-theme="dark"] .device-summary-card,
+  body.dark-mode .device-summary-card {
+    background-color: var(--nbx-color-bg-secondary, #2a2a2a) !important;
+    color: #ffffff !important;
   }
   .device-summary-card:hover {
     box-shadow: 0 2px 8px rgba(0,0,0,0.15);
     transform: translateY(-2px);
   }
   .device-summary-card h6 {
-    color: var(--nbx-color-fg-default, #ffffff) !important;
+    color: var(--nbx-color-fg-default, #212529) !important;
   }
+  
+  html[data-theme="dark"] .device-summary-card h6,
+  body.dark-mode .device-summary-card h6 {
+    color: #ffffff !important;
+  }
+  
   .device-summary-card h6 a {
     text-decoration: none;
-    color: var(--nbx-color-fg-link, #ffffff) !important;
+    color: var(--nbx-color-fg-link, #0066cc) !important;
   }
+  
+  html[data-theme="dark"] .device-summary-card h6 a,
+  body.dark-mode .device-summary-card h6 a {
+    color: #4da6ff !important;
+  }
+  
   .device-summary-card h6 a:hover {
     text-decoration: underline;
-    color: var(--nbx-color-fg-link-hover, #e0e0e0) !important;
+    color: var(--nbx-color-fg-link-hover, #0052a3) !important;
   }
+  
+  html[data-theme="dark"] .device-summary-card h6 a:hover,
+  body.dark-mode .device-summary-card h6 a:hover {
+    color: #80c1ff !important;
+  }
+  
   .device-summary-card .badge {
-    color: var(--nbx-color-fg-default, #ffffff) !important;
+    color: #ffffff !important; /* Badges have white text by default */
+  }
+  
+  .device-summary-card .badge.bg-warning {
+    color: #000000 !important; /* Black text on yellow badge */
   }
   .device-summary-card .badge.bg-secondary {
     background-color: var(--nbx-color-bg-tertiary, #6c757d) !important;
@@ -48,7 +76,12 @@
     color: var(--nbx-color-fg-default, #ffffff) !important;
   }
   .device-summary-card .small {
-    color: var(--nbx-color-fg-default, #ffffff) !important;
+    color: var(--nbx-color-fg-default, #212529) !important;
+  }
+  
+  html[data-theme="dark"] .device-summary-card .small,
+  body.dark-mode .device-summary-card .small {
+    color: #ffffff !important;
   }
   
   /* Deployment logs - NO GREY: Black in light, White in dark */
@@ -234,6 +267,171 @@
   body.dark-mode .card-header * {
     color: #ffffff !important;
   }
+  
+  /* Summary section text colors - ensure proper contrast */
+  .text-success {
+    color: #198754 !important; /* Green text in light mode */
+  }
+  
+  html[data-theme="dark"] .text-success,
+  body.dark-mode .text-success {
+    color: #75b798 !important; /* Lighter green for dark mode */
+  }
+  
+  .text-info {
+    color: #0dcaf0 !important; /* Cyan text in light mode */
+  }
+  
+  html[data-theme="dark"] .text-info,
+  body.dark-mode .text-info {
+    color: #6edff6 !important; /* Lighter cyan for dark mode */
+  }
+  
+  .text-danger {
+    color: #dc3545 !important; /* Red text in light mode */
+  }
+  
+  html[data-theme="dark"] .text-danger,
+  body.dark-mode .text-danger {
+    color: #f5a2a9 !important; /* Lighter red for dark mode */
+  }
+  
+  /* Definition lists (dt/dd) - ensure proper contrast */
+  dt {
+    color: var(--nbx-color-fg-default, #212529) !important;
+  }
+  
+  dd {
+    color: var(--nbx-color-fg-default, #212529) !important;
+  }
+  
+  html[data-theme="dark"] dt,
+  html[data-theme="dark"] dd,
+  body.dark-mode dt,
+  body.dark-mode dd {
+    color: #ffffff !important;
+  }
+  
+  /* Table elements - ensure all text is visible */
+  .table {
+    background-color: var(--nbx-color-bg-default, #ffffff) !important;
+  }
+  
+  html[data-theme="dark"] .table,
+  body.dark-mode .table {
+    background-color: var(--nbx-color-bg-default, #1a1a1a) !important;
+  }
+  
+  .table thead th {
+    background-color: var(--nbx-color-bg-secondary, #f8f9fa) !important;
+    color: var(--nbx-color-fg-default, #212529) !important;
+    border-color: var(--nbx-color-border-default, #dee2e6) !important;
+  }
+  
+  html[data-theme="dark"] .table thead th,
+  body.dark-mode .table thead th {
+    background-color: var(--nbx-color-bg-secondary, #2a2a2a) !important;
+    color: #ffffff !important;
+    border-color: var(--nbx-color-border-default, #495057) !important;
+  }
+  
+  .table tbody td {
+    background-color: var(--nbx-color-bg-default, #ffffff) !important;
+    color: var(--nbx-color-fg-default, #212529) !important;
+    border-color: var(--nbx-color-border-default, #dee2e6) !important;
+  }
+  
+  html[data-theme="dark"] .table tbody td,
+  body.dark-mode .table tbody td {
+    background-color: var(--nbx-color-bg-default, #1a1a1a) !important;
+    color: #ffffff !important;
+    border-color: var(--nbx-color-border-default, #495057) !important;
+  }
+  
+  /* Links in table */
+  .table a {
+    color: var(--nbx-color-fg-link, #0066cc) !important;
+  }
+  
+  html[data-theme="dark"] .table a,
+  body.dark-mode .table a {
+    color: var(--nbx-color-fg-link, #4da6ff) !important;
+  }
+  
+  /* Buttons - ensure text is visible */
+  .btn {
+    color: var(--nbx-color-fg-default, #212529) !important;
+  }
+  
+  .btn-primary {
+    background-color: var(--nbx-color-primary, #0d6efd) !important;
+    border-color: var(--nbx-color-primary, #0d6efd) !important;
+    color: #ffffff !important;
+  }
+  
+  .btn-outline-primary {
+    color: var(--nbx-color-primary, #0d6efd) !important;
+    border-color: var(--nbx-color-primary, #0d6efd) !important;
+  }
+  
+  html[data-theme="dark"] .btn-outline-primary,
+  body.dark-mode .btn-outline-primary {
+    color: #4da6ff !important;
+    border-color: #4da6ff !important;
+  }
+  
+  .btn-outline-primary:hover {
+    background-color: var(--nbx-color-primary, #0d6efd) !important;
+    color: #ffffff !important;
+  }
+  
+  .btn-outline-secondary {
+    color: var(--nbx-color-fg-default, #212529) !important;
+    border-color: var(--nbx-color-border-default, #6c757d) !important;
+  }
+  
+  html[data-theme="dark"] .btn-outline-secondary,
+  body.dark-mode .btn-outline-secondary {
+    color: #ffffff !important;
+    border-color: #6c757d !important;
+  }
+  
+  .btn-secondary {
+    background-color: var(--nbx-color-bg-tertiary, #6c757d) !important;
+    border-color: var(--nbx-color-bg-tertiary, #6c757d) !important;
+    color: #ffffff !important;
+  }
+  
+  /* Badge text colors - ensure visibility */
+  .badge {
+    color: #ffffff !important;
+  }
+  
+  .badge.bg-secondary {
+    background-color: var(--nbx-color-bg-tertiary, #6c757d) !important;
+    color: #ffffff !important;
+  }
+  
+  .badge.bg-success {
+    background-color: var(--nbx-color-success, #198754) !important;
+    color: #ffffff !important;
+  }
+  
+  .badge.bg-warning {
+    background-color: var(--nbx-color-warning, #ffc107) !important;
+    color: #000000 !important; /* Black text on yellow background */
+  }
+  
+  .badge.bg-danger {
+    background-color: var(--nbx-color-danger, #dc3545) !important;
+    color: #ffffff !important;
+  }
+  
+  html[data-theme="dark"] .badge.bg-warning,
+  body.dark-mode .badge.bg-warning {
+    background-color: var(--nbx-color-warning, #ffc107) !important;
+    color: #000000 !important; /* Keep black text on yellow even in dark mode */
+  }
 </style>
   <div class="row mb-3">
     <div class="col-md-12">
@@ -397,6 +595,27 @@
           // Apply to table text
           document.querySelectorAll('.table td, .table th').forEach(el => {
             el.style.setProperty('color', textColor, 'important');
+          });
+          
+          // Apply to summary section (dt/dd)
+          document.querySelectorAll('dt, dd').forEach(el => {
+            el.style.setProperty('color', textColor, 'important');
+          });
+          
+          // Apply to buttons
+          document.querySelectorAll('.btn:not(.btn-primary):not(.btn-secondary)').forEach(el => {
+            if (!el.classList.contains('btn-outline-primary') && !el.classList.contains('btn-outline-secondary')) {
+              el.style.setProperty('color', textColor, 'important');
+            }
+          });
+          
+          // Apply to badges (keep their specific colors but ensure text is visible)
+          document.querySelectorAll('.badge').forEach(el => {
+            if (el.classList.contains('bg-warning')) {
+              el.style.setProperty('color', '#000000', 'important'); // Black text on yellow
+            } else {
+              el.style.setProperty('color', '#ffffff', 'important'); // White text on colored badges
+            }
           });
           
           // Apply to form text elements globally
