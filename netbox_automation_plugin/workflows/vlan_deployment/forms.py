@@ -266,7 +266,9 @@ class VLANDeploymentForm(forms.Form):
                     )
 
         if errors:
-            raise forms.ValidationError(errors)
+            # Join errors into a single string to avoid Django template formatting issues
+            error_msg = "\n".join(errors)
+            raise forms.ValidationError(error_msg)
     
     def _validate_tags_and_interfaces(self, devices, interface_list, cleaned_data, blocking=True):
         """
