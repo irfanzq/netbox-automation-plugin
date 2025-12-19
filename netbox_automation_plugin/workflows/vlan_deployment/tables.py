@@ -162,25 +162,27 @@ class VLANDeploymentResultTable(NetBoxTable):
 
         # Format logs with line breaks and proper styling
         formatted_logs = value.replace('\n', '<br>')
+        line_count = len(value.split('\n'))
 
-        html = f'''
-        <details class="deployment-logs" data-status-filter="{status_filter}">
-            <summary style="cursor: pointer; color: var(--nbx-color-fg-link, #0066cc); font-weight: bold;">
-                View Details ({len(value.split(chr(10)))} lines)
-            </summary>
-            <div style="margin-top: 10px; padding: 10px; background-color: var(--nbx-color-bg-secondary, #f5f5f5); color: #212529; border-left: 3px solid var(--nbx-color-border-primary, #0066cc); font-family: monospace; font-size: 12px; max-height: 400px; overflow-y: auto;">
-                {formatted_logs}
-            </div>
-            <style>
-                @media (prefers-color-scheme: dark) {{
-                    .deployment-logs[data-status-filter="{status_filter}"] div {{
-                        background-color: #2a2a2a !important; /* Dark background in dark mode */
-                        color: #ffffff !important; /* White in dark mode */
-                    }}
-                }}
-            </style>
-        </details>
-        '''
+        # Use string concatenation instead of f-strings to avoid issues with curly braces in logs
+        html = (
+            '<details class="deployment-logs" data-status-filter="' + status_filter + '">'
+            '<summary style="cursor: pointer; color: var(--nbx-color-fg-link, #0066cc); font-weight: bold;">'
+            'View Details (' + str(line_count) + ' lines)'
+            '</summary>'
+            '<div style="margin-top: 10px; padding: 10px; background-color: var(--nbx-color-bg-secondary, #f5f5f5); color: #212529; border-left: 3px solid var(--nbx-color-border-primary, #0066cc); font-family: monospace; font-size: 12px; max-height: 400px; overflow-y: auto;">'
+            + formatted_logs +
+            '</div>'
+            '<style>'
+            '@media (prefers-color-scheme: dark) {'
+            '.deployment-logs[data-status-filter="' + status_filter + '"] div {'
+            'background-color: #2a2a2a !important; /* Dark background in dark mode */'
+            'color: #ffffff !important; /* White in dark mode */'
+            '}'
+            '}'
+            '</style>'
+            '</details>'
+        )
         return format_html(html)
     
     def render_deployment_logs(self, value):
@@ -194,24 +196,26 @@ class VLANDeploymentResultTable(NetBoxTable):
 
         # Format logs with line breaks and proper styling
         formatted_logs = value.replace('\n', '<br>')
+        line_count = len(value.split('\n'))
 
-        html = f'''
-        <details class="deployment-logs">
-            <summary style="cursor: pointer; color: var(--nbx-color-fg-link, #0066cc); font-weight: bold;">
-                View Detailed Logs ({len(value.split(chr(10)))} lines)
-            </summary>
-            <div style="margin-top: 10px; padding: 10px; background-color: var(--nbx-color-bg-secondary, #f5f5f5); color: #212529; border-left: 3px solid var(--nbx-color-border-primary, #0066cc); font-family: monospace; font-size: 12px; max-height: 400px; overflow-y: auto;">
-                {formatted_logs}
-            </div>
-            <style>
-                @media (prefers-color-scheme: dark) {{
-                    .deployment-logs div {{
-                        color: #ffffff !important; /* White in dark mode */
-                    }}
-                }}
-            </style>
-        </details>
-        '''
+        # Use string concatenation instead of f-strings to avoid issues with curly braces in logs
+        html = (
+            '<details class="deployment-logs">'
+            '<summary style="cursor: pointer; color: var(--nbx-color-fg-link, #0066cc); font-weight: bold;">'
+            'View Detailed Logs (' + str(line_count) + ' lines)'
+            '</summary>'
+            '<div style="margin-top: 10px; padding: 10px; background-color: var(--nbx-color-bg-secondary, #f5f5f5); color: #212529; border-left: 3px solid var(--nbx-color-border-primary, #0066cc); font-family: monospace; font-size: 12px; max-height: 400px; overflow-y: auto;">'
+            + formatted_logs +
+            '</div>'
+            '<style>'
+            '@media (prefers-color-scheme: dark) {'
+            '.deployment-logs div {'
+            'color: #ffffff !important; /* White in dark mode */'
+            '}'
+            '}'
+            '</style>'
+            '</details>'
+        )
         return format_html(html)
 
     class Meta(NetBoxTable.Meta):
