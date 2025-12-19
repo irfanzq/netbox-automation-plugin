@@ -2158,8 +2158,8 @@ class VLANDeploymentView(View):
             # Check device tag (BLOCKING)
             if device_tag and device_tag not in device_tags:
                 errors.append(
-                    f"Device '{device.name}' is not tagged as 'automation-ready:vlan'. "
-                    f"Please run the Tagging Workflow first to tag this device."
+                    "Device '" + device.name + "' is not tagged as 'automation-ready:vlan'. "
+                    "Please run the Tagging Workflow first to tag this device."
                 )
             
             # Validate each interface on this device
@@ -2189,34 +2189,34 @@ class VLANDeploymentView(View):
                         if has_vrf:
                             reason.append("VRF configured")
                         errors.append(
-                            f"Interface '{iface_name}' on device '{device.name}' has {' and '.join(reason)} (routed port) - cannot modify routed interfaces."
+                            "Interface '" + iface_name + "' on device '" + device.name + "' has " + ' and '.join(reason) + " (routed port) - cannot modify routed interfaces."
                         )
                         continue  # Skip further checks for this interface
                     
                     # Check for blocking tags (BLOCKING)
                     if interface_tags.get('uplink') and interface_tags['uplink'].name in interface_tag_names_list:
                         errors.append(
-                            f"Interface '{iface_name}' on device '{device.name}' is marked as 'vlan-mode:uplink' - cannot modify uplink interfaces."
+                            "Interface '" + iface_name + "' on device '" + device.name + "' is marked as 'vlan-mode:uplink' - cannot modify uplink interfaces."
                         )
                         continue
-                    
+
                     if interface_tags.get('routed') and interface_tags['routed'].name in interface_tag_names_list:
                         errors.append(
-                            f"Interface '{iface_name}' on device '{device.name}' is marked as 'vlan-mode:routed' - cannot modify routed interfaces."
+                            "Interface '" + iface_name + "' on device '" + device.name + "' is marked as 'vlan-mode:routed' - cannot modify routed interfaces."
                         )
                         continue
                     
                     # Check for port-channel membership (BLOCKING)
                     if hasattr(interface, 'lag') and interface.lag:
                         errors.append(
-                            f"Interface '{iface_name}' on device '{device.name}' is a port-channel member - configure on port-channel '{interface.lag.name}' instead."
+                            "Interface '" + iface_name + "' on device '" + device.name + "' is a port-channel member - configure on port-channel '" + interface.lag.name + "' instead."
                         )
                         continue
-                    
+
                     # Check if cabled (BLOCKING)
                     if not interface.cable:
                         errors.append(
-                            f"Interface '{iface_name}' on device '{device.name}' is not cabled in NetBox - please add cable information first."
+                            "Interface '" + iface_name + "' on device '" + device.name + "' is not cabled in NetBox - please add cable information first."
                         )
                         continue
                     
@@ -2228,26 +2228,26 @@ class VLANDeploymentView(View):
                             connected_device = endpoint.device
                             if connected_device.status in ['offline', 'decommissioning']:
                                 errors.append(
-                                    f"Interface '{iface_name}' on device '{device.name}' is connected to device '{connected_device.name}' "
-                                    f"with status '{connected_device.status}' - cannot configure VLAN."
+                                    "Interface '" + iface_name + "' on device '" + device.name + "' is connected to device '" + connected_device.name + "' "
+                                    "with status '" + str(connected_device.status) + "' - cannot configure VLAN."
                                 )
                                 continue
                     except Exception as e:
-                        logger.warning(f"Could not get connected endpoints for {device.name}:{iface_name}: {e}")
+                        logger.warning("Could not get connected endpoints for " + device.name + ":" + iface_name + ": " + str(e))
                     
                     # REQUIRED: Interface must be tagged as 'access' or 'tagged' to allow deployment (BLOCKING)
                     has_access_tag = interface_tags.get('access') and interface_tags['access'].name in interface_tag_names_list
                     has_tagged_tag = interface_tags.get('tagged') and interface_tags['tagged'].name in interface_tag_names_list
                     if not has_access_tag and not has_tagged_tag:
                         errors.append(
-                            f"Interface '{iface_name}' on device '{device.name}' is not tagged as 'vlan-mode:access' or 'vlan-mode:tagged' - "
-                            f"cannot deploy VLAN. Please run the Tagging Workflow to properly tag this interface."
+                            "Interface '" + iface_name + "' on device '" + device.name + "' is not tagged as 'vlan-mode:access' or 'vlan-mode:tagged' - "
+                            "cannot deploy VLAN. Please run the Tagging Workflow to properly tag this interface."
                         )
                         continue
-                
+
                 except Interface.DoesNotExist:
                     errors.append(
-                        f"Interface '{iface_name}' does not exist on device '{device.name}'"
+                        "Interface '" + iface_name + "' does not exist on device '" + device.name + "'"
                     )
         
         return errors
@@ -3946,7 +3946,7 @@ class VLANDeploymentView(View):
             for iface_name in interface_list:
                 if iface_name not in device_interfaces:
                     errors.append(
-                        f"Interface '{iface_name}' does not exist on device '{device.name}'"
+                        "Interface '" + iface_name + "' does not exist on device '" + device.name + "'"
                     )
 
         return errors
