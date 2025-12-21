@@ -1025,6 +1025,8 @@
 
             // Handle sync mode checkbox changes
             function updateSyncModeState() {
+              console.log('updateSyncModeState called');
+              
               const syncCheckbox = document.getElementById('id_sync_netbox_to_device');
               const vlanIdField = document.getElementById('id_vlan_id');
               const vlanIdLabel = document.querySelector('label[for="id_vlan_id"]');
@@ -1035,26 +1037,36 @@
               const interfacesContainer = document.getElementById('interfaces-checkbox-container');
               const deployUntaggedContainer = document.getElementById('deploy-untagged-container');
               
-              if (!syncCheckbox) return;
+              if (!syncCheckbox) {
+                console.warn('Sync checkbox not found in updateSyncModeState');
+                return;
+              }
               
               const isSyncMode = syncCheckbox.checked;
+              console.log('Sync mode is:', isSyncMode);
               
               if (isSyncMode) {
+                console.log('Applying sync mode - greying out and hiding fields');
+                
                 // Disable and grey out VLAN ID field
                 if (vlanIdField) {
+                  console.log('Grey out VLAN ID field');
                   vlanIdField.disabled = true;
                   vlanIdField.style.opacity = '0.6';
                   vlanIdField.style.cursor = 'not-allowed';
                   vlanIdField.style.backgroundColor = 'var(--nbx-color-bg-secondary, #f8f9fa)';
                   vlanIdField.required = false;
                   vlanIdField.placeholder = 'Read from NetBox interface config';
-                  // Hide the parent div that contains the VLAN ID field
+                  // Grey out the parent div that contains the VLAN ID field
                   const vlanIdContainer = vlanIdField.closest('.mb-3');
                   if (vlanIdContainer) {
                     vlanIdContainer.style.opacity = '0.6';
                     vlanIdContainer.style.pointerEvents = 'none';
                   }
+                } else {
+                  console.warn('VLAN ID field not found!');
                 }
+                
                 if (vlanIdLabel) {
                   vlanIdLabel.classList.remove('required');
                 }
@@ -1062,8 +1074,12 @@
                 // Hide additional interfaces field and its container
                 const interfacesManualContainer = document.getElementById('interfaces_manual_container');
                 if (interfacesManualContainer) {
+                  console.log('Hiding additional interfaces container');
                   interfacesManualContainer.style.display = 'none';
+                } else {
+                  console.warn('Additional interfaces container not found!');
                 }
+                
                 if (interfacesManualField) {
                   interfacesManualField.disabled = true;
                 }
@@ -1096,8 +1112,11 @@
                   interfacesContainer.innerHTML = '<p class="text-muted mb-0" style="color: var(--nbx-color-fg-default) !important; opacity: 1 !important;">Select devices first to load interfaces from NetBox</p>';
                 }
               } else {
+                console.log('Removing sync mode - enabling all fields');
+                
                 // Enable all fields (normal mode)
                 if (vlanIdField) {
+                  console.log('Enable VLAN ID field');
                   vlanIdField.disabled = false;
                   vlanIdField.style.opacity = '1';
                   vlanIdField.style.cursor = 'auto';
@@ -1111,6 +1130,7 @@
                     vlanIdContainer.style.pointerEvents = 'auto';
                   }
                 }
+                
                 if (vlanIdLabel) {
                   vlanIdLabel.classList.add('required');
                 }
@@ -1118,8 +1138,10 @@
                 // Show additional interfaces field and its container
                 const interfacesManualContainer = document.getElementById('interfaces_manual_container');
                 if (interfacesManualContainer) {
+                  console.log('Showing additional interfaces container');
                   interfacesManualContainer.style.display = 'block';
                 }
+                
                 if (interfacesManualField) {
                   interfacesManualField.disabled = false;
                 }
@@ -1839,116 +1861,71 @@
               }
             }
 
-            // Initialize on page load
-            document.addEventListener('DOMContentLoaded', function() {
-              console.log('DOMContentLoaded - Initializing VLAN deployment form...');
-              
-              // Ensure updateFieldVisibility runs first
-              try {
-                updateFieldVisibility();
-              } catch (error) {
-                console.error('Error in updateFieldVisibility on page load:', error);
-              }
-              
+            // Initialize function - follows proven pattern from vlan_tagging_form.html
+            function initVlanDeploymentForm() {
+              // Set initial state first (critical - this must run on page load)
+              updateFieldVisibility();
+              updateSyncModeState();
               setupMutuallyExclusiveCheckboxes();
+              updateDeployButtonState();
 
               // Listen for scope changes
-              const scopeRadios = document.querySelectorAll('input[name="deployment_scope"]');
-              console.log('Found', scopeRadios.length, 'deployment scope radio buttons');
-              
-              scopeRadios.forEach(radio => {
-                radio.addEventListener('change', function() {
-                  console.log('Deployment scope changed to:', this.value);
-                  try {
-                    updateFieldVisibility();
-                  } catch (error) {
-                    console.error('Error in updateFieldVisibility on scope change:', error);
-                  }
-                });
+              document.querySelectorAll('input[name="deployment_scope"]').forEach(radio => {
+                radio.addEventListener('change', updateFieldVisibility);
               });
 
               // Listen for sync mode checkbox changes
               const syncCheckbox = document.getElementById('id_sync_netbox_to_device');
               if (syncCheckbox) {
                 syncCheckbox.addEventListener('change', updateSyncModeState);
-                // Initialize sync mode state on page load
-                updateSyncModeState();
               }
 
               // Listen for device selection changes (single mode)
-              // Note: NetBox uses Select2 for multi-select, so we need to listen for Select2 events
               const devicesSelect = document.getElementById('id_devices');
               if (devicesSelect) {
-                // Function to load interfaces based on sync mode
                 function loadInterfacesBasedOnSyncMode() {
                   const syncCheckbox = document.getElementById('id_sync_netbox_to_device');
                   if (syncCheckbox && syncCheckbox.checked) {
-                    console.log('Loading interfaces for sync mode...');
                     loadInterfacesForSync();
                   } else {
-                    console.log('Loading interfaces for normal mode...');
                     loadCommonInterfaces();
                   }
                 }
 
-                // Handle device selection - listen for both native change and Select2 events
                 devicesSelect.addEventListener('change', loadInterfacesBasedOnSyncMode);
                 
                 // Listen for Select2 events (if Select2 is initialized)
                 if (jQuery && jQuery(devicesSelect).data('select2')) {
                   jQuery(devicesSelect).on('select2:select select2:unselect select2:clear', loadInterfacesBasedOnSyncMode);
                 } else {
-                  // Wait for Select2 to initialize, then attach events
+                  // Wait for Select2 to initialize
                   const checkSelect2 = setInterval(function() {
                     if (jQuery && jQuery(devicesSelect).data('select2')) {
                       jQuery(devicesSelect).on('select2:select select2:unselect select2:clear', loadInterfacesBasedOnSyncMode);
                       clearInterval(checkSelect2);
-                      
-                      // If devices are already selected, load interfaces immediately
                       if (jQuery(devicesSelect).val() && jQuery(devicesSelect).val().length > 0) {
-                        console.log('Devices already selected, loading interfaces...');
                         loadInterfacesBasedOnSyncMode();
                       }
                     }
                   }, 100);
-                  
-                  // Stop checking after 5 seconds
                   setTimeout(function() { clearInterval(checkSelect2); }, 5000);
                 }
 
-                // Fallback: If devices are already selected on page load (form re-render after error)
-                // Check both native select and Select2
                 if (devicesSelect.selectedOptions && devicesSelect.selectedOptions.length > 0) {
-                  console.log('Devices already selected (native select), loading interfaces...');
                   loadInterfacesBasedOnSyncMode();
                 }
               }
 
-              // Listen for group filter changes (group mode - load interfaces)
+              // Listen for group filter changes (group mode)
               const siteSelect = document.getElementById('id_site');
               const locationSelect = document.getElementById('id_location');
               const manufacturerSelect = document.getElementById('id_manufacturer');
               const roleSelect = document.getElementById('id_role');
               
-              // Also listen for sync mode changes to reload interfaces
-              const syncCheckbox = document.getElementById('id_sync_netbox_to_device');
-              if (syncCheckbox) {
-                syncCheckbox.addEventListener('change', function() {
-                  // Reload interfaces if group filters are already selected
-                  const siteId = siteSelect ? siteSelect.value : '';
-                  const locationId = locationSelect ? locationSelect.value : '';
-                  const manufacturerId = manufacturerSelect ? manufacturerSelect.value : '';
-                  const roleId = roleSelect ? roleSelect.value : '';
-                  if (siteId && locationId && manufacturerId && roleId) {
-                    loadInterfacesFromGroupFilters();
-                  }
-                });
-              }
-              
               if (siteSelect) {
                 siteSelect.addEventListener('change', function() {
-                  filterVLANsBySite();  // Load VLANs
-                  loadInterfacesFromGroupFilters();  // Load interfaces
+                  filterVLANsBySite();
+                  loadInterfacesFromGroupFilters();
                 });
               }
               
@@ -1963,7 +1940,15 @@
               if (roleSelect) {
                 roleSelect.addEventListener('change', loadInterfacesFromGroupFilters);
               }
-            });
+            }
+            
+            // Initialize on page load - using proven pattern from vlan_tagging_form.html
+            if (document.readyState === 'loading') {
+              document.addEventListener('DOMContentLoaded', initVlanDeploymentForm);
+            } else {
+              // DOM is already ready
+              initVlanDeploymentForm();
+            }
 
             // Form submission handler
             document.getElementById('vlan-deployment-form').addEventListener('submit', function(e) {
