@@ -1903,7 +1903,7 @@
                     if (typeof jQuery !== 'undefined' && jQuery(devicesSelect).data('select2')) {
                       jQuery(devicesSelect).on('select2:select select2:unselect select2:clear', loadInterfacesBasedOnSyncMode);
                       clearInterval(checkSelect2);
-                      if (jQuery(devicesSelect).val() && jQuery(devicesSelect).val().length > 0) {
+                      if (typeof jQuery !== 'undefined' && jQuery(devicesSelect).val() && jQuery(devicesSelect).val().length > 0) {
                         loadInterfacesBasedOnSyncMode();
                       }
                     }
