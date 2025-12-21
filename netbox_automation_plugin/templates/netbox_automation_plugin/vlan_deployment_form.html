@@ -671,24 +671,58 @@
   }
   
   /* Accordion buttons - ensure device names are visible in dark mode */
+  #interfaces-checkbox-container .accordion-button,
   .accordion-button {
     color: var(--nbx-color-fg-default) !important;
     background-color: var(--nbx-color-bg-default) !important;
   }
   
+  #interfaces-checkbox-container .accordion-button strong,
+  #interfaces-checkbox-container .accordion-button *,
   .accordion-button strong,
   .accordion-button * {
     color: var(--nbx-color-fg-default) !important;
   }
   
+  #interfaces-checkbox-container .accordion-button:not(.collapsed),
   .accordion-button:not(.collapsed) {
     color: var(--nbx-color-fg-default) !important;
     background-color: var(--nbx-color-bg-default) !important;
   }
   
+  #interfaces-checkbox-container .accordion-button:not(.collapsed) strong,
+  #interfaces-checkbox-container .accordion-button:not(.collapsed) *,
   .accordion-button:not(.collapsed) strong,
   .accordion-button:not(.collapsed) * {
     color: var(--nbx-color-fg-default) !important;
+  }
+  
+  /* Explicit dark mode overrides for accordion buttons */
+  html[data-theme="dark"] #interfaces-checkbox-container .accordion-button,
+  html[data-theme="dark"] .accordion-button,
+  body.dark-mode #interfaces-checkbox-container .accordion-button,
+  body.dark-mode .accordion-button {
+    color: #ffffff !important;
+    background-color: var(--nbx-color-bg-default) !important;
+  }
+  
+  html[data-theme="dark"] #interfaces-checkbox-container .accordion-button strong,
+  html[data-theme="dark"] #interfaces-checkbox-container .accordion-button *,
+  html[data-theme="dark"] .accordion-button strong,
+  html[data-theme="dark"] .accordion-button *,
+  body.dark-mode #interfaces-checkbox-container .accordion-button strong,
+  body.dark-mode #interfaces-checkbox-container .accordion-button *,
+  body.dark-mode .accordion-button strong,
+  body.dark-mode .accordion-button * {
+    color: #ffffff !important;
+  }
+  
+  html[data-theme="dark"] #interfaces-checkbox-container .accordion-button:not(.collapsed),
+  html[data-theme="dark"] .accordion-button:not(.collapsed),
+  body.dark-mode #interfaces-checkbox-container .accordion-button:not(.collapsed),
+  body.dark-mode .accordion-button:not(.collapsed) {
+    color: #ffffff !important;
+    background-color: var(--nbx-color-bg-default) !important;
   }
   
   /* Expand All / Collapse All buttons - dark mode compatible */
@@ -705,15 +739,37 @@
   }
   
   /* Ensure interface labels and strong tags use proper colors */
+  #interfaces-checkbox-container .form-check-label,
+  #interfaces-checkbox-container .form-check-label strong,
+  .accordion-body .form-check-label,
+  .accordion-body .form-check-label strong,
   .form-check-label,
   .form-check-label strong {
     color: var(--nbx-color-fg-default) !important;
   }
   
   /* Ensure text-muted spans in interface labels are visible */
+  #interfaces-checkbox-container .form-check-label .text-muted,
+  .accordion-body .form-check-label .text-muted,
   .form-check-label .text-muted {
     color: var(--nbx-color-fg-muted, var(--nbx-color-fg-default)) !important;
     opacity: 1 !important;
+  }
+  
+  /* Explicit dark mode overrides for interface labels */
+  html[data-theme="dark"] #interfaces-checkbox-container .form-check-label,
+  html[data-theme="dark"] #interfaces-checkbox-container .form-check-label strong,
+  html[data-theme="dark"] .accordion-body .form-check-label,
+  html[data-theme="dark"] .accordion-body .form-check-label strong,
+  html[data-theme="dark"] .form-check-label,
+  html[data-theme="dark"] .form-check-label strong,
+  body.dark-mode #interfaces-checkbox-container .form-check-label,
+  body.dark-mode #interfaces-checkbox-container .form-check-label strong,
+  body.dark-mode .accordion-body .form-check-label,
+  body.dark-mode .accordion-body .form-check-label strong,
+  body.dark-mode .form-check-label,
+  body.dark-mode .form-check-label strong {
+    color: #ffffff !important;
   }
 </style>
   <div class="row">
@@ -1431,8 +1487,14 @@
                 button.setAttribute('data-bs-target', `#${collapseId}`);
                 button.setAttribute('aria-expanded', isFirst ? 'true' : 'false');
                 button.setAttribute('aria-controls', collapseId);
+                // Set button style explicitly for dark mode compatibility
+                button.style.color = 'var(--nbx-color-fg-default)';
+                // Check if dark mode is active and set explicit white color
+                if (document.documentElement.getAttribute('data-theme') === 'dark' || document.body.classList.contains('dark-mode')) {
+                  button.style.color = '#ffffff';
+                }
                 button.innerHTML = `
-                  <strong style="color: var(--nbx-color-fg-default);">${deviceName}</strong>
+                  <strong style="color: inherit !important;">${deviceName}</strong>
                   <span class="badge bg-secondary ms-2">${interfaces.length} interface${interfaces.length !== 1 ? 's' : ''}</span>
                 `;
                 header.appendChild(button);
@@ -1483,9 +1545,15 @@
                   const label = document.createElement('label');
                   label.className = 'form-check-label me-2';
                   label.htmlFor = checkboxId;
-                  label.style.color = 'var(--nbx-color-fg-default)';
+                  // Set explicit color based on dark mode
+                  if (document.documentElement.getAttribute('data-theme') === 'dark' || document.body.classList.contains('dark-mode')) {
+                    label.style.color = '#ffffff';
+                  } else {
+                    label.style.color = 'var(--nbx-color-fg-default)';
+                  }
                   // Ensure all child elements (strong, span) inherit the color
-                  label.innerHTML = `<strong style="color: var(--nbx-color-fg-default);">${ifaceName}</strong>${configInfo ? `<span class="text-muted small ms-2" style="color: var(--nbx-color-fg-muted, var(--nbx-color-fg-default));">${configInfo}</span>` : ''}`;
+                  const strongColor = (document.documentElement.getAttribute('data-theme') === 'dark' || document.body.classList.contains('dark-mode')) ? '#ffffff' : 'var(--nbx-color-fg-default)';
+                  label.innerHTML = `<strong style="color: ${strongColor} !important;">${ifaceName}</strong>${configInfo ? `<span class="text-muted small ms-2" style="color: var(--nbx-color-fg-muted, ${strongColor});">${configInfo}</span>` : ''}`;
                   
                   labelWrapper.appendChild(label);
                   
