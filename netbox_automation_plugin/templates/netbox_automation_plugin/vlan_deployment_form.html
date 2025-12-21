@@ -1097,8 +1097,8 @@
                   if (devicesSelect.selectedOptions && devicesSelect.selectedOptions.length > 0) {
                     hasSelectedDevices = true;
                   }
-                  // Check Select2 (if initialized)
-                  if (jQuery && jQuery(devicesSelect).data('select2')) {
+                  // Check Select2 (if initialized and jQuery is available)
+                  if (typeof jQuery !== 'undefined' && jQuery(devicesSelect).data('select2')) {
                     const select2Value = jQuery(devicesSelect).val();
                     if (select2Value && select2Value.length > 0) {
                       hasSelectedDevices = true;
@@ -1162,8 +1162,8 @@
                   if (devicesSelect.selectedOptions && devicesSelect.selectedOptions.length > 0) {
                     hasSelectedDevices = true;
                   }
-                  // Check Select2 (if initialized)
-                  if (jQuery && jQuery(devicesSelect).data('select2')) {
+                  // Check Select2 (if initialized and jQuery is available)
+                  if (typeof jQuery !== 'undefined' && jQuery(devicesSelect).data('select2')) {
                     const select2Value = jQuery(devicesSelect).val();
                     if (select2Value && select2Value.length > 0) {
                       hasSelectedDevices = true;
@@ -1894,13 +1894,13 @@
 
                 devicesSelect.addEventListener('change', loadInterfacesBasedOnSyncMode);
                 
-                // Listen for Select2 events (if Select2 is initialized)
-                if (jQuery && jQuery(devicesSelect).data('select2')) {
+                // Listen for Select2 events (if Select2 is initialized and jQuery is available)
+                if (typeof jQuery !== 'undefined' && jQuery(devicesSelect).data('select2')) {
                   jQuery(devicesSelect).on('select2:select select2:unselect select2:clear', loadInterfacesBasedOnSyncMode);
-                } else {
+                } else if (typeof jQuery !== 'undefined') {
                   // Wait for Select2 to initialize
                   const checkSelect2 = setInterval(function() {
-                    if (jQuery && jQuery(devicesSelect).data('select2')) {
+                    if (typeof jQuery !== 'undefined' && jQuery(devicesSelect).data('select2')) {
                       jQuery(devicesSelect).on('select2:select select2:unselect select2:clear', loadInterfacesBasedOnSyncMode);
                       clearInterval(checkSelect2);
                       if (jQuery(devicesSelect).val() && jQuery(devicesSelect).val().length > 0) {
