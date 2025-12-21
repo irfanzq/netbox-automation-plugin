@@ -1488,15 +1488,21 @@
                 button.setAttribute('aria-expanded', isFirst ? 'true' : 'false');
                 button.setAttribute('aria-controls', collapseId);
                 // Set button style explicitly for dark mode compatibility
-                button.style.color = 'var(--nbx-color-fg-default)';
-                // Check if dark mode is active and set explicit white color
-                if (document.documentElement.getAttribute('data-theme') === 'dark' || document.body.classList.contains('dark-mode')) {
-                  button.style.color = '#ffffff';
-                }
-                button.innerHTML = `
-                  <strong style="color: inherit !important;">${deviceName}</strong>
-                  <span class="badge bg-secondary ms-2">${interfaces.length} interface${interfaces.length !== 1 ? 's' : ''}</span>
-                `;
+                const isDarkMode = document.documentElement.getAttribute('data-theme') === 'dark' || document.body.classList.contains('dark-mode');
+                button.style.color = isDarkMode ? '#ffffff' : 'var(--nbx-color-fg-default)';
+                button.style.setProperty('color', isDarkMode ? '#ffffff' : 'var(--nbx-color-fg-default)', 'important');
+                // Create strong element separately to set explicit color
+                const strongEl = document.createElement('strong');
+                strongEl.style.color = isDarkMode ? '#ffffff' : 'var(--nbx-color-fg-default)';
+                strongEl.style.setProperty('color', isDarkMode ? '#ffffff' : 'var(--nbx-color-fg-default)', 'important');
+                strongEl.textContent = deviceName;
+                
+                const badgeSpan = document.createElement('span');
+                badgeSpan.className = 'badge bg-secondary ms-2';
+                badgeSpan.textContent = `${interfaces.length} interface${interfaces.length !== 1 ? 's' : ''}`;
+                
+                button.appendChild(strongEl);
+                button.appendChild(badgeSpan);
                 header.appendChild(button);
                 
                 // Body
