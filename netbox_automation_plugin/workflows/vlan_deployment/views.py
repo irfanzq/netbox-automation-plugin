@@ -2307,19 +2307,32 @@ class VLANDeploymentView(View):
                 
                 # Check tags
                 interface_tags = set(iface.tags.values_list('name', flat=True))
-                has_vlan_mode_tag = any(
+                has_vlan_mode_access_tagged = any(
                     tag.startswith('vlan-mode:access') or tag.startswith('vlan-mode:tagged')
                     for tag in interface_tags
                 )
                 has_any_tags = iface.tags.exists()
                 
-                if has_vlan_mode_tag:
+                # Explicit duplicate prevention: if interface has vlan-mode:access or vlan-mode:tagged,
+                # it MUST go to Section 1 only, never Section 2
+                if has_vlan_mode_access_tagged:
                     # Section 1: Has vlan-mode:access or vlan-mode:tagged tag
                     tagged_interfaces.append(iface)
-                elif include_untagged and not has_any_tags:
-                    # Section 2: Completely untagged (no tags at all)
+                elif include_untagged:
+                    # Section 2: All interfaces with VLAN config that DON'T have vlan-mode:access/tagged
+                    # No strict filtering - include all interfaces with VLAN config
+                    # This includes: untagged, uplink/routed, needs-review, or any other vlan-mode tags
                     untagged_interfaces.append(iface)
-                # Else: Has other tags but not vlan-mode tags - exclude
+                # Note: Interfaces without VLAN config are already filtered out above
+            
+            # Safety check: Verify no duplicates between Section 1 and Section 2
+            tagged_interface_ids = {iface.id for iface in tagged_interfaces}
+            untagged_interface_ids = {iface.id for iface in untagged_interfaces}
+            duplicates = tagged_interface_ids & untagged_interface_ids
+            if duplicates:
+                logger.warning(f"Found duplicate interfaces between Section 1 and Section 2 for device {device.name}: {duplicates}")
+                # Remove duplicates from Section 2 (Section 1 takes priority)
+                untagged_interfaces = [iface for iface in untagged_interfaces if iface.id not in duplicates]
             
             if tagged_interfaces:
                 tagged_interfaces_by_device[device.name] = tagged_interfaces
@@ -2402,18 +2415,22 @@ class VLANDeploymentView(View):
             'bridge_vlans': bridge_vlans,
         }
 
-    def _auto_tag_interface_after_deployment(self, interface):
+    def _auto_tag_interface_after_deployment(self, interface, replace_conflicting_tags=False):
         """
         Auto-tag interface based on NetBox VLAN config after successful deployment.
         Bypasses analysis criteria (cable checks, etc.) since we've already deployed.
         
         Args:
             interface: Interface object from NetBox
+            replace_conflicting_tags: If True, remove vlan-mode:uplink/routed tags before adding new tag
         
         Returns:
             str: Tag name that was applied, or None if tagging failed/skipped
         """
         from extras.models import Tag
+        
+        # Refresh interface from DB to get latest tags
+        interface.refresh_from_db()
         
         # Read NetBox VLAN config
         has_untagged = interface.untagged_vlan is not None
@@ -2429,22 +2446,47 @@ class VLANDeploymentView(View):
             logger.warning(f"Interface {interface.name} has no VLAN config, skipping auto-tag")
             return None
         
-        # Get Tag object
+        # Get Tag objects
         try:
-            tag = Tag.objects.get(name=tag_name)
+            new_tag = Tag.objects.get(name=tag_name)
         except Tag.DoesNotExist:
             logger.error(f"Tag '{tag_name}' not found in NetBox - cannot auto-tag interface {interface.name}")
             return None
         
-        # Add tag directly (no removal needed - interface has no tags)
+        # If replacing conflicting tags, remove vlan-mode:uplink and vlan-mode:routed tags first
+        if replace_conflicting_tags:
+            conflicting_tags_to_remove = []
+            interface_tags = list(interface.tags.all())
+            for tag in interface_tags:
+                if tag.name.startswith('vlan-mode:uplink') or tag.name.startswith('vlan-mode:routed'):
+                    conflicting_tags_to_remove.append(tag)
+            
+            if conflicting_tags_to_remove:
+                for old_tag in conflicting_tags_to_remove:
+                    interface.tags.remove(old_tag)
+                    logger.info(f"Removed conflicting tag '{old_tag.name}' from interface {interface.device.name}:{interface.name}")
+                interface.save()
+        
+        # Remove any existing vlan-mode:access or vlan-mode:tagged tags (if any) before adding new one
+        existing_vlan_mode_tags = [
+            tag for tag in interface.tags.all()
+            if tag.name.startswith('vlan-mode:access') or tag.name.startswith('vlan-mode:tagged')
+        ]
+        if existing_vlan_mode_tags:
+            for old_tag in existing_vlan_mode_tags:
+                interface.tags.remove(old_tag)
+            interface.save()
+        
+        # Add new tag
         try:
-            interface.tags.add(tag)
+            interface.tags.add(new_tag)
             interface.save()
             
             # Verify tag was added
             interface.refresh_from_db()
-            if tag in interface.tags.all():
-                logger.info(f"Auto-tagged interface {interface.device.name}:{interface.name} as {tag_name}")
+            if new_tag in interface.tags.all():
+                action = "replaced" if replace_conflicting_tags or existing_vlan_mode_tags else "applied"
+                logger.info(f"Auto-tagged interface {interface.device.name}:{interface.name} as {tag_name} ({action})")
                 return tag_name
             else:
                 logger.error(f"Failed to verify tag {tag_name} on interface {interface.name}")
@@ -2588,11 +2630,13 @@ class VLANDeploymentView(View):
         
         # Process Section 2: Untagged interfaces (only if deploy_untagged is True)
         interfaces_to_auto_tag = []
+        interfaces_with_conflicting_tags = []  # Track interfaces with uplink/routed tags
         if deploy_untagged:
             for device in devices:
                 device_interfaces = untagged_interfaces_by_device.get(device.name, [])
                 
                 for interface in device_interfaces:
+                    # interface is already an Interface object from _get_interfaces_for_sync
                     # Generate config from NetBox state
                     config_info = self._generate_config_from_netbox(device, interface, platform)
                     config_commands = config_info['commands']
@@ -2666,6 +2710,18 @@ class VLANDeploymentView(View):
                         # Track for auto-tagging if deployment succeeded
                         if result.get('success'):
                             interfaces_to_auto_tag.append(interface)
+                        # Check if this interface has conflicting vlan-mode tags that need replacement
+                        interface.refresh_from_db()
+                        interface_tags = set(interface.tags.values_list('name', flat=True))
+                        # Any vlan-mode tag that's not access/tagged needs replacement
+                        has_conflicting_tags = any(
+                            tag.startswith('vlan-mode:') and 
+                            not tag.startswith('vlan-mode:access') and 
+                            not tag.startswith('vlan-mode:tagged')
+                            for tag in interface_tags
+                        )
+                        if has_conflicting_tags:
+                            interfaces_with_conflicting_tags.append(interface)
                         
                         results.append(result)
         
@@ -2673,11 +2729,14 @@ class VLANDeploymentView(View):
         if not dry_run and interfaces_to_auto_tag:
             auto_tag_results = []
             for interface in interfaces_to_auto_tag:
-                tag_applied = self._auto_tag_interface_after_deployment(interface)
+                # Check if this interface has conflicting tags that need replacement
+                replace_tags = interface in interfaces_with_conflicting_tags
+                tag_applied = self._auto_tag_interface_after_deployment(interface, replace_conflicting_tags=replace_tags)
                 auto_tag_results.append({
                     'interface': f"{interface.device.name}:{interface.name}",
                     'tag_applied': tag_applied,
                     'success': tag_applied is not None,
+                    'tags_replaced': replace_tags,
                 })
             
             # Add auto-tagging summary to results
@@ -4586,28 +4645,17 @@ class GetInterfacesForSyncView(View):
                 if not (iface.untagged_vlan or iface.tagged_vlans.exists()):
                     continue
                 
-                # Filter by mode: only access or tagged interfaces (similar to normal deployment checks)
-                interface_mode = getattr(iface, 'mode', None)
-                if interface_mode not in ['access', 'tagged', 'tagged-all']:
-                    continue  # Skip routed, bridged, etc.
-                
-                # Check if interface is cable connected (similar to normal deployment)
-                if not iface.cable_id:
-                    continue  # Skip uncabled interfaces in sync mode
-                
-                # Check if connected to a host device (similar to normal deployment)
-                if iface.cable_id:
-                    from dcim.models import Cable
-                    try:
-                        cable = Cable.objects.get(id=iface.cable_id)
-                        # Check if other end is connected to a device (not just a patch panel)
-                        other_termination = cable.termination_a if cable.termination_b_id == iface.id else cable.termination_b
-                        if not hasattr(other_termination, 'device'):
-                            continue  # Not connected to a device
-                    except Cable.DoesNotExist:
-                        continue  # Cable not found
-                    except Exception:
-                        continue  # Skip if there's any error
+                # Check interface tags to categorize them
+                interface_tags = set(iface.tags.values_list('name', flat=True))
+                has_vlan_mode_access_tagged = any(
+                    tag.startswith('vlan-mode:access') or tag.startswith('vlan-mode:tagged')
+                    for tag in interface_tags
+                )
+                has_vlan_mode_uplink_routed = any(
+                    tag.startswith('vlan-mode:uplink') or tag.startswith('vlan-mode:routed')
+                    for tag in interface_tags
+                )
+                has_any_tags = iface.tags.exists()
                 
                 # Serialize interface with VLAN config
                 iface_data = {
@@ -4625,35 +4673,94 @@ class GetInterfacesForSyncView(View):
                     ],
                 }
                 
-                # Check if interface has vlan-mode:access or vlan-mode:tagged tags
-                interface_tags = set(iface.tags.values_list('name', flat=True))
-                has_vlan_mode_tag = any(
-                    tag.startswith('vlan-mode:access') or tag.startswith('vlan-mode:tagged')
-                    for tag in interface_tags
-                )
-                
-                # Check if interface has ANY tags at all
-                has_any_tags = iface.tags.exists()
-                
-                if has_vlan_mode_tag:
+                # Explicit duplicate prevention: if interface has vlan-mode:access or vlan-mode:tagged,
+                # it MUST go to Section 1 only, never Section 2
+                if has_vlan_mode_access_tagged:
                     # Section 1: Has vlan-mode:access or vlan-mode:tagged tag
+                    # Skip strict filtering - these are already validated
                     tagged_interfaces.append(iface_data)
-                elif not has_any_tags:
-                    # Section 2: Completely untagged (no tags at all)
+                    # Explicitly skip Section 2 to prevent duplicates
+                    continue
+                else:
+                    # Section 2: All interfaces with VLAN config that don't have vlan-mode:access/tagged
+                    # Include all interfaces with VLAN config - no strict filtering
+                    
+                    # Check for any vlan-mode tags (other than access/tagged)
+                    other_vlan_mode_tags = [
+                        tag for tag in interface_tags 
+                        if tag.startswith('vlan-mode:') and 
+                        not tag.startswith('vlan-mode:access') and 
+                        not tag.startswith('vlan-mode:tagged')
+                    ]
+                    
+                    # Check for any other tags (non-vlan-mode tags like custom tags)
+                    non_vlan_mode_tags = [
+                        tag for tag in interface_tags 
+                        if not tag.startswith('vlan-mode:')
+                    ]
+                    
+                    # Combine all tags that will be replaced/warned about
+                    all_other_tags = other_vlan_mode_tags + non_vlan_mode_tags
+                    
+                    # Store tag information for frontend display
+                    iface_data['current_tags'] = list(interface_tags)  # All current tags
+                    iface_data['has_any_tags'] = has_any_tags
+                    
+                    if other_vlan_mode_tags:
+                        # Has vlan-mode tags that need replacement (uplink, routed, etc.)
+                        iface_data['has_conflicting_tags'] = True
+                        iface_data['conflicting_tags'] = other_vlan_mode_tags
+                        iface_data['warning'] = f"Interface labeled as {', '.join(other_vlan_mode_tags)}. These labels will be replaced with vlan-mode:access or vlan-mode:tagged after successful deployment."
+                    elif has_any_tags:
+                        # Has other tags (non-vlan-mode) but also has VLAN config
+                        # Still include it, but show info (tags won't be replaced, just adding vlan-mode tag)
+                        iface_data['has_conflicting_tags'] = False
+                        iface_data['other_tags'] = non_vlan_mode_tags
+                        iface_data['info'] = f"Interface has tags: {', '.join(non_vlan_mode_tags)}. Will add vlan-mode:access or vlan-mode:tagged tag."
+                    else:
+                        # No tags at all - completely untagged
+                        iface_data['has_conflicting_tags'] = False
+                        iface_data['info'] = "Untagged interface - will be auto-tagged after deployment."
+                    
                     untagged_interfaces.append(iface_data)
-                # Else: Has other tags but not vlan-mode tags - exclude (routed, uplink, etc.)
+            
+            # Safety check: Verify no duplicates between Section 1 and Section 2
+            tagged_interface_ids = {iface_data['id'] for iface_data in tagged_interfaces}
+            untagged_interface_ids = {iface_data['id'] for iface_data in untagged_interfaces}
+            duplicates = tagged_interface_ids & untagged_interface_ids
+            if duplicates:
+                logger.warning(f"Found duplicate interfaces between Section 1 and Section 2 for device {device.name}: {duplicates}")
+                # Remove duplicates from Section 2 (Section 1 takes priority)
+                untagged_interfaces = [iface_data for iface_data in untagged_interfaces if iface_data['id'] not in duplicates]
             
             if tagged_interfaces:
                 tagged_interfaces_by_device[device.name] = tagged_interfaces
             if untagged_interfaces:
                 untagged_interfaces_by_device[device.name] = untagged_interfaces
         
+        # Count interfaces with conflicting tags (uplink/routed)
+        total_conflicting = 0
+        for device_name, ifaces in untagged_interfaces_by_device.items():
+            for iface_data in ifaces:
+                if iface_data.get('has_conflicting_tags', False):
+                    total_conflicting += 1
+        
+        # Calculate device count properly
+        if device_ids:
+            device_count = len(device_ids)
+        else:
+            try:
+                device_count = devices.count() if hasattr(devices, 'count') else len(list(devices))
+            except:
+                device_count = 0
+        
         return JsonResponse({
             'tagged_interfaces': tagged_interfaces_by_device,
             'untagged_interfaces': untagged_interfaces_by_device,
-            'device_count': len(device_ids),
+            'device_count': device_count,
             'total_tagged': sum(len(ifaces) for ifaces in tagged_interfaces_by_device.values()),
             'total_untagged': sum(len(ifaces) for ifaces in untagged_interfaces_by_device.values()),
+            'total_conflicting': total_conflicting,
         })
 
 

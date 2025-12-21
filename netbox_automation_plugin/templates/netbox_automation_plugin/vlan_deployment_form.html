@@ -503,29 +503,110 @@
   }
   
   .alert-info {
-    background-color: var(--nbx-color-bg-info, #d1ecf1) !important;
-    border-color: var(--nbx-color-border-info, #bee5eb) !important;
-    color: var(--nbx-color-fg-default, #0c5460) !important;
+    background-color: var(--nbx-color-bg-info) !important;
+    border-color: var(--nbx-color-border-info) !important;
+    color: var(--nbx-color-fg-default) !important;
   }
   
-  html[data-theme="dark"] .alert-info,
-  body.dark-mode .alert-info {
-    background-color: var(--nbx-color-bg-info, #1a4a52) !important;
-    border-color: var(--nbx-color-border-info, #2a5a62) !important;
-    color: var(--nbx-color-fg-default, #d1ecf1) !important;
+  /* Ensure all child elements in alert-info inherit proper colors */
+  .alert-info *,
+  .alert-info p,
+  .alert-info ul,
+  .alert-info li,
+  .alert-info strong {
+    color: inherit !important;
   }
   
   .alert-success {
-    background-color: var(--nbx-color-bg-success, #d4edda) !important;
-    border-color: var(--nbx-color-border-success, #c3e6cb) !important;
-    color: var(--nbx-color-fg-default, #155724) !important;
+    background-color: var(--nbx-color-bg-success) !important;
+    border-color: var(--nbx-color-border-success) !important;
+    color: var(--nbx-color-fg-default) !important;
   }
   
-  html[data-theme="dark"] .alert-success,
-  body.dark-mode .alert-success {
-    background-color: var(--nbx-color-bg-success, #1a4a2a) !important;
-    border-color: var(--nbx-color-border-success, #2a5a3a) !important;
-    color: var(--nbx-color-fg-default, #d4edda) !important;
+  /* Ensure all child elements in alert-success inherit proper colors */
+  .alert-success *,
+  .alert-success p,
+  .alert-success ul,
+  .alert-success li,
+  .alert-success strong {
+    color: inherit !important;
+  }
+  
+  .alert-warning {
+    background-color: var(--nbx-color-bg-warning) !important;
+    border-color: var(--nbx-color-border-warning) !important;
+    color: var(--nbx-color-fg-default) !important;
+  }
+  
+  /* Ensure all child elements in alert-warning inherit proper colors */
+  .alert-warning *,
+  .alert-warning p,
+  .alert-warning ul,
+  .alert-warning li,
+  .alert-warning strong {
+    color: inherit !important;
+  }
+  
+  /* Badges - use NetBox CSS variables dynamically */
+  .badge {
+    font-size: 0.75rem !important;
+    padding: 0.25em 0.6em !important;
+    border-radius: 0.25rem !important;
+  }
+  
+  .badge.bg-danger {
+    background-color: var(--nbx-color-danger, #dc3545) !important;
+    color: #ffffff !important;
+  }
+  
+  html[data-theme="dark"] .badge.bg-danger,
+  body.dark-mode .badge.bg-danger {
+    background-color: var(--nbx-color-danger, #dc3545) !important;
+    color: #ffffff !important;
+  }
+  
+  .badge.bg-warning {
+    background-color: var(--nbx-color-warning, #ffc107) !important;
+    color: #000000 !important;
+  }
+  
+  html[data-theme="dark"] .badge.bg-warning,
+  body.dark-mode .badge.bg-warning {
+    background-color: var(--nbx-color-warning, #ffc107) !important;
+    color: #000000 !important;
+  }
+  
+  .badge.bg-info {
+    background-color: var(--nbx-color-info, #0dcaf0) !important;
+    color: #000000 !important;
+  }
+  
+  html[data-theme="dark"] .badge.bg-info,
+  body.dark-mode .badge.bg-info {
+    background-color: var(--nbx-color-info, #0dcaf0) !important;
+    color: #000000 !important;
+  }
+  
+  .badge.bg-success {
+    background-color: var(--nbx-color-success, #198754) !important;
+    color: #ffffff !important;
+  }
+  
+  html[data-theme="dark"] .badge.bg-success,
+  body.dark-mode .badge.bg-success {
+    background-color: var(--nbx-color-success, #198754) !important;
+    color: #ffffff !important;
+  }
+  
+  .badge.bg-secondary {
+    background-color: var(--nbx-color-bg-secondary, #6c757d) !important;
+    color: var(--nbx-color-fg-default, #ffffff) !important;
+  }
+  
+  html[data-theme="dark"] .badge.bg-secondary,
+  body.dark-mode .badge.bg-secondary {
+    background-color: var(--nbx-color-bg-secondary, #6c757d) !important;
+    color: var(--nbx-color-fg-default, #ffffff) !important;
   }
   
   .alert code {
@@ -666,7 +747,7 @@
                 {% endif %}
               </div>
               
-              <div id="sync-mode-info" style="display: none; margin-top: 10px; padding: 10px; background-color: var(--nbx-color-bg-info, #d1ecf1); border: 1px solid var(--nbx-color-border-info, #bee5eb); border-radius: 4px;">
+              <div id="sync-mode-info" class="alert alert-info" style="display: none; margin-top: 10px;">
                 <strong>Sync Mode Active:</strong> Interfaces with VLAN configuration from NetBox will be synced to devices. 
                 All interfaces are pre-selected - uncheck any you don't want to sync.
               </div>
@@ -760,7 +841,7 @@
                 </div>
               </div>
 
-              <div class="form-text" style="color: var(--nbx-color-fg-default) !important;">
+              <div id="combined-selection-message" class="form-text" style="color: var(--nbx-color-fg-default) !important;">
                 <strong>Combined selection:</strong> Both checkbox selections and manual entries will be combined and validated against NetBox.
               </div>
 
@@ -1110,6 +1191,13 @@
                   console.error('Additional interfaces container not found!');
                 }
                 
+                // Hide "Combined selection" message in sync mode
+                const combinedSelectionMsg = document.getElementById('combined-selection-message');
+                if (combinedSelectionMsg) {
+                  combinedSelectionMsg.style.display = 'none';
+                  console.log('Hiding combined selection message');
+                }
+                
                 if (interfacesManualField) {
                   interfacesManualField.disabled = true;
                 }
@@ -1179,6 +1267,13 @@
                   console.log('Additional interfaces container display:', interfacesManualContainer.style.display);
                 } else {
                   console.error('Additional interfaces container not found when removing sync mode!');
+                }
+                
+                // Show "Combined selection" message in normal mode
+                const combinedSelectionMsg = document.getElementById('combined-selection-message');
+                if (combinedSelectionMsg) {
+                  combinedSelectionMsg.style.display = 'block';
+                  console.log('Showing combined selection message');
                 }
                 
                 if (interfacesManualField) {
@@ -1309,13 +1404,22 @@
                 // Add checkboxes for each interface
                 interfaces.forEach(iface => {
                   const checked = syncMode ? 'checked' : '';
-                  const ifaceName = typeof iface === 'string' ? iface : iface.name;
+                  const ifaceName = typeof iface === 'string' ? iface : (iface.name || iface);
                   const configInfo = syncMode && typeof iface === 'object' ? formatInterfaceConfig(iface) : '';
                   const checkboxValue = syncMode ? `${deviceName}:${ifaceName}` : ifaceName;
+                  
+                  // Extract interface metadata for display
+                  const hasWarning = syncMode && typeof iface === 'object' && iface.has_conflicting_tags;
+                  const warningText = syncMode && typeof iface === 'object' && iface.warning ? iface.warning : '';
+                  const infoText = syncMode && typeof iface === 'object' && iface.info ? iface.info : '';
+                  const conflictingTags = syncMode && typeof iface === 'object' && iface.conflicting_tags ? iface.conflicting_tags : [];
+                  const otherTags = syncMode && typeof iface === 'object' && iface.other_tags ? iface.other_tags : [];
+                  const hasAnyTags = syncMode && typeof iface === 'object' && iface.has_any_tags !== undefined ? iface.has_any_tags : false;
+                  
                   const checkboxId = `iface_${deviceIndex}_${ifaceName.replace(/[^a-zA-Z0-9]/g, '_')}`;
                   
                   const formCheck = document.createElement('div');
-                  formCheck.className = 'form-check mb-2';
+                  formCheck.className = 'form-check mb-3';
                   
                   const checkbox = document.createElement('input');
                   checkbox.type = 'checkbox';
@@ -1325,14 +1429,82 @@
                   checkbox.id = checkboxId;
                   if (checked) checkbox.checked = true;
                   
+                  const labelWrapper = document.createElement('div');
+                  labelWrapper.className = 'd-flex align-items-start flex-wrap';
+                  
                   const label = document.createElement('label');
-                  label.className = 'form-check-label';
+                  label.className = 'form-check-label me-2';
                   label.htmlFor = checkboxId;
                   label.style.color = window.getNetBoxTextColor ? window.getNetBoxTextColor() : (isDarkMode() ? '#ffffff' : '#212529');
                   label.innerHTML = `<strong>${ifaceName}</strong>${configInfo ? `<span class="text-muted small ms-2">${configInfo}</span>` : ''}`;
                   
+                  labelWrapper.appendChild(label);
+                  
+                  // Add tag badges to show interface status
+                  if (syncMode && typeof iface === 'object') {
+                    if (hasAnyTags) {
+                      // Show current tags as badges
+                      const tagsDiv = document.createElement('div');
+                      tagsDiv.className = 'd-flex flex-wrap gap-1 ms-2';
+                      
+                      if (conflictingTags.length > 0) {
+                        conflictingTags.forEach(tagName => {
+                          const badge = document.createElement('span');
+                          badge.className = 'badge bg-danger';
+                          // Badge styling handled by CSS with NetBox variables
+                          badge.textContent = tagName;
+                          badge.title = 'This tag will be replaced';
+                          tagsDiv.appendChild(badge);
+                        });
+                      }
+                      
+                      if (otherTags.length > 0) {
+                        otherTags.forEach(tagName => {
+                          const badge = document.createElement('span');
+                          badge.className = 'badge bg-info';
+                          // Badge styling handled by CSS with NetBox variables
+                          badge.textContent = tagName;
+                          badge.title = 'Existing tag (will not be removed)';
+                          tagsDiv.appendChild(badge);
+                        });
+                      }
+                      
+                      if (tagsDiv.children.length > 0) {
+                        labelWrapper.appendChild(tagsDiv);
+                      }
+                    } else {
+                      // No tags - show "Untagged" badge
+                      const untaggedBadge = document.createElement('span');
+                      untaggedBadge.className = 'badge bg-secondary';
+                      // Badge styling handled by CSS with NetBox variables
+                      untaggedBadge.textContent = 'Untagged';
+                      untaggedBadge.title = 'No tags - will be auto-tagged after deployment';
+                      labelWrapper.appendChild(untaggedBadge);
+                    }
+                  }
+                  
                   formCheck.appendChild(checkbox);
-                  formCheck.appendChild(label);
+                  formCheck.appendChild(labelWrapper);
+                  
+                  // Add warning/info messages below the interface
+                  if (hasWarning && warningText) {
+                    const warningDiv = document.createElement('div');
+                    warningDiv.className = 'alert alert-warning alert-sm mt-2 mb-0 ms-4';
+                    warningDiv.style.fontSize = '0.85rem';
+                    warningDiv.style.padding = '0.5rem 0.75rem';
+                    // Use NetBox CSS variables - they handle dark mode automatically
+                    warningDiv.innerHTML = `<i class="mdi mdi-alert"></i> <strong>Warning:</strong> ${warningText}`;
+                    formCheck.appendChild(warningDiv);
+                  } else if (infoText) {
+                    const infoDiv = document.createElement('div');
+                    infoDiv.className = 'alert alert-info alert-sm mt-2 mb-0 ms-4';
+                    infoDiv.style.fontSize = '0.85rem';
+                    infoDiv.style.padding = '0.5rem 0.75rem';
+                    // Use NetBox CSS variables - they handle dark mode automatically
+                    infoDiv.innerHTML = `<i class="mdi mdi-information"></i> ${infoText}`;
+                    formCheck.appendChild(infoDiv);
+                  }
+                  
                   body.appendChild(formCheck);
                 });
                 
@@ -1388,9 +1560,7 @@
                   <p class="mb-2 mt-2">No interfaces matching your criteria were found. Make sure:</p>
                   <ul class="mb-0">
                     <li>Devices have interfaces with VLAN configuration in NetBox</li>
-                    <li>Interfaces are cable-connected</li>
-                    <li>Interfaces are mode: <code>access</code> or <code>tagged</code></li>
-                    <li>Interfaces are connected to host devices (not just patch panels)</li>
+                    <li>Interfaces have VLAN configuration (untagged_vlan or tagged_vlans)</li>
                   </ul>
                 `;
                 container.appendChild(emptyDiv);
@@ -1404,7 +1574,7 @@
                 
                 const section1Header = document.createElement('h5');
                 section1Header.className = 'mb-3';
-                section1Header.style.color = window.getNetBoxTextColor ? window.getNetBoxTextColor() : (isDarkMode() ? '#ffffff' : '#212529');
+                section1Header.style.color = 'var(--nbx-color-fg-default)';
                 section1Header.innerHTML = `
                   Section 1: Tagged Interfaces (vlan-mode:access or vlan-mode:tagged)
                   <span class="badge bg-success ms-2">${totalTagged} interface${totalTagged !== 1 ? 's' : ''}</span>
@@ -1429,17 +1599,19 @@
                 container.appendChild(section1Div);
               }
               
-              // Section 2: Untagged Interfaces (only show if it has interfaces)
+              // Section 2: Interfaces with VLAN config but not tagged as access/tagged (only show if it has interfaces)
               if (hasUntagged) {
                 const section2Div = document.createElement('div');
                 section2Div.className = 'mb-4';
                 
+                const totalConflicting = data.total_conflicting || 0;
                 const section2Header = document.createElement('h5');
                 section2Header.className = 'mb-3';
-                section2Header.style.color = window.getNetBoxTextColor ? window.getNetBoxTextColor() : (isDarkMode() ? '#ffffff' : '#212529');
+                section2Header.style.color = 'var(--nbx-color-fg-default)';
                 section2Header.innerHTML = `
-                  Section 2: Untagged Interfaces (no tags - will be auto-tagged after deployment)
+                  Section 2: Interfaces with VLAN Config (untagged or labeled differently - will be auto-tagged/re-labeled after deployment)
                   <span class="badge bg-warning ms-2">${totalUntagged} interface${totalUntagged !== 1 ? 's' : ''}</span>
+                  ${totalConflicting > 0 ? `<span class="badge bg-danger ms-2">${totalConflicting} with conflicting tags</span>` : ''}
                 `;
                 section2Div.appendChild(section2Header);
                 
