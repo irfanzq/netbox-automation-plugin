@@ -669,6 +669,52 @@
   body.dark-mode #deploy-btn:disabled {
     color: #ffffff !important; /* White for dark mode */
   }
+  
+  /* Accordion buttons - ensure device names are visible in dark mode */
+  .accordion-button {
+    color: var(--nbx-color-fg-default) !important;
+    background-color: var(--nbx-color-bg-default) !important;
+  }
+  
+  .accordion-button strong,
+  .accordion-button * {
+    color: var(--nbx-color-fg-default) !important;
+  }
+  
+  .accordion-button:not(.collapsed) {
+    color: var(--nbx-color-fg-default) !important;
+    background-color: var(--nbx-color-bg-default) !important;
+  }
+  
+  .accordion-button:not(.collapsed) strong,
+  .accordion-button:not(.collapsed) * {
+    color: var(--nbx-color-fg-default) !important;
+  }
+  
+  /* Expand All / Collapse All buttons - dark mode compatible */
+  .btn-outline-secondary {
+    color: var(--nbx-color-fg-default) !important;
+    border-color: var(--nbx-color-border-default) !important;
+    background-color: transparent !important;
+  }
+  
+  .btn-outline-secondary:hover {
+    color: var(--nbx-color-fg-default) !important;
+    background-color: var(--nbx-color-bg-secondary) !important;
+    border-color: var(--nbx-color-border-default) !important;
+  }
+  
+  /* Ensure interface labels and strong tags use proper colors */
+  .form-check-label,
+  .form-check-label strong {
+    color: var(--nbx-color-fg-default) !important;
+  }
+  
+  /* Ensure text-muted spans in interface labels are visible */
+  .form-check-label .text-muted {
+    color: var(--nbx-color-fg-muted, var(--nbx-color-fg-default)) !important;
+    opacity: 1 !important;
+  }
 </style>
   <div class="row">
     <div class="col-md-12">
@@ -1065,8 +1111,8 @@
               if (!scopeRadio) {
                 console.warn('No deployment scope radio button is checked - using default "single"');
                 // Default to single mode if no radio is checked
-                const singleFields = document.getElementById('single-device-fields');
-                const groupFields = document.getElementById('group-device-fields');
+              const singleFields = document.getElementById('single-device-fields');
+              const groupFields = document.getElementById('group-device-fields');
                 console.log('Default mode - singleFields:', !!singleFields, 'groupFields:', !!groupFields);
                 if (singleFields) {
                   singleFields.style.display = 'block';
@@ -1326,13 +1372,13 @@
             }
 
             // Render interfaces in accordion format (for both normal and sync modes)
-            function renderInterfacesAccordion(interfacesByDevice, container, syncMode = false) {
+            function renderInterfacesAccordion(interfacesByDevice, container, syncMode = false, sectionLabel = 'Interfaces grouped by device') {
               container.innerHTML = '';
               
               if (!interfacesByDevice || Object.keys(interfacesByDevice).length === 0) {
                 const p = document.createElement('p');
                 p.className = 'text-muted mb-0';
-                p.style.color = window.getNetBoxTextColor ? window.getNetBoxTextColor() : (isDarkMode() ? '#ffffff' : '#212529');
+                p.style.color = 'var(--nbx-color-fg-default)';
                 p.style.opacity = '1';
                 p.textContent = syncMode ? 'No interfaces with VLAN configuration found' : 'No interfaces found';
                 container.appendChild(p);
@@ -1349,7 +1395,7 @@
               const buttonDiv = document.createElement('div');
               buttonDiv.className = 'mb-2 d-flex justify-content-between align-items-center';
               buttonDiv.innerHTML = `
-                <span class="text-muted small">Interfaces grouped by device</span>
+                <span class="text-muted small" style="color: var(--nbx-color-fg-default);">${sectionLabel}</span>
                 <div>
                   <button type="button" class="btn btn-sm btn-outline-secondary" onclick="expandAllAccordion('${accordionId}')">
                     <i class="mdi mdi-chevron-double-down"></i> Expand All
@@ -1414,7 +1460,9 @@
                   const infoText = syncMode && typeof iface === 'object' && iface.info ? iface.info : '';
                   const conflictingTags = syncMode && typeof iface === 'object' && iface.conflicting_tags ? iface.conflicting_tags : [];
                   const otherTags = syncMode && typeof iface === 'object' && iface.other_tags ? iface.other_tags : [];
+                  const vlanModeTags = syncMode && typeof iface === 'object' && iface.vlan_mode_tags ? iface.vlan_mode_tags : [];
                   const hasAnyTags = syncMode && typeof iface === 'object' && iface.has_any_tags !== undefined ? iface.has_any_tags : false;
+                  const isSection1 = vlanModeTags.length > 0; // Section 1 interfaces have vlan-mode tags
                   
                   const checkboxId = `iface_${deviceIndex}_${ifaceName.replace(/[^a-zA-Z0-9]/g, '_')}`;
                   
@@ -1435,26 +1483,46 @@
                   const label = document.createElement('label');
                   label.className = 'form-check-label me-2';
                   label.htmlFor = checkboxId;
-                  label.style.color = window.getNetBoxTextColor ? window.getNetBoxTextColor() : (isDarkMode() ? '#ffffff' : '#212529');
-                  label.innerHTML = `<strong>${ifaceName}</strong>${configInfo ? `<span class="text-muted small ms-2">${configInfo}</span>` : ''}`;
+                  label.style.color = 'var(--nbx-color-fg-default)';
+                  // Ensure all child elements (strong, span) inherit the color
+                  label.innerHTML = `<strong style="color: var(--nbx-color-fg-default);">${ifaceName}</strong>${configInfo ? `<span class="text-muted small ms-2" style="color: var(--nbx-color-fg-muted, var(--nbx-color-fg-default));">${configInfo}</span>` : ''}`;
                   
                   labelWrapper.appendChild(label);
                   
                   // Add tag badges to show interface status
                   if (syncMode && typeof iface === 'object') {
-                    if (hasAnyTags) {
-                      // Show current tags as badges
-                      const tagsDiv = document.createElement('div');
-                      tagsDiv.className = 'd-flex flex-wrap gap-1 ms-2';
-                      
+                    const tagsDiv = document.createElement('div');
+                    tagsDiv.className = 'd-flex flex-wrap gap-1 ms-2';
+                    let hasBadges = false;
+                    
+                    // Section 1: Show vlan-mode:access or vlan-mode:tagged badges
+                    if (isSection1 && vlanModeTags.length > 0) {
+                      vlanModeTags.forEach(tagName => {
+                        const badge = document.createElement('span');
+                        // vlan-mode:access = success (green), vlan-mode:tagged = info (blue)
+                        if (tagName.startsWith('vlan-mode:access')) {
+                          badge.className = 'badge bg-success';
+                        } else if (tagName.startsWith('vlan-mode:tagged')) {
+                          badge.className = 'badge bg-info';
+                        } else {
+                          badge.className = 'badge bg-secondary';
+                        }
+                        badge.textContent = tagName;
+                        badge.title = 'Interface tag';
+                        tagsDiv.appendChild(badge);
+                        hasBadges = true;
+                      });
+                    }
+                    // Section 2: Show conflicting tags (danger) or other tags (info) or untagged badge
+                    else {
                       if (conflictingTags.length > 0) {
                         conflictingTags.forEach(tagName => {
                           const badge = document.createElement('span');
                           badge.className = 'badge bg-danger';
-                          // Badge styling handled by CSS with NetBox variables
                           badge.textContent = tagName;
                           badge.title = 'This tag will be replaced';
                           tagsDiv.appendChild(badge);
+                          hasBadges = true;
                         });
                       }
                       
@@ -1462,24 +1530,26 @@
                         otherTags.forEach(tagName => {
                           const badge = document.createElement('span');
                           badge.className = 'badge bg-info';
-                          // Badge styling handled by CSS with NetBox variables
                           badge.textContent = tagName;
                           badge.title = 'Existing tag (will not be removed)';
                           tagsDiv.appendChild(badge);
+                          hasBadges = true;
                         });
                       }
                       
-                      if (tagsDiv.children.length > 0) {
-                        labelWrapper.appendChild(tagsDiv);
+                      if (!hasAnyTags) {
+                        // No tags - show "Untagged" badge
+                        const untaggedBadge = document.createElement('span');
+                        untaggedBadge.className = 'badge bg-secondary';
+                        untaggedBadge.textContent = 'Untagged';
+                        untaggedBadge.title = 'No tags - will be auto-tagged after deployment';
+                        tagsDiv.appendChild(untaggedBadge);
+                        hasBadges = true;
                       }
-                    } else {
-                      // No tags - show "Untagged" badge
-                      const untaggedBadge = document.createElement('span');
-                      untaggedBadge.className = 'badge bg-secondary';
-                      // Badge styling handled by CSS with NetBox variables
-                      untaggedBadge.textContent = 'Untagged';
-                      untaggedBadge.title = 'No tags - will be auto-tagged after deployment';
-                      labelWrapper.appendChild(untaggedBadge);
+                    }
+                    
+                    if (hasBadges) {
+                      labelWrapper.appendChild(tagsDiv);
                     }
                   }
                   
@@ -1518,25 +1588,37 @@
               
               container.appendChild(accordion);
               
-              // Add helper functions for Expand All / Collapse All
-              if (typeof window.expandAllAccordion === 'undefined') {
-                window.expandAllAccordion = function(accordionId) {
-                  const accordion = document.getElementById(accordionId);
-                  if (!accordion) return;
-                  const collapses = accordion.querySelectorAll('.accordion-collapse');
-                  collapses.forEach(collapse => {
-                    const bsCollapse = new bootstrap.Collapse(collapse, { toggle: true, show: true });
-                  });
-                };
-                window.collapseAllAccordion = function(accordionId) {
-                  const accordion = document.getElementById(accordionId);
-                  if (!accordion) return;
-                  const collapses = accordion.querySelectorAll('.accordion-collapse');
-                  collapses.forEach(collapse => {
-                    const bsCollapse = new bootstrap.Collapse(collapse, { toggle: true, show: false });
-                  });
-                };
-              }
+              // Add helper functions for Expand All / Collapse All (always define to ensure they work)
+              window.expandAllAccordion = function(accordionId) {
+                const accordion = document.getElementById(accordionId);
+                if (!accordion) return;
+                const collapses = accordion.querySelectorAll('.accordion-collapse');
+                collapses.forEach(collapse => {
+                  // Check if Bootstrap Collapse is available
+                  if (typeof bootstrap !== 'undefined' && bootstrap.Collapse) {
+                    const bsCollapse = new bootstrap.Collapse(collapse, { toggle: false });
+                    bsCollapse.show();
+                  } else {
+                    // Fallback: manually add 'show' class
+                    collapse.classList.add('show');
+                  }
+                });
+              };
+              window.collapseAllAccordion = function(accordionId) {
+                const accordion = document.getElementById(accordionId);
+                if (!accordion) return;
+                const collapses = accordion.querySelectorAll('.accordion-collapse');
+                collapses.forEach(collapse => {
+                  // Check if Bootstrap Collapse is available
+                  if (typeof bootstrap !== 'undefined' && bootstrap.Collapse) {
+                    const bsCollapse = new bootstrap.Collapse(collapse, { toggle: false });
+                    bsCollapse.hide();
+                  } else {
+                    // Fallback: manually remove 'show' class
+                    collapse.classList.remove('show');
+                  }
+                });
+              };
             }
 
             // Render sync mode interfaces in two sections (tagged and untagged)
@@ -1581,7 +1663,7 @@
                 `;
                 section1Div.appendChild(section1Header);
                 
-                renderInterfacesAccordion(taggedInterfaces, section1Div, true);
+                renderInterfacesAccordion(taggedInterfaces, section1Div, true, 'Tagged interfaces grouped by device');
                 
                 // If Section 1 has items but Section 2 is empty, show info message
                 if (hasTagged && !hasUntagged) {
@@ -1621,7 +1703,7 @@
                   deployUntaggedCheckbox.checked = true; // Pre-check by default
                 }
                 
-                renderInterfacesAccordion(untaggedInterfaces, section2Div, true);
+                renderInterfacesAccordion(untaggedInterfaces, section2Div, true, 'Untagged interfaces grouped by device');
                 container.appendChild(section2Div);
               }
             }
@@ -1640,7 +1722,7 @@
               if (!interfaces || interfaces.length === 0) {
                 const p = document.createElement('p');
                 p.className = 'text-muted mb-0';
-                p.style.color = window.getNetBoxTextColor ? window.getNetBoxTextColor() : (isDarkMode() ? '#ffffff' : '#212529');
+                p.style.color = 'var(--nbx-color-fg-default)';
                 p.style.opacity = '1';
                 p.textContent = 'No interfaces found';
                 container.appendChild(p);
@@ -1681,7 +1763,7 @@
               if (selectedDeviceIds.length === 0) {
                 const p = document.createElement('p');
                 p.className = 'text-muted mb-0';
-                p.style.color = window.getNetBoxTextColor ? window.getNetBoxTextColor() : (isDarkMode() ? '#ffffff' : '#212529');
+                p.style.color = 'var(--nbx-color-fg-default)';
                 p.style.opacity = '1';
                 p.textContent = 'Select devices first to load interfaces from NetBox';
                 interfacesContainer.innerHTML = '';
@@ -1750,7 +1832,7 @@
               if (selectedDeviceIds.length === 0) {
                 const p = document.createElement('p');
                 p.className = 'text-muted mb-0';
-                p.style.color = window.getNetBoxTextColor ? window.getNetBoxTextColor() : (isDarkMode() ? '#ffffff' : '#212529');
+                p.style.color = 'var(--nbx-color-fg-default)';
                 p.style.opacity = '1';
                 p.textContent = 'Select devices first to load interfaces';
                 interfacesContainer.innerHTML = '';
@@ -1788,7 +1870,7 @@
                     renderInterfacesAccordion(data.interfaces_by_device, interfacesContainer, false);
                   } else if (data.interfaces) {
                     // Backward compatibility: if old format, render as flat list
-                    renderInterfaceCheckboxes(data.interfaces, interfacesContainer);
+                  renderInterfaceCheckboxes(data.interfaces, interfacesContainer);
                   }
 
                   // Also filter VLANs by site of selected devices
@@ -1814,6 +1896,7 @@
               const locationSelect = document.getElementById('id_location');
               const manufacturerSelect = document.getElementById('id_manufacturer');
               const roleSelect = document.getElementById('id_role');
+              const excludedDevicesSelect = document.getElementById('id_excluded_devices');
               const interfacesContainer = document.getElementById('interfaces-checkbox-container');
               const syncCheckbox = document.getElementById('id_sync_netbox_to_device');
               const isSyncMode = syncCheckbox && syncCheckbox.checked;
@@ -1823,13 +1906,23 @@
               const manufacturerId = manufacturerSelect ? manufacturerSelect.value : '';
               const roleId = roleSelect ? roleSelect.value : '';
               
-              console.log('Group filters:', {siteId, locationId, manufacturerId, roleId, isSyncMode});
+              // Get excluded device IDs
+              let excludedDeviceIds = [];
+              if (excludedDevicesSelect) {
+                if (excludedDevicesSelect.selectedOptions) {
+                  excludedDeviceIds = Array.from(excludedDevicesSelect.selectedOptions).map(opt => opt.value);
+                } else if (typeof jQuery !== 'undefined' && jQuery(excludedDevicesSelect).data('select2')) {
+                  excludedDeviceIds = jQuery(excludedDevicesSelect).val() || [];
+                }
+              }
+              
+              console.log('Group filters:', {siteId, locationId, manufacturerId, roleId, isSyncMode, excludedDeviceIds});
               
               // Only load interfaces if ALL filters are selected
               if (!siteId || !locationId || !manufacturerId || !roleId) {
                 const p = document.createElement('p');
                 p.className = 'text-muted mb-0';
-                p.style.color = window.getNetBoxTextColor ? window.getNetBoxTextColor() : (isDarkMode() ? '#ffffff' : '#212529');
+                p.style.color = 'var(--nbx-color-fg-default)';
                 p.style.opacity = '1';
                 p.textContent = 'Select all filters (Site, Location, Manufacturer, Role) to load interfaces';
                 interfacesContainer.innerHTML = '';
@@ -1840,7 +1933,7 @@
               // Show loading
               const loadingP = document.createElement('p');
               loadingP.className = 'text-muted mb-0';
-              loadingP.style.color = window.getNetBoxTextColor ? window.getNetBoxTextColor() : (isDarkMode() ? '#ffffff' : '#212529');
+              loadingP.style.color = 'var(--nbx-color-fg-default)';
               loadingP.style.opacity = '1';
               loadingP.textContent = isSyncMode ? 'Loading interfaces from NetBox...' : 'Loading interfaces...';
               interfacesContainer.innerHTML = '';
@@ -1850,7 +1943,13 @@
               let url;
               if (isSyncMode) {
                 // Sync mode: use sync endpoint with group filters
-                url = `/plugins/automation/vlan-deployment/get-interfaces-for-sync/?site_id=${siteId}&location_id=${locationId}&manufacturer_id=${manufacturerId}&role_id=${roleId}`;
+                const params = new URLSearchParams();
+                params.append('site_id', siteId);
+                params.append('location_id', locationId);
+                params.append('manufacturer_id', manufacturerId);
+                params.append('role_id', roleId);
+                excludedDeviceIds.forEach(id => params.append('excluded_device_ids[]', id));
+                url = `/plugins/automation/vlan-deployment/get-interfaces-for-sync/?${params.toString()}`;
                 console.log('Fetching interfaces for sync from:', url);
                 
                 fetch(url)
@@ -1874,16 +1973,22 @@
                   });
               } else {
                 // Normal mode: use normal endpoint
-                url = `/plugins/automation/vlan-deployment/get-interfaces/?site_id=${siteId}&location_id=${locationId}&manufacturer_id=${manufacturerId}&role_id=${roleId}`;
+                const params = new URLSearchParams();
+                params.append('site_id', siteId);
+                params.append('location_id', locationId);
+                params.append('manufacturer_id', manufacturerId);
+                params.append('role_id', roleId);
+                excludedDeviceIds.forEach(id => params.append('excluded_device_ids[]', id));
+                url = `/plugins/automation/vlan-deployment/get-interfaces/?${params.toString()}`;
                 console.log('Fetching interfaces from:', url);
-                
-                fetch(url)
-                  .then(response => {
-                    console.log('Interface response status:', response.status);
-                    return response.json();
-                  })
-                  .then(data => {
-                    console.log('Interface data received:', data);
+              
+              fetch(url)
+                .then(response => {
+                  console.log('Interface response status:', response.status);
+                  return response.json();
+                })
+                .then(data => {
+                  console.log('Interface data received:', data);
                     console.log(`Found ${data.device_count} devices with interfaces`);
                     
                     // Use accordion format (interfaces_by_device)
@@ -1891,21 +1996,21 @@
                       renderInterfacesAccordion(data.interfaces_by_device, interfacesContainer, false);
                     } else if (data.interfaces) {
                       // Backward compatibility: if old format, render as flat list
-                      renderInterfaceCheckboxes(data.interfaces, interfacesContainer);
+                  renderInterfaceCheckboxes(data.interfaces, interfacesContainer);
                     }
-                    
-                    // Also load VLANs for this site
-                    filterVLANsBySite();
-                  })
-                  .catch(error => {
-                    console.error('Error loading interfaces:', error);
-                    const errorP = document.createElement('p');
-                    errorP.className = 'text-danger mb-0';
-                    errorP.style.color = 'var(--nbx-color-danger, #dc3545)';
-                    errorP.textContent = 'Error loading interfaces';
-                    interfacesContainer.innerHTML = '';
-                    interfacesContainer.appendChild(errorP);
-                  });
+                  
+                  // Also load VLANs for this site
+                  filterVLANsBySite();
+                })
+                .catch(error => {
+                  console.error('Error loading interfaces:', error);
+                  const errorP = document.createElement('p');
+                  errorP.className = 'text-danger mb-0';
+                  errorP.style.color = 'var(--nbx-color-danger, #dc3545)';
+                  errorP.textContent = 'Error loading interfaces';
+                  interfacesContainer.innerHTML = '';
+                  interfacesContainer.appendChild(errorP);
+                });
               }
             }
 
@@ -2109,9 +2214,9 @@
                   if (syncCheckbox && syncCheckbox.checked) {
                     loadInterfacesForSync();
                   } else {
-                    loadCommonInterfaces();
-                  }
+                  loadCommonInterfaces();
                 }
+              }
 
                 devicesSelect.addEventListener('change', loadInterfacesBasedOnSyncMode);
                 
@@ -2160,6 +2265,34 @@
               
               if (roleSelect) {
                 roleSelect.addEventListener('change', loadInterfacesFromGroupFilters);
+              }
+              
+              // Listen for excluded devices changes to reload interfaces
+              const excludedDevicesSelect = document.getElementById('id_excluded_devices');
+              if (excludedDevicesSelect) {
+                excludedDevicesSelect.addEventListener('change', function() {
+                  console.log('Event: Excluded devices changed, reloading interfaces...');
+                  loadInterfacesFromGroupFilters();
+                });
+                // Also listen for Select2 events if Select2 is used
+                if (typeof jQuery !== 'undefined' && jQuery(excludedDevicesSelect).data('select2')) {
+                  jQuery(excludedDevicesSelect).on('select2:select select2:unselect select2:clear', function() {
+                    console.log('Event: Excluded devices changed (Select2), reloading interfaces...');
+                    loadInterfacesFromGroupFilters();
+                  });
+                } else if (typeof jQuery !== 'undefined') {
+                  // Wait for Select2 to initialize
+                  const checkSelect2 = setInterval(function() {
+                    if (typeof jQuery !== 'undefined' && jQuery(excludedDevicesSelect).data('select2')) {
+                      jQuery(excludedDevicesSelect).on('select2:select select2:unselect select2:clear', function() {
+                        console.log('Event: Excluded devices changed (Select2), reloading interfaces...');
+                        loadInterfacesFromGroupFilters();
+                      });
+                      clearInterval(checkSelect2);
+                    }
+                  }, 100);
+                  setTimeout(function() { clearInterval(checkSelect2); }, 5000);
+                }
               }
             }
             

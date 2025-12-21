@@ -4519,6 +4519,7 @@ class GetCommonInterfacesView(View):
         location_id = request.GET.get('location_id')
         manufacturer_id = request.GET.get('manufacturer_id')
         role_id = request.GET.get('role_id')
+        excluded_device_ids = request.GET.getlist('excluded_device_ids[]')
 
         # Get devices either by IDs (Single mode) or by filters (Group mode)
         if device_ids:
@@ -4542,6 +4543,13 @@ class GetCommonInterfacesView(View):
             logger.info(f"Group mode devices: {device_names}")
         else:
             return JsonResponse({'interfaces': [], 'device_count': 0})
+
+        # Filter out excluded devices if any
+        if excluded_device_ids:
+            excluded_ids = [int(did) for did in excluded_device_ids if str(did).isdigit()]
+            if excluded_ids:
+                devices = devices.exclude(id__in=excluded_ids)
+                logger.info(f"Excluded {len(excluded_ids)} devices. Remaining: {devices.count()} devices")
 
         if not devices.exists():
             return JsonResponse({'interfaces': [], 'device_count': 0})
@@ -4595,6 +4603,7 @@ class GetInterfacesForSyncView(View):
         location_id = request.GET.get('location_id')
         manufacturer_id = request.GET.get('manufacturer_id')
         role_id = request.GET.get('role_id')
+        excluded_device_ids = request.GET.getlist('excluded_device_ids[]')
         
         # Get devices either by IDs (Single mode) or by filters (Group mode)
         if device_ids:
@@ -4618,6 +4627,13 @@ class GetInterfacesForSyncView(View):
             logger.info(f"Sync mode - Group mode: Found {devices.count()} devices matching filters (site={site_id}, location={location_id}, manufacturer={manufacturer_id}, role={role_id})")
         else:
             return JsonResponse({'error': 'No devices selected or incomplete group filters'}, status=400)
+        
+        # Filter out excluded devices if any
+        if excluded_device_ids:
+            excluded_ids = [int(did) for did in excluded_device_ids if str(did).isdigit()]
+            if excluded_ids:
+                devices = devices.exclude(id__in=excluded_ids)
+                logger.info(f"Sync mode - Excluded {len(excluded_ids)} devices. Remaining: {devices.count()} devices")
         
         if not devices.exists():
             return JsonResponse({'tagged_interfaces': {}, 'untagged_interfaces': {}, 'device_count': 0, 'total_tagged': 0, 'total_untagged': 0})
@@ -4678,6 +4694,14 @@ class GetInterfacesForSyncView(View):
                 if has_vlan_mode_access_tagged:
                     # Section 1: Has vlan-mode:access or vlan-mode:tagged tag
                     # Skip strict filtering - these are already validated
+                    # Store the actual vlan-mode tags for display
+                    vlan_mode_tags = [
+                        tag for tag in interface_tags 
+                        if tag.startswith('vlan-mode:access') or tag.startswith('vlan-mode:tagged')
+                    ]
+                    iface_data['vlan_mode_tags'] = vlan_mode_tags
+                    iface_data['current_tags'] = list(interface_tags)
+                    iface_data['has_any_tags'] = has_any_tags
                     tagged_interfaces.append(iface_data)
                     # Explicitly skip Section 2 to prevent duplicates
                     continue
