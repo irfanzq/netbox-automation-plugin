@@ -497,6 +497,47 @@
     opacity: 0.7;
   }
   
+  /* Alert boxes styling for sync mode info messages */
+  .alert {
+    color: var(--nbx-color-fg-default) !important;
+  }
+  
+  .alert-info {
+    background-color: var(--nbx-color-bg-info, #d1ecf1) !important;
+    border-color: var(--nbx-color-border-info, #bee5eb) !important;
+    color: var(--nbx-color-fg-default, #0c5460) !important;
+  }
+  
+  html[data-theme="dark"] .alert-info,
+  body.dark-mode .alert-info {
+    background-color: var(--nbx-color-bg-info, #1a4a52) !important;
+    border-color: var(--nbx-color-border-info, #2a5a62) !important;
+    color: var(--nbx-color-fg-default, #d1ecf1) !important;
+  }
+  
+  .alert-success {
+    background-color: var(--nbx-color-bg-success, #d4edda) !important;
+    border-color: var(--nbx-color-border-success, #c3e6cb) !important;
+    color: var(--nbx-color-fg-default, #155724) !important;
+  }
+  
+  html[data-theme="dark"] .alert-success,
+  body.dark-mode .alert-success {
+    background-color: var(--nbx-color-bg-success, #1a4a2a) !important;
+    border-color: var(--nbx-color-border-success, #2a5a3a) !important;
+    color: var(--nbx-color-fg-default, #d4edda) !important;
+  }
+  
+  .alert code {
+    background-color: rgba(0, 0, 0, 0.1) !important;
+    color: inherit !important;
+  }
+  
+  html[data-theme="dark"] .alert code,
+  body.dark-mode .alert code {
+    background-color: rgba(255, 255, 255, 0.1) !important;
+  }
+  
   /* Loading overlay - dark mode compatible */
   #loading-overlay {
     background: rgba(0, 0, 0, 0.7) !important;
@@ -705,7 +746,7 @@
               </div>
 
               {# Field 2: Manual text input for custom interfaces #}
-              <div class="mb-2">
+              <div class="mb-2" id="interfaces_manual_container">
                 <label for="id_interfaces_manual" class="form-label text-muted small">Additional Interfaces (manual entry)</label>
                 <textarea
                   id="id_interfaces_manual"
@@ -934,21 +975,52 @@
             
             // Show/hide fields based on deployment scope
             function updateFieldVisibility() {
-              const scope = document.querySelector('input[name="deployment_scope"]:checked').value;
-
+              console.log('updateFieldVisibility called');
+              
+              const scopeRadio = document.querySelector('input[name="deployment_scope"]:checked');
+              
+              // Safety check - return if no radio button is checked
+              if (!scopeRadio) {
+                console.warn('No deployment scope radio button is checked - using default "single"');
+                // Default to single mode if no radio is checked
+                const singleFields = document.getElementById('single-device-fields');
+                const groupFields = document.getElementById('group-device-fields');
+                if (singleFields) singleFields.style.display = 'block';
+                if (groupFields) groupFields.style.display = 'none';
+                return;
+              }
+              
+              const scope = scopeRadio.value;
+              console.log('Deployment scope:', scope);
+              
               const singleFields = document.getElementById('single-device-fields');
               const groupFields = document.getElementById('group-device-fields');
 
+              // Safety check - return if elements don't exist
+              if (!singleFields || !groupFields) {
+                console.error('Single or group device fields container not found!', {
+                  singleFields: !!singleFields,
+                  groupFields: !!groupFields
+                });
+                return;
+              }
+
               if (scope === 'single') {
+                console.log('Showing single device fields, hiding group fields');
                 singleFields.style.display = 'block';
                 groupFields.style.display = 'none';
               } else {
+                console.log('Showing group device fields, hiding single fields');
                 singleFields.style.display = 'none';
                 groupFields.style.display = 'block';
               }
               
-              // Update sync mode state after scope change
-              updateSyncModeState();
+              // Update sync mode state after scope change (with error handling)
+              try {
+                updateSyncModeState();
+              } catch (error) {
+                console.error('Error in updateSyncModeState:', error);
+              }
             }
 
             // Handle sync mode checkbox changes
@@ -961,6 +1033,7 @@
               const syncModeInfo = document.getElementById('sync-mode-info');
               const devicesSelect = document.getElementById('id_devices');
               const interfacesContainer = document.getElementById('interfaces-checkbox-container');
+              const deployUntaggedContainer = document.getElementById('deploy-untagged-container');
               
               if (!syncCheckbox) return;
               
@@ -972,20 +1045,27 @@
                   vlanIdField.disabled = true;
                   vlanIdField.style.opacity = '0.6';
                   vlanIdField.style.cursor = 'not-allowed';
+                  vlanIdField.style.backgroundColor = 'var(--nbx-color-bg-secondary, #f8f9fa)';
                   vlanIdField.required = false;
                   vlanIdField.placeholder = 'Read from NetBox interface config';
+                  // Hide the parent div that contains the VLAN ID field
+                  const vlanIdContainer = vlanIdField.closest('.mb-3');
+                  if (vlanIdContainer) {
+                    vlanIdContainer.style.opacity = '0.6';
+                    vlanIdContainer.style.pointerEvents = 'none';
+                  }
                 }
                 if (vlanIdLabel) {
                   vlanIdLabel.classList.remove('required');
                 }
                 
-                // Hide additional interfaces field
-                if (interfacesManualField) {
-                  interfacesManualField.style.display = 'none';
-                  interfacesManualField.disabled = true;
+                // Hide additional interfaces field and its container
+                const interfacesManualContainer = document.getElementById('interfaces_manual_container');
+                if (interfacesManualContainer) {
+                  interfacesManualContainer.style.display = 'none';
                 }
-                if (interfacesManualLabel && interfacesManualLabel.parentElement) {
-                  interfacesManualLabel.parentElement.style.display = 'none';
+                if (interfacesManualField) {
+                  interfacesManualField.disabled = true;
                 }
                 
                 // Show sync mode info
@@ -994,7 +1074,23 @@
                 }
                 
                 // Load interfaces for sync if devices are already selected
-                if (devicesSelect && devicesSelect.selectedOptions.length > 0) {
+                // Check both native select and Select2
+                let hasSelectedDevices = false;
+                if (devicesSelect) {
+                  // Check native select
+                  if (devicesSelect.selectedOptions && devicesSelect.selectedOptions.length > 0) {
+                    hasSelectedDevices = true;
+                  }
+                  // Check Select2 (if initialized)
+                  if (jQuery && jQuery(devicesSelect).data('select2')) {
+                    const select2Value = jQuery(devicesSelect).val();
+                    if (select2Value && select2Value.length > 0) {
+                      hasSelectedDevices = true;
+                    }
+                  }
+                }
+                
+                if (hasSelectedDevices) {
                   loadInterfacesForSync();
                 } else {
                   interfacesContainer.innerHTML = '<p class="text-muted mb-0" style="color: var(--nbx-color-fg-default) !important; opacity: 1 !important;">Select devices first to load interfaces from NetBox</p>';
@@ -1005,20 +1101,27 @@
                   vlanIdField.disabled = false;
                   vlanIdField.style.opacity = '1';
                   vlanIdField.style.cursor = 'auto';
+                  vlanIdField.style.backgroundColor = '';
                   vlanIdField.required = true;
                   vlanIdField.placeholder = 'e.g., 100';
+                  // Show the parent div that contains the VLAN ID field
+                  const vlanIdContainer = vlanIdField.closest('.mb-3');
+                  if (vlanIdContainer) {
+                    vlanIdContainer.style.opacity = '1';
+                    vlanIdContainer.style.pointerEvents = 'auto';
+                  }
                 }
                 if (vlanIdLabel) {
                   vlanIdLabel.classList.add('required');
                 }
                 
-                // Show additional interfaces field
-                if (interfacesManualField) {
-                  interfacesManualField.style.display = 'block';
-                  interfacesManualField.disabled = false;
+                // Show additional interfaces field and its container
+                const interfacesManualContainer = document.getElementById('interfaces_manual_container');
+                if (interfacesManualContainer) {
+                  interfacesManualContainer.style.display = 'block';
                 }
-                if (interfacesManualLabel && interfacesManualLabel.parentElement) {
-                  interfacesManualLabel.parentElement.style.display = 'block';
+                if (interfacesManualField) {
+                  interfacesManualField.disabled = false;
                 }
                 
                 // Hide sync mode info and deploy untagged checkbox
@@ -1030,7 +1133,23 @@
                 }
                 
                 // Load interfaces normally if devices are already selected
-                if (devicesSelect && devicesSelect.selectedOptions.length > 0) {
+                // Check both native select and Select2
+                let hasSelectedDevices = false;
+                if (devicesSelect) {
+                  // Check native select
+                  if (devicesSelect.selectedOptions && devicesSelect.selectedOptions.length > 0) {
+                    hasSelectedDevices = true;
+                  }
+                  // Check Select2 (if initialized)
+                  if (jQuery && jQuery(devicesSelect).data('select2')) {
+                    const select2Value = jQuery(devicesSelect).val();
+                    if (select2Value && select2Value.length > 0) {
+                      hasSelectedDevices = true;
+                    }
+                  }
+                }
+                
+                if (hasSelectedDevices) {
                   loadCommonInterfaces();
                 } else {
                   interfacesContainer.innerHTML = '<p class="text-muted mb-0" style="color: var(--nbx-color-fg-default) !important; opacity: 1 !important;">Select devices first to load interfaces</p>';
@@ -1196,8 +1315,29 @@
               const totalTagged = data.total_tagged || 0;
               const totalUntagged = data.total_untagged || 0;
               
+              const hasTagged = totalTagged > 0 || Object.keys(taggedInterfaces).length > 0;
+              const hasUntagged = totalUntagged > 0 || Object.keys(untaggedInterfaces).length > 0;
+              
+              // Scenario: Both sections are empty
+              if (!hasTagged && !hasUntagged) {
+                const emptyDiv = document.createElement('div');
+                emptyDiv.className = 'alert alert-info mb-0';
+                emptyDiv.innerHTML = `
+                  <strong><i class="mdi mdi-information"></i> No interfaces with VLAN configuration found</strong>
+                  <p class="mb-2 mt-2">No interfaces matching your criteria were found. Make sure:</p>
+                  <ul class="mb-0">
+                    <li>Devices have interfaces with VLAN configuration in NetBox</li>
+                    <li>Interfaces are cable-connected</li>
+                    <li>Interfaces are mode: <code>access</code> or <code>tagged</code></li>
+                    <li>Interfaces are connected to host devices (not just patch panels)</li>
+                  </ul>
+                `;
+                container.appendChild(emptyDiv);
+                return;
+              }
+              
               // Section 1: Tagged Interfaces
-              if (totalTagged > 0 || Object.keys(taggedInterfaces).length > 0) {
+              if (hasTagged) {
                 const section1Div = document.createElement('div');
                 section1Div.className = 'mb-4';
                 
@@ -1211,11 +1351,25 @@
                 section1Div.appendChild(section1Header);
                 
                 renderInterfacesAccordion(taggedInterfaces, section1Div, true);
+                
+                // If Section 1 has items but Section 2 is empty, show info message
+                if (hasTagged && !hasUntagged) {
+                  const infoDiv = document.createElement('div');
+                  infoDiv.className = 'alert alert-success mb-0 mt-3';
+                  infoDiv.style.fontSize = '0.9rem';
+                  infoDiv.innerHTML = `
+                    <i class="mdi mdi-information"></i> 
+                    <strong>All interfaces are already tagged.</strong> 
+                    No untagged interfaces found - all interfaces have <code>vlan-mode:access</code> or <code>vlan-mode:tagged</code> tags.
+                  `;
+                  section1Div.appendChild(infoDiv);
+                }
+                
                 container.appendChild(section1Div);
               }
               
-              // Section 2: Untagged Interfaces
-              if (totalUntagged > 0 || Object.keys(untaggedInterfaces).length > 0) {
+              // Section 2: Untagged Interfaces (only show if it has interfaces)
+              if (hasUntagged) {
                 const section2Div = document.createElement('div');
                 section2Div.className = 'mb-4';
                 
@@ -1229,8 +1383,6 @@
                 section2Div.appendChild(section2Header);
                 
                 // Add checkbox for deploying on untagged interfaces
-                const deployUntaggedDiv = document.createElement('div');
-                deployUntaggedDiv.className = 'mb-3';
                 const deployUntaggedCheckbox = document.getElementById('id_deploy_untagged_interfaces');
                 if (deployUntaggedCheckbox) {
                   deployUntaggedCheckbox.checked = true; // Pre-check by default
@@ -1238,16 +1390,6 @@
                 
                 renderInterfacesAccordion(untaggedInterfaces, section2Div, true);
                 container.appendChild(section2Div);
-              }
-              
-              // Show message if no interfaces
-              if (totalTagged === 0 && totalUntagged === 0) {
-                const p = document.createElement('p');
-                p.className = 'text-muted mb-0';
-                p.style.color = window.getNetBoxTextColor ? window.getNetBoxTextColor() : (isDarkMode() ? '#ffffff' : '#212529');
-                p.style.opacity = '1';
-                p.textContent = 'No interfaces with VLAN configuration found';
-                container.appendChild(p);
               }
             }
 
@@ -1440,13 +1582,15 @@
               const manufacturerSelect = document.getElementById('id_manufacturer');
               const roleSelect = document.getElementById('id_role');
               const interfacesContainer = document.getElementById('interfaces-checkbox-container');
+              const syncCheckbox = document.getElementById('id_sync_netbox_to_device');
+              const isSyncMode = syncCheckbox && syncCheckbox.checked;
               
               const siteId = siteSelect ? siteSelect.value : '';
               const locationId = locationSelect ? locationSelect.value : '';
               const manufacturerId = manufacturerSelect ? manufacturerSelect.value : '';
               const roleId = roleSelect ? roleSelect.value : '';
               
-              console.log('Group filters:', {siteId, locationId, manufacturerId, roleId});
+              console.log('Group filters:', {siteId, locationId, manufacturerId, roleId, isSyncMode});
               
               // Only load interfaces if ALL filters are selected
               if (!siteId || !locationId || !manufacturerId || !roleId) {
@@ -1465,44 +1609,71 @@
               loadingP.className = 'text-muted mb-0';
               loadingP.style.color = window.getNetBoxTextColor ? window.getNetBoxTextColor() : (isDarkMode() ? '#ffffff' : '#212529');
               loadingP.style.opacity = '1';
-              loadingP.textContent = 'Loading interfaces...';
+              loadingP.textContent = isSyncMode ? 'Loading interfaces from NetBox...' : 'Loading interfaces...';
               interfacesContainer.innerHTML = '';
               interfacesContainer.appendChild(loadingP);
               
-              // Build query string with filter parameters
-              const url = `/plugins/automation/vlan-deployment/get-interfaces/?site_id=${siteId}&location_id=${locationId}&manufacturer_id=${manufacturerId}&role_id=${roleId}`;
-              console.log('Fetching interfaces from:', url);
-              
-              // Fetch common interfaces for devices matching filters
-              fetch(url)
-                .then(response => {
-                  console.log('Interface response status:', response.status);
-                  return response.json();
-                })
-                .then(data => {
-                  console.log('Interface data received:', data);
-                  console.log(`Found ${data.device_count} devices with interfaces`);
-                  
-                  // Use accordion format (interfaces_by_device)
-                  if (data.interfaces_by_device) {
-                    renderInterfacesAccordion(data.interfaces_by_device, interfacesContainer, false);
-                  } else if (data.interfaces) {
-                    // Backward compatibility: if old format, render as flat list
-                    renderInterfaceCheckboxes(data.interfaces, interfacesContainer);
-                  }
-                  
-                  // Also load VLANs for this site
-                  filterVLANsBySite();
-                })
-                .catch(error => {
-                  console.error('Error loading interfaces:', error);
-                  const errorP = document.createElement('p');
-                  errorP.className = 'text-danger mb-0';
-                  errorP.style.color = 'var(--nbx-color-danger, #dc3545)';
-                  errorP.textContent = 'Error loading interfaces';
-                  interfacesContainer.innerHTML = '';
-                  interfacesContainer.appendChild(errorP);
-                });
+              // Choose endpoint based on sync mode
+              let url;
+              if (isSyncMode) {
+                // Sync mode: use sync endpoint with group filters
+                url = `/plugins/automation/vlan-deployment/get-interfaces-for-sync/?site_id=${siteId}&location_id=${locationId}&manufacturer_id=${manufacturerId}&role_id=${roleId}`;
+                console.log('Fetching interfaces for sync from:', url);
+                
+                fetch(url)
+                  .then(response => {
+                    console.log('Sync interface response status:', response.status);
+                    return response.json();
+                  })
+                  .then(data => {
+                    console.log('Sync interface data received:', data);
+                    // Render two sections: tagged and untagged
+                    renderSyncModeInterfaces(data, interfacesContainer);
+                  })
+                  .catch(error => {
+                    console.error('Error loading interfaces for sync:', error);
+                    const errorP = document.createElement('p');
+                    errorP.className = 'text-danger mb-0';
+                    errorP.style.color = 'var(--nbx-color-danger, #dc3545)';
+                    errorP.textContent = 'Error loading interfaces';
+                    interfacesContainer.innerHTML = '';
+                    interfacesContainer.appendChild(errorP);
+                  });
+              } else {
+                // Normal mode: use normal endpoint
+                url = `/plugins/automation/vlan-deployment/get-interfaces/?site_id=${siteId}&location_id=${locationId}&manufacturer_id=${manufacturerId}&role_id=${roleId}`;
+                console.log('Fetching interfaces from:', url);
+                
+                fetch(url)
+                  .then(response => {
+                    console.log('Interface response status:', response.status);
+                    return response.json();
+                  })
+                  .then(data => {
+                    console.log('Interface data received:', data);
+                    console.log(`Found ${data.device_count} devices with interfaces`);
+                    
+                    // Use accordion format (interfaces_by_device)
+                    if (data.interfaces_by_device) {
+                      renderInterfacesAccordion(data.interfaces_by_device, interfacesContainer, false);
+                    } else if (data.interfaces) {
+                      // Backward compatibility: if old format, render as flat list
+                      renderInterfaceCheckboxes(data.interfaces, interfacesContainer);
+                    }
+                    
+                    // Also load VLANs for this site
+                    filterVLANsBySite();
+                  })
+                  .catch(error => {
+                    console.error('Error loading interfaces:', error);
+                    const errorP = document.createElement('p');
+                    errorP.className = 'text-danger mb-0';
+                    errorP.style.color = 'var(--nbx-color-danger, #dc3545)';
+                    errorP.textContent = 'Error loading interfaces';
+                    interfacesContainer.innerHTML = '';
+                    interfacesContainer.appendChild(errorP);
+                  });
+              }
             }
 
             // Filter VLANs by site when devices are selected (single mode)
@@ -1670,12 +1841,30 @@
 
             // Initialize on page load
             document.addEventListener('DOMContentLoaded', function() {
-              updateFieldVisibility();
+              console.log('DOMContentLoaded - Initializing VLAN deployment form...');
+              
+              // Ensure updateFieldVisibility runs first
+              try {
+                updateFieldVisibility();
+              } catch (error) {
+                console.error('Error in updateFieldVisibility on page load:', error);
+              }
+              
               setupMutuallyExclusiveCheckboxes();
 
               // Listen for scope changes
-              document.querySelectorAll('input[name="deployment_scope"]').forEach(radio => {
-                radio.addEventListener('change', updateFieldVisibility);
+              const scopeRadios = document.querySelectorAll('input[name="deployment_scope"]');
+              console.log('Found', scopeRadios.length, 'deployment scope radio buttons');
+              
+              scopeRadios.forEach(radio => {
+                radio.addEventListener('change', function() {
+                  console.log('Deployment scope changed to:', this.value);
+                  try {
+                    updateFieldVisibility();
+                  } catch (error) {
+                    console.error('Error in updateFieldVisibility on scope change:', error);
+                  }
+                });
               });
 
               // Listen for sync mode checkbox changes
@@ -1687,27 +1876,51 @@
               }
 
               // Listen for device selection changes (single mode)
+              // Note: NetBox uses Select2 for multi-select, so we need to listen for Select2 events
               const devicesSelect = document.getElementById('id_devices');
               if (devicesSelect) {
-                // Handle device selection - load interfaces based on sync mode
-                devicesSelect.addEventListener('change', function() {
+                // Function to load interfaces based on sync mode
+                function loadInterfacesBasedOnSyncMode() {
                   const syncCheckbox = document.getElementById('id_sync_netbox_to_device');
                   if (syncCheckbox && syncCheckbox.checked) {
+                    console.log('Loading interfaces for sync mode...');
                     loadInterfacesForSync();
                   } else {
+                    console.log('Loading interfaces for normal mode...');
                     loadCommonInterfaces();
                   }
-                });
+                }
 
-                // If devices are already selected (form re-render after error), load interfaces
-                if (devicesSelect.selectedOptions.length > 0) {
-                  console.log('Devices already selected on page load, loading interfaces...');
-                  const syncCheckbox = document.getElementById('id_sync_netbox_to_device');
-                  if (syncCheckbox && syncCheckbox.checked) {
-                    loadInterfacesForSync();
-                  } else {
-                    loadCommonInterfaces();
-                  }
+                // Handle device selection - listen for both native change and Select2 events
+                devicesSelect.addEventListener('change', loadInterfacesBasedOnSyncMode);
+                
+                // Listen for Select2 events (if Select2 is initialized)
+                if (jQuery && jQuery(devicesSelect).data('select2')) {
+                  jQuery(devicesSelect).on('select2:select select2:unselect select2:clear', loadInterfacesBasedOnSyncMode);
+                } else {
+                  // Wait for Select2 to initialize, then attach events
+                  const checkSelect2 = setInterval(function() {
+                    if (jQuery && jQuery(devicesSelect).data('select2')) {
+                      jQuery(devicesSelect).on('select2:select select2:unselect select2:clear', loadInterfacesBasedOnSyncMode);
+                      clearInterval(checkSelect2);
+                      
+                      // If devices are already selected, load interfaces immediately
+                      if (jQuery(devicesSelect).val() && jQuery(devicesSelect).val().length > 0) {
+                        console.log('Devices already selected, loading interfaces...');
+                        loadInterfacesBasedOnSyncMode();
+                      }
+                    }
+                  }, 100);
+                  
+                  // Stop checking after 5 seconds
+                  setTimeout(function() { clearInterval(checkSelect2); }, 5000);
+                }
+
+                // Fallback: If devices are already selected on page load (form re-render after error)
+                // Check both native select and Select2
+                if (devicesSelect.selectedOptions && devicesSelect.selectedOptions.length > 0) {
+                  console.log('Devices already selected (native select), loading interfaces...');
+                  loadInterfacesBasedOnSyncMode();
                 }
               }
 
@@ -1716,6 +1929,21 @@
               const locationSelect = document.getElementById('id_location');
               const manufacturerSelect = document.getElementById('id_manufacturer');
               const roleSelect = document.getElementById('id_role');
+              
+              // Also listen for sync mode changes to reload interfaces
+              const syncCheckbox = document.getElementById('id_sync_netbox_to_device');
+              if (syncCheckbox) {
+                syncCheckbox.addEventListener('change', function() {
+                  // Reload interfaces if group filters are already selected
+                  const siteId = siteSelect ? siteSelect.value : '';
+                  const locationId = locationSelect ? locationSelect.value : '';
+                  const manufacturerId = manufacturerSelect ? manufacturerSelect.value : '';
+                  const roleId = roleSelect ? roleSelect.value : '';
+                  if (siteId && locationId && manufacturerId && roleId) {
+                    loadInterfacesFromGroupFilters();
+                  }
+                });
+              }
               
               if (siteSelect) {
                 siteSelect.addEventListener('change', function() {

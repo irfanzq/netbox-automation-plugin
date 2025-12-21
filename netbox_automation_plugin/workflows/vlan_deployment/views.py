@@ -4530,17 +4530,38 @@ class GetInterfacesForSyncView(View):
     
     def get(self, request):
         device_ids = request.GET.getlist('device_ids[]')
-        if not device_ids:
-            # Try alternative format (comma-separated)
-            device_ids_str = request.GET.get('devices', '')
-            device_ids = device_ids_str.split(',') if device_ids_str else []
         
-        device_ids = [int(did) for did in device_ids if str(did).isdigit()]
+        # Group mode filter parameters
+        site_id = request.GET.get('site_id')
+        location_id = request.GET.get('location_id')
+        manufacturer_id = request.GET.get('manufacturer_id')
+        role_id = request.GET.get('role_id')
         
-        if not device_ids:
-            return JsonResponse({'error': 'No devices selected'}, status=400)
+        # Get devices either by IDs (Single mode) or by filters (Group mode)
+        if device_ids:
+            # Single mode: Use provided device IDs
+            device_ids = [int(did) for did in device_ids if str(did).isdigit()]
+            if not device_ids:
+                return JsonResponse({'error': 'No devices selected'}, status=400)
+            devices = Device.objects.filter(id__in=device_ids).order_by('name')
+        elif site_id and location_id and manufacturer_id and role_id:
+            # Group mode: Query devices by filters
+            from django.db.models import Q
+            devices = Device.objects.filter(
+                site_id=site_id,
+                location_id=location_id,
+                device_type__manufacturer_id=manufacturer_id,
+                role_id=role_id
+            ).filter(
+                Q(primary_ip4__isnull=False) | Q(primary_ip6__isnull=False)
+            ).select_related('device_type', 'device_type__manufacturer').order_by('name')
+            
+            logger.info(f"Sync mode - Group mode: Found {devices.count()} devices matching filters (site={site_id}, location={location_id}, manufacturer={manufacturer_id}, role={role_id})")
+        else:
+            return JsonResponse({'error': 'No devices selected or incomplete group filters'}, status=400)
         
-        devices = Device.objects.filter(id__in=device_ids).order_by('name')
+        if not devices.exists():
+            return JsonResponse({'tagged_interfaces': {}, 'untagged_interfaces': {}, 'device_count': 0, 'total_tagged': 0, 'total_untagged': 0})
         tagged_interfaces_by_device = {}
         untagged_interfaces_by_device = {}
         
@@ -4564,6 +4585,29 @@ class GetInterfacesForSyncView(View):
                 # Only process interfaces with VLAN config
                 if not (iface.untagged_vlan or iface.tagged_vlans.exists()):
                     continue
+                
+                # Filter by mode: only access or tagged interfaces (similar to normal deployment checks)
+                interface_mode = getattr(iface, 'mode', None)
+                if interface_mode not in ['access', 'tagged', 'tagged-all']:
+                    continue  # Skip routed, bridged, etc.
+                
+                # Check if interface is cable connected (similar to normal deployment)
+                if not iface.cable_id:
+                    continue  # Skip uncabled interfaces in sync mode
+                
+                # Check if connected to a host device (similar to normal deployment)
+                if iface.cable_id:
+                    from dcim.models import Cable
+                    try:
+                        cable = Cable.objects.get(id=iface.cable_id)
+                        # Check if other end is connected to a device (not just a patch panel)
+                        other_termination = cable.termination_a if cable.termination_b_id == iface.id else cable.termination_b
+                        if not hasattr(other_termination, 'device'):
+                            continue  # Not connected to a device
+                    except Cable.DoesNotExist:
+                        continue  # Cable not found
+                    except Exception:
+                        continue  # Skip if there's any error
                 
                 # Serialize interface with VLAN config
                 iface_data = {
