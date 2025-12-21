@@ -975,9 +975,10 @@
             
             // Show/hide fields based on deployment scope
             function updateFieldVisibility() {
-              console.log('updateFieldVisibility called');
+              console.log('=== updateFieldVisibility called ===');
               
               const scopeRadio = document.querySelector('input[name="deployment_scope"]:checked');
+              console.log('Scope radio found:', !!scopeRadio);
               
               // Safety check - return if no radio button is checked
               if (!scopeRadio) {
@@ -985,8 +986,15 @@
                 // Default to single mode if no radio is checked
                 const singleFields = document.getElementById('single-device-fields');
                 const groupFields = document.getElementById('group-device-fields');
-                if (singleFields) singleFields.style.display = 'block';
-                if (groupFields) groupFields.style.display = 'none';
+                console.log('Default mode - singleFields:', !!singleFields, 'groupFields:', !!groupFields);
+                if (singleFields) {
+                  singleFields.style.display = 'block';
+                  console.log('Set singleFields display to block');
+                }
+                if (groupFields) {
+                  groupFields.style.display = 'none';
+                  console.log('Set groupFields display to none');
+                }
                 return;
               }
               
@@ -995,24 +1003,29 @@
               
               const singleFields = document.getElementById('single-device-fields');
               const groupFields = document.getElementById('group-device-fields');
+              console.log('Elements found - singleFields:', !!singleFields, 'groupFields:', !!groupFields);
 
               // Safety check - return if elements don't exist
               if (!singleFields || !groupFields) {
                 console.error('Single or group device fields container not found!', {
                   singleFields: !!singleFields,
-                  groupFields: !!groupFields
+                  groupFields: !!groupFields,
+                  singleFieldsId: singleFields ? singleFields.id : 'NOT FOUND',
+                  groupFieldsId: groupFields ? groupFields.id : 'NOT FOUND'
                 });
                 return;
               }
 
               if (scope === 'single') {
-                console.log('Showing single device fields, hiding group fields');
+                console.log('>>> Showing single device fields, hiding group fields');
                 singleFields.style.display = 'block';
                 groupFields.style.display = 'none';
+                console.log('Applied styles - singleFields.display:', singleFields.style.display, 'groupFields.display:', groupFields.style.display);
               } else {
-                console.log('Showing group device fields, hiding single fields');
+                console.log('>>> Showing group device fields, hiding single fields');
                 singleFields.style.display = 'none';
                 groupFields.style.display = 'block';
+                console.log('Applied styles - singleFields.display:', singleFields.style.display, 'groupFields.display:', groupFields.style.display);
               }
               
               // Update sync mode state after scope change (with error handling)
@@ -1025,7 +1038,7 @@
 
             // Handle sync mode checkbox changes
             function updateSyncModeState() {
-              console.log('updateSyncModeState called');
+              console.log('=== updateSyncModeState called ===');
               
               const syncCheckbox = document.getElementById('id_sync_netbox_to_device');
               const vlanIdField = document.getElementById('id_vlan_id');
@@ -1037,16 +1050,26 @@
               const interfacesContainer = document.getElementById('interfaces-checkbox-container');
               const deployUntaggedContainer = document.getElementById('deploy-untagged-container');
               
+              console.log('Elements found:', {
+                syncCheckbox: !!syncCheckbox,
+                vlanIdField: !!vlanIdField,
+                vlanIdLabel: !!vlanIdLabel,
+                interfacesManualField: !!interfacesManualField,
+                interfacesManualContainer: !!document.getElementById('interfaces_manual_container'),
+                syncModeInfo: !!syncModeInfo,
+                deployUntaggedContainer: !!deployUntaggedContainer
+              });
+              
               if (!syncCheckbox) {
                 console.warn('Sync checkbox not found in updateSyncModeState');
                 return;
               }
               
               const isSyncMode = syncCheckbox.checked;
-              console.log('Sync mode is:', isSyncMode);
+              console.log('>>> Sync mode checkbox checked:', isSyncMode);
               
               if (isSyncMode) {
-                console.log('Applying sync mode - greying out and hiding fields');
+                console.log('>>> APPLYING SYNC MODE - greying out and hiding fields');
                 
                 // Disable and grey out VLAN ID field
                 if (vlanIdField) {
@@ -1057,18 +1080,24 @@
                   vlanIdField.style.backgroundColor = 'var(--nbx-color-bg-secondary, #f8f9fa)';
                   vlanIdField.required = false;
                   vlanIdField.placeholder = 'Read from NetBox interface config';
+                  console.log('VLAN ID field updated - disabled:', vlanIdField.disabled, 'opacity:', vlanIdField.style.opacity);
+                  
                   // Grey out the parent div that contains the VLAN ID field
                   const vlanIdContainer = vlanIdField.closest('.mb-3');
                   if (vlanIdContainer) {
                     vlanIdContainer.style.opacity = '0.6';
                     vlanIdContainer.style.pointerEvents = 'none';
+                    console.log('VLAN ID container greyed out');
+                  } else {
+                    console.warn('VLAN ID container not found');
                   }
                 } else {
-                  console.warn('VLAN ID field not found!');
+                  console.error('VLAN ID field not found!');
                 }
                 
                 if (vlanIdLabel) {
                   vlanIdLabel.classList.remove('required');
+                  console.log('Removed required class from VLAN ID label');
                 }
                 
                 // Hide additional interfaces field and its container
@@ -1076,8 +1105,9 @@
                 if (interfacesManualContainer) {
                   console.log('Hiding additional interfaces container');
                   interfacesManualContainer.style.display = 'none';
+                  console.log('Additional interfaces container display:', interfacesManualContainer.style.display);
                 } else {
-                  console.warn('Additional interfaces container not found!');
+                  console.error('Additional interfaces container not found!');
                 }
                 
                 if (interfacesManualField) {
@@ -1112,7 +1142,7 @@
                   interfacesContainer.innerHTML = '<p class="text-muted mb-0" style="color: var(--nbx-color-fg-default) !important; opacity: 1 !important;">Select devices first to load interfaces from NetBox</p>';
                 }
               } else {
-                console.log('Removing sync mode - enabling all fields');
+                console.log('>>> REMOVING SYNC MODE - enabling all fields');
                 
                 // Enable all fields (normal mode)
                 if (vlanIdField) {
@@ -1123,16 +1153,22 @@
                   vlanIdField.style.backgroundColor = '';
                   vlanIdField.required = true;
                   vlanIdField.placeholder = 'e.g., 100';
+                  console.log('VLAN ID field enabled - disabled:', vlanIdField.disabled, 'opacity:', vlanIdField.style.opacity);
+                  
                   // Show the parent div that contains the VLAN ID field
                   const vlanIdContainer = vlanIdField.closest('.mb-3');
                   if (vlanIdContainer) {
                     vlanIdContainer.style.opacity = '1';
                     vlanIdContainer.style.pointerEvents = 'auto';
+                    console.log('VLAN ID container enabled');
                   }
+                } else {
+                  console.error('VLAN ID field not found when removing sync mode!');
                 }
                 
                 if (vlanIdLabel) {
                   vlanIdLabel.classList.add('required');
+                  console.log('Added required class to VLAN ID label');
                 }
                 
                 // Show additional interfaces field and its container
@@ -1140,6 +1176,9 @@
                 if (interfacesManualContainer) {
                   console.log('Showing additional interfaces container');
                   interfacesManualContainer.style.display = 'block';
+                  console.log('Additional interfaces container display:', interfacesManualContainer.style.display);
+                } else {
+                  console.error('Additional interfaces container not found when removing sync mode!');
                 }
                 
                 if (interfacesManualField) {
@@ -1863,10 +1902,20 @@
 
             // Initialize function - follows proven pattern from vlan_tagging_form.html
             function initVlanDeploymentForm() {
+              console.log('=== initVlanDeploymentForm called ===');
+              console.log('Document ready state:', document.readyState);
+              
               // Set initial state first (critical - this must run on page load)
+              console.log('Step 1: Calling updateFieldVisibility...');
               updateFieldVisibility();
+              
+              console.log('Step 2: Calling updateSyncModeState...');
               updateSyncModeState();
+              
+              console.log('Step 3: Calling setupMutuallyExclusiveCheckboxes...');
               setupMutuallyExclusiveCheckboxes();
+              
+              console.log('Step 4: Calling updateDeployButtonState...');
               updateDeployButtonState();
 
               // Listen for scope changes
