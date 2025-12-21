@@ -28,6 +28,30 @@ class VLANDeploymentForm(forms.Form):
         widget=forms.RadioSelect(attrs={'class': 'form-check-input'}),
     )
 
+    # Sync NetBox to Device checkbox
+    sync_netbox_to_device = forms.BooleanField(
+        required=False,
+        initial=False,
+        label=_("Sync NetBox to Device"),
+        help_text=_(
+            "When enabled, automatically sync all interface VLAN configurations from NetBox to devices. "
+            "VLAN ID and interface selection fields will be auto-populated from NetBox."
+        ),
+        widget=forms.CheckboxInput(attrs={'class': 'form-check-input', 'id': 'id_sync_netbox_to_device'}),
+    )
+
+    # Deploy on untagged interfaces checkbox (only used in sync mode)
+    deploy_untagged_interfaces = forms.BooleanField(
+        required=False,
+        initial=False,
+        label=_("Deploy VLAN configs on untagged interfaces"),
+        help_text=_(
+            "When enabled, deploy VLAN configurations to interfaces that have no tags. "
+            "These interfaces will be automatically tagged after successful deployment."
+        ),
+        widget=forms.CheckboxInput(attrs={'class': 'form-check-input', 'id': 'id_deploy_untagged_interfaces'}),
+    )
+
     # Single device mode: Multi-select devices (same as LLDP form)
     devices = forms.ModelMultipleChoiceField(
         queryset=Device.objects.select_related('primary_ip4', 'primary_ip6', 'site', 'role', 'device_type', 'device_type__manufacturer').filter(
@@ -37,7 +61,7 @@ class VLANDeploymentForm(forms.Form):
         ),
         required=False,
         label=_("Devices"),
-        help_text=_("Select one or more devices. Interfaces will be filtered to show only those common to all selected devices."),
+        help_text=_("Select one or more devices. Interfaces will be shown grouped by device."),
     )
 
     # Group selection (for Device Group mode)
@@ -194,6 +218,7 @@ class VLANDeploymentForm(forms.Form):
         interfaces_manual = cleaned_data.get('interfaces_manual', '')
         dry_run = cleaned_data.get('dry_run')
         deploy_changes = cleaned_data.get('deploy_changes')
+        sync_netbox_to_device = cleaned_data.get('sync_netbox_to_device', False)
 
         # Validate deployment mode - must select one and only one
         if dry_run and deploy_changes:
@@ -203,6 +228,16 @@ class VLANDeploymentForm(forms.Form):
         if not dry_run and not deploy_changes:
             # Wrap in list to prevent Django from trying to format the string
             raise forms.ValidationError([_("Please select either 'Dry Run' (preview) or 'Deploy Changes' (apply).")])
+
+        # Sync mode validation
+        if sync_netbox_to_device:
+            # In sync mode, VLAN ID is not required (read from NetBox)
+            if 'vlan_id' in self.errors:
+                del self.errors['vlan_id']
+            # Additional interfaces field is not used in sync mode
+            if interfaces_manual and interfaces_manual.strip():
+                # Wrap in list to prevent Django from trying to format the string
+                raise forms.ValidationError([_("Additional interfaces field is not available in sync mode. Interfaces are auto-discovered from NetBox.")])
 
         # Validate based on scope
         if scope == 'single':
@@ -220,8 +255,8 @@ class VLANDeploymentForm(forms.Form):
         # Combine checkbox selections and manual entries
         combined_interfaces = list(interfaces_select) if interfaces_select else []
 
-        # Parse manual interfaces (handles ranges like swp1-48) - only if provided
-        if interfaces_manual and interfaces_manual.strip():
+        # Parse manual interfaces (handles ranges like swp1-48) - only if provided and not in sync mode
+        if not sync_netbox_to_device and interfaces_manual and interfaces_manual.strip():
             manual_list = self._parse_interface_list(interfaces_manual.strip())
             if manual_list:  # Only extend if parsing returned valid interfaces
                 combined_interfaces.extend(manual_list)
@@ -229,13 +264,18 @@ class VLANDeploymentForm(forms.Form):
         # Remove duplicates while preserving order
         combined_interfaces = list(dict.fromkeys(combined_interfaces))
 
-        # Validate that at least one interface is specified (from either field)
+        # Validate that at least one interface is specified
         if not combined_interfaces:
-            # Wrap in list to prevent Django from trying to format the string
-            raise forms.ValidationError([_("Please select at least one interface from the checkbox list or enter manually in the text field.")])
+            if sync_netbox_to_device:
+                # Wrap in list to prevent Django from trying to format the string
+                raise forms.ValidationError([_("In sync mode, at least one interface must be selected for sync.")])
+            else:
+                # Wrap in list to prevent Django from trying to format the string
+                raise forms.ValidationError([_("Please select at least one interface from the checkbox list or enter manually in the text field.")])
 
         # Validate that all interfaces exist on selected devices (only if devices are selected)
-        if devices and combined_interfaces:
+        # In sync mode, interfaces are in "device:interface" format, so skip this validation
+        if devices and combined_interfaces and not sync_netbox_to_device:
             self._validate_interfaces_on_devices(devices, combined_interfaces, cleaned_data)
             
             # Validate tags and interface eligibility

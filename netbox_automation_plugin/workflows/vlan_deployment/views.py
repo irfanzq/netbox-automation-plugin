@@ -66,6 +66,9 @@ class VLANDeploymentView(View):
                 form.add_error(None, _("All devices were excluded. Please select at least one device for deployment."))
                 return render(request, self.template_name_form, {"form": form})
 
+        # Check if sync mode is enabled
+        sync_netbox_to_device = form.cleaned_data.get('sync_netbox_to_device', False)
+        
         # Additional tag validation before deployment (even for dry run, to show warnings)
         # This provides a second layer of validation and shows warnings even in dry run mode
         tagging_warnings = form.cleaned_data.get('_tagging_warnings', [])
@@ -77,8 +80,11 @@ class VLANDeploymentView(View):
                     form.add_error(None, error)
                 return render(request, self.template_name_form, {"form": form})
 
-        # Run deployment
-        results = self._run_vlan_deployment(devices, form.cleaned_data)
+        # Run deployment - route to sync or normal mode
+        if sync_netbox_to_device:
+            results = self._run_vlan_sync(devices, form.cleaned_data)
+        else:
+            results = self._run_vlan_deployment(devices, form.cleaned_data)
 
         # CSV export if requested
         if "export_csv" in request.POST:
@@ -2252,6 +2258,440 @@ class VLANDeploymentView(View):
         
         return errors
 
+    def _get_interfaces_for_sync(self, devices, selected_interface_names=None, include_untagged=False):
+        """
+        Get interfaces from NetBox for selected devices that have VLAN configuration.
+        Separates into tagged and untagged sections.
+        
+        Args:
+            devices: QuerySet or list of Device objects
+            selected_interface_names: Optional list of interface names selected by user.
+                                     Format: ["device1:swp1", "device1:swp2", "device2:Ethernet1"]
+                                     If None, returns all interfaces with VLAN config.
+            include_untagged: If True, include untagged interfaces (Section 2). Default: False
+        
+        Returns:
+            dict: {
+                'tagged': {device_name: [Interface objects]},
+                'untagged': {device_name: [Interface objects]}
+            }
+        """
+        tagged_interfaces_by_device = {}
+        untagged_interfaces_by_device = {}
+        
+        # Management interfaces to exclude
+        management_interfaces = {'eth0', 'lo', 'mgmt', 'management', 'loopback', 'Loopback0'}
+        
+        for device in devices:
+            device_interfaces = Interface.objects.filter(
+                device=device
+            ).select_related('untagged_vlan').prefetch_related('tagged_vlans', 'tags')
+            
+            tagged_interfaces = []
+            untagged_interfaces = []
+            
+            for iface in device_interfaces:
+                # Skip management interfaces
+                if iface.name.lower() in [m.lower() for m in management_interfaces]:
+                    continue
+                
+                # Only process interfaces with VLAN config
+                if not (iface.untagged_vlan or iface.tagged_vlans.exists()):
+                    continue
+                
+                # If user selected specific interfaces, filter to those
+                if selected_interface_names:
+                    interface_key = f"{device.name}:{iface.name}"
+                    if interface_key not in selected_interface_names:
+                        continue
+                
+                # Check tags
+                interface_tags = set(iface.tags.values_list('name', flat=True))
+                has_vlan_mode_tag = any(
+                    tag.startswith('vlan-mode:access') or tag.startswith('vlan-mode:tagged')
+                    for tag in interface_tags
+                )
+                has_any_tags = iface.tags.exists()
+                
+                if has_vlan_mode_tag:
+                    # Section 1: Has vlan-mode:access or vlan-mode:tagged tag
+                    tagged_interfaces.append(iface)
+                elif include_untagged and not has_any_tags:
+                    # Section 2: Completely untagged (no tags at all)
+                    untagged_interfaces.append(iface)
+                # Else: Has other tags but not vlan-mode tags - exclude
+            
+            if tagged_interfaces:
+                tagged_interfaces_by_device[device.name] = tagged_interfaces
+            if untagged_interfaces:
+                untagged_interfaces_by_device[device.name] = untagged_interfaces
+        
+        return {
+            'tagged': tagged_interfaces_by_device,
+            'untagged': untagged_interfaces_by_device,
+        }
+
+    def _generate_config_from_netbox(self, device, interface, platform):
+        """
+        Generate platform-specific config based on NetBox interface state.
+        
+        Args:
+            device: Device object
+            interface: Interface object from NetBox
+            platform: Platform type ('cumulus' or 'eos')
+        
+        Returns:
+            dict: {
+                'commands': list of command strings,
+                'mode': str ('access' or 'tagged'),
+                'untagged_vlan': int or None,
+                'tagged_vlans': list of ints,
+                'bridge_vlans': list of ints (for Cumulus, VLANs to add to bridge)
+            }
+        """
+        mode = getattr(interface, 'mode', None)
+        untagged_vlan = interface.untagged_vlan.vid if interface.untagged_vlan else None
+        tagged_vlans = list(interface.tagged_vlans.values_list('vid', flat=True))
+        
+        commands = []
+        bridge_vlans = []
+        
+        if platform == 'cumulus':
+            # Cumulus: VLANs are bridge-level, access is interface-level
+            # IMPORTANT: Use "vlan add" not "vlan" - "vlan" alone would OVERWRITE entire VLAN list
+            # 1. Add all VLANs to bridge (untagged + tagged) using "vlan add" for each VLAN
+            all_vlans = set()
+            if untagged_vlan:
+                all_vlans.add(untagged_vlan)
+            all_vlans.update(tagged_vlans)
+            
+            # Generate bridge VLAN commands - one "add" command per VLAN
+            for vlan in sorted(all_vlans):
+                bridge_cmd = f"nv set bridge domain br_default vlan add {vlan}"
+                commands.append(bridge_cmd)
+                bridge_vlans = sorted(all_vlans)
+            
+            # 2. Set interface access VLAN (untagged)
+            if untagged_vlan:
+                access_cmd = f"nv set interface {interface.name} bridge domain br_default access {untagged_vlan}"
+                commands.append(access_cmd)
+            
+            # Note: "nv config apply" is handled by the deployment method, don't include here
+        
+        elif platform == 'eos':
+            # EOS: Config is interface-level
+            if mode == 'access' and untagged_vlan:
+                commands.append(f"interface {interface.name}")
+                commands.append(f"   switchport mode access")
+                commands.append(f"   switchport access vlan {untagged_vlan}")
+            elif mode in ['tagged', 'tagged-all'] and tagged_vlans:
+                commands.append(f"interface {interface.name}")
+                commands.append(f"   switchport mode trunk")
+                # Format: "switchport trunk allowed vlan 100,200,300"
+                vlan_list = ','.join(map(str, sorted(tagged_vlans)))
+                commands.append(f"   switchport trunk allowed vlan {vlan_list}")
+                # If untagged VLAN exists, set native VLAN
+                if untagged_vlan:
+                    commands.append(f"   switchport trunk native vlan {untagged_vlan}")
+        
+        return {
+            'commands': commands,
+            'mode': mode or 'access',
+            'untagged_vlan': untagged_vlan,
+            'tagged_vlans': sorted(tagged_vlans),
+            'bridge_vlans': bridge_vlans,
+        }
+
+    def _auto_tag_interface_after_deployment(self, interface):
+        """
+        Auto-tag interface based on NetBox VLAN config after successful deployment.
+        Bypasses analysis criteria (cable checks, etc.) since we've already deployed.
+        
+        Args:
+            interface: Interface object from NetBox
+        
+        Returns:
+            str: Tag name that was applied, or None if tagging failed/skipped
+        """
+        from extras.models import Tag
+        
+        # Read NetBox VLAN config
+        has_untagged = interface.untagged_vlan is not None
+        has_tagged = interface.tagged_vlans.exists()
+        
+        # Determine tag based on VLAN config only (no mode check)
+        if has_tagged:
+            tag_name = "vlan-mode:tagged"
+        elif has_untagged:
+            tag_name = "vlan-mode:access"
+        else:
+            # No VLAN config - shouldn't happen, but skip
+            logger.warning(f"Interface {interface.name} has no VLAN config, skipping auto-tag")
+            return None
+        
+        # Get Tag object
+        try:
+            tag = Tag.objects.get(name=tag_name)
+        except Tag.DoesNotExist:
+            logger.error(f"Tag '{tag_name}' not found in NetBox - cannot auto-tag interface {interface.name}")
+            return None
+        
+        # Add tag directly (no removal needed - interface has no tags)
+        try:
+            interface.tags.add(tag)
+            interface.save()
+            
+            # Verify tag was added
+            interface.refresh_from_db()
+            if tag in interface.tags.all():
+                logger.info(f"Auto-tagged interface {interface.device.name}:{interface.name} as {tag_name}")
+                return tag_name
+            else:
+                logger.error(f"Failed to verify tag {tag_name} on interface {interface.name}")
+                return None
+        except Exception as e:
+            logger.error(f"Error auto-tagging interface {interface.name}: {e}")
+            return None
+
+    def _run_vlan_sync(self, devices, cleaned_data):
+        """
+        Sync NetBox interface VLAN configurations to devices.
+        Uses existing deployment infrastructure (Nornir/NAPALM).
+        
+        Args:
+            devices: QuerySet or list of Device objects
+            cleaned_data: Form cleaned data containing:
+                - sync_netbox_to_device: bool
+                - interfaces_select: list (interface names in "device:interface" format)
+                - dry_run: bool
+                - deploy_changes: bool
+        
+        Returns:
+            list: Results in same format as _run_vlan_deployment
+        """
+        dry_run = cleaned_data.get('dry_run', False)
+        deploy_changes = cleaned_data.get('deploy_changes', False)
+        
+        # Get selected interfaces from form (user may have unchecked some)
+        selected_interfaces_str = cleaned_data.get('interfaces_select', [])
+        selected_interface_names = None
+        if selected_interfaces_str:
+            # Parse list of "device:interface" pairs
+            if isinstance(selected_interfaces_str, list):
+                selected_interface_names = selected_interfaces_str
+            else:
+                selected_interface_names = [s.strip() for s in str(selected_interfaces_str).split(',') if s.strip()]
+        
+        # Get deploy_untagged_interfaces checkbox value
+        deploy_untagged = cleaned_data.get('deploy_untagged_interfaces', False)
+        
+        # Get interfaces for each device from NetBox (filtered by user selection)
+        # Returns dict with 'tagged' and 'untagged' sections
+        interfaces_dict = self._get_interfaces_for_sync(
+            devices, 
+            selected_interface_names, 
+            include_untagged=deploy_untagged
+        )
+        
+        tagged_interfaces_by_device = interfaces_dict['tagged']
+        untagged_interfaces_by_device = interfaces_dict['untagged'] if deploy_untagged else {}
+        
+        results = []
+        
+        # Detect platform - all devices should be same platform
+        platform = self._get_device_platform(devices[0]) if devices else 'cumulus'
+        
+        logger.info(f"VLAN Sync: {len(devices)} devices, platform: {platform}, dry_run: {dry_run}, deploy_untagged: {deploy_untagged}")
+        
+        # Track which interfaces need auto-tagging (Section 2 only)
+        interfaces_to_auto_tag = []
+        
+        # Process Section 1: Tagged interfaces (always deploy)
+        for device in devices:
+            device_interfaces = tagged_interfaces_by_device.get(device.name, [])
+            
+            for interface in device_interfaces:
+                # Generate config from NetBox state
+                config_info = self._generate_config_from_netbox(device, interface, platform)
+                config_commands = config_info['commands']
+                
+                # Combine commands into single config string (for deployment)
+                config_command = '\n'.join(config_commands) if isinstance(config_commands, list) else config_commands
+                
+                if dry_run:
+                    # Dry run mode - show what would be deployed
+                    # Get current device config
+                    device_config_result = self._get_current_device_config(device, interface.name, platform)
+                    current_device_config = device_config_result.get('current_config', 'Unable to fetch')
+                    
+                    # Generate diff
+                    config_diff = self._generate_config_diff(
+                        current_device_config, 
+                        config_command, 
+                        platform, 
+                        device=device, 
+                        interface_name=interface.name
+                    )
+                    
+                    # Get NetBox state
+                    untagged_vid = config_info['untagged_vlan']
+                    tagged_vids = config_info['tagged_vlans']
+                    netbox_state = {
+                        'current': {
+                            'untagged_vlan': interface.untagged_vlan.vid if interface.untagged_vlan else None,
+                            'tagged_vlans': list(interface.tagged_vlans.values_list('vid', flat=True)),
+                            'mode': getattr(interface, 'mode', None),
+                        },
+                        'proposed': {
+                            'untagged_vlan': untagged_vid,
+                            'tagged_vlans': tagged_vids,
+                            'mode': config_info['mode'],
+                        }
+                    }
+                    
+                    results.append({
+                        'device': device.name,
+                        'interface': interface.name,
+                        'status': 'success',
+                        'message': 'Would sync from NetBox',
+                        'current_config': current_device_config,
+                        'proposed_config': config_command,
+                        'config_diff': config_diff,
+                        'netbox_state': netbox_state,
+                        'dry_run': True,
+                    })
+                else:
+                    # Actual deployment
+                    untagged_vid = config_info['untagged_vlan']
+                    tagged_vids = config_info['tagged_vlans']
+                    
+                    result = self._deploy_config_to_device(
+                        device, 
+                        interface.name, 
+                        config_command, 
+                        platform, 
+                        vlan_id=untagged_vid or (tagged_vids[0] if tagged_vids else None)
+                    )
+                    
+                    # Add device/interface info to result
+                    result['device'] = device.name
+                    result['interface'] = interface.name
+                    result['dry_run'] = False
+                    result['netbox_state'] = {
+                        'untagged_vlan': untagged_vid,
+                        'tagged_vlans': tagged_vids,
+                        'mode': config_info['mode'],
+                    }
+                    result['section'] = 'tagged'
+                    
+                    results.append(result)
+        
+        # Process Section 2: Untagged interfaces (only if deploy_untagged is True)
+        interfaces_to_auto_tag = []
+        if deploy_untagged:
+            for device in devices:
+                device_interfaces = untagged_interfaces_by_device.get(device.name, [])
+                
+                for interface in device_interfaces:
+                    # Generate config from NetBox state
+                    config_info = self._generate_config_from_netbox(device, interface, platform)
+                    config_commands = config_info['commands']
+                    
+                    # Combine commands into single config string (for deployment)
+                    config_command = '\n'.join(config_commands) if isinstance(config_commands, list) else config_commands
+                    
+                    if dry_run:
+                        # Dry run mode - show what would be deployed
+                        device_config_result = self._get_current_device_config(device, interface.name, platform)
+                        current_device_config = device_config_result.get('current_config', 'Unable to fetch')
+                        
+                        config_diff = self._generate_config_diff(
+                            current_device_config, 
+                            config_command, 
+                            platform, 
+                            device=device, 
+                            interface_name=interface.name
+                        )
+                        
+                        untagged_vid = config_info['untagged_vlan']
+                        tagged_vids = config_info['tagged_vlans']
+                        netbox_state = {
+                            'current': {
+                                'untagged_vlan': interface.untagged_vlan.vid if interface.untagged_vlan else None,
+                                'tagged_vlans': list(interface.tagged_vlans.values_list('vid', flat=True)),
+                                'mode': getattr(interface, 'mode', None),
+                            },
+                            'proposed': {
+                                'untagged_vlan': untagged_vid,
+                                'tagged_vlans': tagged_vids,
+                                'mode': config_info['mode'],
+                            }
+                        }
+                        
+                        results.append({
+                            'device': device.name,
+                            'interface': interface.name,
+                            'status': 'success',
+                            'message': 'Would sync from NetBox (untagged interface - will be auto-tagged)',
+                            'current_config': current_device_config,
+                            'proposed_config': config_command,
+                            'config_diff': config_diff,
+                            'netbox_state': netbox_state,
+                            'dry_run': True,
+                            'section': 'untagged',
+                        })
+                    else:
+                        # Actual deployment
+                        untagged_vid = config_info['untagged_vlan']
+                        tagged_vids = config_info['tagged_vlans']
+                        
+                        result = self._deploy_config_to_device(
+                            device, 
+                            interface.name, 
+                            config_command, 
+                            platform, 
+                            vlan_id=untagged_vid or (tagged_vids[0] if tagged_vids else None)
+                        )
+                        
+                        result['device'] = device.name
+                        result['interface'] = interface.name
+                        result['dry_run'] = False
+                        result['netbox_state'] = {
+                            'untagged_vlan': untagged_vid,
+                            'tagged_vlans': tagged_vids,
+                            'mode': config_info['mode'],
+                        }
+                        result['section'] = 'untagged'
+                        
+                        # Track for auto-tagging if deployment succeeded
+                        if result.get('success'):
+                            interfaces_to_auto_tag.append(interface)
+                        
+                        results.append(result)
+        
+        # Auto-tag Section 2 interfaces after successful deployment
+        if not dry_run and interfaces_to_auto_tag:
+            auto_tag_results = []
+            for interface in interfaces_to_auto_tag:
+                tag_applied = self._auto_tag_interface_after_deployment(interface)
+                auto_tag_results.append({
+                    'interface': f"{interface.device.name}:{interface.name}",
+                    'tag_applied': tag_applied,
+                    'success': tag_applied is not None,
+                })
+            
+            # Add auto-tagging summary to results
+            results.append({
+                'device': 'AUTO-TAGGING',
+                'interface': 'Summary',
+                'status': 'info',
+                'message': f"Auto-tagged {len([r for r in auto_tag_results if r['success']])} interfaces",
+                'auto_tag_results': auto_tag_results,
+                'dry_run': False,
+            })
+        
+        return results
+
     def _run_vlan_deployment(self, devices, cleaned_data):
         """
         Core VLAN deployment logic.
@@ -3084,10 +3524,12 @@ class VLANDeploymentView(View):
         driver = napalm_manager.get_driver_name()
         return driver
 
-    def _generate_vlan_config(self, interface_name, vlan_id, platform):
+    def _generate_vlan_config(self, interface_name, vlan_id, platform, include_bridge_vlan=True):
         """
         Generate platform-specific VLAN configuration command.
-        Phase 1: Access mode only.
+        
+        For Cumulus: Adds VLAN to bridge first (additive), then sets interface access VLAN.
+        For EOS: Sets interface access VLAN directly.
 
         Supported platforms:
         - cumulus: Cumulus Linux NVUE
@@ -3097,13 +3539,25 @@ class VLANDeploymentView(View):
             interface_name: Interface name (e.g., 'bond1', 'Ethernet1')
             vlan_id: VLAN ID (1-4094)
             platform: Platform type ('cumulus' or 'eos')
+            include_bridge_vlan: If True, add bridge VLAN command for Cumulus (default: True)
 
         Returns:
-            str: Configuration command(s) for the platform
+            str or list: Configuration command(s) for the platform
+                          For Cumulus with bridge: list of commands
+                          Otherwise: string
         """
         if platform == 'cumulus':
-            # Cumulus NVUE command
-            return f"nv set interface {interface_name} bridge domain br_default access {vlan_id}"
+            commands = []
+            
+            # Add VLAN to bridge first (additive - safe, won't remove existing VLANs)
+            if include_bridge_vlan:
+                commands.append(f"nv set bridge domain br_default vlan add {vlan_id}")
+            
+            # Set interface access VLAN
+            commands.append(f"nv set interface {interface_name} bridge domain br_default access {vlan_id}")
+            
+            # Return as newline-separated string for compatibility
+            return "\n".join(commands)
 
         elif platform == 'eos':
             # Arista EOS commands (hierarchical config format for NAPALM)
@@ -4033,117 +4487,26 @@ class GetCommonInterfacesView(View):
         if not devices.exists():
             return JsonResponse({'interfaces': [], 'device_count': 0})
 
-        # Get interfaces for each device
-        device_interface_sets = []
+        # Get interfaces for each device - return ALL interfaces grouped by device
+        interfaces_by_device = {}
         for device in devices:
-            interfaces = set(
-                Interface.objects.filter(device=device).values_list('name', flat=True)
+            interfaces = list(
+                Interface.objects.filter(device=device)
+                .exclude(name__in=['eth0', 'lo', 'mgmt', 'management', 'loopback', 'Loopback0'])
+                .values_list('name', flat=True)
+                .order_by('name')
             )
-            device_interface_sets.append(interfaces)
+            # Sort naturally (swp1, swp2, swp10 instead of swp1, swp10, swp2)
+            interfaces = sorted(interfaces, key=self._natural_sort_key)
+            interfaces_by_device[device.name] = interfaces
             # Debug: Log first few interfaces per device
-            logger.debug(f"Device {device.name}: {len(interfaces)} interfaces, first 5: {list(interfaces)[:5]}")
+            logger.debug(f"Device {device.name}: {len(interfaces)} interfaces, first 5: {interfaces[:5]}")
 
-        # Find common interfaces using pattern matching
-        # Handles cases where devices have different naming (swp7 vs swp1s1, swp2s1, etc.)
-        if device_interface_sets:
-            import re
-            
-            def get_base_interface_name(interface_name):
-                """
-                Extract base interface name for pattern matching.
-                Examples:
-                - swp7 -> swp7
-                - swp1s1 -> swp1
-                - swp2s2 -> swp2
-                - Ethernet1 -> Ethernet1
-                - Ethernet1/1 -> Ethernet1
-                """
-                # Remove sub-interface notation (s1, s2, etc.)
-                # Pattern: swp1s1 -> swp1, swp2s2 -> swp2
-                match = re.match(r'^([a-zA-Z]+\d+)s\d+', interface_name)
-                if match:
-                    return match.group(1)
-                
-                # Remove port notation (Ethernet1/1 -> Ethernet1)
-                match = re.match(r'^([a-zA-Z]+\d+)/\d+', interface_name)
-                if match:
-                    return match.group(1)
-                
-                # Return as-is for simple names (swp7, Ethernet1)
-                return interface_name
-            
-            # Group interfaces by base name across all devices
-            base_interface_map = {}  # base_name -> set of actual interface names
-            for interface_set in device_interface_sets:
-                for interface in interface_set:
-                    base_name = get_base_interface_name(interface)
-                    if base_name not in base_interface_map:
-                        base_interface_map[base_name] = set()
-                    base_interface_map[base_name].add(interface)
-            
-            # Count how many devices have each base interface
-            base_interface_counts = {}
-            for interface_set in device_interface_sets:
-                base_names_found = set()
-                for interface in interface_set:
-                    base_name = get_base_interface_name(interface)
-                    base_names_found.add(base_name)
-                
-                for base_name in base_names_found:
-                    base_interface_counts[base_name] = base_interface_counts.get(base_name, 0) + 1
-            
-            # Calculate threshold: 80% of devices, but at least 1 device (for single device case)
-            total_devices = len(device_interface_sets)
-            if total_devices == 1:
-                # Single device: show all interfaces (except management)
-                management_interfaces = {'eth0', 'lo', 'mgmt', 'management', 'loopback', 'Loopback0'}
-                all_interfaces = device_interface_sets[0]
-                common_interfaces = sorted(
-                    [iface for iface in all_interfaces if iface.lower() not in management_interfaces],
-                    key=self._natural_sort_key
-                )
-                logger.info(f"Single device: Showing {len(common_interfaces)} interfaces (excluding management)")
-            else:
-                # Multiple devices: use threshold approach
-                threshold = max(1, int(total_devices * 0.8))
-                
-                # Filter out management interfaces (eth0, lo, mgmt, etc.)
-                management_interfaces = {'eth0', 'lo', 'mgmt', 'management', 'loopback', 'Loopback0'}
-                
-                # Get base interfaces that exist on at least threshold devices
-                common_base_interfaces = {
-                    base_name for base_name, count in base_interface_counts.items()
-                    if count >= threshold and base_name.lower() not in management_interfaces
-                }
-                
-                # For each common base interface, pick the most common actual interface name
-                # This handles swp7 vs swp7s1 - we'll show the one that appears most
-                common_interfaces = []
-                for base_name in common_base_interfaces:
-                    # Get all actual interface names for this base
-                    actual_names = base_interface_map[base_name]
-                    
-                    # Count occurrences of each actual name
-                    actual_name_counts = {}
-                    for interface_set in device_interface_sets:
-                        for interface in interface_set:
-                            if get_base_interface_name(interface) == base_name:
-                                actual_name_counts[interface] = actual_name_counts.get(interface, 0) + 1
-                    
-                    # Pick the most common actual name, or shortest if tie
-                    if actual_name_counts:
-                        most_common = max(actual_name_counts.items(), key=lambda x: (x[1], -len(x[0])))
-                        common_interfaces.append(most_common[0])
-                
-                # Sort for consistent display
-                common_interfaces = sorted(common_interfaces, key=self._natural_sort_key)
-                logger.info(f"Common interfaces across {total_devices} devices (threshold: {threshold}): {len(common_interfaces)} found - {list(common_interfaces)[:10]}")
-        else:
-            common_interfaces = []
-
+        # Return interfaces grouped by device (for accordion display)
         return JsonResponse({
-            'interfaces': list(common_interfaces),
+            'interfaces_by_device': interfaces_by_device,
             'device_count': len(devices),
+            'total_interfaces': sum(len(ifaces) for ifaces in interfaces_by_device.values())
         })
 
     def _natural_sort_key(self, s):
@@ -4153,6 +4516,101 @@ class GetCommonInterfacesView(View):
         import re
         return [int(text) if text.isdigit() else text.lower()
                 for text in re.split('([0-9]+)', s)]
+
+
+class GetInterfacesForSyncView(View):
+    """
+    AJAX endpoint to get interfaces with VLAN config from NetBox for selected devices.
+    Used by JavaScript to populate interface checkboxes in sync mode.
+    
+    Returns interfaces separated into two sections:
+    - Section 1 (tagged): Interfaces with vlan-mode:access or vlan-mode:tagged tags
+    - Section 2 (untagged): Interfaces with VLAN config but NO tags at all (completely blank)
+    """
+    
+    def get(self, request):
+        device_ids = request.GET.getlist('device_ids[]')
+        if not device_ids:
+            # Try alternative format (comma-separated)
+            device_ids_str = request.GET.get('devices', '')
+            device_ids = device_ids_str.split(',') if device_ids_str else []
+        
+        device_ids = [int(did) for did in device_ids if str(did).isdigit()]
+        
+        if not device_ids:
+            return JsonResponse({'error': 'No devices selected'}, status=400)
+        
+        devices = Device.objects.filter(id__in=device_ids).order_by('name')
+        tagged_interfaces_by_device = {}
+        untagged_interfaces_by_device = {}
+        
+        # Management interfaces to exclude
+        management_interfaces = {'eth0', 'lo', 'mgmt', 'management', 'loopback', 'Loopback0'}
+        
+        for device in devices:
+            device_interfaces = Interface.objects.filter(
+                device=device
+            ).select_related('untagged_vlan').prefetch_related('tagged_vlans', 'tags').order_by('name')
+            
+            # Separate into tagged and untagged
+            tagged_interfaces = []
+            untagged_interfaces = []
+            
+            for iface in device_interfaces:
+                # Skip management interfaces
+                if iface.name.lower() in [m.lower() for m in management_interfaces]:
+                    continue
+                
+                # Only process interfaces with VLAN config
+                if not (iface.untagged_vlan or iface.tagged_vlans.exists()):
+                    continue
+                
+                # Serialize interface with VLAN config
+                iface_data = {
+                    'name': iface.name,
+                    'id': iface.id,
+                    'mode': getattr(iface, 'mode', None),
+                    'untagged_vlan': {
+                        'id': iface.untagged_vlan.id,
+                        'vid': iface.untagged_vlan.vid,
+                        'name': iface.untagged_vlan.name,
+                    } if iface.untagged_vlan else None,
+                    'tagged_vlans': [
+                        {'id': v.id, 'vid': v.vid, 'name': v.name}
+                        for v in iface.tagged_vlans.all().order_by('vid')
+                    ],
+                }
+                
+                # Check if interface has vlan-mode:access or vlan-mode:tagged tags
+                interface_tags = set(iface.tags.values_list('name', flat=True))
+                has_vlan_mode_tag = any(
+                    tag.startswith('vlan-mode:access') or tag.startswith('vlan-mode:tagged')
+                    for tag in interface_tags
+                )
+                
+                # Check if interface has ANY tags at all
+                has_any_tags = iface.tags.exists()
+                
+                if has_vlan_mode_tag:
+                    # Section 1: Has vlan-mode:access or vlan-mode:tagged tag
+                    tagged_interfaces.append(iface_data)
+                elif not has_any_tags:
+                    # Section 2: Completely untagged (no tags at all)
+                    untagged_interfaces.append(iface_data)
+                # Else: Has other tags but not vlan-mode tags - exclude (routed, uplink, etc.)
+            
+            if tagged_interfaces:
+                tagged_interfaces_by_device[device.name] = tagged_interfaces
+            if untagged_interfaces:
+                untagged_interfaces_by_device[device.name] = untagged_interfaces
+        
+        return JsonResponse({
+            'tagged_interfaces': tagged_interfaces_by_device,
+            'untagged_interfaces': untagged_interfaces_by_device,
+            'device_count': len(device_ids),
+            'total_tagged': sum(len(ifaces) for ifaces in tagged_interfaces_by_device.values()),
+            'total_untagged': sum(len(ifaces) for ifaces in untagged_interfaces_by_device.values()),
+        })
 
 
 class GetVLANsBySiteView(View):
