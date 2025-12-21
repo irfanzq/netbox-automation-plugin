@@ -1432,7 +1432,7 @@
                 button.setAttribute('aria-expanded', isFirst ? 'true' : 'false');
                 button.setAttribute('aria-controls', collapseId);
                 button.innerHTML = `
-                  <strong>${deviceName}</strong>
+                  <strong style="color: var(--nbx-color-fg-default);">${deviceName}</strong>
                   <span class="badge bg-secondary ms-2">${interfaces.length} interface${interfaces.length !== 1 ? 's' : ''}</span>
                 `;
                 header.appendChild(button);
