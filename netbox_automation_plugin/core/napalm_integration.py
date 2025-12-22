@@ -309,7 +309,14 @@ class NAPALMDeviceManager:
             return True
                 
         except Exception as e:
-            logger.error(f"Failed to load config on {self.device.name}: {e}")
+            error_msg = str(e)
+            logger.error(f"Failed to load config on {self.device.name}: {error_msg}")
+            logger.error(f"Exception type: {type(e).__name__}")
+            # Store error for later retrieval
+            if not hasattr(self, '_last_load_error'):
+                self._last_load_error = {}
+            self._last_load_error['error'] = error_msg
+            self._last_load_error['exception_type'] = type(e).__name__
             try:
                 self.connection.discard_config()
             except:
@@ -1374,25 +1381,83 @@ class NAPALMDeviceManager:
                     except Exception as hist_error:
                         logger.debug(f"Could not get history before load: {hist_error}")
 
-                load_result = self.load_config(config, replace=replace)
-                logger.info(f"load_config() returned: {load_result}")
-                logs.append(f"  [DEBUG] load_config() return value: {load_result}")
+                try:
+                    load_result = self.load_config(config, replace=replace)
+                    logger.info(f"load_config() returned: {load_result}")
+                    logs.append(f"  [DEBUG] load_config() return value: {load_result}")
+                except Exception as load_error:
+                    logger.error(f"Phase 1 failed: load_config raised exception: {load_error}")
+                    logs.append(f"  ✗ Configuration load FAILED")
+                    logs.append(f"  Exception: {str(load_error)}")
+                    result['message'] = f"Failed to load configuration: {str(load_error)}"
+                    result['logs'] = logs
+                    return result
                 
                 if not load_result:
-                    result['message'] = "Failed to load configuration. The device rejected the config or NAPALM driver encountered an error."
+                    # Get stored error from load_config if available
+                    error_msg = "Device rejected config or NAPALM driver encountered an error"
+                    if hasattr(self, '_last_load_error') and self._last_load_error:
+                        stored_error = self._last_load_error.get('error', '')
+                        if stored_error:
+                            error_msg = stored_error
+                            logger.error(f"Phase 1 failed: load_config error: {stored_error}")
+                    
+                    result['message'] = f"Failed to load configuration. {error_msg}"
                     logger.error(f"Phase 1 failed: load_config returned False")
                     logs.append(f"  ✗ Configuration load FAILED")
-                    logs.append(f"  Error: Device rejected config or NAPALM driver error")
+                    logs.append(f"  Error: {error_msg}")
                     
-                    # DEBUG: Try to get error details
+                    # Show the config that failed to load (first few lines)
+                    logs.append(f"  [DEBUG] Config that failed to load:")
+                    for i, line in enumerate(config.split('\n')[:10]):
+                        if line.strip():
+                            logs.append(f"    {line.strip()}")
+                    if len(config.split('\n')) > 10:
+                        logs.append(f"    ... ({len(config.split('\n')) - 10} more lines)")
+                    
+                    # DEBUG: Try to get error details from NAPALM connection
+                    error_details = []
+                    
+                    # Check if connection has any error attributes
+                    if hasattr(self.connection, 'device'):
+                        if hasattr(self.connection.device, 'last_error'):
+                            error_details.append(f"Device last_error: {self.connection.device.last_error}")
+                        if hasattr(self.connection.device, 'error'):
+                            error_details.append(f"Device error: {self.connection.device.error}")
+                    
+                    # For Cumulus, check config diff and validation errors
                     if driver_name == 'cumulus':
                         try:
                             if hasattr(self.connection, 'device') and hasattr(self.connection.device, 'send_command'):
+                                # Check config diff
                                 error_check = self.connection.device.send_command('nv config diff', read_timeout=10)
-                                logger.debug(f"Config diff after failed load: {error_check}")
-                                logs.append(f"  [DEBUG] Config diff after failed load: {error_check[:200]}")
+                                if error_check and error_check.strip():
+                                    logger.debug(f"Config diff after failed load: {error_check}")
+                                    logs.append(f"  [DEBUG] Config diff after failed load:")
+                                    for line in error_check.split('\n')[:20]:  # Show first 20 lines
+                                        if line.strip():
+                                            logs.append(f"    {line.strip()}")
+                                
+                                # Check for validation errors
+                                try:
+                                    validate_output = self.connection.device.send_command('nv config validate', read_timeout=10)
+                                    if validate_output and ('error' in validate_output.lower() or 'invalid' in validate_output.lower()):
+                                        logger.debug(f"Config validation errors: {validate_output}")
+                                        logs.append(f"  [DEBUG] Config validation errors:")
+                                        for line in validate_output.split('\n')[:20]:
+                                            if line.strip():
+                                                logs.append(f"    {line.strip()}")
+                                except Exception:
+                                    pass  # Validation command might not be available
                         except Exception as err_check:
                             logger.debug(f"Could not check error details: {err_check}")
+                            logs.append(f"  [DEBUG] Could not retrieve detailed error info: {str(err_check)}")
+                    
+                    # Log any collected error details
+                    if error_details:
+                        logs.append(f"  [DEBUG] Additional error details:")
+                        for detail in error_details:
+                            logs.append(f"    {detail}")
                     
                     result['logs'] = logs
                     return result

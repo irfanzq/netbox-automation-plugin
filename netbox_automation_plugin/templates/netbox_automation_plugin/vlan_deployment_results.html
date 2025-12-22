@@ -67,7 +67,14 @@
     color: #ffffff !important;
   }
   
-  /* Device names in table (first column) - White ONLY in dark mode */
+  /* Device names in table (first column) - Teal in light mode, white in dark mode */
+  .table tbody td:first-child,
+  .table tbody td:first-child a,
+  .table tbody td:first-child span,
+  .table tbody td:first-child strong {
+    color: #20c997 !important; /* Teal for light mode */
+  }
+  
   html[data-theme="dark"] .table tbody td:first-child,
   html[data-theme="dark"] .table tbody td:first-child a,
   html[data-theme="dark"] .table tbody td:first-child span,
@@ -75,11 +82,22 @@
   body.dark-mode .table tbody td:first-child,
   body.dark-mode .table tbody td:first-child a,
   body.dark-mode .table tbody td:first-child span,
-  body.dark-mode .table tbody td:first-child strong {
-    color: #ffffff !important;
+  body.dark-mode .table tbody td:first-child strong,
+  body[data-bs-theme="dark"] .table tbody td:first-child,
+  body[data-bs-theme="dark"] .table tbody td:first-child a,
+  body[data-bs-theme="dark"] .table tbody td:first-child span,
+  body[data-bs-theme="dark"] .table tbody td:first-child strong {
+    color: #ffffff !important; /* White for dark mode */
   }
   
-  /* Device names in summary cards - White ONLY in dark mode */
+  /* Device names in summary cards - Teal in light mode, vibrant teal/cyan in dark mode */
+  .device-summary-card h6,
+  .device-summary-card h6 a,
+  .device-summary-card h6 span,
+  .device-summary-card h6 strong {
+    color: #20c997 !important; /* Teal for light mode */
+  }
+  
   html[data-theme="dark"] .device-summary-card h6,
   html[data-theme="dark"] .device-summary-card h6 a,
   html[data-theme="dark"] .device-summary-card h6 span,
@@ -87,8 +105,12 @@
   body.dark-mode .device-summary-card h6,
   body.dark-mode .device-summary-card h6 a,
   body.dark-mode .device-summary-card h6 span,
-  body.dark-mode .device-summary-card h6 strong {
-    color: #ffffff !important;
+  body.dark-mode .device-summary-card h6 strong,
+  body[data-bs-theme="dark"] .device-summary-card h6,
+  body[data-bs-theme="dark"] .device-summary-card h6 a,
+  body[data-bs-theme="dark"] .device-summary-card h6 span,
+  body[data-bs-theme="dark"] .device-summary-card h6 strong {
+    color: #4dd4ac !important; /* Vibrant teal/cyan for dark mode */
   }
   
   /* Colored text - brighter in dark mode */
@@ -153,20 +175,89 @@
   body.dark-mode #bulk-action-buttons .btn i {
     color: var(--nbx-color-fg-default, #212529) !important; /* Dark icon on light grey background */
   }
+  
+  /* Section headers - Vibrant blue that works in both light and dark modes */
+  .card-header h5.card-title,
+  .card-header .card-title {
+    color: #0066cc !important; /* Vibrant blue for light mode */
+  }
+  
+  html[data-theme="dark"] .card-header h5.card-title,
+  html[data-theme="dark"] .card-header .card-title,
+  body.dark-mode .card-header h5.card-title,
+  body.dark-mode .card-header .card-title,
+  body[data-bs-theme="dark"] .card-header h5.card-title,
+  body[data-bs-theme="dark"] .card-header .card-title {
+    color: #4da6ff !important; /* Brighter blue for dark mode */
+  }
+  
+  /* VLAN Deployment Summary labels and values - Vibrant blue */
+  .card-body dl.row .summary-label,
+  .card-body dl.row .summary-value {
+    color: #0066cc !important; /* Vibrant blue for light mode */
+  }
+  
+  html[data-theme="dark"] .card-body dl.row .summary-label,
+  html[data-theme="dark"] .card-body dl.row .summary-value,
+  body.dark-mode .card-body dl.row .summary-label,
+  body.dark-mode .card-body dl.row .summary-value,
+  body[data-bs-theme="dark"] .card-body dl.row .summary-label,
+  body[data-bs-theme="dark"] .card-body dl.row .summary-value {
+    color: #4da6ff !important; /* Brighter blue for dark mode */
+  }
+  
+  /* Interface and VLAN column values - Teal/cyan color matching device names */
+  .table tbody td:nth-child(2),
+  .table tbody td:nth-child(3),
+  .table tbody td:nth-child(2) a,
+  .table tbody td:nth-child(3) a,
+  .table tbody td:nth-child(2) span,
+  .table tbody td:nth-child(3) span,
+  .table tbody td:nth-child(2) strong,
+  .table tbody td:nth-child(3) strong {
+    color: #20c997 !important; /* Teal for light mode */
+  }
+  
+  html[data-theme="dark"] .table tbody td:nth-child(2),
+  html[data-theme="dark"] .table tbody td:nth-child(3),
+  html[data-theme="dark"] .table tbody td:nth-child(2) a,
+  html[data-theme="dark"] .table tbody td:nth-child(3) a,
+  html[data-theme="dark"] .table tbody td:nth-child(2) span,
+  html[data-theme="dark"] .table tbody td:nth-child(3) span,
+  html[data-theme="dark"] .table tbody td:nth-child(2) strong,
+  html[data-theme="dark"] .table tbody td:nth-child(3) strong,
+  body.dark-mode .table tbody td:nth-child(2),
+  body.dark-mode .table tbody td:nth-child(3),
+  body.dark-mode .table tbody td:nth-child(2) a,
+  body.dark-mode .table tbody td:nth-child(3) a,
+  body.dark-mode .table tbody td:nth-child(2) span,
+  body.dark-mode .table tbody td:nth-child(3) span,
+  body.dark-mode .table tbody td:nth-child(2) strong,
+  body.dark-mode .table tbody td:nth-child(3) strong,
+  body[data-bs-theme="dark"] .table tbody td:nth-child(2),
+  body[data-bs-theme="dark"] .table tbody td:nth-child(3),
+  body[data-bs-theme="dark"] .table tbody td:nth-child(2) a,
+  body[data-bs-theme="dark"] .table tbody td:nth-child(3) a,
+  body[data-bs-theme="dark"] .table tbody td:nth-child(2) span,
+  body[data-bs-theme="dark"] .table tbody td:nth-child(3) span,
+  body[data-bs-theme="dark"] .table tbody td:nth-child(2) strong,
+  body[data-bs-theme="dark"] .table tbody td:nth-child(3) strong {
+    color: #4dd4ac !important; /* Brighter teal for dark mode */
+  }
 </style>
   <div class="row mb-3">
     <div class="col-md-12">
       <div class="card">
         <div class="card-header">
-          <h5 class="card-title mb-0" style="color: var(--nbx-color-fg-default);">{% trans "VLAN Deployment Summary" %}</h5>
+          <h5 class="card-title mb-0">{% trans "VLAN Deployment Summary" %}</h5>
         </div>
         <div class="card-body">
           <dl class="row mb-0">
-            <dt class="col-md-3">{% trans "Devices" %}</dt>
-            <dd class="col-md-3">{{ summary.device_count }}</dd>
+            <dt class="col-md-3 summary-label">{% trans "Devices" %}</dt>
+            <dd class="col-md-3 summary-value">{{ summary.device_count }}</dd>
 
-            <dt class="col-md-3">{% trans "Interfaces" %}</dt>
-            <dd class="col-md-3">{{ summary.interface_count }}</dd>
+            <dt class="col-md-3 summary-label">{% trans "Interfaces" %}</dt>
+            <dd class="col-md-3 summary-value">{{ summary.interface_count }}</dd>
 
             <dt class="col-md-3 text-success">{% trans "Successful" %}</dt>
             <dd class="col-md-3 text-success">{{ summary.success }}</dd>
@@ -198,11 +289,11 @@
                    data-device-name="{{ device_summary.device_name }}"
                    style="cursor: pointer; border-left: 4px solid {% if device_summary.device_status == 'pass' %}#198754{% elif device_summary.device_status == 'warn' %}#ffc107{% else %}#dc3545{% endif %};">
                 <div class="card-body p-2">
-                  <h6 class="mb-1" style="color: var(--nbx-color-fg-default);">
+                  <h6 class="mb-1">
                     {% if device_summary.device and device_summary.device.pk %}
-                      <a href="{% url 'dcim:device' pk=device_summary.device.pk %}" onclick="event.stopPropagation();" style="color: var(--nbx-color-fg-default);">{{ device_summary.device_name }}</a>
+                      <a href="{% url 'dcim:device' pk=device_summary.device.pk %}" onclick="event.stopPropagation();">{{ device_summary.device_name }}</a>
                     {% else %}
-                      <span style="color: var(--nbx-color-fg-default);">{{ device_summary.device_name }}</span>
+                      <span>{{ device_summary.device_name }}</span>
                     {% endif %}
                   </h6>
                   <div class="small">
@@ -230,7 +321,7 @@
     <div class="col-md-12">
       <div class="card">
         <div class="card-header d-flex justify-content-between align-items-center">
-          <h5 class="card-title mb-0" style="color: var(--nbx-color-fg-default);">{% trans "VLAN Deployment Results" %}</h5>
+          <h5 class="card-title mb-0">{% trans "VLAN Deployment Results" %}</h5>
           <div>
             <div class="btn-group btn-group-sm me-2" role="group" id="status-filter-buttons">
               <button type="button" class="btn btn-primary active" data-filter="all">
@@ -423,10 +514,17 @@
             }
           });
           
-          // Device names in summary cards ONLY - force white
+          // Device names in summary cards - teal in light mode, vibrant teal/cyan in dark mode
+          const isDark = document.documentElement.getAttribute('data-theme') === 'dark' || 
+                        document.body.classList.contains('dark-mode') ||
+                        document.documentElement.getAttribute('data-bs-theme') === 'dark';
           document.querySelectorAll('.device-summary-card h6, .device-summary-card h6 a, .device-summary-card h6 span, .device-summary-card h6 strong').forEach(el => {
             if (!el.closest('.badge') && !el.closest('.btn')) {
-              el.style.setProperty('color', '#ffffff', 'important');
+              if (isDark) {
+                el.style.setProperty('color', '#4dd4ac', 'important'); // Vibrant teal/cyan for dark mode
+              } else {
+                el.style.setProperty('color', '#20c997', 'important'); // Teal for light mode
+              }
             }
           });
         }
