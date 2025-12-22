@@ -97,17 +97,37 @@
     color: #ffffff !important;
   }
   
-  /* Device names in table cells - HARDCODED WHITE IN DARK MODE */
+  /* Device names in table cells - HARDCODED WHITE IN DARK MODE - MAXIMUM SPECIFICITY */
   html[data-theme="dark"] .table tbody td:first-child,
   html[data-theme="dark"] .table tbody td:first-child a,
   html[data-theme="dark"] .table tbody td:first-child *,
   html[data-theme="dark"] .table tbody td:first-child strong,
   html[data-theme="dark"] .table tbody td:first-child span,
+  html[data-theme="dark"] .table tbody td:first-child div,
+  html[data-theme="dark"] .table tbody td:first-child p,
+  html[data-theme="dark"] .table tbody tr td:first-child,
+  html[data-theme="dark"] .table tbody tr td:first-child a,
+  html[data-theme="dark"] .table tbody tr td:first-child *,
   body.dark-mode .table tbody td:first-child,
   body.dark-mode .table tbody td:first-child a,
   body.dark-mode .table tbody td:first-child *,
   body.dark-mode .table tbody td:first-child strong,
-  body.dark-mode .table tbody td:first-child span {
+  body.dark-mode .table tbody td:first-child span,
+  body.dark-mode .table tbody td:first-child div,
+  body.dark-mode .table tbody td:first-child p,
+  body.dark-mode .table tbody tr td:first-child,
+  body.dark-mode .table tbody tr td:first-child a,
+  body.dark-mode .table tbody tr td:first-child * {
+    color: #ffffff !important;
+  }
+  
+  /* ALL table cells in dark mode - force white */
+  html[data-theme="dark"] .table tbody td,
+  html[data-theme="dark"] .table tbody td a,
+  html[data-theme="dark"] .table tbody td *:not(.badge):not(.btn),
+  body.dark-mode .table tbody td,
+  body.dark-mode .table tbody td a,
+  body.dark-mode .table tbody td *:not(.badge):not(.btn) {
     color: #ffffff !important;
   }
   
@@ -461,10 +481,27 @@
           });
           
           // Force white on all table cells (device names, interface names, VLAN names)
-          document.querySelectorAll('.table tbody td, .table tbody td a, .table tbody td *, .table tbody td strong, .table tbody td span').forEach(el => {
-            // Skip badges and colored elements
-            if (!el.classList.contains('badge') && !el.closest('.badge')) {
+          document.querySelectorAll('.table tbody td, .table tbody td a, .table tbody td *, .table tbody td strong, .table tbody td span, .table tbody td div, .table tbody td p').forEach(el => {
+            // Skip badges, buttons, and colored elements
+            if (!el.classList.contains('badge') && !el.closest('.badge') && 
+                !el.classList.contains('btn') && !el.closest('.btn') &&
+                !el.classList.contains('text-success') && !el.classList.contains('text-info') &&
+                !el.classList.contains('text-danger') && !el.classList.contains('text-warning')) {
               el.style.setProperty('color', '#ffffff', 'important');
+            }
+          });
+          
+          // Specifically target first column (device names) with even more specificity
+          document.querySelectorAll('.table tbody tr').forEach(row => {
+            const firstCell = row.querySelector('td:first-child');
+            if (firstCell) {
+              firstCell.style.setProperty('color', '#ffffff', 'important');
+              const allChildren = firstCell.querySelectorAll('*');
+              allChildren.forEach(child => {
+                if (!child.classList.contains('badge') && !child.classList.contains('btn')) {
+                  child.style.setProperty('color', '#ffffff', 'important');
+                }
+              });
             }
           });
           
@@ -504,6 +541,17 @@
           // MutationObserver to watch for style changes and reapply
           const observer = new MutationObserver(function(mutations) {
             forceDeviceNamesWhite();
+            // Also force white on all table cells specifically
+            const isDarkMode = document.documentElement.getAttribute('data-theme') === 'dark' || document.body.classList.contains('dark-mode');
+            if (isDarkMode) {
+              document.querySelectorAll('.table tbody td, .table tbody td a, .table tbody td *').forEach(el => {
+                if (!el.classList.contains('badge') && !el.classList.contains('btn') &&
+                    !el.classList.contains('text-success') && !el.classList.contains('text-info') &&
+                    !el.classList.contains('text-danger') && !el.classList.contains('text-warning')) {
+                  el.style.setProperty('color', '#ffffff', 'important');
+                }
+              });
+            }
           });
           observer.observe(document.body, {
             childList: true,
@@ -511,6 +559,28 @@
             attributes: true,
             attributeFilter: ['style', 'class']
           });
+          
+          // Additional aggressive check for table cells - run every second
+          setInterval(function() {
+            const isDarkMode = document.documentElement.getAttribute('data-theme') === 'dark' || document.body.classList.contains('dark-mode');
+            if (isDarkMode) {
+              // Force white on all table cells
+              document.querySelectorAll('.table tbody tr').forEach(row => {
+                const cells = row.querySelectorAll('td');
+                cells.forEach(cell => {
+                  cell.style.setProperty('color', '#ffffff', 'important');
+                  const allChildren = cell.querySelectorAll('*');
+                  allChildren.forEach(child => {
+                    if (!child.classList.contains('badge') && !child.classList.contains('btn') &&
+                        !child.classList.contains('text-success') && !child.classList.contains('text-info') &&
+                        !child.classList.contains('text-danger') && !child.classList.contains('text-warning')) {
+                      child.style.setProperty('color', '#ffffff', 'important');
+                    }
+                  });
+                });
+              });
+            }
+          }, 1000);
         });
       </script>
 

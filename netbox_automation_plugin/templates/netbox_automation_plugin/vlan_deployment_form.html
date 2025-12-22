@@ -704,12 +704,16 @@
   html[data-theme="dark"] .accordion .accordion-item .accordion-header .accordion-button,
   html[data-theme="dark"] .accordion-button,
   html[data-theme="dark"] .accordion-button button,
+  html[data-theme="dark"] .accordion-header button,
+  html[data-theme="dark"] .accordion-header button.accordion-button,
   body.dark-mode #interfaces-checkbox-container .accordion .accordion-item .accordion-header .accordion-button,
   body.dark-mode #interfaces-checkbox-container .accordion-button,
   body.dark-mode #interfaces-checkbox-container .accordion-button button,
   body.dark-mode .accordion .accordion-item .accordion-header .accordion-button,
   body.dark-mode .accordion-button,
-  body.dark-mode .accordion-button button {
+  body.dark-mode .accordion-button button,
+  body.dark-mode .accordion-header button,
+  body.dark-mode .accordion-header button.accordion-button {
     color: #ffffff !important;
     background-color: var(--nbx-color-bg-default) !important;
   }
@@ -722,6 +726,10 @@
   html[data-theme="dark"] .accordion-button strong,
   html[data-theme="dark"] .accordion-button button strong,
   html[data-theme="dark"] .accordion-button *,
+  html[data-theme="dark"] .accordion-header button strong,
+  html[data-theme="dark"] .accordion-header button.accordion-button strong,
+  html[data-theme="dark"] .accordion-header button *,
+  html[data-theme="dark"] .accordion-header button.accordion-button *,
   body.dark-mode #interfaces-checkbox-container .accordion .accordion-item .accordion-header .accordion-button strong,
   body.dark-mode #interfaces-checkbox-container .accordion-button strong,
   body.dark-mode #interfaces-checkbox-container .accordion-button button strong,
@@ -729,7 +737,11 @@
   body.dark-mode .accordion .accordion-item .accordion-header .accordion-button strong,
   body.dark-mode .accordion-button strong,
   body.dark-mode .accordion-button button strong,
-  body.dark-mode .accordion-button * {
+  body.dark-mode .accordion-button *,
+  body.dark-mode .accordion-header button strong,
+  body.dark-mode .accordion-header button.accordion-button strong,
+  body.dark-mode .accordion-header button *,
+  body.dark-mode .accordion-header button.accordion-button * {
     color: #ffffff !important;
   }
   
@@ -1523,19 +1535,27 @@
                 button.setAttribute('data-bs-target', `#${collapseId}`);
                 button.setAttribute('aria-expanded', isFirst ? 'true' : 'false');
                 button.setAttribute('aria-controls', collapseId);
-                // Set button style explicitly for dark mode compatibility
+                // Set button style explicitly for dark mode compatibility - ALWAYS WHITE IN DARK MODE
                 const isDarkMode = document.documentElement.getAttribute('data-theme') === 'dark' || document.body.classList.contains('dark-mode');
                 const textColor = isDarkMode ? '#ffffff' : 'var(--nbx-color-fg-default)';
                 
-                // Apply styles to button
-                button.style.color = textColor;
-                button.style.setProperty('color', textColor, 'important');
+                // Apply styles to button - FORCE WHITE IN DARK MODE
+                if (isDarkMode) {
+                  button.style.setProperty('color', '#ffffff', 'important');
+                  button.classList.add('text-white');
+                } else {
+                  button.style.setProperty('color', textColor, 'important');
+                }
                 
-                // Create strong element separately to set explicit color
+                // Create strong element separately to set explicit color - FORCE WHITE IN DARK MODE
                 const strongEl = document.createElement('strong');
-                strongEl.style.color = textColor;
-                strongEl.style.setProperty('color', textColor, 'important');
-                strongEl.style.setProperty('--bs-accordion-btn-color', textColor, 'important');
+                if (isDarkMode) {
+                  strongEl.style.setProperty('color', '#ffffff', 'important');
+                  strongEl.classList.add('text-white');
+                } else {
+                  strongEl.style.setProperty('color', textColor, 'important');
+                }
+                strongEl.style.setProperty('--bs-accordion-btn-color', isDarkMode ? '#ffffff' : textColor, 'important');
                 strongEl.textContent = deviceName;
                 
                 const badgeSpan = document.createElement('span');
@@ -2456,12 +2476,54 @@
               }
             }
             
+            // Global function to force white text on device names in dark mode
+            function forceDeviceNamesWhiteInDarkMode() {
+              const isDarkMode = document.documentElement.getAttribute('data-theme') === 'dark' || document.body.classList.contains('dark-mode');
+              if (!isDarkMode) return;
+              
+              // Force white on all accordion buttons and device names
+              document.querySelectorAll('.accordion-button, .accordion-button strong, .accordion-button *, .accordion-header button, .accordion-header button strong, .accordion-header button *').forEach(el => {
+                if (!el.classList.contains('badge')) {
+                  el.style.setProperty('color', '#ffffff', 'important');
+                }
+              });
+            }
+            
             // Initialize on page load - using proven pattern from vlan_tagging_form.html
             if (document.readyState === 'loading') {
-              document.addEventListener('DOMContentLoaded', initVlanDeploymentForm);
+              document.addEventListener('DOMContentLoaded', function() {
+                initVlanDeploymentForm();
+                // Force white text on device names after initialization
+                setTimeout(forceDeviceNamesWhiteInDarkMode, 100);
+                setTimeout(forceDeviceNamesWhiteInDarkMode, 500);
+                setTimeout(forceDeviceNamesWhiteInDarkMode, 1000);
+                
+                // Run periodically to catch dynamically added elements
+                setInterval(forceDeviceNamesWhiteInDarkMode, 2000);
+                
+                // MutationObserver to watch for new accordion elements
+                const observer = new MutationObserver(function(mutations) {
+                  forceDeviceNamesWhiteInDarkMode();
+                });
+                observer.observe(document.body, {
+                  childList: true,
+                  subtree: true,
+                  attributes: true,
+                  attributeFilter: ['style', 'class']
+                });
+                
+                // Listen for theme changes
+                window.addEventListener('netbox.colorModeChanged', function() {
+                  setTimeout(forceDeviceNamesWhiteInDarkMode, 100);
+                });
+              });
             } else {
               // DOM is already ready
               initVlanDeploymentForm();
+              setTimeout(forceDeviceNamesWhiteInDarkMode, 100);
+              setTimeout(forceDeviceNamesWhiteInDarkMode, 500);
+              setTimeout(forceDeviceNamesWhiteInDarkMode, 1000);
+              setInterval(forceDeviceNamesWhiteInDarkMode, 2000);
             }
 
             // Form submission handler
