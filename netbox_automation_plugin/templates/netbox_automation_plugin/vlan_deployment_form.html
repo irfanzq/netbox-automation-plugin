@@ -697,44 +697,68 @@
     color: var(--nbx-color-fg-default) !important;
   }
   
-  /* Explicit dark mode overrides for accordion buttons */
+  /* Explicit dark mode overrides for accordion buttons - MAXIMUM SPECIFICITY */
+  html[data-theme="dark"] #interfaces-checkbox-container .accordion .accordion-item .accordion-header .accordion-button,
   html[data-theme="dark"] #interfaces-checkbox-container .accordion-button,
   html[data-theme="dark"] #interfaces-checkbox-container .accordion-button button,
+  html[data-theme="dark"] .accordion .accordion-item .accordion-header .accordion-button,
   html[data-theme="dark"] .accordion-button,
   html[data-theme="dark"] .accordion-button button,
+  body.dark-mode #interfaces-checkbox-container .accordion .accordion-item .accordion-header .accordion-button,
   body.dark-mode #interfaces-checkbox-container .accordion-button,
   body.dark-mode #interfaces-checkbox-container .accordion-button button,
+  body.dark-mode .accordion .accordion-item .accordion-header .accordion-button,
   body.dark-mode .accordion-button,
   body.dark-mode .accordion-button button {
     color: #ffffff !important;
     background-color: var(--nbx-color-bg-default) !important;
   }
   
+  html[data-theme="dark"] #interfaces-checkbox-container .accordion .accordion-item .accordion-header .accordion-button strong,
   html[data-theme="dark"] #interfaces-checkbox-container .accordion-button strong,
   html[data-theme="dark"] #interfaces-checkbox-container .accordion-button button strong,
   html[data-theme="dark"] #interfaces-checkbox-container .accordion-button *,
+  html[data-theme="dark"] .accordion .accordion-item .accordion-header .accordion-button strong,
   html[data-theme="dark"] .accordion-button strong,
   html[data-theme="dark"] .accordion-button button strong,
   html[data-theme="dark"] .accordion-button *,
+  body.dark-mode #interfaces-checkbox-container .accordion .accordion-item .accordion-header .accordion-button strong,
   body.dark-mode #interfaces-checkbox-container .accordion-button strong,
   body.dark-mode #interfaces-checkbox-container .accordion-button button strong,
   body.dark-mode #interfaces-checkbox-container .accordion-button *,
+  body.dark-mode .accordion .accordion-item .accordion-header .accordion-button strong,
   body.dark-mode .accordion-button strong,
   body.dark-mode .accordion-button button strong,
   body.dark-mode .accordion-button * {
     color: #ffffff !important;
   }
   
+  html[data-theme="dark"] #interfaces-checkbox-container .accordion .accordion-item .accordion-header .accordion-button:not(.collapsed),
+  html[data-theme="dark"] #interfaces-checkbox-container .accordion .accordion-item .accordion-header .accordion-button:not(.collapsed) strong,
   html[data-theme="dark"] #interfaces-checkbox-container .accordion-button:not(.collapsed),
   html[data-theme="dark"] #interfaces-checkbox-container .accordion-button:not(.collapsed) strong,
+  html[data-theme="dark"] .accordion .accordion-item .accordion-header .accordion-button:not(.collapsed),
+  html[data-theme="dark"] .accordion .accordion-item .accordion-header .accordion-button:not(.collapsed) strong,
   html[data-theme="dark"] .accordion-button:not(.collapsed),
   html[data-theme="dark"] .accordion-button:not(.collapsed) strong,
+  body.dark-mode #interfaces-checkbox-container .accordion .accordion-item .accordion-header .accordion-button:not(.collapsed),
+  body.dark-mode #interfaces-checkbox-container .accordion .accordion-item .accordion-header .accordion-button:not(.collapsed) strong,
   body.dark-mode #interfaces-checkbox-container .accordion-button:not(.collapsed),
   body.dark-mode #interfaces-checkbox-container .accordion-button:not(.collapsed) strong,
+  body.dark-mode .accordion .accordion-item .accordion-header .accordion-button:not(.collapsed),
+  body.dark-mode .accordion .accordion-item .accordion-header .accordion-button:not(.collapsed) strong,
   body.dark-mode .accordion-button:not(.collapsed),
   body.dark-mode .accordion-button:not(.collapsed) strong {
     color: #ffffff !important;
     background-color: var(--nbx-color-bg-default) !important;
+  }
+  
+  /* Also target text-white class if Bootstrap adds it */
+  html[data-theme="dark"] .accordion-button.text-white,
+  html[data-theme="dark"] .accordion-button.text-white strong,
+  body.dark-mode .accordion-button.text-white,
+  body.dark-mode .accordion-button.text-white strong {
+    color: #ffffff !important;
   }
   
   /* Expand All / Collapse All buttons - dark mode compatible */

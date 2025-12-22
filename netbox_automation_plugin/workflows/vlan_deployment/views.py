@@ -2592,7 +2592,7 @@ class VLANDeploymentView(View):
                     }
                     
                     results.append({
-                        'device': device.name,
+                        'device': device,  # Store Device object, not just name
                         'interface': interface.name,
                         'status': 'success',
                         'message': 'Would sync from NetBox',
@@ -2616,7 +2616,7 @@ class VLANDeploymentView(View):
                     )
                     
                     # Add device/interface info to result
-                    result['device'] = device.name
+                    result['device'] = device  # Store Device object, not just name
                     result['interface'] = interface.name
                     result['dry_run'] = False
                     result['netbox_state'] = {
@@ -2673,7 +2673,7 @@ class VLANDeploymentView(View):
                         }
                         
                         results.append({
-                            'device': device.name,
+                            'device': device,  # Store Device object, not just name
                             'interface': interface.name,
                             'status': 'success',
                             'message': 'Would sync from NetBox (untagged interface - will be auto-tagged)',
@@ -2697,7 +2697,7 @@ class VLANDeploymentView(View):
                             vlan_id=untagged_vid or (tagged_vids[0] if tagged_vids else None)
                         )
                         
-                        result['device'] = device.name
+                        result['device'] = device  # Store Device object, not just name
                         result['interface'] = interface.name
                         result['dry_run'] = False
                         result['netbox_state'] = {

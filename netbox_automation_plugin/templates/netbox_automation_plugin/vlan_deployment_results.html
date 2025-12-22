@@ -177,7 +177,11 @@
                    style="cursor: pointer; border-left: 4px solid {% if device_summary.device_status == 'pass' %}#198754{% elif device_summary.device_status == 'warn' %}#ffc107{% else %}#dc3545{% endif %};">
                 <div class="card-body p-2">
                   <h6 class="mb-1">
-                    <a href="{% url 'dcim:device' pk=device_summary.device.pk %}" onclick="event.stopPropagation();">{{ device_summary.device_name }}</a>
+                    {% if device_summary.device and device_summary.device.pk %}
+                      <a href="{% url 'dcim:device' pk=device_summary.device.pk %}" onclick="event.stopPropagation();">{{ device_summary.device_name }}</a>
+                    {% else %}
+                      <span>{{ device_summary.device_name }}</span>
+                    {% endif %}
                   </h6>
                   <div class="small">
                     <span class="badge bg-secondary">{{ device_summary.total }} total</span>
