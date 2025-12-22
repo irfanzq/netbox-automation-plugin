@@ -6,20 +6,28 @@
 
 {% block content %}
 <style>
-  /* SIMPLE FIX: Override NetBox CSS variables in dark mode */
+  /* AGGRESSIVE FIX: Override NetBox CSS variables in dark mode */
   html[data-theme="dark"],
-  body.dark-mode {
+  body.dark-mode,
+  body[data-bs-theme="dark"] {
     --nbx-color-fg-default: #ffffff !important;
     --bs-body-color: #ffffff !important;
+    --nbx-body-color: #ffffff !important;
   }
   
-  /* Device names in accordion buttons */
+  /* Device names in accordion buttons - ALL variations */
   html[data-theme="dark"] .accordion-button strong,
   html[data-theme="dark"] .accordion-button .device-name,
   html[data-theme="dark"] .accordion-button,
+  html[data-theme="dark"] .accordion-button *,
   body.dark-mode .accordion-button strong,
   body.dark-mode .accordion-button .device-name,
-  body.dark-mode .accordion-button {
+  body.dark-mode .accordion-button,
+  body.dark-mode .accordion-button *,
+  body[data-bs-theme="dark"] .accordion-button strong,
+  body[data-bs-theme="dark"] .accordion-button .device-name,
+  body[data-bs-theme="dark"] .accordion-button,
+  body[data-bs-theme="dark"] .accordion-button * {
     color: #ffffff !important;
   }
   
@@ -2493,15 +2501,35 @@
               }
             }
             
-            // SIMPLE FIX: Force white text on device names in dark mode
+            // ULTRA AGGRESSIVE FIX: Force white text on device names in dark mode
             function forceWhiteText() {
-              const isDark = document.documentElement.getAttribute('data-theme') === 'dark' || document.body.classList.contains('dark-mode');
+              const isDark = document.documentElement.getAttribute('data-theme') === 'dark' || 
+                            document.body.classList.contains('dark-mode') ||
+                            document.documentElement.getAttribute('data-bs-theme') === 'dark';
               if (!isDark) return;
               
-              // Accordion buttons and device names
-              document.querySelectorAll('.accordion-button, .accordion-button strong, .accordion-header button').forEach(el => {
-                if (!el.closest('.badge')) {
-                  el.style.color = '#ffffff';
+              // Recursive function to force white on element and all children
+              function forceWhiteOnElementAndChildren(element) {
+                if (!element.closest('.badge') && !element.closest('.btn')) {
+                  element.style.setProperty('color', '#ffffff', 'important');
+                  element.querySelectorAll('*').forEach(child => {
+                    if (!child.closest('.badge') && !child.closest('.btn')) {
+                      child.style.setProperty('color', '#ffffff', 'important');
+                      forceWhiteOnElementAndChildren(child); // Recursive
+                    }
+                  });
+                }
+              }
+              
+              // Accordion buttons and device names - ALL variations with recursive children
+              document.querySelectorAll('.accordion-button, .accordion-button strong, .accordion-button .device-name, .accordion-button *, .accordion-header, .accordion-header button, .accordion-header button strong, .accordion-header button *, .accordion-header button .device-name').forEach(el => {
+                forceWhiteOnElementAndChildren(el);
+              });
+              
+              // Also target any elements with device-name class
+              document.querySelectorAll('.device-name, .device-name *, [class*="device"]').forEach(el => {
+                if (el.textContent && el.textContent.trim() && !el.closest('.badge') && !el.closest('.btn')) {
+                  forceWhiteOnElementAndChildren(el);
                 }
               });
             }
@@ -2510,24 +2538,57 @@
             if (document.readyState === 'loading') {
               document.addEventListener('DOMContentLoaded', function() {
                 initVlanDeploymentForm();
-                // Force white text on device names
+                // Force white text on device names - AGGRESSIVE timing
                 forceWhiteText();
+                setTimeout(forceWhiteText, 50);
                 setTimeout(forceWhiteText, 100);
+                setTimeout(forceWhiteText, 300);
                 setTimeout(forceWhiteText, 500);
-                setInterval(forceWhiteText, 2000);
+                setTimeout(forceWhiteText, 1000);
+                setTimeout(forceWhiteText, 2000);
+                
+                // More aggressive periodic check - every 1 second
+                setInterval(forceWhiteText, 1000);
+                
+                // MutationObserver to catch any dynamically added elements
+                const observer = new MutationObserver(function(mutations) {
+                  forceWhiteText();
+                });
+                observer.observe(document.body, {
+                  childList: true,
+                  subtree: true,
+                  attributes: true,
+                  attributeFilter: ['style', 'class', 'data-theme', 'data-bs-theme']
+                });
                 
                 // Listen for theme changes
                 window.addEventListener('netbox.colorModeChanged', function() {
+                  setTimeout(forceWhiteText, 50);
                   setTimeout(forceWhiteText, 100);
+                  setTimeout(forceWhiteText, 300);
                 });
               });
             } else {
               // DOM is already ready
               initVlanDeploymentForm();
               forceWhiteText();
+              setTimeout(forceWhiteText, 50);
               setTimeout(forceWhiteText, 100);
+              setTimeout(forceWhiteText, 300);
               setTimeout(forceWhiteText, 500);
-              setInterval(forceWhiteText, 2000);
+              setTimeout(forceWhiteText, 1000);
+              setInterval(forceWhiteText, 1000);
+              
+              // MutationObserver
+              const observer = new MutationObserver(function(mutations) {
+                forceWhiteText();
+              });
+              observer.observe(document.body, {
+                childList: true,
+                subtree: true,
+                attributes: true,
+                attributeFilter: ['style', 'class', 'data-theme', 'data-bs-theme']
+              });
             }
 
             // Form submission handler

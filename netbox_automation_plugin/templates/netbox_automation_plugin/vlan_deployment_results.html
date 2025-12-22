@@ -9,20 +9,68 @@
 <style>
   /* SIMPLE FIX: Override NetBox CSS variables in dark mode - this fixes everything */
   html[data-theme="dark"],
-  body.dark-mode {
+  body.dark-mode,
+  body[data-bs-theme="dark"] {
     --nbx-color-fg-default: #ffffff !important;
     --bs-body-color: #ffffff !important;
+    --nbx-body-color: #ffffff !important;
   }
   
-  /* NetBox's exact table header selector - match their specificity */
+  /* NetBox's exact table header selector - match their specificity + higher - ALL VARIATIONS */
+  html[data-theme="dark"] table th,
+  html[data-theme="dark"] table th *,
+  html[data-theme="dark"] table th.orderable,
+  html[data-theme="dark"] table th.orderable *,
   html[data-theme="dark"] table th.orderable a,
   html[data-theme="dark"] table th a,
+  html[data-theme="dark"] table th span,
+  html[data-theme="dark"] table th strong,
   html[data-theme="dark"] table thead th,
   html[data-theme="dark"] table thead th *,
+  html[data-theme="dark"] table thead th a,
+  html[data-theme="dark"] table thead th span,
+  html[data-theme="dark"] table thead th strong,
+  html[data-theme="dark"] table thead tr th,
+  html[data-theme="dark"] table thead tr th *,
+  html[data-theme="dark"] table thead tr th a,
+  html[data-theme="dark"] table thead tr th span,
+  html[data-theme="dark"] table thead tr th strong,
+  body.dark-mode table th,
+  body.dark-mode table th *,
+  body.dark-mode table th.orderable,
+  body.dark-mode table th.orderable *,
   body.dark-mode table th.orderable a,
   body.dark-mode table th a,
+  body.dark-mode table th span,
+  body.dark-mode table th strong,
   body.dark-mode table thead th,
-  body.dark-mode table thead th * {
+  body.dark-mode table thead th *,
+  body.dark-mode table thead th a,
+  body.dark-mode table thead th span,
+  body.dark-mode table thead th strong,
+  body.dark-mode table thead tr th,
+  body.dark-mode table thead tr th *,
+  body.dark-mode table thead tr th a,
+  body.dark-mode table thead tr th span,
+  body.dark-mode table thead tr th strong,
+  body[data-bs-theme="dark"] table th,
+  body[data-bs-theme="dark"] table th *,
+  body[data-bs-theme="dark"] table th.orderable,
+  body[data-bs-theme="dark"] table th.orderable *,
+  body[data-bs-theme="dark"] table th.orderable a,
+  body[data-bs-theme="dark"] table th a,
+  body[data-bs-theme="dark"] table th span,
+  body[data-bs-theme="dark"] table th strong,
+  body[data-bs-theme="dark"] table thead th,
+  body[data-bs-theme="dark"] table thead th *,
+  body[data-bs-theme="dark"] table thead th a,
+  body[data-bs-theme="dark"] table thead th span,
+  body[data-bs-theme="dark"] table thead th strong,
+  body[data-bs-theme="dark"] table thead tr th,
+  body[data-bs-theme="dark"] table thead tr th *,
+  body[data-bs-theme="dark"] table thead tr th a,
+  body[data-bs-theme="dark"] table thead tr th span,
+  body[data-bs-theme="dark"] table thead tr th strong {
     color: #ffffff !important;
   }
   
@@ -511,47 +559,95 @@
           });
         }
         
-        // SIMPLE FIX: Just set inline styles directly - this always works
+        // AGGRESSIVE FIX: Force white text with inline styles - highest priority
         function forceWhiteText() {
-          const isDark = document.documentElement.getAttribute('data-theme') === 'dark' || document.body.classList.contains('dark-mode');
+          const isDark = document.documentElement.getAttribute('data-theme') === 'dark' || 
+                        document.body.classList.contains('dark-mode') ||
+                        document.body.getAttribute('data-bs-theme') === 'dark';
           if (!isDark) return;
           
-          // Table headers - use NetBox's exact selector
-          document.querySelectorAll('table th.orderable a, table th a, table thead th').forEach(el => {
-            el.style.color = '#ffffff';
+          // Table headers - ALL possible variations with recursive children
+          function forceWhiteOnElementAndChildren(element) {
+            element.style.setProperty('color', '#ffffff', 'important');
+            element.querySelectorAll('*').forEach(child => {
+              if (!child.closest('.badge') && !child.closest('.btn')) {
+                child.style.setProperty('color', '#ffffff', 'important');
+                forceWhiteOnElementAndChildren(child); // Recursive
+              }
+            });
+          }
+          
+          document.querySelectorAll('table th, table thead th, table thead tr th, table th.orderable, table th.orderable a, table th a, table th *, table thead th *, table thead tr th *, table thead tr th a, table thead tr th span').forEach(el => {
+            forceWhiteOnElementAndChildren(el);
           });
           
-          // All table cells
-          document.querySelectorAll('table tbody td, table tbody td a').forEach(el => {
+          // All table cells - force white
+          document.querySelectorAll('table tbody td, table tbody td a, table tbody tr td').forEach(el => {
             if (!el.closest('.badge') && !el.closest('.btn') && 
                 !el.classList.contains('text-success') && !el.classList.contains('text-info') &&
                 !el.classList.contains('text-danger') && !el.classList.contains('text-warning')) {
-              el.style.color = '#ffffff';
+              el.style.setProperty('color', '#ffffff', 'important');
+              // Force on direct text nodes and children - RECURSIVE
+              function forceWhiteOnChildren(parent) {
+                parent.querySelectorAll('*').forEach(child => {
+                  if (!child.closest('.badge') && !child.closest('.btn') &&
+                      !child.classList.contains('text-success') && !child.classList.contains('text-info') &&
+                      !child.classList.contains('text-danger') && !child.classList.contains('text-warning')) {
+                    child.style.setProperty('color', '#ffffff', 'important');
+                    forceWhiteOnChildren(child); // Recursive to get all nested children
+                  }
+                });
+              }
+              forceWhiteOnChildren(el);
             }
           });
           
-          // Device names in cards
-          document.querySelectorAll('.device-summary-card h6, .device-summary-card h6 a').forEach(el => {
-            el.style.color = '#ffffff';
+          // Device names in cards and accordion - ALL variations with children
+          document.querySelectorAll('.device-summary-card h6, .device-summary-card h6 a, .device-summary-card h6 *, .accordion-button, .accordion-button strong, .accordion-button .device-name, .accordion-button *, .accordion-header button, .accordion-header button strong, .accordion-header button *').forEach(el => {
+            if (!el.closest('.badge') && !el.closest('.btn')) {
+              el.style.setProperty('color', '#ffffff', 'important');
+              // Force all children
+              el.querySelectorAll('*').forEach(child => {
+                if (!child.closest('.badge') && !child.closest('.btn')) {
+                  child.style.setProperty('color', '#ffffff', 'important');
+                }
+              });
+            }
           });
         }
         
-        // Apply on page load - SIMPLE approach
+        // Apply on page load - AGGRESSIVE approach
         document.addEventListener('DOMContentLoaded', function() {
           applyThemeColors();
           forceWhiteText();
           
-          // Reapply after NetBox styles load
+          // Reapply multiple times to catch NetBox's dynamic style application
+          setTimeout(forceWhiteText, 50);
           setTimeout(forceWhiteText, 100);
+          setTimeout(forceWhiteText, 300);
           setTimeout(forceWhiteText, 500);
+          setTimeout(forceWhiteText, 1000);
+          setTimeout(forceWhiteText, 2000);
           
           // Listen for theme changes
           window.addEventListener('netbox.colorModeChanged', function() {
-            setTimeout(forceWhiteText, 100);
+            setTimeout(forceWhiteText, 50);
+            setTimeout(forceWhiteText, 200);
           });
           
-          // Periodic check (simple, runs every 2 seconds)
-          setInterval(forceWhiteText, 2000);
+          // More aggressive periodic check - every 1 second
+          setInterval(forceWhiteText, 1000);
+          
+          // MutationObserver to catch any dynamically added elements
+          const observer = new MutationObserver(function(mutations) {
+            forceWhiteText();
+          });
+          observer.observe(document.body, {
+            childList: true,
+            subtree: true,
+            attributes: true,
+            attributeFilter: ['style', 'class', 'data-theme', 'data-bs-theme']
+          });
         });
       </script>
 

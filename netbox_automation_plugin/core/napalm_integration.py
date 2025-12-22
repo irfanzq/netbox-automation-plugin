@@ -970,27 +970,276 @@ class NAPALMDeviceManager:
         logs.append(f"")
         logs.append(f"[Phase 0.5] Baseline Collection")
         baseline = {}
+        
+        # Get driver_name early for bond membership check in baseline collection
+        driver_name = self.get_driver_name()
 
         try:
             # Collect interface state if specific interface is being configured
+            # Note: interface_name may be a bond interface if original_interface_name is a bond member
             if interface_name:
-                logs.append(f"  Collecting interface state for {interface_name}...")
-                interfaces_before = self.get_interfaces()
-                if interfaces_before and interface_name in interfaces_before:
-                    baseline['interface'] = {
-                        'name': interface_name,
-                        'is_up': interfaces_before[interface_name].get('is_up', False),
-                        'is_enabled': interfaces_before[interface_name].get('is_enabled', True),
-                        'description': interfaces_before[interface_name].get('description', ''),
-                    }
-                    logger.info(f"  Baseline: {interface_name} is_up={baseline['interface']['is_up']}, is_enabled={baseline['interface']['is_enabled']}")
-                    logs.append(f"  ✓ Interface {interface_name}: UP={baseline['interface']['is_up']}, Enabled={baseline['interface']['is_enabled']}")
+                baseline_interface_name = interface_name  # Default to interface_name (could be bond)
+                
+                # For Cumulus devices, use direct NVUE command instead of NAPALM's get_interfaces()
+                # This is more reliable for bond members which may not appear in get_interfaces()
+                if driver_name == 'cumulus':
+                    try:
+                        if hasattr(self.connection, 'device') and hasattr(self.connection.device, 'send_command'):
+                            # Try to get interface stats directly using NVUE command
+                            # This works for both bond interfaces and member interfaces
+                            # Use link stats to verify interface exists AND get packet counters
+                            stats_command = f'nv show interface {interface_name} link stats -o json'
+                            try:
+                                stats_output = self.connection.device.send_command(stats_command, read_timeout=10)
+                                if stats_output:
+                                    import json
+                                    stats_data = json.loads(stats_output)
+                                    # If we get stats, interface exists - use direct NVUE commands for baseline
+                                    logger.info(f"Using direct NVUE commands for Cumulus baseline collection on {interface_name}")
+                                    logs.append(f"  Collecting interface state for {interface_name} using NVUE...")
+                                    
+                                    # Extract packet counters from stats
+                                    in_pkts = stats_data.get('in-pkts', 0)
+                                    out_pkts = stats_data.get('out-pkts', 0)
+                                    in_bytes = stats_data.get('in-bytes', 0)
+                                    out_bytes = stats_data.get('out-bytes', 0)
+                                    in_drops = stats_data.get('in-drops', 0)
+                                    out_drops = stats_data.get('out-drops', 0)
+                                    in_errors = stats_data.get('in-errors', 0)
+                                    out_errors = stats_data.get('out-errors', 0)
+                                    
+                                    # Get interface link state
+                                    try:
+                                        link_command = f'nv show interface {interface_name} link -o json'
+                                        link_output = self.connection.device.send_command(link_command, read_timeout=10)
+                                        if link_output:
+                                            link_data = json.loads(link_output)
+                                            link_info = link_data.get('link', {})
+                                            is_up = link_info.get('oper-status') == 'up'
+                                            is_enabled = link_info.get('admin-status') == 'up'
+                                            
+                                            # Get description if available
+                                            try:
+                                                desc_command = f'nv show interface {interface_name} description -o json'
+                                                desc_output = self.connection.device.send_command(desc_command, read_timeout=10)
+                                                if desc_output:
+                                                    desc_data = json.loads(desc_output)
+                                                    description = desc_data.get('link', {}).get('description', '')
+                                                else:
+                                                    description = ''
+                                            except:
+                                                description = ''
+                                            
+                                            baseline['interface'] = {
+                                                'name': interface_name,
+                                                'is_up': is_up,
+                                                'is_enabled': is_enabled,
+                                                'description': description,
+                                                # Include packet counters for traffic flow detection
+                                                'in_pkts': in_pkts,
+                                                'out_pkts': out_pkts,
+                                                'in_bytes': in_bytes,
+                                                'out_bytes': out_bytes,
+                                                'in_drops': in_drops,
+                                                'out_drops': out_drops,
+                                                'in_errors': in_errors,
+                                                'out_errors': out_errors,
+                                            }
+                                            logger.info(f"  Baseline: {interface_name} is_up={is_up}, is_enabled={is_enabled}, in_pkts={in_pkts}, out_pkts={out_pkts}")
+                                            logs.append(f"  ✓ Interface {interface_name}: UP={is_up}, Enabled={is_enabled}, In-Pkts={in_pkts}, Out-Pkts={out_pkts}")
+                                            
+                                            # Check if this is actually a bond member that we should be using bond interface for
+                                            # (We can still track member interface state, but deployment will target bond)
+                                            try:
+                                                bond_members_output = self.connection.device.send_command('nv show interface bond-members -o json', read_timeout=10)
+                                                if bond_members_output:
+                                                    bond_members = json.loads(bond_members_output)
+                                                    if interface_name in bond_members:
+                                                        member_info = bond_members[interface_name]
+                                                        if isinstance(member_info, dict):
+                                                            bond_name = member_info.get('parent')
+                                                        elif isinstance(member_info, str):
+                                                            bond_name = member_info
+                                                        else:
+                                                            bond_name = None
+                                                        
+                                                        if bond_name:
+                                                            logs.append(f"  Note: {interface_name} is a member of bond {bond_name} - deployment will target bond interface")
+                                            except:
+                                                pass  # Bond check is optional
+                                            
+                                            # Success - skip NAPALM fallback
+                                            baseline_collected = True
+                                        else:
+                                            baseline_collected = False
+                                    except Exception as link_error:
+                                        logger.warning(f"Could not get link state for {interface_name}: {link_error}")
+                                        baseline_collected = False
+                                else:
+                                    baseline_collected = False
+                            except (json.JSONDecodeError, Exception) as stats_error:
+                                logger.debug(f"Could not get stats for {interface_name} using direct NVUE: {stats_error}")
+                                baseline_collected = False
+                        else:
+                            baseline_collected = False
+                    except Exception as nvue_error:
+                        logger.debug(f"Direct NVUE check failed: {nvue_error}")
+                        baseline_collected = False
                 else:
-                    # Interface doesn't exist on device
-                    # This is an ERROR - interface should exist in NetBox AND on device
-                    error_msg = f"Interface {interface_name} does not exist on device {self.device.name}"
+                    baseline_collected = False
+                
+                # Fallback to NAPALM's get_interfaces() for non-Cumulus or if direct NVUE failed
+                if driver_name != 'cumulus' or not baseline_collected:
+                    interfaces_before = self.get_interfaces()
+                    if not interfaces_before:
+                        error_msg = f"Cannot get interfaces from device {self.device.name}"
+                        logger.error(f"CRITICAL: {error_msg}")
+                        logs.append(f"  ✗ Cannot get interfaces from device")
+                        result['message'] = f"Interface validation failed: {error_msg}"
+                        result['logs'] = logs
+                        return result
+                    
+                    # Check if interface_name exists (could be bond interface)
+                    if interface_name in interfaces_before:
+                        baseline_interface_name = interface_name
+                        logs.append(f"  Collecting interface state for {interface_name}...")
+                    else:
+                        # Interface_name not found - might be bond member case
+                        # Check if original_interface_name was provided and exists
+                        original_interface = getattr(self, '_original_interface_name_for_baseline', None)
+                    if original_interface and original_interface in interfaces_before:
+                        # Original interface exists - use it for baseline
+                        baseline_interface_name = original_interface
+                        logs.append(f"  Collecting interface state for {original_interface} (member interface)...")
+                    else:
+                        # Neither found - try to find bond interface for member
+                        # For Cumulus, check if it's a bond member by looking at bond-members
+                        # Use driver_name from above (got it early for this check)
+                        if driver_name == 'cumulus':
+                            try:
+                                if hasattr(self.connection, 'device') and hasattr(self.connection.device, 'send_command'):
+                                    bond_members_output = self.connection.device.send_command('nv show interface bond-members -o json', read_timeout=10)
+                                    if bond_members_output:
+                                        import json
+                                        try:
+                                            bond_members = json.loads(bond_members_output)
+                                            logger.debug(f"Bond members JSON structure: {bond_members}")
+                                            # bond_members format can be either:
+                                            # Format 1: {"swp3": {"parent": "bond3"}, ...}
+                                            # Format 2: {"swp3": "bond3", ...} (simple dict)
+                                            # Format 3: nested structure from nv config show
+                                            
+                                            bond_name = None
+                                            
+                                            # Check if interface_name is a direct key (Format 1 or 2)
+                                            if interface_name in bond_members:
+                                                member_info = bond_members[interface_name]
+                                                if isinstance(member_info, dict):
+                                                    bond_name = member_info.get('parent') or member_info.get('bond')
+                                                elif isinstance(member_info, str):
+                                                    bond_name = member_info
+                                                else:
+                                                    logger.warning(f"Unexpected bond member format for {interface_name}: {member_info}")
+                                            
+                                            # If not found in direct format, check nested structure
+                                            if not bond_name:
+                                                # Try looking for interface_name in nested structure
+                                                # Structure: {"interface": {"bond3": {"bond": {"member": {"swp3": {}}}}}}
+                                                if isinstance(bond_members, dict) and 'interface' in bond_members:
+                                                    interfaces = bond_members.get('interface', {})
+                                                    for potential_bond, bond_config in interfaces.items():
+                                                        if isinstance(bond_config, dict):
+                                                            bond_data = bond_config.get('bond', {})
+                                                            if isinstance(bond_data, dict):
+                                                                members = bond_data.get('member', {})
+                                                                if interface_name in members:
+                                                                    bond_name = potential_bond
+                                                                    break
+                                            
+                                            if bond_name:
+                                                logger.info(f"Found that {interface_name} is a member of bond {bond_name}")
+                                                if bond_name in interfaces_before:
+                                                    baseline_interface_name = bond_name
+                                                    logs.append(f"  Found bond interface {bond_name} for member {interface_name}")
+                                                    logs.append(f"  Using bond interface {bond_name} for baseline collection")
+                                                else:
+                                                    # Bond not in interfaces either
+                                                    error_msg = f"Interface {interface_name} is a bond member but bond {bond_name} does not exist in device interfaces"
+                                                    logger.error(f"CRITICAL: {error_msg}")
+                                                    logs.append(f"  ✗ Interface {interface_name} and bond {bond_name}: Bond interface not found!")
+                                                    result['message'] = f"Interface validation failed: {error_msg}"
+                                                    result['logs'] = logs
+                                                    return result
+                                            else:
+                                                # Interface is not a bond member
+                                                error_msg = f"Interface {interface_name} does not exist on device {self.device.name}"
+                                                logger.error(f"CRITICAL: {error_msg}")
+                                                logs.append(f"  ✗ Interface {interface_name}: Does not exist on device!")
+                                                result['message'] = f"Interface validation failed: {error_msg}"
+                                                result['logs'] = logs
+                                                return result
+                                        except (json.JSONDecodeError, KeyError, AttributeError) as parse_error:
+                                            logger.warning(f"Could not parse bond members JSON: {parse_error}")
+                                            logger.debug(f"Bond members output: {bond_members_output[:200]}")
+                                            # Fall through to error
+                                            error_msg = f"Interface {interface_name} does not exist on device {self.device.name} (could not verify bond membership)"
+                                            logger.error(f"CRITICAL: {error_msg}")
+                                            logs.append(f"  ✗ Interface {interface_name}: Does not exist on device!")
+                                            result['message'] = f"Interface validation failed: {error_msg}"
+                                            result['logs'] = logs
+                                            return result
+                                    else:
+                                        # Can't check bond membership, interface doesn't exist
+                                        error_msg = f"Interface {interface_name} does not exist on device {self.device.name}"
+                                        logger.error(f"CRITICAL: {error_msg}")
+                                        logs.append(f"  ✗ Interface {interface_name}: Does not exist on device!")
+                                        result['message'] = f"Interface validation failed: {error_msg}"
+                                        result['logs'] = logs
+                                        return result
+                                else:
+                                    # Can't check bond membership
+                                    error_msg = f"Interface {interface_name} does not exist on device {self.device.name}"
+                                    logger.error(f"CRITICAL: {error_msg}")
+                                    logs.append(f"  ✗ Interface {interface_name}: Does not exist on device!")
+                                    result['message'] = f"Interface validation failed: {error_msg}"
+                                    result['logs'] = logs
+                                    return result
+                            except Exception as bond_check_error:
+                                logger.warning(f"Could not check bond membership: {bond_check_error}")
+                                # Fall through to error
+                                error_msg = f"Interface {interface_name} does not exist on device {self.device.name}"
+                                logger.error(f"CRITICAL: {error_msg}")
+                                logs.append(f"  ✗ Interface {interface_name}: Does not exist on device!")
+                                result['message'] = f"Interface validation failed: {error_msg}"
+                                result['logs'] = logs
+                                return result
+                        else:
+                            # Not Cumulus, interface doesn't exist
+                            error_msg = f"Interface {interface_name} does not exist on device {self.device.name}"
+                            logger.error(f"CRITICAL: {error_msg}")
+                            logs.append(f"  ✗ Interface {interface_name}: Does not exist on device!")
+                            result['message'] = f"Interface validation failed: {error_msg}"
+                            result['logs'] = logs
+                            return result
+                
+                # Now we have a valid baseline_interface_name, collect baseline
+                if baseline_interface_name in interfaces_before:
+                    baseline['interface'] = {
+                        'name': baseline_interface_name,
+                        'is_up': interfaces_before[baseline_interface_name].get('is_up', False),
+                        'is_enabled': interfaces_before[baseline_interface_name].get('is_enabled', True),
+                        'description': interfaces_before[baseline_interface_name].get('description', ''),
+                    }
+                    logger.info(f"  Baseline: {baseline_interface_name} is_up={baseline['interface']['is_up']}, is_enabled={baseline['interface']['is_enabled']}")
+                    logs.append(f"  ✓ Interface {baseline_interface_name}: UP={baseline['interface']['is_up']}, Enabled={baseline['interface']['is_enabled']}")
+                    # Note if we used bond instead of member
+                    if baseline_interface_name != interface_name:
+                        logs.append(f"  Note: Using bond interface {baseline_interface_name} for baseline (member {interface_name})")
+                else:
+                    # Should not reach here, but just in case
+                    error_msg = f"Interface {baseline_interface_name} does not exist on device {self.device.name}"
                     logger.error(f"CRITICAL: {error_msg}")
-                    logs.append(f"  ✗ Interface {interface_name}: Does not exist on device!")
+                    logs.append(f"  ✗ Interface {baseline_interface_name}: Does not exist on device!")
                     result['message'] = f"Interface validation failed: {error_msg}"
                     result['logs'] = logs
                     return result
@@ -1065,6 +1314,9 @@ class NAPALMDeviceManager:
         driver_name = self.get_driver_name()
         supports_native_commit_confirm = driver_name in ['junos', 'cumulus']  # EOS SSH does NOT support commit-confirm
         use_eos_session = (driver_name == 'eos')  # EOS requires configure session with timer
+        
+        # Store driver_name for use in baseline collection (needed for bond membership check)
+        self._driver_name_for_baseline = driver_name
         
         # Phase 1: Load configuration (skip for EOS sessions - handled in Phase 2)
         if not use_eos_session:
@@ -1265,6 +1517,33 @@ class NAPALMDeviceManager:
                 logger.info(f"Phase 2: Config committed (will auto-rollback in {timeout}s if not confirmed)")
                 logs.append(f"  ✓ Configuration committed with {timeout}s rollback timer")
                 logs.append(f"  ⚠ Will auto-rollback if not confirmed within {timeout}s")
+                
+                # CRITICAL FIX: For Cumulus, get the actual pending revision ID after commit
+                # NAPALM's driver stores candidate revision_id from load_config, but commit_config
+                # creates a NEW pending revision. We need to get the actual pending revision ID.
+                if driver_name == 'cumulus':
+                    try:
+                        if hasattr(self.connection, 'device') and hasattr(self.connection.device, 'send_command'):
+                            # Get pending commits - should return list of revision IDs in "confirm" state
+                            pending_rev_output = self.connection.device.send_command('nv config revision -o json', read_timeout=10)
+                            if pending_rev_output:
+                                import json
+                                pending_revisions = json.loads(pending_rev_output)
+                                # Find revisions with state == "confirm"
+                                pending_confirm_ids = [k for k, v in pending_revisions.items() if v.get("state") == "confirm"]
+                                if pending_confirm_ids:
+                                    # Use the most recent pending revision (should be the one we just created)
+                                    actual_pending_revision = pending_confirm_ids[0]  # Get first/most recent
+                                    # Store it in result for Phase 5 to use
+                                    result['_cumulus_pending_revision_id'] = actual_pending_revision
+                                    logger.info(f"Found pending commit-confirm revision ID: {actual_pending_revision}")
+                                    logs.append(f"  ✓ Pending revision ID captured: {actual_pending_revision}")
+                                else:
+                                    logger.warning(f"No pending commits found after commit_config - may have failed")
+                                    logs.append(f"  ⚠ No pending commits found - commit may have failed")
+                    except Exception as rev_error:
+                        logger.warning(f"Could not get pending revision ID: {rev_error}")
+                        # Continue anyway - will try NAPALM's method in Phase 5
 
             elif use_eos_session:
                 # EOS: Use configure session with commit timer (manual CLI approach)
@@ -1434,18 +1713,19 @@ class NAPALMDeviceManager:
             return result
         
         # Phase 3: Verification window (let config settle)
-        # Extended wait time for testing rollback scenarios (30s gives time to SSH and break things)
-        settle_time = 30  # seconds - increase for easier testing, decrease for production
+        # Reduced wait time to avoid commit-confirm timeout
+        # We have 90s total timeout, need time for verification + confirmation
+        # 5s settle + ~10-20s verification + confirmation = ~25-35s, leaving ~55-65s buffer
+        settle_time = 5  # seconds - reduced from 30s to avoid timeout issues
         logger.info(f"Phase 3: Waiting {settle_time} seconds for config to settle...")
         logs.append(f"")
         logs.append(f"[Phase 3] Configuration Settling")
         logs.append(f"  Waiting {settle_time} seconds for config to take effect...")
-        logs.append(f"  💡 TIP: You have {settle_time}s to SSH to device and test rollback scenarios")
-        logs.append(f"     (e.g., shutdown a different interface to trigger LLDP check failure)")
+        logs.append(f"  Note: Reduced settle time to ensure commit-confirm doesn't timeout")
         
         # Progress indicator in logs so you know it's waiting
         for i in range(settle_time):
-            if i == 0 or i == 5 or i == 10 or i == 15 or i == 20 or i == 25 or i == settle_time - 1:
+            if i == 0 or i == settle_time - 1:
                 logger.info(f"  Settling... {i+1}/{settle_time}s elapsed")
             time.sleep(1)
         
@@ -1526,22 +1806,93 @@ class NAPALMDeviceManager:
                     logger.info(f"Phase 5: All checks passed - confirming commit...")
                     logs.append(f"  Confirming commit (making changes permanent)...")
                     
-                    # For Cumulus, manually execute nv config confirm since NAPALM's confirm_commit() may not work
+                    # For Cumulus, we need to handle commit confirmation manually because:
+                    # 1. NAPALM stores candidate revision_id from load_config (Phase 1)
+                    # 2. commit_config creates a NEW pending revision with different ID
+                    # 3. confirm_commit() looks for old revision_id, can't find it → "No pending commit-confirm found!"
+                    # 
+                    # FIX: Use the actual pending revision ID we captured in Phase 2
                     if driver_name == 'cumulus':
-                        if hasattr(self.connection, 'device') and hasattr(self.connection.device, 'send_command'):
+                        # Check if we captured the pending revision ID in Phase 2
+                        actual_pending_revision = result.get('_cumulus_pending_revision_id')
+                        if actual_pending_revision:
+                            # Use the actual pending revision ID to confirm
+                            logger.info(f"Using captured pending revision ID {actual_pending_revision} to confirm commit")
+                            logs.append(f"  Using pending revision ID: {actual_pending_revision}")
+                            
                             try:
-                                confirm_output = self.connection.device.send_command('nv config confirm', read_timeout=30)
-                                logger.info(f"Cumulus confirm output: {confirm_output}")
-                                # Check if confirm failed
-                                if confirm_output and ('error' in confirm_output.lower() or 'failed' in confirm_output.lower()):
-                                    raise Exception(f"nv config confirm failed: {confirm_output}")
-                            except Exception as confirm_error:
-                                # If manual confirm fails, try NAPALM's method as fallback
-                                logger.warning(f"Manual nv config confirm failed: {confirm_error}, trying NAPALM method...")
-                                self.connection.confirm_commit()
+                                if hasattr(self.connection, 'device') and hasattr(self.connection.device, 'send_command'):
+                                    # Manually execute confirm commands with the correct revision ID
+                                    confirm_cmd = f"nv config apply {actual_pending_revision} --confirm-yes"
+                                    logger.info(f"Executing: {confirm_cmd}")
+                                    confirm_output = self.connection.device.send_command(confirm_cmd, read_timeout=30)
+                                    logger.info(f"Confirm output: {confirm_output}")
+                                    
+                                    # Also run nv config save to make it persistent
+                                    save_output = self.connection.device.send_command("nv config save", read_timeout=30)
+                                    logger.info(f"Save output: {save_output}")
+                                    
+                                    # Update NAPALM's revision_id to None to mark as committed
+                                    if hasattr(self.connection, 'revision_id'):
+                                        self.connection.revision_id = None
+                                    
+                                    logger.info(f"Successfully confirmed commit using revision {actual_pending_revision}")
+                                else:
+                                    # Fallback to NAPALM method if device.send_command not available
+                                    logger.warning(f"device.send_command not available, using NAPALM confirm_commit()")
+                                    self.connection.confirm_commit()
+                            except Exception as manual_confirm_error:
+                                error_msg = str(manual_confirm_error)
+                                logger.warning(f"Manual confirm failed: {manual_confirm_error}, trying NAPALM method...")
+                                logs.append(f"  ⚠ Manual confirm failed, trying NAPALM method...")
+                                # Fallback to NAPALM's method
+                                try:
+                                    self.connection.confirm_commit()
+                                except Exception as napalm_confirm_error:
+                                    # Both methods failed
+                                    raise Exception(f"Both manual and NAPALM confirm failed. Manual: {error_msg}, NAPALM: {napalm_confirm_error}")
                         else:
-                            # Fallback to NAPALM method if device.send_command not available
-                            self.connection.confirm_commit()
+                            # No captured revision ID - try NAPALM's method (may fail, but worth trying)
+                            logger.warning(f"No pending revision ID captured in Phase 2, using NAPALM confirm_commit()")
+                            logs.append(f"  ⚠ No pending revision ID captured, using NAPALM method...")
+                            try:
+                                self.connection.confirm_commit()
+                            except Exception as confirm_error:
+                                error_msg = str(confirm_error)
+                                # Check if it's the "No pending commit-confirm found!" error
+                                if "no pending commit-confirm" in error_msg.lower() or "no pending" in error_msg.lower():
+                                    # Try to get pending revision now and confirm manually
+                                    logger.warning(f"NAPALM confirm failed, trying to get pending revision now...")
+                                    try:
+                                        if hasattr(self.connection, 'device') and hasattr(self.connection.device, 'send_command'):
+                                            pending_rev_output = self.connection.device.send_command('nv config revision -o json', read_timeout=10)
+                                            if pending_rev_output:
+                                                import json
+                                                pending_revisions = json.loads(pending_rev_output)
+                                                pending_confirm_ids = [k for k, v in pending_revisions.items() if v.get("state") == "confirm"]
+                                                if pending_confirm_ids:
+                                                    actual_rev = pending_confirm_ids[0]
+                                                    logger.info(f"Found pending revision {actual_rev}, confirming manually...")
+                                                    self.connection.device.send_command(f"nv config apply {actual_rev} --confirm-yes", read_timeout=30)
+                                                    self.connection.device.send_command("nv config save", read_timeout=30)
+                                                    if hasattr(self.connection, 'revision_id'):
+                                                        self.connection.revision_id = None
+                                                else:
+                                                    raise Exception("No pending commits found - may have timed out")
+                                            else:
+                                                raise Exception("Could not get pending revisions")
+                                        else:
+                                            raise confirm_error
+                                    except Exception as recovery_error:
+                                        logger.error(f"Failed to recover: {recovery_error}")
+                                        logs.append(f"  ✗ Commit-confirm not found: {error_msg}")
+                                        logs.append(f"  ✗ Recovery attempt also failed: {recovery_error}")
+                                        logs.append(f"  Possible causes:")
+                                        logs.append(f"    - Commit-confirm timed out and auto-rolled back")
+                                        logs.append(f"    - Commit was confirmed/aborted by another process")
+                                        raise
+                                else:
+                                    raise
                     else:
                         # For other platforms (Juniper), use NAPALM's method
                         self.connection.confirm_commit()

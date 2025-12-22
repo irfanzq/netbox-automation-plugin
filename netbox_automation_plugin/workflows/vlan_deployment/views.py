@@ -601,10 +601,24 @@ class VLANDeploymentView(View):
         inherited_from = []
         bond_member_of = None
         
+        # ALWAYS check for bond membership FIRST (independent of interface config)
+        # Interface can exist in config AND be a bond member - both should be detected
+        for bond_name, bond_config in interfaces.items():
+            if isinstance(bond_config, dict) and 'bond' in bond_config:
+                bond_members = bond_config.get('bond', {}).get('member', {})
+                if isinstance(bond_members, dict) and interface_name in bond_members:
+                    # Interface is a bond member - record bond name and merge bond config
+                    bond_member_of = bond_name
+                    if isinstance(bond_config, dict):
+                        merged_config = self._deep_merge_dicts(merged_config, bond_config)
+                    break  # Only one bond per interface
+        
         # 1. Check for exact match (highest priority - most specific)
+        # This runs independently of bond detection - interface can have its own config too
         if interface_name in interfaces:
             exact_config = interfaces[interface_name]
             if isinstance(exact_config, dict):
+                # Merge interface config with bond config (if bond was found above)
                 merged_config = self._deep_merge_dicts(merged_config, exact_config)
         
         # 2. Check ALL range matches (collect all, don't stop at first)
@@ -621,23 +635,20 @@ class VLANDeploymentView(View):
                     merged_config = self._deep_merge_dicts(merged_config, range_config)
                     inherited_from.append(range_key)
         
-        # 3. Check if interface is a bond member
-        for bond_name, bond_config in interfaces.items():
-            if isinstance(bond_config, dict) and 'bond' in bond_config:
-                bond_members = bond_config.get('bond', {}).get('member', {})
-                if isinstance(bond_members, dict) and interface_name in bond_members:
-                    # Interface is a bond member - merge bond config
-                    if isinstance(bond_config, dict):
-                        merged_config = self._deep_merge_dicts(merged_config, bond_config)
-                        bond_member_of = bond_name
-        
-        # If we found any config, add metadata and return
-        if merged_config:
+        # Return config with metadata if we found ANY config (interface config, bond config, or range config)
+        # OR if bond membership was detected (even if no config found)
+        if merged_config or bond_member_of:
             # Add metadata about inheritance
             if inherited_from:
                 merged_config['_inherited_from'] = inherited_from
             if bond_member_of:
                 merged_config['_bond_member_of'] = bond_member_of
+            
+            # Return config dict (even if empty, it will have bond_member_of metadata)
+            # This ensures bond membership is always detected and returned
+            if not merged_config:
+                merged_config = {}  # Return empty dict with just metadata
+            
             return merged_config
         
         return None
@@ -958,14 +969,112 @@ class VLANDeploymentView(View):
                                                 # Don't add inheritance notes - just show actual configs
                                                 current_config = f"(interface {interface_name} exists but has minimal configuration)"
                                             else:
-                                                # Interface not found in JSON - try grep fallback
-                                                current_config = None
+                                                # Interface not found in JSON - check if it's a bond member
+                                                # Even if interface config wasn't found, it might be a bond member
+                                                if not bond_member_of and config_data:
+                                                    try:
+                                                        for item in config_data:
+                                                            if isinstance(item, dict) and 'set' in item:
+                                                                set_data = item.get('set', {})
+                                                                if isinstance(set_data, dict) and 'interface' in set_data:
+                                                                    interfaces = set_data.get('interface', {})
+                                                                    if isinstance(interfaces, dict):
+                                                                        for potential_bond_name, potential_bond_config in interfaces.items():
+                                                                            if isinstance(potential_bond_config, dict) and 'bond' in potential_bond_config:
+                                                                                bond_data = potential_bond_config.get('bond', {})
+                                                                                if isinstance(bond_data, dict):
+                                                                                    members = bond_data.get('member', {})
+                                                                                    if isinstance(members, dict) and interface_name in members:
+                                                                                        bond_member_of = potential_bond_name
+                                                                                        # Get bond config
+                                                                                        bond_interface_config = self._find_interface_config_in_json(config_data, bond_member_of)
+                                                                                        if bond_interface_config:
+                                                                                            if isinstance(bond_interface_config, dict):
+                                                                                                bond_interface_config.pop('_inherited_from', None)
+                                                                                                bond_interface_config.pop('_bond_member_of', None)
+                                                                                            bond_parsed_commands = self._parse_json_to_nv_commands(bond_interface_config, "", bond_member_of)
+                                                                                            bond_interface_config_commands.extend(bond_parsed_commands)
+                                                                                        break
+                                                                        if bond_member_of:
+                                                                            break
+                                                    except Exception as bond_check_error:
+                                                        logger.debug(f"Could not check bond membership when interface not found: {bond_check_error}")
+                                                
+                                                # Set current_config message based on whether bond was found
+                                                if bond_member_of:
+                                                    current_config = f"(interface {interface_name} not found in config, but detected as bond member of {bond_member_of})"
+                                                else:
+                                                    # Interface not found in JSON - try grep fallback
+                                                    current_config = None
                                     except json.JSONDecodeError as e:
                                         logger.warning(f"Failed to parse JSON config for {device.name}:{interface_name}: {e}")
                                         current_config = None  # JSON parse failed - will try grep fallback
+                                        
+                                        # Still try to detect bond membership even if JSON parse failed
+                                        if not bond_member_of and config_data:
+                                            try:
+                                                # Check if interface is a bond member by looking through all bonds in config
+                                                for item in config_data:
+                                                    if isinstance(item, dict) and 'set' in item:
+                                                        set_data = item.get('set', {})
+                                                        if isinstance(set_data, dict) and 'interface' in set_data:
+                                                            interfaces = set_data.get('interface', {})
+                                                            if isinstance(interfaces, dict):
+                                                                for potential_bond_name, potential_bond_config in interfaces.items():
+                                                                    if isinstance(potential_bond_config, dict) and 'bond' in potential_bond_config:
+                                                                        bond_data = potential_bond_config.get('bond', {})
+                                                                        if isinstance(bond_data, dict):
+                                                                            members = bond_data.get('member', {})
+                                                                            if isinstance(members, dict) and interface_name in members:
+                                                                                bond_member_of = potential_bond_name
+                                                                                # Try to get bond config even though interface config failed
+                                                                                bond_interface_config = self._find_interface_config_in_json(config_data, bond_member_of)
+                                                                                if bond_interface_config:
+                                                                                    if isinstance(bond_interface_config, dict):
+                                                                                        bond_interface_config.pop('_inherited_from', None)
+                                                                                        bond_interface_config.pop('_bond_member_of', None)
+                                                                                    bond_parsed_commands = self._parse_json_to_nv_commands(bond_interface_config, "", bond_member_of)
+                                                                                    bond_interface_config_commands.extend(bond_parsed_commands)
+                                                                                break
+                                                            if bond_member_of:
+                                                                break
+                                            except Exception as bond_check_error:
+                                                logger.debug(f"Could not check bond membership after JSON parse error: {bond_check_error}")
                                     except Exception as e:
                                         error_msg = str(e)
                                         logger.warning(f"Error processing JSON config for {device.name}:{interface_name}: {error_msg}")
+                                        
+                                        # Try to detect bond membership even if config processing failed
+                                        if not bond_member_of and config_data:
+                                            try:
+                                                # Check if interface is a bond member by looking through all bonds in config
+                                                for item in config_data:
+                                                    if isinstance(item, dict) and 'set' in item:
+                                                        set_data = item.get('set', {})
+                                                        if isinstance(set_data, dict) and 'interface' in set_data:
+                                                            interfaces = set_data.get('interface', {})
+                                                            if isinstance(interfaces, dict):
+                                                                for potential_bond_name, potential_bond_config in interfaces.items():
+                                                                    if isinstance(potential_bond_config, dict) and 'bond' in potential_bond_config:
+                                                                        bond_data = potential_bond_config.get('bond', {})
+                                                                        if isinstance(bond_data, dict):
+                                                                            members = bond_data.get('member', {})
+                                                                            if isinstance(members, dict) and interface_name in members:
+                                                                                bond_member_of = potential_bond_name
+                                                                                # Try to get bond config even though interface config failed
+                                                                                bond_interface_config = self._find_interface_config_in_json(config_data, bond_member_of)
+                                                                                if bond_interface_config:
+                                                                                    if isinstance(bond_interface_config, dict):
+                                                                                        bond_interface_config.pop('_inherited_from', None)
+                                                                                        bond_interface_config.pop('_bond_member_of', None)
+                                                                                    bond_parsed_commands = self._parse_json_to_nv_commands(bond_interface_config, "", bond_member_of)
+                                                                                    bond_interface_config_commands.extend(bond_parsed_commands)
+                                                                                break
+                                                            if bond_member_of:
+                                                                break
+                                            except Exception as bond_check_error:
+                                                logger.debug(f"Could not check bond membership after config processing error: {bond_check_error}")
+                                        
                                         # If it's a variable error, provide more context
                                         if 'cannot access local variable' in error_msg or 'not associated with a value' in error_msg:
                                             logger.error(f"Variable scope error in config parsing - config_json_str may not be initialized. Error: {error_msg}")
@@ -3561,16 +3670,20 @@ class VLANDeploymentView(View):
                     # Get interface details
                     interface_details = self._get_interface_details(device, interface_name)
                     
-                    # Get proposed config (pass device to check bond membership)
-                    proposed_config = self._generate_vlan_config(interface_name, vlan_id, platform, device=device)
-                    
-                    # Get current device config (try device, fallback to NetBox)
+                    # Get current device config FIRST (needed for bond detection and for diff generation)
                     device_config_result = self._get_current_device_config(device, interface_name, platform)
                     current_device_config = device_config_result.get('current_config', 'Unable to fetch')
                     config_source = device_config_result.get('source', 'error')
                     config_timestamp = device_config_result.get('timestamp', 'N/A')
                     device_uptime = device_config_result.get('device_uptime', None)
                     bridge_vlans = device_config_result.get('_bridge_vlans', [])  # Get bridge VLANs if available
+                    bond_member_of = device_config_result.get('bond_member_of', None)  # Get bond info for proposed config generation
+                    
+                    # Determine target interface (bond if member, otherwise original)
+                    target_interface_for_config = bond_member_of if bond_member_of else interface_name
+                    
+                    # Get proposed config (use target_interface which may be bond, pass device for additional checks)
+                    proposed_config = self._generate_vlan_config(target_interface_for_config, vlan_id, platform, device=device)
                     
                     # Generate config diff (pass bridge VLANs to check if VLAN already exists)
                     config_diff = self._generate_config_diff(current_device_config, proposed_config, platform, device=device, interface_name=interface_name, bridge_vlans=bridge_vlans)
@@ -4076,10 +4189,12 @@ class VLANDeploymentView(View):
                     # Get current config before deployment (same logic as dry run)
                     current_config_before = None
                     bridge_vlans_before = []
+                    bond_member_of = None
                     try:
                         device_config_result = self._get_current_device_config(device, interface_name, platform)
                         current_config_before = device_config_result.get('current_config', None)
                         bridge_vlans_before = device_config_result.get('_bridge_vlans', [])
+                        bond_member_of = device_config_result.get('bond_member_of', None)  # Get bond info for proposed config generation
                         
                         if current_config_before and isinstance(current_config_before, str):
                             if current_config_before.startswith('ERROR:'):
@@ -4090,14 +4205,18 @@ class VLANDeploymentView(View):
                         logger.debug(f"Could not get current config before deployment: {e}")
                         current_config_before = None
                         bridge_vlans_before = []
+                        bond_member_of = None
                     
                     # Get NetBox current state and generate diffs (same as dry run)
                     netbox_state = self._get_netbox_current_state(device, interface_name, vlan_id)
                     netbox_diff = self._generate_netbox_diff(netbox_state, netbox_state['proposed'])
                     
-                    # Generate proposed config and config diff (same as dry run) (pass device to check bond membership)
-                    proposed_config = self._generate_vlan_config(interface_name, vlan_id, platform, device=device)
-                    config_diff = self._generate_config_diff(current_config_before, proposed_config, platform, device=device, interface_name=interface_name, bridge_vlans=bridge_vlans_before)
+                    # Determine target interface for proposed config (bond if member, otherwise original)
+                    target_interface_for_config = bond_member_of if bond_member_of else interface_name
+                    
+                    # Generate proposed config and config diff (same as dry run) (use target_interface which may be bond)
+                    proposed_config = self._generate_vlan_config(target_interface_for_config, vlan_id, platform, device=device)
+                    config_diff = self._generate_config_diff(current_config_before, proposed_config, platform, device=device, interface_name=target_interface_for_config, bridge_vlans=bridge_vlans_before)
                     
                     # Build all the sections (same as dry run)
                     logs.append("=" * 80)
