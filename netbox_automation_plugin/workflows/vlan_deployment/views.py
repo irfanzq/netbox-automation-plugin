@@ -2704,14 +2704,8 @@ class VLANDeploymentView(View):
                     current_device_config = device_config_result.get('current_config', 'Unable to fetch')
                     config_source = device_config_result.get('source', 'error')
                     
-                    # Generate diff
-                    config_diff = self._generate_config_diff(
-                        current_device_config, 
-                        config_command, 
-                        platform, 
-                        device=device, 
-                        interface_name=interface.name
-                    )
+                    # Get bond info early for diff generation
+                    bond_member_of = device_config_result.get('bond_member_of')
                     
                     # Get NetBox state
                     untagged_vid = config_info['untagged_vlan']
@@ -2799,6 +2793,17 @@ class VLANDeploymentView(View):
                             
                             config_command = '\n'.join(regenerated_commands)
                         # For EOS, would need similar regeneration
+                    
+                    # Generate diff AFTER bond detection and config_command regeneration
+                    # Use bond interface name if bond detected
+                    target_interface_for_diff = bond_member_of if bond_member_of else interface.name
+                    config_diff = self._generate_config_diff(
+                        current_device_config, 
+                        config_command, 
+                        platform, 
+                        device=device, 
+                        interface_name=target_interface_for_diff
+                    )
                     
                     logs.append("--- Current Device Configuration (Real from Device) ---")
                     logs.append("")
@@ -3066,6 +3071,30 @@ class VLANDeploymentView(View):
                     
                     # Use target_interface (bond if member) for deployment, but keep interface.name for display
                     target_interface = config_info.get('target_interface', interface.name)
+                    
+                    # IMPORTANT: If bond detected, regenerate config_command with bond interface name
+                    # This ensures all commands use bond3 instead of swp3
+                    if target_interface != interface.name:
+                        # Bond detected - regenerate config_command with bond interface
+                        if platform == 'cumulus':
+                            # Regenerate bridge VLAN commands
+                            all_vlans = set()
+                            if untagged_vid:
+                                all_vlans.add(untagged_vid)
+                            all_vlans.update(tagged_vids)
+                            
+                            regenerated_commands = []
+                            for vlan in sorted(all_vlans):
+                                regenerated_commands.append(f"nv set bridge domain br_default vlan add {vlan}")
+                            
+                            # Set interface access VLAN using bond interface
+                            if untagged_vid:
+                                regenerated_commands.append(f"nv set interface {target_interface} bridge domain br_default access {untagged_vid}")
+                            
+                            config_command = '\n'.join(regenerated_commands)
+                            logger.info(f"Regenerated config_command with bond interface {target_interface} instead of {interface.name}")
+                        # For EOS, would need similar regeneration
+                    
                     result = self._deploy_config_to_device(
                         device, 
                         target_interface,  # Use bond interface for deployment
@@ -3157,13 +3186,8 @@ class VLANDeploymentView(View):
                         current_device_config = device_config_result.get('current_config', 'Unable to fetch')
                         config_source = device_config_result.get('source', 'error')
                         
-                        config_diff = self._generate_config_diff(
-                            current_device_config, 
-                            config_command, 
-                            platform, 
-                            device=device, 
-                            interface_name=interface.name
-                        )
+                        # Get bond info early for config regeneration
+                        bond_member_of = device_config_result.get('bond_member_of')
                         
                         untagged_vid = config_info['untagged_vlan']
                         tagged_vids = config_info['tagged_vlans']
@@ -3225,6 +3249,39 @@ class VLANDeploymentView(View):
                         logs.append("Note: This interface is currently untagged in NetBox.")
                         logs.append("      After successful deployment, it will be auto-tagged as 'vlan-mode:access' or 'vlan-mode:tagged'.")
                         logs.append("")
+                        # If bond detected, regenerate config_command with bond interface name
+                        if bond_member_of:
+                            # Regenerate config with bond interface instead of member interface
+                            target_interface = bond_member_of
+                            # Regenerate config_command using target_interface (bond)
+                            if platform == 'cumulus':
+                                # Regenerate bridge VLAN commands
+                                all_vlans = set()
+                                if untagged_vid:
+                                    all_vlans.add(untagged_vid)
+                                all_vlans.update(tagged_vids)
+                                
+                                regenerated_commands = []
+                                for vlan in sorted(all_vlans):
+                                    regenerated_commands.append(f"nv set bridge domain br_default vlan add {vlan}")
+                                
+                                # Set interface access VLAN using bond interface
+                                if untagged_vid:
+                                    regenerated_commands.append(f"nv set interface {target_interface} bridge domain br_default access {untagged_vid}")
+                                
+                                config_command = '\n'.join(regenerated_commands)
+                            # For EOS, would need similar regeneration
+                        
+                        # Generate diff AFTER bond detection and config_command regeneration
+                        target_interface_for_diff = bond_member_of if bond_member_of else interface.name
+                        config_diff = self._generate_config_diff(
+                            current_device_config, 
+                            config_command, 
+                            platform, 
+                            device=device, 
+                            interface_name=target_interface_for_diff
+                        )
+                        
                         logs.append("--- Proposed Device Configuration ---")
                         for line in config_command.split('\n'):
                             if line.strip():
@@ -3232,7 +3289,6 @@ class VLANDeploymentView(View):
                         logs.append("")
                         logs.append("--- Current Device Configuration ---")
                         # Check if interface is a bond member
-                        bond_member_of = device_config_result.get('bond_member_of')
                         bond_interface_config = device_config_result.get('bond_interface_config')
                         
                         if bond_member_of:
@@ -3467,6 +3523,10 @@ class VLANDeploymentView(View):
                         })
                     else:
                         # Actual deployment
+                        # Get current device config to check for bond membership
+                        device_config_result = self._get_current_device_config(device, interface.name, platform)
+                        bond_member_of = device_config_result.get('bond_member_of')
+                        
                         untagged_vid = config_info['untagged_vlan']
                         tagged_vids = config_info['tagged_vlans']
                         
@@ -3482,6 +3542,36 @@ class VLANDeploymentView(View):
                         
                         # Use target_interface (bond if member) for deployment, but keep interface.name for display
                         target_interface = config_info.get('target_interface', interface.name)
+                        
+                        # IMPORTANT: Check bond_member_of from device config if _generate_config_from_netbox didn't detect it
+                        # This handles cases where NetBox doesn't have bond info but device config shows bond membership
+                        if target_interface == interface.name and bond_member_of:
+                            target_interface = bond_member_of
+                            logger.info(f"Bond detected from device config: {interface.name} is member of {bond_member_of}, using {bond_member_of} for deployment")
+                        
+                        # IMPORTANT: If bond detected, regenerate config_command with bond interface name
+                        # This ensures all commands use bond3 instead of swp3
+                        if target_interface != interface.name:
+                            # Bond detected - regenerate config_command with bond interface
+                            if platform == 'cumulus':
+                                # Regenerate bridge VLAN commands
+                                all_vlans = set()
+                                if untagged_vid:
+                                    all_vlans.add(untagged_vid)
+                                all_vlans.update(tagged_vids)
+                                
+                                regenerated_commands = []
+                                for vlan in sorted(all_vlans):
+                                    regenerated_commands.append(f"nv set bridge domain br_default vlan add {vlan}")
+                                
+                                # Set interface access VLAN using bond interface
+                                if untagged_vid:
+                                    regenerated_commands.append(f"nv set interface {target_interface} bridge domain br_default access {untagged_vid}")
+                                
+                                config_command = '\n'.join(regenerated_commands)
+                                logger.info(f"Regenerated config_command with bond interface {target_interface} instead of {interface.name}")
+                            # For EOS, would need similar regeneration
+                        
                         result = self._deploy_config_to_device(
                             device, 
                             target_interface,  # Use bond interface for deployment
@@ -3742,7 +3832,8 @@ class VLANDeploymentView(View):
                     proposed_config = self._generate_vlan_config(target_interface_for_config, vlan_id, platform, device=device)
                     
                     # Generate config diff (pass bridge VLANs to check if VLAN already exists)
-                    config_diff = self._generate_config_diff(current_device_config, proposed_config, platform, device=device, interface_name=interface_name, bridge_vlans=bridge_vlans)
+                    # Use target_interface_for_config for interface_name parameter to ensure diff shows correct interface
+                    config_diff = self._generate_config_diff(current_device_config, proposed_config, platform, device=device, interface_name=target_interface_for_config, bridge_vlans=bridge_vlans)
                     
                     # Get NetBox current and proposed state
                     netbox_state = self._get_netbox_current_state(device, interface_name, vlan_id)
@@ -5108,10 +5199,42 @@ class VLANDeploymentView(View):
 
             # Convert platform-specific commands to NAPALM config format
             if platform == 'cumulus':
+                # IMPORTANT: Replace interface name in config_command if bond detected
+                # This ensures all commands use bond3 instead of swp3
+                corrected_config_command = config_command
+                if original_interface_name and original_interface_name != interface_name:
+                    # Replace original interface name (swp3) with target interface (bond3) in ALL commands
+                    # Use multiple replacement patterns to catch all variations
+                    corrected_lines = []
+                    for line in config_command.split('\n'):
+                        if line.strip():
+                            # Replace in each line - multiple patterns to catch all cases
+                            corrected_line = line
+                            # Pattern 1: "interface swp3 " -> "interface bond3 "
+                            corrected_line = corrected_line.replace(f"interface {original_interface_name} ", f"interface {interface_name} ")
+                            # Pattern 2: "interface swp3\n" -> "interface bond3\n"
+                            corrected_line = corrected_line.replace(f"interface {original_interface_name}\n", f"interface {interface_name}\n")
+                            # Pattern 3: "nv set interface swp3 " -> "nv set interface bond3 "
+                            corrected_line = corrected_line.replace(f"nv set interface {original_interface_name} ", f"nv set interface {interface_name} ")
+                            # Pattern 4: "nv set interface swp3\n" -> "nv set interface bond3\n"
+                            corrected_line = corrected_line.replace(f"nv set interface {original_interface_name}\n", f"nv set interface {interface_name}\n")
+                            # Pattern 5: "interface swp3" at end of line -> "interface bond3"
+                            if corrected_line.strip().endswith(f"interface {original_interface_name}"):
+                                corrected_line = corrected_line.replace(f"interface {original_interface_name}", f"interface {interface_name}")
+                            # Pattern 6: "nv set interface swp3" at end of line -> "nv set interface bond3"
+                            if f"nv set interface {original_interface_name}" in corrected_line:
+                                corrected_line = corrected_line.replace(f"nv set interface {original_interface_name}", f"nv set interface {interface_name}")
+                            corrected_lines.append(corrected_line)
+                    corrected_config_command = '\n'.join(corrected_lines)
+                    logger.info(f"Replaced interface name from {original_interface_name} to {interface_name} in config command")
+                    logger.debug(f"Original config_command: {config_command}")
+                    logger.debug(f"Corrected config_command: {corrected_config_command}")
+                    logs.append(f"  [INFO] Replaced interface name from {original_interface_name} to {interface_name} in all commands")
+                
                 # For Cumulus NVUE, the config_command is already an NVUE command (e.g., "nv set interface ...")
                 # NAPALM's commit_config() will handle "nv config apply --confirm {timeout}s" automatically
                 # So we only need the NVUE set command, not the apply command
-                config_text = config_command
+                config_text = corrected_config_command
                 # Log only first line to reduce noise
                 first_line = config_text.split('\n')[0] if config_text else ''
                 logs.append(f"[2.2] Deploying {len(config_text.splitlines())} command(s) to {device.name} (interface: {interface_name})")
@@ -5199,24 +5322,28 @@ class VLANDeploymentView(View):
                 else:
                     logger.info(f"VLAN {vlan_id} already exists on bridge br_default - skipping bridge command")
                 
-                # Command 2: Add access VLAN to interface (always needed)
-                # IMPORTANT: config_command may contain swp3 instead of bond3 - replace with interface_name (target interface)
-                interface_access_cmd = config_command
-                # If config_command contains wrong interface name, replace it with target interface_name (bond3)
-                if original_interface_name and original_interface_name != interface_name:
-                    # Replace original interface name (swp3) with target interface (bond3) in the command
-                    interface_access_cmd = interface_access_cmd.replace(f"interface {original_interface_name} ", f"interface {interface_name} ")
-                    interface_access_cmd = interface_access_cmd.replace(f"interface {original_interface_name}\n", f"interface {interface_name}\n")
-                    # For Cumulus: "nv set interface swp3" -> "nv set interface bond3"
-                    interface_access_cmd = interface_access_cmd.replace(f"nv set interface {original_interface_name} ", f"nv set interface {interface_name} ")
-                    logger.info(f"Replaced interface name from {original_interface_name} to {interface_name} in config command")
+                # Command 2: Process config_text (already corrected above if bond detected)
+                # Build final config_text: bridge VLAN first (if needed), then all other commands from config_text
+                final_commands = []
                 
-                commands_to_run.append(interface_access_cmd)
+                # Add bridge VLAN command first if needed
+                if bridge_vlan_needed:
+                    final_commands.append(bridge_vlan_cmd)
+                
+                # Add all commands from config_text (already corrected above if bond detected)
+                # Parse config_text to extract individual commands
+                for line in config_text.split('\n'):
+                    if line.strip():
+                        # Skip duplicate bridge VLAN command if we already added it
+                        if bridge_vlan_needed and 'bridge domain br_default vlan' in line and 'vlan add' not in line:
+                            continue  # Skip "vlan {id}" if we already have it from bridge_vlan_needed check
+                        # Add command if not already in final_commands
+                        if line.strip() not in final_commands:
+                            final_commands.append(line.strip())
                 
                 # Combine commands in correct order
-                config_text = "\n".join(commands_to_run)
-                
-                # Update config_command with the corrected config_text so it's used in deploy_config_safe
+                config_text = "\n".join(final_commands)
+                # Update config_command with corrected config_text for use in logs
                 config_command = config_text
 
             # Deploy using safe deployment with post-checks
@@ -5450,6 +5577,7 @@ class VLANDeploymentView(View):
                 if old_vlan_match:
                     old_vlan = old_vlan_match.group(1)
                     logs.append(f"Removed/Replaced:")
+                    # Use interface_name which is the target interface (bond3 if bond member)
                     logs.append(f"  - nv set interface {interface_name} bridge domain br_default access {old_vlan}")
                 else:
                     logs.append(f"Removed/Replaced:")
@@ -5459,12 +5587,12 @@ class VLANDeploymentView(View):
                 logs.append(f"  (no existing configuration to replace)")
             logs.append(f"")
             
-            # Show what's being added
+            # Show what's being added - use config_text which has the correct bond interface name (after replacement)
             logs.append(f"Added:")
-            # Split config_command into lines and add "+" prefix to each line
-            # This handles cases where config_command contains multiple commands (e.g., multiple bridge VLAN adds, bond migration)
-            config_lines = [line.strip() for line in config_command.split('\n') if line.strip()]
-            for line in config_lines:
+            # Use config_text which is the final corrected command that will be sent to device
+            # This ensures the diff shows bond3 instead of swp3
+            config_lines_to_show = [line.strip() for line in config_text.split('\n') if line.strip()]
+            for line in config_lines_to_show:
                 logs.append(f"  + {line}")
             logs.append(f"")
             
@@ -5473,6 +5601,11 @@ class VLANDeploymentView(View):
             logs.append(f"      Checks: connectivity")
             logs.append(f"      Interface: {interface_name}")
             logs.append(f"      VLAN ID: {vlan_id}")
+            logs.append(f"      Actual command being sent to device:")
+            # Log the actual config_text that will be sent (after interface name replacement)
+            for line in config_text.split('\n'):
+                if line.strip():
+                    logs.append(f"        {line.strip()}")
 
             logger.info(f"Starting safe deployment for {device.name} (interface: {interface_name}, timeout: 90s)")
             deploy_result = napalm_manager.deploy_config_safe(

@@ -159,7 +159,36 @@ class NAPALMDeviceManager:
             for attempt in range(max_retries):
                 try:
                     self.connection.open()
+                    
+                    # CRITICAL: Verify that the device object was properly initialized
+                    # The NAPALM driver's device object (Netmiko connection) must exist
+                    # If it's None, load_merge_candidate will fail with 'NoneType' object has no attribute 'send_command_timing'
+                    if hasattr(self.connection, 'device'):
+                        if self.connection.device is None:
+                            logger.warning(f"Connection opened but device object is None for {self.device.name} (attempt {attempt + 1})")
+                            try:
+                                self.connection.close()
+                            except:
+                                pass
+                            # This is a retryable error - connection didn't fully initialize
+                            if attempt < max_retries - 1:
+                                wait_time = retry_delay * (2 ** attempt)
+                                logger.warning(f"Retrying connection in {wait_time}s...")
+                                time.sleep(wait_time)
+                                # Recreate connection for retry
+                                self.connection = self.driver(
+                                    hostname=device_hostname,
+                                    username=username,
+                                    password=password,
+                                    timeout=timeout,
+                                    optional_args=optional_args
+                                )
+                                continue
+                            else:
+                                raise ConnectionException(f"Connection opened but device object is None after {max_retries} attempts")
+                    
                     logger.info(f"Connected to {self.device.name} using {driver_name} driver (attempt {attempt + 1})")
+                    logger.debug(f"Connection device object type: {type(self.connection.device) if hasattr(self.connection, 'device') else 'N/A'}")
                     return True
                 except (ConnectionException, Exception) as e:
                     # Check if this is a retryable error (connection failure, not auth failure)
@@ -294,20 +323,92 @@ class NAPALMDeviceManager:
         """
         if not self.connection:
             if not self.connect():
+                logger.error(f"Failed to connect to {self.device.name} for load_config")
                 return False
+        
+        # Verify connection is still valid
+        if not self.connection:
+            logger.error(f"Connection is None after connect() for {self.device.name}")
+            return False
+        
+        # CRITICAL: Verify the connection is actually open and device object exists
+        # The NAPALM driver's load_merge_candidate uses self.connection.device.send_command_timing()
+        # If device is None, we get 'NoneType' object has no attribute 'send_command_timing'
+        try:
+            if not hasattr(self.connection, 'is_alive') or not self.connection.is_alive():
+                logger.warning(f"Connection to {self.device.name} is not alive, reconnecting...")
+                if not self.connect():
+                    logger.error(f"Failed to reconnect to {self.device.name} for load_config")
+                    return False
+            
+            # Check if device object exists (this is what NAPALM uses internally)
+            if hasattr(self.connection, 'device'):
+                if self.connection.device is None:
+                    logger.error(f"Connection device object is None for {self.device.name} - connection may not be properly opened")
+                    logger.error(f"Attempting to reconnect...")
+                    if not self.connect():
+                        logger.error(f"Failed to reconnect to {self.device.name} for load_config")
+                        return False
+                    # Verify device object exists after reconnect
+                    if not hasattr(self.connection, 'device') or self.connection.device is None:
+                        logger.error(f"Connection device object is still None after reconnect for {self.device.name}")
+                        return False
+        except Exception as conn_check_error:
+            logger.warning(f"Could not verify connection state for {self.device.name}: {conn_check_error}")
+            logger.warning(f"Attempting to reconnect...")
+            if not self.connect():
+                logger.error(f"Failed to reconnect to {self.device.name} for load_config")
+                return False
+        
+        # Verify connection has required methods
+        if not hasattr(self.connection, 'load_replace_candidate') and not hasattr(self.connection, 'load_merge_candidate'):
+            logger.error(f"Connection object for {self.device.name} does not have load_replace_candidate or load_merge_candidate methods")
+            logger.error(f"Connection type: {type(self.connection)}")
+            logger.error(f"Connection attributes: {dir(self.connection)[:20]}")
+            return False
         
         try:
             if replace:
                 # Full configuration replacement
-                self.connection.load_replace_candidate(config=config)
-                logger.info(f"Loaded REPLACE candidate config on {self.device.name}")
+                if hasattr(self.connection, 'load_replace_candidate'):
+                    self.connection.load_replace_candidate(config=config)
+                    logger.info(f"Loaded REPLACE candidate config on {self.device.name}")
+                else:
+                    logger.error(f"load_replace_candidate not available on connection for {self.device.name}")
+                    return False
             else:
                 # Incremental merge
-                self.connection.load_merge_candidate(config=config)
-                logger.info(f"Loaded MERGE candidate config on {self.device.name}")
+                if hasattr(self.connection, 'load_merge_candidate'):
+                    self.connection.load_merge_candidate(config=config)
+                    logger.info(f"Loaded MERGE candidate config on {self.device.name}")
+                else:
+                    logger.error(f"load_merge_candidate not available on connection for {self.device.name}")
+                    return False
             
             return True
                 
+        except AttributeError as attr_error:
+            error_msg = str(attr_error)
+            logger.error(f"Failed to load config on {self.device.name}: AttributeError - {error_msg}")
+            logger.error(f"Connection object type: {type(self.connection)}")
+            logger.error(f"Connection object: {self.connection}")
+            
+            # Check if device object exists (this is what causes 'send_command_timing' errors)
+            if hasattr(self.connection, 'device'):
+                logger.error(f"Connection device object: {self.connection.device}")
+                logger.error(f"Connection device type: {type(self.connection.device) if self.connection.device else 'None'}")
+                if self.connection.device is None:
+                    logger.error(f"ROOT CAUSE: Connection device object is None - connection may not be properly opened")
+                    logger.error(f"This typically means connection.open() didn't fully initialize the device object")
+            else:
+                logger.error(f"Connection object does not have 'device' attribute")
+            
+            # Store error for later retrieval
+            if not hasattr(self, '_last_load_error'):
+                self._last_load_error = {}
+            self._last_load_error['error'] = error_msg
+            self._last_load_error['exception_type'] = type(attr_error).__name__
+            return False
         except Exception as e:
             error_msg = str(e)
             logger.error(f"Failed to load config on {self.device.name}: {error_msg}")
@@ -318,7 +419,8 @@ class NAPALMDeviceManager:
             self._last_load_error['error'] = error_msg
             self._last_load_error['exception_type'] = type(e).__name__
             try:
-                self.connection.discard_config()
+                if self.connection and hasattr(self.connection, 'discard_config'):
+                    self.connection.discard_config()
             except:
                 pass
             return False
