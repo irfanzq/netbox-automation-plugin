@@ -83,11 +83,69 @@
     color: #ffffff !important;
   }
   
-  /* Table headers - HARDCODED WHITE */
+  /* Table headers - HARDCODED WHITE IN DARK MODE */
   html[data-theme="dark"] .table thead th,
   html[data-theme="dark"] .table thead th *,
+  html[data-theme="dark"] .table thead th a,
+  html[data-theme="dark"] .table thead th strong,
+  html[data-theme="dark"] .table thead th span,
   body.dark-mode .table thead th,
-  body.dark-mode .table thead th * {
+  body.dark-mode .table thead th *,
+  body.dark-mode .table thead th a,
+  body.dark-mode .table thead th strong,
+  body.dark-mode .table thead th span {
+    color: #ffffff !important;
+  }
+  
+  /* Device names in table cells - HARDCODED WHITE IN DARK MODE */
+  html[data-theme="dark"] .table tbody td:first-child,
+  html[data-theme="dark"] .table tbody td:first-child a,
+  html[data-theme="dark"] .table tbody td:first-child *,
+  html[data-theme="dark"] .table tbody td:first-child strong,
+  html[data-theme="dark"] .table tbody td:first-child span,
+  body.dark-mode .table tbody td:first-child,
+  body.dark-mode .table tbody td:first-child a,
+  body.dark-mode .table tbody td:first-child *,
+  body.dark-mode .table tbody td:first-child strong,
+  body.dark-mode .table tbody td:first-child span {
+    color: #ffffff !important;
+  }
+  
+  /* Device Summary section - device names and headers - HARDCODED WHITE IN DARK MODE */
+  html[data-theme="dark"] .device-summary-card h6,
+  html[data-theme="dark"] .device-summary-card h6 a,
+  html[data-theme="dark"] .device-summary-card h6 span,
+  html[data-theme="dark"] .device-summary-card h6 *,
+  body.dark-mode .device-summary-card h6,
+  body.dark-mode .device-summary-card h6 a,
+  body.dark-mode .device-summary-card h6 span,
+  body.dark-mode .device-summary-card h6 * {
+    color: #ffffff !important;
+  }
+  
+  /* Card headers and titles - HARDCODED WHITE IN DARK MODE */
+  html[data-theme="dark"] .card-header h5,
+  html[data-theme="dark"] .card-header .card-title,
+  html[data-theme="dark"] .card-header h5 *,
+  html[data-theme="dark"] .card-title,
+  html[data-theme="dark"] .card-title *,
+  html[data-theme="dark"] h5.card-title,
+  html[data-theme="dark"] h5.card-title *,
+  body.dark-mode .card-header h5,
+  body.dark-mode .card-header .card-title,
+  body.dark-mode .card-header h5 *,
+  body.dark-mode .card-title,
+  body.dark-mode .card-title *,
+  body.dark-mode h5.card-title,
+  body.dark-mode h5.card-title * {
+    color: #ffffff !important;
+  }
+  
+  /* "Device Summary" and "VLAN Deployment Results" headers - HARDCODED WHITE IN DARK MODE */
+  html[data-theme="dark"] .card-header .card-title.mb-0,
+  html[data-theme="dark"] .card-header h5.card-title.mb-0,
+  body.dark-mode .card-header .card-title.mb-0,
+  body.dark-mode .card-header h5.card-title.mb-0 {
     color: #ffffff !important;
   }
   
@@ -158,7 +216,7 @@
     <div class="col-md-12">
       <div class="card">
         <div class="card-header">
-          <h5 class="card-title mb-0">{% trans "VLAN Deployment Summary" %}</h5>
+          <h5 class="card-title mb-0" style="color: var(--nbx-color-fg-default);">{% trans "VLAN Deployment Summary" %}</h5>
         </div>
         <div class="card-body">
           <dl class="row mb-0">
@@ -198,11 +256,11 @@
                    data-device-name="{{ device_summary.device_name }}"
                    style="cursor: pointer; border-left: 4px solid {% if device_summary.device_status == 'pass' %}#198754{% elif device_summary.device_status == 'warn' %}#ffc107{% else %}#dc3545{% endif %};">
                 <div class="card-body p-2">
-                  <h6 class="mb-1">
+                  <h6 class="mb-1" style="color: var(--nbx-color-fg-default);">
                     {% if device_summary.device and device_summary.device.pk %}
-                      <a href="{% url 'dcim:device' pk=device_summary.device.pk %}" onclick="event.stopPropagation();">{{ device_summary.device_name }}</a>
+                      <a href="{% url 'dcim:device' pk=device_summary.device.pk %}" onclick="event.stopPropagation();" style="color: var(--nbx-color-fg-default);">{{ device_summary.device_name }}</a>
                     {% else %}
-                      <span>{{ device_summary.device_name }}</span>
+                      <span style="color: var(--nbx-color-fg-default);">{{ device_summary.device_name }}</span>
                     {% endif %}
                   </h6>
                   <div class="small">
@@ -230,7 +288,7 @@
     <div class="col-md-12">
       <div class="card">
         <div class="card-header d-flex justify-content-between align-items-center">
-          <h5 class="card-title mb-0">{% trans "VLAN Deployment Results" %}</h5>
+          <h5 class="card-title mb-0" style="color: var(--nbx-color-fg-default);">{% trans "VLAN Deployment Results" %}</h5>
           <div>
             <div class="btn-group btn-group-sm me-2" role="group" id="status-filter-buttons">
               <button type="button" class="btn btn-primary active" data-filter="all">
@@ -392,13 +450,18 @@
           });
         }
         
-        // Force white color on device names in dark mode - HARDCODED FIX
+        // Force white color on device names and table headers in dark mode - HARDCODED FIX
         function forceDeviceNamesWhite() {
           const isDarkMode = document.documentElement.getAttribute('data-theme') === 'dark' || document.body.classList.contains('dark-mode');
           if (!isDarkMode) return;
           
+          // Force white on table headers (Device, Interface, VLAN, Device Status, etc.)
+          document.querySelectorAll('.table thead th, .table thead th *, .table thead th a, .table thead th strong, .table thead th span').forEach(el => {
+            el.style.setProperty('color', '#ffffff', 'important');
+          });
+          
           // Force white on all table cells (device names, interface names, VLAN names)
-          document.querySelectorAll('.table td, .table td a, .table th, .table th a').forEach(el => {
+          document.querySelectorAll('.table tbody td, .table tbody td a, .table tbody td *, .table tbody td strong, .table tbody td span').forEach(el => {
             // Skip badges and colored elements
             if (!el.classList.contains('badge') && !el.closest('.badge')) {
               el.style.setProperty('color', '#ffffff', 'important');
@@ -406,15 +469,13 @@
           });
           
           // Force white on device summary card names
-          document.querySelectorAll('.device-summary-card h6, .device-summary-card h6 a, .device-summary-card h6 span').forEach(el => {
+          document.querySelectorAll('.device-summary-card h6, .device-summary-card h6 a, .device-summary-card h6 span, .device-summary-card h6 *').forEach(el => {
             el.style.setProperty('color', '#ffffff', 'important');
           });
           
-          // Force white on all links in table
-          document.querySelectorAll('.table a').forEach(el => {
-            if (!el.classList.contains('badge') && !el.closest('.badge')) {
-              el.style.setProperty('color', '#ffffff', 'important');
-            }
+          // Force white on card headers and titles
+          document.querySelectorAll('.card-header h5, .card-header .card-title, .card-header h5 *, .card-title, .card-title *, h5.card-title, h5.card-title *').forEach(el => {
+            el.style.setProperty('color', '#ffffff', 'important');
           });
         }
         
