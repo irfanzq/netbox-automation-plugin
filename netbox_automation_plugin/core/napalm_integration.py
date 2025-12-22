@@ -1090,14 +1090,36 @@ class NAPALMDeviceManager:
                 
                 # Fallback to NAPALM's get_interfaces() for non-Cumulus or if direct NVUE failed
                 if driver_name != 'cumulus' or not baseline_collected:
-                    interfaces_before = self.get_interfaces()
-                    if not interfaces_before:
-                        error_msg = f"Cannot get interfaces from device {self.device.name}"
-                        logger.error(f"CRITICAL: {error_msg}")
-                        logs.append(f"  ✗ Cannot get interfaces from device")
-                        result['message'] = f"Interface validation failed: {error_msg}"
-                        result['logs'] = logs
-                        return result
+                    try:
+                        interfaces_before = self.get_interfaces()
+                        if not interfaces_before:
+                            # For Cumulus, this is expected if direct NVUE already failed - continue without baseline
+                            if driver_name == 'cumulus':
+                                logger.warning(f"Could not get interfaces from {self.device.name} - continuing without baseline collection")
+                                logs.append(f"  ⚠ Could not collect interface baseline (non-critical, continuing deployment)")
+                                baseline_collected = False
+                            else:
+                                error_msg = f"Cannot get interfaces from device {self.device.name}"
+                                logger.error(f"CRITICAL: {error_msg}")
+                                logs.append(f"  ✗ Cannot get interfaces from device")
+                                result['message'] = f"Interface validation failed: {error_msg}"
+                                result['logs'] = logs
+                                return result
+                        else:
+                            baseline_collected = True
+                    except Exception as get_interfaces_error:
+                        # For Cumulus, if direct NVUE failed and get_interfaces() also fails, continue without baseline
+                        if driver_name == 'cumulus':
+                            logger.warning(f"get_interfaces() failed for {self.device.name}: {get_interfaces_error} - continuing without baseline")
+                            logs.append(f"  ⚠ Interface collection failed (non-critical, continuing deployment)")
+                            baseline_collected = False
+                        else:
+                            error_msg = f"Failed to get interfaces from device {self.device.name}: {get_interfaces_error}"
+                            logger.error(f"CRITICAL: {error_msg}")
+                            logs.append(f"  ✗ Cannot get interfaces from device: {get_interfaces_error}")
+                            result['message'] = f"Interface validation failed: {error_msg}"
+                            result['logs'] = logs
+                            return result
                     
                     # Check if interface_name exists (could be bond interface)
                     if interface_name in interfaces_before:
@@ -1329,17 +1351,73 @@ class NAPALMDeviceManager:
                 logs.append(f"  Config to load: {config}")
                 logs.append(f"  Mode: {'Replace (full config)' if replace else 'Merge (incremental)'}")
                 logs.append(f"  Loading configuration...")
+                
+                # DEBUG: Check connection state before load
+                try:
+                    if hasattr(self.connection, 'is_alive'):
+                        is_alive = self.connection.is_alive()
+                        logger.debug(f"Connection is_alive before load_config: {is_alive}")
+                        logs.append(f"  [DEBUG] Connection alive: {is_alive}")
+                except Exception as alive_check:
+                    logger.debug(f"Could not check connection alive status: {alive_check}")
 
-                if not self.load_config(config, replace=replace):
+                # DEBUG: For Cumulus, check current revision before load
+                if driver_name == 'cumulus':
+                    try:
+                        if hasattr(self.connection, 'device') and hasattr(self.connection.device, 'send_command'):
+                            history_before_load = self.connection.device.send_command('nv config history | head -3', read_timeout=10)
+                            logger.debug(f"Config history BEFORE load_config:\n{history_before_load}")
+                            logs.append(f"  [DEBUG] History before load (last 3 entries):")
+                            for line in history_before_load.split('\n')[:3]:
+                                if line.strip():
+                                    logs.append(f"    {line.strip()}")
+                    except Exception as hist_error:
+                        logger.debug(f"Could not get history before load: {hist_error}")
+
+                load_result = self.load_config(config, replace=replace)
+                logger.info(f"load_config() returned: {load_result}")
+                logs.append(f"  [DEBUG] load_config() return value: {load_result}")
+                
+                if not load_result:
                     result['message'] = "Failed to load configuration. The device rejected the config or NAPALM driver encountered an error."
                     logger.error(f"Phase 1 failed: load_config returned False")
                     logs.append(f"  ✗ Configuration load FAILED")
                     logs.append(f"  Error: Device rejected config or NAPALM driver error")
+                    
+                    # DEBUG: Try to get error details
+                    if driver_name == 'cumulus':
+                        try:
+                            if hasattr(self.connection, 'device') and hasattr(self.connection.device, 'send_command'):
+                                error_check = self.connection.device.send_command('nv config diff', read_timeout=10)
+                                logger.debug(f"Config diff after failed load: {error_check}")
+                                logs.append(f"  [DEBUG] Config diff after failed load: {error_check[:200]}")
+                        except Exception as err_check:
+                            logger.debug(f"Could not check error details: {err_check}")
+                    
                     result['logs'] = logs
                     return result
 
                 logger.info(f"Phase 1: Configuration loaded successfully")
                 logs.append(f"  ✓ Configuration loaded to candidate config")
+                
+                # DEBUG: For Cumulus, check if candidate revision was created
+                if driver_name == 'cumulus':
+                    try:
+                        if hasattr(self.connection, 'revision_id'):
+                            candidate_revision = self.connection.revision_id
+                            logger.info(f"Candidate revision ID after load: {candidate_revision}")
+                            logs.append(f"  [DEBUG] Candidate revision ID: {candidate_revision}")
+                        
+                        # Check history after load
+                        if hasattr(self.connection, 'device') and hasattr(self.connection.device, 'send_command'):
+                            history_after_load = self.connection.device.send_command('nv config history | head -3', read_timeout=10)
+                            logger.debug(f"Config history AFTER load_config:\n{history_after_load}")
+                            logs.append(f"  [DEBUG] History after load (last 3 entries):")
+                            for line in history_after_load.split('\n')[:3]:
+                                if line.strip():
+                                    logs.append(f"    {line.strip()}")
+                    except Exception as post_load_error:
+                        logger.debug(f"Could not check post-load state: {post_load_error}")
                 
                 # Show commands that will be executed
                 logs.append(f"")
@@ -1348,7 +1426,54 @@ class NAPALMDeviceManager:
                 for line in config_lines:
                     if line.strip():
                         logs.append(f"    + {line.strip()}")
-
+                
+                # Phase 1.5: For Cumulus, verify that candidate config actually has changes
+                # If there are no changes, commit will not create a revision
+                if driver_name == 'cumulus':
+                    try:
+                        logs.append(f"  [DEBUG] Checking for config differences...")
+                        if hasattr(self.connection, 'compare_config'):
+                            diff_output = self.connection.compare_config()
+                            logger.info(f"compare_config() returned output of length: {len(diff_output) if diff_output else 0}")
+                            logs.append(f"  [DEBUG] compare_config() output length: {len(diff_output) if diff_output else 0}")
+                            
+                            if diff_output:
+                                logger.debug(f"Full config diff (candidate vs running):\n{diff_output}")
+                                # Log first 1000 chars of diff
+                                diff_preview = diff_output[:1000] if len(diff_output) > 1000 else diff_output
+                                logs.append(f"  [DEBUG] Config diff preview:")
+                                for line in diff_preview.split('\n')[:50]:  # First 50 lines
+                                    if line.strip():
+                                        logs.append(f"    {line.strip()}")
+                                
+                                # Also try direct nv config diff command
+                                try:
+                                    if hasattr(self.connection, 'device') and hasattr(self.connection.device, 'send_command'):
+                                        direct_diff = self.connection.device.send_command('nv config diff', read_timeout=15)
+                                        logger.debug(f"Direct 'nv config diff' output:\n{direct_diff}")
+                                        logs.append(f"  [DEBUG] Direct 'nv config diff' output:")
+                                        if direct_diff:
+                                            for line in direct_diff.split('\n')[:30]:  # First 30 lines
+                                                if line.strip():
+                                                    logs.append(f"    {line.strip()}")
+                                except Exception as direct_diff_error:
+                                    logger.debug(f"Could not run direct nv config diff: {direct_diff_error}")
+                                
+                                # Check if diff shows actual changes
+                                if 'no changes' in diff_output.lower() or (len(diff_output.strip()) < 10):
+                                    logger.warning(f"WARNING: Candidate config appears to match running config - commit may not create revision")
+                                    logs.append(f"  ⚠ WARNING: Candidate config matches running config - no changes to commit")
+                                else:
+                                    logs.append(f"  ✓ Candidate config has differences from running config")
+                            else:
+                                logger.warning(f"compare_config() returned empty - no diff available")
+                                logs.append(f"  ⚠ compare_config() returned empty/None")
+                    except Exception as diff_check_error:
+                        logger.error(f"Exception in compare_config(): {diff_check_error}")
+                        logs.append(f"  ⚠ Exception checking config diff: {str(diff_check_error)}")
+                        import traceback
+                        logger.debug(f"Traceback: {traceback.format_exc()}")
+                
                 # Phase 1.5: Compare/Preview changes (optional, if supported by driver)
                 # Note: Current device configuration is already shown in views.py before deployment
                 # (interface-specific config, not full device config - matches dry run format)
@@ -1513,7 +1638,89 @@ class NAPALMDeviceManager:
                 logger.info(f"Phase 2: Committing with {timeout}s rollback timer (platform supports commit-confirm)...")
                 logs.append(f"  Method: Native commit-confirm (auto-rollback in {timeout}s)")
                 logs.append(f"  Committing configuration...")
-                self.connection.commit_config(revert_in=timeout)
+                
+                # For Cumulus, check for pending commits BEFORE committing to verify no conflicts
+                if driver_name == 'cumulus':
+                    try:
+                        if hasattr(self.connection, 'device') and hasattr(self.connection.device, 'send_command'):
+                            # Check current revision count before commit
+                            history_before = self.connection.device.send_command('nv config history | head -5', read_timeout=10)
+                            logger.debug(f"Config history before commit:\n{history_before}")
+                            
+                            # Check if there are any pending commits that might conflict
+                            pending_before = self.connection.device.send_command('nv config history | grep -i "pending\\|confirm" | head -1', read_timeout=10)
+                            if pending_before:
+                                logger.warning(f"Found existing pending commit before new commit: {pending_before}")
+                                logs.append(f"  ⚠ Warning: Found existing pending commit - may conflict")
+                    except Exception as check_error:
+                        logger.debug(f"Could not check pre-commit state: {check_error}")
+                
+                # Execute commit_config - this should execute: nv config apply --confirm {timeout}s -y
+                try:
+                    # DEBUG: Log what commit_config should do
+                    logger.info(f"About to call commit_config(revert_in={timeout})")
+                    logs.append(f"  [DEBUG] Calling commit_config(revert_in={timeout})...")
+                    
+                    # For Cumulus, log what command will be executed
+                    if driver_name == 'cumulus':
+                        expected_cmd = f"nv config apply --confirm {timeout}s -y"
+                        logger.info(f"Expected command: {expected_cmd}")
+                        logs.append(f"  [DEBUG] Expected NVUE command: {expected_cmd}")
+                        
+                        # Check for pending commits before executing
+                        try:
+                            if hasattr(self.connection, 'has_pending_commit'):
+                                has_pending = self.connection.has_pending_commit()
+                                logger.info(f"has_pending_commit() before commit: {has_pending}")
+                                logs.append(f"  [DEBUG] has_pending_commit() before commit: {has_pending}")
+                                if has_pending:
+                                    logger.warning(f"WARNING: Pending commit already exists - commit_config may fail")
+                                    logs.append(f"  ⚠ WARNING: Pending commit already exists")
+                        except Exception as pending_check_error:
+                            logger.debug(f"Could not check pending commit: {pending_check_error}")
+                    
+                    commit_result = self.connection.commit_config(revert_in=timeout)
+                    logger.info(f"commit_config() returned: {commit_result}")
+                    logs.append(f"  [DEBUG] commit_config() return value: {commit_result}")
+                    logs.append(f"  [DEBUG] commit_config() return type: {type(commit_result)}")
+                    
+                    # Check if there's actually a diff to apply (Cumulus won't create revision if no changes)
+                    if driver_name == 'cumulus':
+                        try:
+                            if hasattr(self.connection, 'device') and hasattr(self.connection.device, 'send_command'):
+                                # Check if there are pending changes immediately after commit
+                                time.sleep(0.5)  # Small delay to allow revision to be created
+                                diff_check = self.connection.device.send_command('nv config diff', read_timeout=10)
+                                logger.info(f"Config diff immediately after commit:\n{diff_check}")
+                                logs.append(f"  [DEBUG] Config diff immediately after commit:")
+                                if diff_check:
+                                    for line in diff_check.split('\n')[:20]:
+                                        if line.strip():
+                                            logs.append(f"    {line.strip()}")
+                                    
+                                    if 'no changes' in diff_check.lower():
+                                        logger.warning(f"No pending changes found - commit may not have created a revision")
+                                        logs.append(f"  ⚠ Warning: No pending changes detected - config may already match")
+                                    else:
+                                        logger.info(f"Pending changes detected after commit")
+                                        logs.append(f"  ✓ Pending changes detected")
+                                else:
+                                    logger.warning(f"diff_check returned empty/None")
+                                    logs.append(f"  ⚠ Config diff returned empty")
+                        except Exception as diff_error:
+                            logger.error(f"Exception checking config diff after commit: {diff_error}")
+                            logs.append(f"  ⚠ Exception checking diff: {str(diff_error)}")
+                            import traceback
+                            logger.debug(f"Traceback: {traceback.format_exc()}")
+                    
+                except Exception as commit_error:
+                    logger.error(f"commit_config() raised exception: {commit_error}")
+                    logs.append(f"  ✗ Commit FAILED with exception: {str(commit_error)}")
+                    import traceback
+                    logger.error(f"Full traceback:\n{traceback.format_exc()}")
+                    logs.append(f"  [DEBUG] Exception type: {type(commit_error).__name__}")
+                    raise  # Re-raise to be caught by outer exception handler
+                
                 logger.info(f"Phase 2: Config committed (will auto-rollback in {timeout}s if not confirmed)")
                 logs.append(f"  ✓ Configuration committed with {timeout}s rollback timer")
                 logs.append(f"  ⚠ Will auto-rollback if not confirmed within {timeout}s")
@@ -1524,25 +1731,55 @@ class NAPALMDeviceManager:
                 if driver_name == 'cumulus':
                     try:
                         if hasattr(self.connection, 'device') and hasattr(self.connection.device, 'send_command'):
-                            # Get pending commits - should return list of revision IDs in "confirm" state
-                            pending_rev_output = self.connection.device.send_command('nv config revision -o json', read_timeout=10)
+                            # Wait a moment for the revision to be created
+                            import time
+                            time.sleep(0.5)
+                            
+                            # Use nv config history to find pending revisions (more reliable than revision -o json)
+                            # Look for revisions with "pending" or "confirm" status
+                            pending_rev_output = self.connection.device.send_command('nv config history | head -3', read_timeout=10)
+                            logger.debug(f"Full history output after commit:\n{pending_rev_output}")
+                            
+                            # Look for pending/confirm status in the output
                             if pending_rev_output:
-                                import json
-                                pending_revisions = json.loads(pending_rev_output)
-                                # Find revisions with state == "confirm"
-                                pending_confirm_ids = [k for k, v in pending_revisions.items() if v.get("state") == "confirm"]
-                                if pending_confirm_ids:
-                                    # Use the most recent pending revision (should be the one we just created)
-                                    actual_pending_revision = pending_confirm_ids[0]  # Get first/most recent
-                                    # Store it in result for Phase 5 to use
-                                    result['_cumulus_pending_revision_id'] = actual_pending_revision
-                                    logger.info(f"Found pending commit-confirm revision ID: {actual_pending_revision}")
-                                    logs.append(f"  ✓ Pending revision ID captured: {actual_pending_revision}")
+                                import re
+                                # Look for lines with "*" marker (indicates pending)
+                                lines = pending_rev_output.split('\n')
+                                for line in lines:
+                                    if '*' in line and ('pending' in line.lower() or 'confirm' in line.lower()):
+                                        # Extract revision number (format: "271 * pending (confirm)" or "Revision: 271 * pending")
+                                        rev_match = re.search(r'Revision:\s*(\d+)', line)
+                                        if not rev_match:
+                                            rev_match = re.search(r'^\s*(\d+)\s*\*', line)
+                                        if rev_match:
+                                            actual_pending_revision = rev_match.group(1)
+                                            # Store it in result for Phase 5 to use
+                                            result['_cumulus_pending_revision_id'] = actual_pending_revision
+                                            # Also update NAPALM driver's revision_id for consistency
+                                            if hasattr(self.connection, 'revision_id'):
+                                                self.connection.revision_id = actual_pending_revision
+                                            logger.info(f"Found pending commit-confirm revision ID: {actual_pending_revision}")
+                                            logs.append(f"  ✓ Pending revision ID captured: {actual_pending_revision}")
+                                            break
                                 else:
-                                    logger.warning(f"No pending commits found after commit_config - may have failed")
-                                    logs.append(f"  ⚠ No pending commits found - commit may have failed")
+                                    # No pending revision found - check if commit actually happened
+                                    logger.warning(f"No pending revision found in history output")
+                                    logs.append(f"  ⚠ No pending revision found - checking if commit succeeded...")
+                                    
+                                    # Check if there's a diff (if no diff, no revision is created)
+                                    diff_check = self.connection.device.send_command('nv config diff', read_timeout=10)
+                                    if diff_check and 'no changes' in diff_check.lower():
+                                        logs.append(f"  ⚠ No pending changes - config already matches (no revision created)")
+                                        logger.warning(f"Commit did not create revision because config already matches")
+                                    else:
+                                        logs.append(f"  ✗ WARNING: Commit may have failed - no pending revision created but changes exist")
+                                        logger.error(f"Commit may have failed - no pending revision but changes detected")
+                            else:
+                                logger.warning(f"No pending commits found after commit_config - may have failed")
+                                logs.append(f"  ⚠ No pending commits found - commit may have failed")
                     except Exception as rev_error:
                         logger.warning(f"Could not get pending revision ID: {rev_error}")
+                        logs.append(f"  ⚠ Could not get pending revision ID: {str(rev_error)[:100]}")
                         # Continue anyway - will try NAPALM's method in Phase 5
 
             elif use_eos_session:
@@ -1865,13 +2102,15 @@ class NAPALMDeviceManager:
                                     logger.warning(f"NAPALM confirm failed, trying to get pending revision now...")
                                     try:
                                         if hasattr(self.connection, 'device') and hasattr(self.connection.device, 'send_command'):
-                                            pending_rev_output = self.connection.device.send_command('nv config revision -o json', read_timeout=10)
+                                            # Use nv config history instead of revision -o json (more reliable)
+                                            pending_rev_output = self.connection.device.send_command('nv config history | grep -i "pending\\|confirm" | head -1', read_timeout=10)
                                             if pending_rev_output:
-                                                import json
-                                                pending_revisions = json.loads(pending_rev_output)
-                                                pending_confirm_ids = [k for k, v in pending_revisions.items() if v.get("state") == "confirm"]
-                                                if pending_confirm_ids:
-                                                    actual_rev = pending_confirm_ids[0]
+                                                import re
+                                                rev_match = re.search(r'Revision:\s*(\d+)', pending_rev_output)
+                                                if not rev_match:
+                                                    rev_match = re.search(r'^\s*(\d+)\s*\*', pending_rev_output)
+                                                if rev_match:
+                                                    actual_rev = rev_match.group(1)
                                                     logger.info(f"Found pending revision {actual_rev}, confirming manually...")
                                                     self.connection.device.send_command(f"nv config apply {actual_rev} --confirm-yes", read_timeout=30)
                                                     self.connection.device.send_command("nv config save", read_timeout=30)

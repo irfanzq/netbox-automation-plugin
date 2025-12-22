@@ -7,16 +7,9 @@
 
 {% block content %}
 <style>
-  /* SIMPLE FIX: Override NetBox CSS variables in dark mode - this fixes everything */
-  html[data-theme="dark"],
-  body.dark-mode,
-  body[data-bs-theme="dark"] {
-    --nbx-color-fg-default: #ffffff !important;
-    --bs-body-color: #ffffff !important;
-    --nbx-body-color: #ffffff !important;
-  }
+  /* MINIMAL FIX: Only table headers and device names in dark mode - nothing else */
   
-  /* NetBox's exact table header selector - match their specificity + higher - ALL VARIATIONS */
+  /* Table headers - White ONLY in dark mode */
   html[data-theme="dark"] table th,
   html[data-theme="dark"] table th *,
   html[data-theme="dark"] table th.orderable,
@@ -74,187 +67,27 @@
     color: #ffffff !important;
   }
   
-  /* All table cells in dark mode */
-  html[data-theme="dark"] table tbody td,
-  html[data-theme="dark"] table tbody td a,
-  html[data-theme="dark"] table tbody td *:not(.badge):not(.btn),
-  body.dark-mode table tbody td,
-  body.dark-mode table tbody td a,
-  body.dark-mode table tbody td *:not(.badge):not(.btn) {
-    color: #ffffff !important;
-  }
-  
-  /* Device names in accordion/form */
-  html[data-theme="dark"] .accordion-button strong,
-  html[data-theme="dark"] .accordion-button .device-name,
-  html[data-theme="dark"] .device-summary-card h6,
-  html[data-theme="dark"] .device-summary-card h6 a,
-  body.dark-mode .accordion-button strong,
-  body.dark-mode .accordion-button .device-name,
-  body.dark-mode .device-summary-card h6,
-  body.dark-mode .device-summary-card h6 a {
-    color: #ffffff !important;
-  }
-  
-  /* Dark mode compatible styles - NO GREY TEXT! */
-  
-  /* Card text - Black in light, White in dark */
-  .card-body,
-  .card-body *:not(input):not(select):not(textarea):not(button):not(.form-control):not(.form-select):not(.btn):not(.badge) {
-    color: #212529 !important;
-  }
-  
-  html[data-theme="dark"] .card-body,
-  html[data-theme="dark"] .card-body *:not(input):not(select):not(textarea):not(button):not(.form-control):not(.form-select):not(.btn):not(.badge),
-  body.dark-mode .card-body,
-  body.dark-mode .card-body *:not(input):not(select):not(textarea):not(button):not(.form-control):not(.form-select):not(.btn):not(.badge) {
-    color: #ffffff !important;
-  }
-  
-  /* Text elements - NO GREY TEXT! */
-  .card-body .form-label, .card-body label, .card-body p, .card-body div:not(.badge), .card-body span:not(.badge), .card-body small,
-  .card-body h1, .card-body h2, .card-body h3, .card-body h4, .card-body h5, .card-body h6,
-  .card-body .card-title, .card-body dt, .card-body dd,
-  .card-header, .card-header h5, .card-header .card-title {
-    color: #212529 !important;
-  }
-
-  html[data-theme="dark"] .card-body .form-label, html[data-theme="dark"] .card-body label, html[data-theme="dark"] .card-body p,
-  html[data-theme="dark"] .card-body div:not(.badge), html[data-theme="dark"] .card-body span:not(.badge), html[data-theme="dark"] .card-body small,
-  html[data-theme="dark"] .card-body h1, html[data-theme="dark"] .card-body h2, html[data-theme="dark"] .card-body h3,
-  html[data-theme="dark"] .card-body h4, html[data-theme="dark"] .card-body h5, html[data-theme="dark"] .card-body h6,
-  html[data-theme="dark"] .card-body .card-title, html[data-theme="dark"] .card-body dt, html[data-theme="dark"] .card-body dd,
-  html[data-theme="dark"] .card-header, html[data-theme="dark"] .card-header h5, html[data-theme="dark"] .card-header .card-title,
-  body.dark-mode .card-body .form-label, body.dark-mode .card-body label, body.dark-mode .card-body p,
-  body.dark-mode .card-body div:not(.badge), body.dark-mode .card-body span:not(.badge), body.dark-mode .card-body small,
-  body.dark-mode .card-body h1, body.dark-mode .card-body h2, body.dark-mode .card-body h3,
-  body.dark-mode .card-body h4, body.dark-mode .card-body h5, body.dark-mode .card-body h6,
-  body.dark-mode .card-body .card-title, body.dark-mode .card-body dt, body.dark-mode .card-body dd,
-  body.dark-mode .card-header, body.dark-mode .card-header h5, body.dark-mode .card-header .card-title {
-    color: #ffffff !important;
-  }
-  
-  /* text-muted - NO GREY: Black in light, White in dark */
-  .text-muted, p.text-muted, label.text-muted, small.text-muted, td.text-muted, span.text-muted {
-    color: #212529 !important;
-    opacity: 1 !important;
-  }
-  
-  html[data-theme="dark"] .text-muted, html[data-theme="dark"] p.text-muted, html[data-theme="dark"] label.text-muted,
-  html[data-theme="dark"] small.text-muted, html[data-theme="dark"] td.text-muted, html[data-theme="dark"] span.text-muted,
-  body.dark-mode .text-muted, body.dark-mode p.text-muted, body.dark-mode label.text-muted,
-  body.dark-mode small.text-muted, body.dark-mode td.text-muted, body.dark-mode span.text-muted {
-    color: #ffffff !important;
-    opacity: 1 !important;
-  }
-  
-  /* Table text - HARDCODED WHITE IN DARK MODE */
-  .table, .table td, .table th {
-    color: #212529 !important;
-  }
-  
-  html[data-theme="dark"] .table, html[data-theme="dark"] .table td, html[data-theme="dark"] .table th,
-  html[data-theme="dark"] .table a, html[data-theme="dark"] .table td a, html[data-theme="dark"] .table th a,
-  html[data-theme="dark"] .table td *, html[data-theme="dark"] .table th *,
-  body.dark-mode .table, body.dark-mode .table td, body.dark-mode .table th,
-  body.dark-mode .table a, body.dark-mode .table td a, body.dark-mode .table th a,
-  body.dark-mode .table td *, body.dark-mode .table th * {
-    color: #ffffff !important;
-  }
-  
-  /* Device names in table - HARDCODED WHITE */
-  html[data-theme="dark"] .table td:first-child,
-  html[data-theme="dark"] .table td:first-child a,
-  html[data-theme="dark"] .table td:first-child *,
-  body.dark-mode .table td:first-child,
-  body.dark-mode .table td:first-child a,
-  body.dark-mode .table td:first-child * {
-    color: #ffffff !important;
-  }
-  
-  /* Table headers - HARDCODED WHITE IN DARK MODE */
-  html[data-theme="dark"] .table thead th,
-  html[data-theme="dark"] .table thead th *,
-  html[data-theme="dark"] .table thead th a,
-  html[data-theme="dark"] .table thead th strong,
-  html[data-theme="dark"] .table thead th span,
-  body.dark-mode .table thead th,
-  body.dark-mode .table thead th *,
-  body.dark-mode .table thead th a,
-  body.dark-mode .table thead th strong,
-  body.dark-mode .table thead th span {
-    color: #ffffff !important;
-  }
-  
-  /* Device names in table cells - HARDCODED WHITE IN DARK MODE - MAXIMUM SPECIFICITY */
+  /* Device names in table (first column) - White ONLY in dark mode */
   html[data-theme="dark"] .table tbody td:first-child,
   html[data-theme="dark"] .table tbody td:first-child a,
-  html[data-theme="dark"] .table tbody td:first-child *,
-  html[data-theme="dark"] .table tbody td:first-child strong,
   html[data-theme="dark"] .table tbody td:first-child span,
-  html[data-theme="dark"] .table tbody td:first-child div,
-  html[data-theme="dark"] .table tbody td:first-child p,
-  html[data-theme="dark"] .table tbody tr td:first-child,
-  html[data-theme="dark"] .table tbody tr td:first-child a,
-  html[data-theme="dark"] .table tbody tr td:first-child *,
+  html[data-theme="dark"] .table tbody td:first-child strong,
   body.dark-mode .table tbody td:first-child,
   body.dark-mode .table tbody td:first-child a,
-  body.dark-mode .table tbody td:first-child *,
-  body.dark-mode .table tbody td:first-child strong,
   body.dark-mode .table tbody td:first-child span,
-  body.dark-mode .table tbody td:first-child div,
-  body.dark-mode .table tbody td:first-child p,
-  body.dark-mode .table tbody tr td:first-child,
-  body.dark-mode .table tbody tr td:first-child a,
-  body.dark-mode .table tbody tr td:first-child * {
+  body.dark-mode .table tbody td:first-child strong {
     color: #ffffff !important;
   }
   
-  /* ALL table cells in dark mode - force white */
-  html[data-theme="dark"] .table tbody td,
-  html[data-theme="dark"] .table tbody td a,
-  html[data-theme="dark"] .table tbody td *:not(.badge):not(.btn),
-  body.dark-mode .table tbody td,
-  body.dark-mode .table tbody td a,
-  body.dark-mode .table tbody td *:not(.badge):not(.btn) {
-    color: #ffffff !important;
-  }
-  
-  /* Device Summary section - device names and headers - HARDCODED WHITE IN DARK MODE */
+  /* Device names in summary cards - White ONLY in dark mode */
   html[data-theme="dark"] .device-summary-card h6,
   html[data-theme="dark"] .device-summary-card h6 a,
   html[data-theme="dark"] .device-summary-card h6 span,
-  html[data-theme="dark"] .device-summary-card h6 *,
+  html[data-theme="dark"] .device-summary-card h6 strong,
   body.dark-mode .device-summary-card h6,
   body.dark-mode .device-summary-card h6 a,
   body.dark-mode .device-summary-card h6 span,
-  body.dark-mode .device-summary-card h6 * {
-    color: #ffffff !important;
-  }
-  
-  /* Card headers and titles - HARDCODED WHITE IN DARK MODE */
-  html[data-theme="dark"] .card-header h5,
-  html[data-theme="dark"] .card-header .card-title,
-  html[data-theme="dark"] .card-header h5 *,
-  html[data-theme="dark"] .card-title,
-  html[data-theme="dark"] .card-title *,
-  html[data-theme="dark"] h5.card-title,
-  html[data-theme="dark"] h5.card-title *,
-  body.dark-mode .card-header h5,
-  body.dark-mode .card-header .card-title,
-  body.dark-mode .card-header h5 *,
-  body.dark-mode .card-title,
-  body.dark-mode .card-title *,
-  body.dark-mode h5.card-title,
-  body.dark-mode h5.card-title * {
-    color: #ffffff !important;
-  }
-  
-  /* "Device Summary" and "VLAN Deployment Results" headers - HARDCODED WHITE IN DARK MODE */
-  html[data-theme="dark"] .card-header .card-title.mb-0,
-  html[data-theme="dark"] .card-header h5.card-title.mb-0,
-  body.dark-mode .card-header .card-title.mb-0,
-  body.dark-mode .card-header h5.card-title.mb-0 {
+  body.dark-mode .device-summary-card h6 strong {
     color: #ffffff !important;
   }
   
@@ -559,59 +392,41 @@
           });
         }
         
-        // AGGRESSIVE FIX: Force white text with inline styles - highest priority
+        // MINIMAL FIX: Only table headers and device names in dark mode
         function forceWhiteText() {
           const isDark = document.documentElement.getAttribute('data-theme') === 'dark' || 
                         document.body.classList.contains('dark-mode') ||
-                        document.body.getAttribute('data-bs-theme') === 'dark';
-          if (!isDark) return;
+                        document.documentElement.getAttribute('data-bs-theme') === 'dark';
+          if (!isDark) return; // Only run in dark mode
           
-          // Table headers - ALL possible variations with recursive children
-          function forceWhiteOnElementAndChildren(element) {
-            element.style.setProperty('color', '#ffffff', 'important');
-            element.querySelectorAll('*').forEach(child => {
+          // Table headers ONLY - force white
+          document.querySelectorAll('table th, table thead th, table thead tr th, table th.orderable, table th.orderable a, table th a').forEach(el => {
+            el.style.setProperty('color', '#ffffff', 'important');
+            // Force on direct children
+            el.querySelectorAll('*').forEach(child => {
               if (!child.closest('.badge') && !child.closest('.btn')) {
                 child.style.setProperty('color', '#ffffff', 'important');
-                forceWhiteOnElementAndChildren(child); // Recursive
               }
             });
-          }
-          
-          document.querySelectorAll('table th, table thead th, table thead tr th, table th.orderable, table th.orderable a, table th a, table th *, table thead th *, table thead tr th *, table thead tr th a, table thead tr th span').forEach(el => {
-            forceWhiteOnElementAndChildren(el);
           });
           
-          // All table cells - force white
-          document.querySelectorAll('table tbody td, table tbody td a, table tbody tr td').forEach(el => {
-            if (!el.closest('.badge') && !el.closest('.btn') && 
-                !el.classList.contains('text-success') && !el.classList.contains('text-info') &&
-                !el.classList.contains('text-danger') && !el.classList.contains('text-warning')) {
-              el.style.setProperty('color', '#ffffff', 'important');
-              // Force on direct text nodes and children - RECURSIVE
-              function forceWhiteOnChildren(parent) {
-                parent.querySelectorAll('*').forEach(child => {
-                  if (!child.closest('.badge') && !child.closest('.btn') &&
-                      !child.classList.contains('text-success') && !child.classList.contains('text-info') &&
-                      !child.classList.contains('text-danger') && !child.classList.contains('text-warning')) {
-                    child.style.setProperty('color', '#ffffff', 'important');
-                    forceWhiteOnChildren(child); // Recursive to get all nested children
-                  }
-                });
-              }
-              forceWhiteOnChildren(el);
-            }
-          });
-          
-          // Device names in cards and accordion - ALL variations with children
-          document.querySelectorAll('.device-summary-card h6, .device-summary-card h6 a, .device-summary-card h6 *, .accordion-button, .accordion-button strong, .accordion-button .device-name, .accordion-button *, .accordion-header button, .accordion-header button strong, .accordion-header button *').forEach(el => {
+          // Device names in first column ONLY - force white
+          document.querySelectorAll('table tbody td:first-child, table tbody td:first-child a, table tbody td:first-child span, table tbody td:first-child strong').forEach(el => {
             if (!el.closest('.badge') && !el.closest('.btn')) {
               el.style.setProperty('color', '#ffffff', 'important');
-              // Force all children
+              // Force on direct children only
               el.querySelectorAll('*').forEach(child => {
                 if (!child.closest('.badge') && !child.closest('.btn')) {
                   child.style.setProperty('color', '#ffffff', 'important');
                 }
               });
+            }
+          });
+          
+          // Device names in summary cards ONLY - force white
+          document.querySelectorAll('.device-summary-card h6, .device-summary-card h6 a, .device-summary-card h6 span, .device-summary-card h6 strong').forEach(el => {
+            if (!el.closest('.badge') && !el.closest('.btn')) {
+              el.style.setProperty('color', '#ffffff', 'important');
             }
           });
         }

@@ -6,153 +6,18 @@
 
 {% block content %}
 <style>
-  /* AGGRESSIVE FIX: Override NetBox CSS variables in dark mode */
-  html[data-theme="dark"],
-  body.dark-mode,
-  body[data-bs-theme="dark"] {
-    --nbx-color-fg-default: #ffffff !important;
-    --bs-body-color: #ffffff !important;
-    --nbx-body-color: #ffffff !important;
-  }
+  /* MINIMAL FIX: Only device names in accordion buttons in dark mode - nothing else */
   
-  /* Device names in accordion buttons - ALL variations */
+  /* Device names in accordion buttons - White ONLY in dark mode */
   html[data-theme="dark"] .accordion-button strong,
   html[data-theme="dark"] .accordion-button .device-name,
-  html[data-theme="dark"] .accordion-button,
-  html[data-theme="dark"] .accordion-button *,
+  html[data-theme="dark"] .accordion-button span:has(.device-name),
   body.dark-mode .accordion-button strong,
   body.dark-mode .accordion-button .device-name,
-  body.dark-mode .accordion-button,
-  body.dark-mode .accordion-button *,
+  body.dark-mode .accordion-button span:has(.device-name),
   body[data-bs-theme="dark"] .accordion-button strong,
-  body[data-bs-theme="dark"] .accordion-button .device-name,
-  body[data-bs-theme="dark"] .accordion-button,
-  body[data-bs-theme="dark"] .accordion-button * {
+  body[data-bs-theme="dark"] .accordion-button .device-name {
     color: #ffffff !important;
-  }
-  
-  /* Dark mode compatibility for VLAN Deployment Form */
-  /* Use NetBox CSS variables with explicit fallbacks - NO GREY! */
-  
-  /* Use NetBox CSS variables - they adapt to theme automatically */
-  .card-body,
-  .card-body *:not(input):not(select):not(textarea):not(button):not(.form-control):not(.form-select):not(.btn):not(.badge) {
-    color: var(--nbx-color-fg-default) !important;
-  }
-  
-  /* Force visibility - ensure text is never grey */
-  .card-body .text-muted,
-  .card-body .form-text,
-  .card-body small {
-    color: var(--nbx-color-fg-default) !important;
-    opacity: 1 !important;
-  }
-  
-  /* Specific overrides for common text elements */
-  .card-body .form-label,
-  .card-body label:not(.form-check-label),
-  .card-body .form-check-label,
-  .card-body p,
-  .card-body div.form-text,
-  .card-body span,
-  .card-body small,
-  .card-body h1,
-  .card-body h2,
-  .card-body h3,
-  .card-body h4,
-  .card-body h5,
-  .card-body h6,
-  .card-body .card-title {
-    color: var(--nbx-color-fg-default, #212529) !important;
-  }
-  
-  /* Dark mode overrides */
-  html[data-theme="dark"] .card-body .form-label,
-  html[data-theme="dark"] .card-body label:not(.form-check-label),
-  html[data-theme="dark"] .card-body .form-check-label,
-  html[data-theme="dark"] .card-body p,
-  html[data-theme="dark"] .card-body div.form-text,
-  html[data-theme="dark"] .card-body span,
-  html[data-theme="dark"] .card-body small,
-  html[data-theme="dark"] .card-body h1,
-  html[data-theme="dark"] .card-body h2,
-  html[data-theme="dark"] .card-body h3,
-  html[data-theme="dark"] .card-body h4,
-  html[data-theme="dark"] .card-body h5,
-  html[data-theme="dark"] .card-body h6,
-  html[data-theme="dark"] .card-body .card-title,
-  body.dark-mode .card-body .form-label,
-  body.dark-mode .card-body label:not(.form-check-label),
-  body.dark-mode .card-body .form-check-label,
-  body.dark-mode .card-body p,
-  body.dark-mode .card-body div.form-text,
-  body.dark-mode .card-body span,
-  body.dark-mode .card-body small,
-  body.dark-mode .card-body h1,
-  body.dark-mode .card-body h2,
-  body.dark-mode .card-body h3,
-  body.dark-mode .card-body h4,
-  body.dark-mode .card-body h5,
-  body.dark-mode .card-body h6,
-  body.dark-mode .card-body .card-title {
-    color: var(--nbx-color-fg-default, #ffffff) !important; /* White for dark mode */
-  }
-  
-  /* Already covered by html[data-theme="dark"] and body.dark-mode selectors above */
-  
-  /* Help text and muted text - NO GREY: Black in light, White in dark */
-  .card-body .form-text,
-  .card-body .text-muted,
-  .card-body p.text-muted,
-  .card-body label.text-muted,
-  .card-body small.text-muted,
-  .form-text,
-  .text-muted,
-  p.text-muted,
-  label.text-muted,
-  small.text-muted,
-  small {
-    color: #212529 !important; /* Black for light mode */
-    opacity: 1 !important;
-  }
-  
-  html[data-theme="dark"] .card-body .form-text,
-  html[data-theme="dark"] .card-body .text-muted,
-  html[data-theme="dark"] .card-body p.text-muted,
-  html[data-theme="dark"] .card-body label.text-muted,
-  html[data-theme="dark"] .card-body small.text-muted,
-  html[data-theme="dark"] .form-text,
-  html[data-theme="dark"] .text-muted,
-  html[data-theme="dark"] p.text-muted,
-  html[data-theme="dark"] label.text-muted,
-  html[data-theme="dark"] small.text-muted,
-  html[data-theme="dark"] small,
-  body.dark-mode .card-body .form-text,
-  body.dark-mode .card-body .text-muted,
-  body.dark-mode .card-body p.text-muted,
-  body.dark-mode .card-body label.text-muted,
-  body.dark-mode .card-body small.text-muted,
-  body.dark-mode .form-text,
-  body.dark-mode .text-muted,
-  body.dark-mode p.text-muted,
-  body.dark-mode label.text-muted,
-  body.dark-mode small.text-muted,
-  body.dark-mode small {
-    color: #ffffff !important; /* White for dark mode */
-    opacity: 1 !important;
-  }
-  
-  /* Card header text */
-  .card-header,
-  .card-header * {
-    color: #212529 !important; /* Black for light mode */
-  }
-  
-  html[data-theme="dark"] .card-header,
-  html[data-theme="dark"] .card-header *,
-  body.dark-mode .card-header,
-  body.dark-mode .card-header * {
-    color: #ffffff !important; /* White for dark mode */
   }
   
   /* Force dark text in ALL input fields for light mode */
@@ -2501,35 +2366,23 @@
               }
             }
             
-            // ULTRA AGGRESSIVE FIX: Force white text on device names in dark mode
+            // MINIMAL FIX: Only device names in accordion buttons in dark mode
             function forceWhiteText() {
               const isDark = document.documentElement.getAttribute('data-theme') === 'dark' || 
                             document.body.classList.contains('dark-mode') ||
                             document.documentElement.getAttribute('data-bs-theme') === 'dark';
-              if (!isDark) return;
+              if (!isDark) return; // Only run in dark mode
               
-              // Recursive function to force white on element and all children
-              function forceWhiteOnElementAndChildren(element) {
-                if (!element.closest('.badge') && !element.closest('.btn')) {
-                  element.style.setProperty('color', '#ffffff', 'important');
-                  element.querySelectorAll('*').forEach(child => {
+              // Device names in accordion buttons ONLY - force white
+              document.querySelectorAll('.accordion-button strong, .accordion-button .device-name, .accordion-header button strong').forEach(el => {
+                if (!el.closest('.badge') && !el.closest('.btn')) {
+                  el.style.setProperty('color', '#ffffff', 'important');
+                  // Force on direct children (device name text)
+                  el.querySelectorAll('*').forEach(child => {
                     if (!child.closest('.badge') && !child.closest('.btn')) {
                       child.style.setProperty('color', '#ffffff', 'important');
-                      forceWhiteOnElementAndChildren(child); // Recursive
                     }
                   });
-                }
-              }
-              
-              // Accordion buttons and device names - ALL variations with recursive children
-              document.querySelectorAll('.accordion-button, .accordion-button strong, .accordion-button .device-name, .accordion-button *, .accordion-header, .accordion-header button, .accordion-header button strong, .accordion-header button *, .accordion-header button .device-name').forEach(el => {
-                forceWhiteOnElementAndChildren(el);
-              });
-              
-              // Also target any elements with device-name class
-              document.querySelectorAll('.device-name, .device-name *, [class*="device"]').forEach(el => {
-                if (el.textContent && el.textContent.trim() && !el.closest('.badge') && !el.closest('.btn')) {
-                  forceWhiteOnElementAndChildren(el);
                 }
               });
             }

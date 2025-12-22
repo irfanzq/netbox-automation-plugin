@@ -2774,16 +2774,29 @@ class VLANDeploymentView(View):
                         if line.strip():
                             logs.append(f"  {line}")
                     logs.append("")
-                    logs.append("--- Current Device Configuration ---")
+                    logs.append("--- Current Device Configuration (Real from Device) ---")
+                    logs.append("")
+                    
+                    # Show "Device Currently Has" section first (consistent with normal mode)
+                    logs.append("Device Currently Has (from device):")
+                    if current_device_config and current_device_config.strip() and not "ERROR:" in current_device_config:
+                        for line in current_device_config.split('\n'):
+                            if line.strip():
+                                logs.append(f"  {line}")
+                    else:
+                        logs.append("  (no configuration found)")
+                    logs.append("")
+                    
                     # Check if interface is a bond member
                     bond_member_of = device_config_result.get('bond_member_of')
                     bond_interface_config = device_config_result.get('bond_interface_config')
+                    bridge_vlans = device_config_result.get('_bridge_vlans', [])
                     
                     if bond_member_of:
                         logs.append(f"Bond Membership: Interface '{interface.name}' is a member of bond '{bond_member_of}'")
                         logs.append(f"Note: VLAN configuration will be applied to bond '{bond_member_of}', not to '{interface.name}' directly.")
                         logs.append("")
-                        logs.append(f"Interface '{interface.name}' Configuration:")
+                        logs.append(f"Interface-Level Configuration (for '{interface.name}'):")
                         if current_device_config and current_device_config.strip() and not "ERROR:" in current_device_config:
                             for line in current_device_config.split('\n'):
                                 if line.strip():
@@ -2800,6 +2813,7 @@ class VLANDeploymentView(View):
                             logs.append("  (unable to retrieve bond interface configuration)")
                     else:
                         # Not a bond member - show interface config normally
+                        logs.append("Interface-Level Configuration:")
                         if current_device_config and current_device_config.strip() and not "ERROR:" in current_device_config:
                             for line in current_device_config.split('\n'):
                                 if line.strip():
@@ -2807,6 +2821,20 @@ class VLANDeploymentView(View):
                         else:
                             logs.append("  (unable to retrieve or no configuration)")
                     logs.append("")
+                    
+                    # Bridge-Level Configuration (for Cumulus - consistent with normal mode)
+                    if platform == 'cumulus' and bridge_vlans:
+                        logs.append("Bridge-Level Configuration (br_default):")
+                        if len(bridge_vlans) > 0:
+                            vlan_list_str = self._format_vlan_list(bridge_vlans)
+                            logs.append(f"  nv set bridge domain br_default vlan {vlan_list_str}")
+                        else:
+                            logs.append("  (no VLANs configured on bridge br_default)")
+                        logs.append("")
+                    elif platform == 'cumulus' and not bridge_vlans:
+                        logs.append("Bridge-Level Configuration (br_default):")
+                        logs.append("  (bridge VLAN information not available)")
+                        logs.append("")
                     logs.append("--- Configuration Diff ---")
                     for line in config_diff.split('\n'):
                         if line.strip():
@@ -3810,6 +3838,17 @@ class VLANDeploymentView(View):
                     # Current Device Configuration (Always shown - collected from device)
                     logs.append("--- Current Device Configuration (Real from Device) ---")
                     logs.append("")
+                    
+                    # Show "Device Currently Has" section first
+                    logs.append("Device Currently Has (from device):")
+                    if current_device_config and current_device_config.strip() and not "(no configuration" in current_device_config and not "ERROR:" in current_device_config:
+                        for line in current_device_config.split('\n'):
+                            if line.strip():
+                                logs.append(f"  {line}")
+                    else:
+                        logs.append("  (no configuration found)")
+                    logs.append("")
+                    
                     # Check if interface is a bond member
                     bond_member_of = device_config_result.get('bond_member_of')
                     bond_interface_config = device_config_result.get('bond_interface_config')
@@ -3926,14 +3965,6 @@ class VLANDeploymentView(View):
                         logs.append(f"[WARN] Device config differs from NetBox config")
                         if conflict_reasons:
                             logs.append(f"  Conflicts detected: {', '.join(conflict_reasons)}")
-                        logs.append("")
-                        logs.append("Device Currently Has (from device):")
-                        if current_device_config and current_device_config.strip() and not "(no configuration" in current_device_config:
-                            for line in current_device_config.split('\n'):
-                                if line.strip():
-                                    logs.append(f"  {line}")
-                        else:
-                            logs.append("  (no configuration found)")
                         logs.append("")
                         logs.append("Device Should Have (According to NetBox):")
                         # Use proposed_config which already has the correct interface name (bond if member)
@@ -4227,6 +4258,17 @@ class VLANDeploymentView(View):
                     # Current Device Configuration
                     logs.append("--- Current Device Configuration (Real from Device) ---")
                     logs.append("")
+                    
+                    # Show "Device Currently Has" section first
+                    logs.append("Device Currently Has (from device):")
+                    if current_config_before and current_config_before.strip() and not "(no configuration" in current_config_before and not "ERROR:" in current_config_before:
+                        for line in current_config_before.split('\n'):
+                            if line.strip():
+                                logs.append(f"  {line}")
+                    else:
+                        logs.append("  (no configuration found)")
+                    logs.append("")
+                    
                     logs.append("Interface-Level Configuration:")
                     if current_config_before and current_config_before.strip() and not "(no configuration" in current_config_before and not "ERROR:" in current_config_before:
                         for line in current_config_before.split('\n'):
@@ -4305,14 +4347,6 @@ class VLANDeploymentView(View):
                         logs.append(f"[WARN] Device config differs from NetBox config")
                         if conflict_reasons:
                             logs.append(f"  Conflicts detected: {', '.join(conflict_reasons)}")
-                        logs.append("")
-                        logs.append("Device Currently Has (from device):")
-                        if current_config_before and current_config_before.strip() and not "(no configuration" in current_config_before:
-                            for line in current_config_before.split('\n'):
-                                if line.strip():
-                                    logs.append(f"  {line}")
-                        else:
-                            logs.append("  (no configuration found)")
                         logs.append("")
                         logs.append("Device Should Have (According to NetBox):")
                         # Use proposed_config which already has the correct interface name (bond if member)
@@ -5114,7 +5148,9 @@ class VLANDeploymentView(View):
                 # NAPALM's commit_config() will handle "nv config apply --confirm {timeout}s" automatically
                 # So we only need the NVUE set command, not the apply command
                 config_text = config_command
-                logs.append(f"[2.2] Cumulus NVUE command prepared: {config_text}")
+                # Log only first line to reduce noise
+                first_line = config_text.split('\n')[0] if config_text else ''
+                logs.append(f"[2.2] Deploying {len(config_text.splitlines())} command(s) to {device.name} (interface: {interface_name})")
                 logger.info(f"Deploying to Cumulus device {device.name}: {config_text}")
 
             elif platform == 'eos':
@@ -5195,31 +5231,29 @@ class VLANDeploymentView(View):
                     # This is needed because VLAN is NOT part of br_default - we checked device config
                     bridge_vlan_cmd = f"nv set bridge domain br_default vlan {vlan_id}"
                     commands_to_run.append(bridge_vlan_cmd)
-                    logs.append(f"[2.3.1] Command 1: Bridge VLAN command needed")
-                    logs.append(f"           Reason: VLAN {vlan_id} is NOT part of br_default (checked device config)")
-                    logs.append(f"           Action: Adding VLAN {vlan_id} to bridge domain br_default")
-                    logs.append(f"           Command: {bridge_vlan_cmd}")
                     logger.info(f"VLAN {vlan_id} not on bridge - will add to bridge domain br_default")
                 else:
-                    logs.append(f"[2.3.1] Command 1: Bridge VLAN command skipped")
-                    logs.append(f"           Reason: VLAN {vlan_id} already exists on br_default (checked device config)")
-                    logs.append(f"           Action: Skipping bridge VLAN command (not needed)")
                     logger.info(f"VLAN {vlan_id} already exists on bridge br_default - skipping bridge command")
                 
                 # Command 2: Add access VLAN to interface (always needed)
-                interface_access_cmd = config_command  # This is already the interface access command
+                # IMPORTANT: config_command may contain swp3 instead of bond3 - replace with interface_name (target interface)
+                interface_access_cmd = config_command
+                # If config_command contains wrong interface name, replace it with target interface_name (bond3)
+                if original_interface_name and original_interface_name != interface_name:
+                    # Replace original interface name (swp3) with target interface (bond3) in the command
+                    interface_access_cmd = interface_access_cmd.replace(f"interface {original_interface_name} ", f"interface {interface_name} ")
+                    interface_access_cmd = interface_access_cmd.replace(f"interface {original_interface_name}\n", f"interface {interface_name}\n")
+                    # For Cumulus: "nv set interface swp3" -> "nv set interface bond3"
+                    interface_access_cmd = interface_access_cmd.replace(f"nv set interface {original_interface_name} ", f"nv set interface {interface_name} ")
+                    logger.info(f"Replaced interface name from {original_interface_name} to {interface_name} in config command")
+                
                 commands_to_run.append(interface_access_cmd)
-                logs.append(f"[2.3.2] Command 2: Interface access VLAN command")
-                logs.append(f"           {interface_access_cmd}")
                 
                 # Combine commands in correct order
                 config_text = "\n".join(commands_to_run)
                 
-                # Log summary of commands that will be executed
-                logs.append(f"[2.3.3] Commands to be executed (in order):")
-                for i, cmd in enumerate(commands_to_run, 1):
-                    logs.append(f"           {i}. {cmd}")
-                logs.append(f"")
+                # Update config_command with the corrected config_text so it's used in deploy_config_safe
+                config_command = config_text
 
             # Deploy using safe deployment with post-checks
             # Both EOS and Cumulus support commit-confirm workflow:
@@ -5285,6 +5319,18 @@ class VLANDeploymentView(View):
             # Display current configuration (Always shown - same as dry run)
             logs.append(f"")
             logs.append(f"--- Current Device Configuration (Real from Device) ---")
+            logs.append(f"")
+            
+            # Show "Device Currently Has" section first
+            logs.append(f"Device Currently Has (from device):")
+            # Show bond config if available, otherwise show member config
+            config_to_show_for_current = bond_interface_config if (bond_interface_config and original_interface_name) else current_config_before
+            if config_to_show_for_current and config_to_show_for_current.strip() and not "(no configuration" in config_to_show_for_current:
+                for line in config_to_show_for_current.split('\n'):
+                    if line.strip():
+                        logs.append(f"  {line}")
+            else:
+                logs.append(f"  (no configuration found)")
             logs.append(f"")
             
             # If this is a bond member, show bond membership info and both configs
@@ -5389,16 +5435,6 @@ class VLANDeploymentView(View):
                 logs.append(f"[WARN] Device config differs from NetBox config")
                 if conflict_reasons:
                     logs.append(f"  Conflicts detected: {', '.join(conflict_reasons)}")
-                logs.append(f"")
-                logs.append(f"Device Currently Has (from device):")
-                # Show bond config if available, otherwise show member config
-                config_to_show = bond_interface_config if (bond_interface_config and original_interface_name) else current_config_before
-                if config_to_show and config_to_show.strip() and not "(no configuration" in config_to_show:
-                    for line in config_to_show.split('\n'):
-                        if line.strip():
-                            logs.append(f"  {line}")
-                else:
-                    logs.append(f"  (no configuration found)")
                 logs.append(f"")
                 logs.append(f"Device Should Have (According to NetBox):")
                 # Use proposed_config which already has the correct interface name (bond if member)
