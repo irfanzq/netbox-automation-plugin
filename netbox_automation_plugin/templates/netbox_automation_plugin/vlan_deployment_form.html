@@ -1501,12 +1501,17 @@
                 button.setAttribute('aria-controls', collapseId);
                 // Set button style explicitly for dark mode compatibility
                 const isDarkMode = document.documentElement.getAttribute('data-theme') === 'dark' || document.body.classList.contains('dark-mode');
-                button.style.color = isDarkMode ? '#ffffff' : 'var(--nbx-color-fg-default)';
-                button.style.setProperty('color', isDarkMode ? '#ffffff' : 'var(--nbx-color-fg-default)', 'important');
+                const textColor = isDarkMode ? '#ffffff' : 'var(--nbx-color-fg-default)';
+                
+                // Apply styles to button
+                button.style.color = textColor;
+                button.style.setProperty('color', textColor, 'important');
+                
                 // Create strong element separately to set explicit color
                 const strongEl = document.createElement('strong');
-                strongEl.style.color = isDarkMode ? '#ffffff' : 'var(--nbx-color-fg-default)';
-                strongEl.style.setProperty('color', isDarkMode ? '#ffffff' : 'var(--nbx-color-fg-default)', 'important');
+                strongEl.style.color = textColor;
+                strongEl.style.setProperty('color', textColor, 'important');
+                strongEl.style.setProperty('--bs-accordion-btn-color', textColor, 'important');
                 strongEl.textContent = deviceName;
                 
                 const badgeSpan = document.createElement('span');
@@ -1515,6 +1520,17 @@
                 
                 button.appendChild(strongEl);
                 button.appendChild(badgeSpan);
+                
+                // Force reapply styles after element is added to DOM (Bootstrap might override)
+                setTimeout(() => {
+                  button.style.setProperty('color', textColor, 'important');
+                  strongEl.style.setProperty('color', textColor, 'important');
+                  // Also try to remove any Bootstrap classes that might interfere
+                  if (isDarkMode) {
+                    button.classList.add('text-white');
+                    strongEl.classList.add('text-white');
+                  }
+                }, 0);
                 header.appendChild(button);
                 
                 // Body
