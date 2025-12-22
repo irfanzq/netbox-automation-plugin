@@ -835,6 +835,8 @@ class VLANDeploymentView(View):
                         device_connected = True  # Track if device is actually connected
                         device_uptime = None  # Track device uptime for connection verification
                         bridge_vlans = []  # Track bridge VLANs extracted from config
+                        bond_member_of = None  # Track bond interface name if this interface is a bond member
+                        bond_interface_config_commands = []  # Track bond interface config commands
                         try:
                             if hasattr(connection, 'cli'):
                                 # Check device uptime to verify connection
@@ -917,9 +919,23 @@ class VLANDeploymentView(View):
                                         # Check if config is inherited from range or bond
                                         inherited_from = None
                                         bond_member_of = None
+                                        bond_interface_config = None
+                                        bond_interface_config_commands = []
                                         if isinstance(interface_config, dict):
                                             inherited_from = interface_config.pop('_inherited_from', None)
                                             bond_member_of = interface_config.pop('_bond_member_of', None)
+                                        
+                                        # If interface is a bond member, get the bond interface config
+                                        if bond_member_of:
+                                            bond_interface_config = self._find_interface_config_in_json(config_data, bond_member_of)
+                                            if bond_interface_config:
+                                                # Remove metadata from bond config
+                                                if isinstance(bond_interface_config, dict):
+                                                    bond_interface_config.pop('_inherited_from', None)
+                                                    bond_interface_config.pop('_bond_member_of', None)
+                                                # Convert bond interface config to commands
+                                                bond_parsed_commands = self._parse_json_to_nv_commands(bond_interface_config, "", bond_member_of)
+                                                bond_interface_config_commands.extend(bond_parsed_commands)
                                         
                                         if interface_config:
                                             # Convert JSON structure to nv set commands
@@ -1144,7 +1160,9 @@ class VLANDeploymentView(View):
                                 'source': 'device',
                                 'timestamp': timestamp,
                                 'device_uptime': device_uptime,
-                                '_bridge_vlans': bridge_vlans  # Include bridge VLANs for checking if VLAN already exists
+                                '_bridge_vlans': bridge_vlans,  # Include bridge VLANs for checking if VLAN already exists
+                                'bond_member_of': bond_member_of,  # Bond interface name if this interface is a bond member
+                                'bond_interface_config': '\n'.join(bond_interface_config_commands) if bond_interface_config_commands else None  # Bond interface config commands
                             }
                         except Exception as e2:
                             logger.warning(f"Could not get interface config for {device.name}:{interface_name}: {e2}")
@@ -1156,7 +1174,9 @@ class VLANDeploymentView(View):
                                 'source': 'error',
                                 'timestamp': timestamp,
                                 'error': str(e2),
-                                'device_connected': True  # Device was connected, but config retrieval failed
+                                'device_connected': True,  # Device was connected, but config retrieval failed
+                                'bond_member_of': None,
+                                'bond_interface_config': None
                             }
                 except Exception as e:
                     logger.error(f"Could not connect to device {device.name}:{interface_name}: {e}")
@@ -1216,7 +1236,9 @@ class VLANDeploymentView(View):
                                 'success': True,
                                 'current_config': current_config,
                                 'source': 'device',
-                                'timestamp': timestamp
+                                'timestamp': timestamp,
+                                'bond_member_of': None,  # EOS bond detection not implemented yet
+                                'bond_interface_config': None
                             }
                         except Exception as e2:
                             logger.warning(f"Could not get interface config for {device.name}:{interface_name}: {e2}")
@@ -1695,21 +1717,12 @@ class VLANDeploymentView(View):
                 # Note: NVUE replaces the access VLAN when setting a new one
                 # The base "bridge domain br_default" membership is preserved (not removed)
                 diff_lines.append("Added:")
-                diff_lines.append(f"  + {proposed_config}")
-                # Extract VLAN ID from proposed config for bridge command
-                # Only add bridge VLAN command if VLAN doesn't already exist on bridge
-                import re
-                vlan_match = re.search(r'access\s+(\d+)', proposed_config)
-                if vlan_match:
-                    vlan_id_from_config = int(vlan_match.group(1))
-                    # Check if VLAN already exists on bridge
-                    if bridge_vlans is None:
-                        bridge_vlans = []
-                    
-                    if vlan_id_from_config not in bridge_vlans:
-                        diff_lines.append(f"  + nv set bridge domain br_default vlan {vlan_id_from_config}")
-                    else:
-                        diff_lines.append(f"  # Note: VLAN {vlan_id_from_config} already exists on bridge br_default (no bridge command needed)")
+                # Split proposed_config into lines and add "+" prefix to each line
+                proposed_lines = [line.strip() for line in proposed_config.split('\n') if line.strip()]
+                for line in proposed_lines:
+                    diff_lines.append(f"  + {line}")
+                # Note: Bridge VLAN commands are already included in proposed_config if needed
+                # (they're generated in _generate_config_from_netbox or _generate_vlan_config)
                 diff_lines.append("")
                 diff_lines.append("Note: The interface can be part of 'br_default' bridge domain AND have an access VLAN.")
                 diff_lines.append("      Only the access VLAN is replaced - bridge domain membership is preserved.")
@@ -2651,12 +2664,37 @@ class VLANDeploymentView(View):
                             logs.append(f"  {line}")
                     logs.append("")
                     logs.append("--- Current Device Configuration ---")
-                    if current_device_config and current_device_config.strip() and not "ERROR:" in current_device_config:
-                        for line in current_device_config.split('\n'):
-                            if line.strip():
-                                logs.append(f"  {line}")
+                    # Check if interface is a bond member
+                    bond_member_of = device_config_result.get('bond_member_of')
+                    bond_interface_config = device_config_result.get('bond_interface_config')
+                    
+                    if bond_member_of:
+                        logs.append(f"Bond Membership: Interface '{interface.name}' is a member of bond '{bond_member_of}'")
+                        logs.append(f"Note: VLAN configuration will be applied to bond '{bond_member_of}', not to '{interface.name}' directly.")
+                        logs.append("")
+                        logs.append(f"Interface '{interface.name}' Configuration:")
+                        if current_device_config and current_device_config.strip() and not "ERROR:" in current_device_config:
+                            for line in current_device_config.split('\n'):
+                                if line.strip():
+                                    logs.append(f"  {line}")
+                        else:
+                            logs.append("  (no configuration found for this interface)")
+                        logs.append("")
+                        logs.append(f"Bond Interface '{bond_member_of}' Configuration:")
+                        if bond_interface_config and bond_interface_config.strip():
+                            for line in bond_interface_config.split('\n'):
+                                if line.strip():
+                                    logs.append(f"  {line}")
+                        else:
+                            logs.append("  (unable to retrieve bond interface configuration)")
                     else:
-                        logs.append("  (unable to retrieve or no configuration)")
+                        # Not a bond member - show interface config normally
+                        if current_device_config and current_device_config.strip() and not "ERROR:" in current_device_config:
+                            for line in current_device_config.split('\n'):
+                                if line.strip():
+                                    logs.append(f"  {line}")
+                        else:
+                            logs.append("  (unable to retrieve or no configuration)")
                     logs.append("")
                     logs.append("--- Configuration Diff ---")
                     for line in config_diff.split('\n'):
@@ -2763,6 +2801,11 @@ class VLANDeploymentView(View):
                     if bond_info:
                         bond_interface_for_stats = bond_info['bond_name']
                         target_interface_for_stats = bond_interface_for_stats
+                        
+                        # Always warn if interface is a bond member (inform user that config will be applied to bond)
+                        bond_name = bond_info.get('bond_name', 'unknown')
+                        warnings.append(f"BOND MEMBER: Interface '{interface.name}' is a member of bond '{bond_name}'. VLAN configuration will be applied to bond '{bond_name}', not to '{interface.name}' directly.")
+                        has_conflicts = True  # Set as warning to inform user
                         
                         # Check for bond mismatches
                         if bond_info.get('has_mismatch'):
@@ -3013,12 +3056,37 @@ class VLANDeploymentView(View):
                                 logs.append(f"  {line}")
                         logs.append("")
                         logs.append("--- Current Device Configuration ---")
-                        if current_device_config and current_device_config.strip() and not "ERROR:" in current_device_config:
-                            for line in current_device_config.split('\n'):
-                                if line.strip():
-                                    logs.append(f"  {line}")
+                        # Check if interface is a bond member
+                        bond_member_of = device_config_result.get('bond_member_of')
+                        bond_interface_config = device_config_result.get('bond_interface_config')
+                        
+                        if bond_member_of:
+                            logs.append(f"Bond Membership: Interface '{interface.name}' is a member of bond '{bond_member_of}'")
+                            logs.append(f"Note: VLAN configuration will be applied to bond '{bond_member_of}', not to '{interface.name}' directly.")
+                            logs.append("")
+                            logs.append(f"Interface '{interface.name}' Configuration:")
+                            if current_device_config and current_device_config.strip() and not "ERROR:" in current_device_config:
+                                for line in current_device_config.split('\n'):
+                                    if line.strip():
+                                        logs.append(f"  {line}")
+                            else:
+                                logs.append("  (no configuration found for this interface)")
+                            logs.append("")
+                            logs.append(f"Bond Interface '{bond_member_of}' Configuration:")
+                            if bond_interface_config and bond_interface_config.strip():
+                                for line in bond_interface_config.split('\n'):
+                                    if line.strip():
+                                        logs.append(f"  {line}")
+                            else:
+                                logs.append("  (unable to retrieve bond interface configuration)")
                         else:
-                            logs.append("  (unable to retrieve or no configuration)")
+                            # Not a bond member - show interface config normally
+                            if current_device_config and current_device_config.strip() and not "ERROR:" in current_device_config:
+                                for line in current_device_config.split('\n'):
+                                    if line.strip():
+                                        logs.append(f"  {line}")
+                            else:
+                                logs.append("  (unable to retrieve or no configuration)")
                         logs.append("")
                         logs.append("--- Configuration Diff ---")
                         for line in config_diff.split('\n'):
@@ -3074,9 +3142,30 @@ class VLANDeploymentView(View):
                             has_conflicts = True
                         
                         # 4. Port-channel/Bond membership - handled automatically (config applied to bond)
-                        # Only warn if user is applying to member interface (we'll auto-redirect to bond)
-                        if hasattr(interface, 'lag') and interface.lag:
-                            warnings.append(f"Interface is a bond member - VLAN config will be automatically applied to bond interface '{interface.lag.name}' instead of member '{interface.name}'")
+                        # Check both NetBox and device config for bond membership
+                        bond_info_section2 = self._get_bond_interface_for_member(device, interface.name, platform=platform)
+                        if bond_info_section2:
+                            bond_name_section2 = bond_info_section2.get('bond_name', 'unknown')
+                            warnings.append(f"BOND MEMBER: Interface '{interface.name}' is a member of bond '{bond_name_section2}'. VLAN configuration will be applied to bond '{bond_name_section2}', not to '{interface.name}' directly.")
+                            has_conflicts = True
+                            
+                            # Check for bond mismatches
+                            if bond_info_section2.get('has_mismatch'):
+                                netbox_bond = bond_info_section2.get('netbox_bond_name', 'N/A')
+                                device_bond = bond_info_section2.get('device_bond_name', 'N/A')
+                                warnings.append(f"BOND MISMATCH: NetBox has bond '{netbox_bond}' but device config has bond '{device_bond}'. NetBox bond will be used as source of truth. Device bond will be migrated to match NetBox.")
+                                has_conflicts = True
+                            
+                            # Check if NetBox is missing bond info
+                            if bond_info_section2.get('netbox_missing_bond'):
+                                device_bond = bond_info_section2.get('device_bond_name', 'N/A')
+                                all_members = bond_info_section2.get('all_members', [])
+                                members_str = ', '.join(all_members) if all_members else 'unknown'
+                                warnings.append(f"NETBOX MISSING BOND: Device has bond '{device_bond}' with members [{members_str}], but NetBox does not have this bond defined. In deployment mode, bond will be created in NetBox after successful config deployment. For now, please create bond '{device_bond}' in NetBox and add interfaces [{members_str}] to it, then re-run dry run.")
+                                has_conflicts = True
+                        elif hasattr(interface, 'lag') and interface.lag:
+                            # NetBox has bond but device config check didn't find it (fallback to NetBox only)
+                            warnings.append(f"Interface is a bond member (NetBox) - VLAN config will be automatically applied to bond interface '{interface.lag.name}' instead of member '{interface.name}'")
                             has_conflicts = True
                         
                         # 5. Breakout interfaces - only warn if applying to parent (not child)
@@ -3564,13 +3653,37 @@ class VLANDeploymentView(View):
                     # Current Device Configuration (Always shown - collected from device)
                     logs.append("--- Current Device Configuration (Real from Device) ---")
                     logs.append("")
-                    logs.append("Interface-Level Configuration:")
-                    if current_device_config and current_device_config.strip() and not "(no configuration" in current_device_config and not "ERROR:" in current_device_config:
-                        for line in current_device_config.split('\n'):
-                            if line.strip():
-                                logs.append(f"  {line}")
+                    # Check if interface is a bond member
+                    bond_member_of = device_config_result.get('bond_member_of')
+                    bond_interface_config = device_config_result.get('bond_interface_config')
+                    
+                    if bond_member_of:
+                        logs.append(f"Bond Membership: Interface '{interface_name}' is a member of bond '{bond_member_of}'")
+                        logs.append(f"Note: VLAN configuration will be applied to bond '{bond_member_of}', not to '{interface_name}' directly.")
+                        logs.append("")
+                        logs.append("Interface-Level Configuration:")
+                        if current_device_config and current_device_config.strip() and not "(no configuration" in current_device_config and not "ERROR:" in current_device_config:
+                            for line in current_device_config.split('\n'):
+                                if line.strip():
+                                    logs.append(f"  {line}")
+                        else:
+                            logs.append("  (no configuration found for this interface)")
+                        logs.append("")
+                        logs.append(f"Bond Interface '{bond_member_of}' Configuration:")
+                        if bond_interface_config and bond_interface_config.strip():
+                            for line in bond_interface_config.split('\n'):
+                                if line.strip():
+                                    logs.append(f"  {line}")
+                        else:
+                            logs.append("  (unable to retrieve bond interface configuration)")
                     else:
-                        logs.append("  (no configuration found or unable to retrieve)")
+                        logs.append("Interface-Level Configuration:")
+                        if current_device_config and current_device_config.strip() and not "(no configuration" in current_device_config and not "ERROR:" in current_device_config:
+                            for line in current_device_config.split('\n'):
+                                if line.strip():
+                                    logs.append(f"  {line}")
+                        else:
+                            logs.append("  (no configuration found or unable to retrieve)")
                     logs.append("")
                     
                     # Bridge-Level Configuration (for Cumulus - shows VLANs on br_default)
@@ -3693,6 +3806,20 @@ class VLANDeploymentView(View):
                     if bond_info:
                         bond_interface_for_stats = bond_info['bond_name']
                         target_interface_for_stats = bond_interface_for_stats
+                        
+                        # Always warn if interface is a bond member (inform user that config will be applied to bond)
+                        bond_name = bond_info.get('bond_name', 'unknown')
+                        logs.append(f"[INFO] BOND MEMBER DETECTED:")
+                        logs.append(f"  Interface '{interface_name}' is a member of bond '{bond_name}'")
+                        logs.append(f"  VLAN configuration will be applied to bond '{bond_name}', not to '{interface_name}' directly.")
+                        # Update status to WARN to inform user
+                        if interface_status_text == "PASS":
+                            interface_status_text = "WARN"
+                        if overall_status_text == "PASS":
+                            overall_status_text = "WARN"
+                        if risk_level == "LOW":
+                            risk_level = "MEDIUM"
+                        logs.append("")
                         
                         # Check for bond mismatches
                         if bond_info.get('has_mismatch'):
@@ -5116,19 +5243,11 @@ class VLANDeploymentView(View):
             
             # Show what's being added
             logs.append(f"Added:")
-            if platform == 'cumulus':
-                # Check if bridge VLAN command is needed (only if VLAN not already on bridge)
-                bridge_vlan_needed = (vlan_id not in bridge_vlans_before) if bridge_vlans_before else True
-                if bridge_vlan_needed:
-                    logs.append(f"  + nv set bridge domain br_default vlan {vlan_id}")
-                else:
-                    logs.append(f"  # Note: VLAN {vlan_id} already exists on br_default (bridge command not needed)")
-                # Interface access VLAN command is always added
-                logs.append(f"  + nv set interface {interface_name} bridge domain br_default access {vlan_id}")
-            elif platform == 'eos':
-                logs.append(f"  + interface {interface_name}")
-                logs.append(f"  +   switchport mode access")
-                logs.append(f"  +   switchport access vlan {vlan_id}")
+            # Split config_command into lines and add "+" prefix to each line
+            # This handles cases where config_command contains multiple commands (e.g., multiple bridge VLAN adds, bond migration)
+            config_lines = [line.strip() for line in config_command.split('\n') if line.strip()]
+            for line in config_lines:
+                logs.append(f"  + {line}")
             logs.append(f"")
             
             logs.append(f"[2.5] Starting safe deployment with 90s rollback timer...")
