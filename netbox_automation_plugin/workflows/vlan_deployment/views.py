@@ -2798,6 +2798,24 @@ class VLANDeploymentView(View):
                     # Check bond information from both NetBox and device config (side-by-side)
                     bond_info = self._get_bond_interface_for_member(device, interface.name, platform=platform)
                     bond_interface_for_stats = None
+                    
+                    # Also check device_config_result for bond_member_of (from JSON parsing)
+                    bond_member_from_config = device_config_result.get('bond_member_of')
+                    
+                    # If bond_info is None but device config shows bond membership, create a bond_info dict
+                    if not bond_info and bond_member_from_config:
+                        # Device config shows bond membership but _get_bond_interface_for_member didn't find it
+                        # This happens when NetBox doesn't have the bond defined
+                        bond_info = {
+                            'bond_name': bond_member_from_config,
+                            'netbox_bond_name': None,
+                            'device_bond_name': bond_member_from_config,
+                            'has_mismatch': False,
+                            'netbox_missing_bond': True,
+                            'all_members': [],  # Will be populated if available
+                            'netbox_members': []
+                        }
+                    
                     if bond_info:
                         bond_interface_for_stats = bond_info['bond_name']
                         target_interface_for_stats = bond_interface_for_stats
@@ -3144,6 +3162,24 @@ class VLANDeploymentView(View):
                         # 4. Port-channel/Bond membership - handled automatically (config applied to bond)
                         # Check both NetBox and device config for bond membership
                         bond_info_section2 = self._get_bond_interface_for_member(device, interface.name, platform=platform)
+                        
+                        # Also check device_config_result for bond_member_of (from JSON parsing)
+                        bond_member_from_config_section2 = device_config_result.get('bond_member_of')
+                        
+                        # If bond_info is None but device config shows bond membership, create a bond_info dict
+                        if not bond_info_section2 and bond_member_from_config_section2:
+                            # Device config shows bond membership but _get_bond_interface_for_member didn't find it
+                            # This happens when NetBox doesn't have the bond defined
+                            bond_info_section2 = {
+                                'bond_name': bond_member_from_config_section2,
+                                'netbox_bond_name': None,
+                                'device_bond_name': bond_member_from_config_section2,
+                                'has_mismatch': False,
+                                'netbox_missing_bond': True,
+                                'all_members': [],  # Will be populated if available
+                                'netbox_members': []
+                            }
+                        
                         if bond_info_section2:
                             bond_name_section2 = bond_info_section2.get('bond_name', 'unknown')
                             warnings.append(f"BOND MEMBER: Interface '{interface.name}' is a member of bond '{bond_name_section2}'. VLAN configuration will be applied to bond '{bond_name_section2}', not to '{interface.name}' directly.")
