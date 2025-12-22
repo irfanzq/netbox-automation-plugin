@@ -71,9 +71,11 @@ class VLANDeploymentView(View):
         
         # Additional tag validation before deployment (even for dry run, to show warnings)
         # This provides a second layer of validation and shows warnings even in dry run mode
+        # NOTE: Skip this validation in sync mode - sync mode uses different validation logic
+        # and interfaces are in "device:interface" format which breaks this validation
         tagging_warnings = form.cleaned_data.get('_tagging_warnings', [])
-        if not form.cleaned_data.get('dry_run', False):
-            # For actual deployment, do a final check
+        if not form.cleaned_data.get('dry_run', False) and not sync_netbox_to_device:
+            # For actual deployment, do a final check (only in normal mode, not sync mode)
             validation_errors = self._validate_tags_before_deployment(devices, form.cleaned_data.get('combined_interfaces', []))
             if validation_errors:
                 for error in validation_errors:
