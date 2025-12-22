@@ -3817,17 +3817,25 @@ class VLANDeploymentView(View):
                             logs.append("  (no configuration found)")
                         logs.append("")
                         logs.append("Device Should Have (According to NetBox):")
-                        if netbox_current['ip_addresses']:
-                            for ip in netbox_current['ip_addresses']:
-                                logs.append(f"  ip address {ip}")
-                        if netbox_current['vrf']:
-                            logs.append(f"  vrf: {netbox_current['vrf']}")
-                        if netbox_current['untagged_vlan']:
-                            logs.append(f"  untagged vlan: {netbox_current['untagged_vlan']}")
-                        if netbox_current['tagged_vlans']:
-                            logs.append(f"  tagged vlans: {', '.join(map(str, netbox_current['tagged_vlans']))}")
-                        if not netbox_current['ip_addresses'] and not netbox_current['vrf'] and not netbox_current['untagged_vlan']:
-                            logs.append("  No VLAN or IP configuration")
+                        # Use proposed_config which already has the correct interface name (bond if member)
+                        # This ensures bond interfaces are shown correctly
+                        if proposed_config and proposed_config.strip():
+                            for line in proposed_config.split('\n'):
+                                if line.strip():
+                                    logs.append(f"  {line}")
+                        else:
+                            # Fallback to manual construction if proposed_config is not available
+                            if netbox_current['ip_addresses']:
+                                for ip in netbox_current['ip_addresses']:
+                                    logs.append(f"  ip address {ip}")
+                            if netbox_current['vrf']:
+                                logs.append(f"  vrf: {netbox_current['vrf']}")
+                            if netbox_current['untagged_vlan']:
+                                logs.append(f"  untagged vlan: {netbox_current['untagged_vlan']}")
+                            if netbox_current['tagged_vlans']:
+                                logs.append(f"  tagged vlans: {', '.join(map(str, netbox_current['tagged_vlans']))}")
+                            if not netbox_current['ip_addresses'] and not netbox_current['vrf'] and not netbox_current['untagged_vlan']:
+                                logs.append("  No VLAN or IP configuration")
                         logs.append("")
                         logs.append("Note: NetBox is the source of truth. Device may have stale/old configuration.")
                         logs.append("      Any differences will be reconciled during deployment.")
@@ -4182,15 +4190,23 @@ class VLANDeploymentView(View):
                             logs.append("  (no configuration found)")
                         logs.append("")
                         logs.append("Device Should Have (According to NetBox):")
-                        if netbox_current['ip_addresses']:
-                            for ip in netbox_current['ip_addresses']:
-                                logs.append(f"  ip address {ip}")
-                        if netbox_current['vrf']:
-                            logs.append(f"  vrf: {netbox_current['vrf']}")
-                        if netbox_current['untagged_vlan']:
-                            logs.append(f"  bridge domain br_default access {netbox_current['untagged_vlan']}")
-                        if not netbox_current['ip_addresses'] and not netbox_current['vrf'] and not netbox_current['untagged_vlan']:
-                            logs.append("  (no configuration expected)")
+                        # Use proposed_config which already has the correct interface name (bond if member)
+                        # This ensures bond interfaces are shown correctly
+                        if proposed_config and proposed_config.strip():
+                            for line in proposed_config.split('\n'):
+                                if line.strip():
+                                    logs.append(f"  {line}")
+                        else:
+                            # Fallback to manual construction if proposed_config is not available
+                            if netbox_current['ip_addresses']:
+                                for ip in netbox_current['ip_addresses']:
+                                    logs.append(f"  ip address {ip}")
+                            if netbox_current['vrf']:
+                                logs.append(f"  vrf: {netbox_current['vrf']}")
+                            if netbox_current['untagged_vlan']:
+                                logs.append(f"  bridge domain br_default access {netbox_current['untagged_vlan']}")
+                            if not netbox_current['ip_addresses'] and not netbox_current['vrf'] and not netbox_current['untagged_vlan']:
+                                logs.append("  (no configuration expected)")
                         logs.append("")
                         logs.append("Note: NetBox is the source of truth. Device may have stale/old configuration.")
                         logs.append("      Any differences will be reconciled during deployment.")
@@ -4857,6 +4873,28 @@ class VLANDeploymentView(View):
         bond_info = None
         if device:
             bond_info = self._get_bond_interface_for_member(device, interface_name, platform=platform)
+            
+            # If _get_bond_interface_for_member returns None, try to get bond info from device config
+            # This handles cases where NetBox doesn't have the bond defined but device config shows bond membership
+            if not bond_info:
+                # Get current device config to check for bond_member_of
+                device_config_result = self._get_current_device_config(device, interface_name, platform)
+                bond_member_from_config = device_config_result.get('bond_member_of')
+                
+                if bond_member_from_config:
+                    # Device config shows bond membership but _get_bond_interface_for_member didn't find it
+                    # Create a bond_info dict for consistency
+                    bond_info = {
+                        'bond_name': bond_member_from_config,
+                        'netbox_bond_name': None,
+                        'device_bond_name': bond_member_from_config,
+                        'has_mismatch': False,
+                        'netbox_missing_bond': True,
+                        'all_members': [],
+                        'netbox_members': []
+                    }
+                    target_interface = bond_member_from_config
+            
             if bond_info:
                 target_interface = bond_info['bond_name']
         
@@ -5189,15 +5227,23 @@ class VLANDeploymentView(View):
                     logs.append(f"  (no configuration found)")
                 logs.append(f"")
                 logs.append(f"Device Should Have (According to NetBox):")
-                if netbox_current['ip_addresses']:
-                    for ip in netbox_current['ip_addresses']:
-                        logs.append(f"  ip address {ip}")
-                if netbox_current['vrf']:
-                    logs.append(f"  vrf: {netbox_current['vrf']}")
-                if netbox_current['untagged_vlan']:
-                    logs.append(f"  bridge domain br_default access {netbox_current['untagged_vlan']}")
-                if not netbox_current['ip_addresses'] and not netbox_current['vrf'] and not netbox_current['untagged_vlan']:
-                    logs.append(f"  (no configuration expected)")
+                # Use proposed_config which already has the correct interface name (bond if member)
+                # This ensures bond interfaces are shown correctly
+                if proposed_config and proposed_config.strip():
+                    for line in proposed_config.split('\n'):
+                        if line.strip():
+                            logs.append(f"  {line}")
+                else:
+                    # Fallback to manual construction if proposed_config is not available
+                    if netbox_current['ip_addresses']:
+                        for ip in netbox_current['ip_addresses']:
+                            logs.append(f"  ip address {ip}")
+                    if netbox_current['vrf']:
+                        logs.append(f"  vrf: {netbox_current['vrf']}")
+                    if netbox_current['untagged_vlan']:
+                        logs.append(f"  bridge domain br_default access {netbox_current['untagged_vlan']}")
+                    if not netbox_current['ip_addresses'] and not netbox_current['vrf'] and not netbox_current['untagged_vlan']:
+                        logs.append(f"  (no configuration expected)")
                 logs.append(f"")
                 logs.append(f"Note: NetBox is the source of truth. Device may have stale/old configuration.")
                 logs.append(f"      Any differences will be reconciled during deployment.")
