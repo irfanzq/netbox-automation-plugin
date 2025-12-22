@@ -292,7 +292,7 @@ nv unset interface swp1 bridge domain br_default access
 2. `nv config history` - View revision history
 3. `nv config diff {rev_id}` - View differences
 4. `nv config apply {rev_id}` - Apply previous revision
-5. `nv config pending` - Verify no pending changes
+5. `nv config diff` - Verify no pending changes (shows diff if pending, empty if none)
 
 ---
 
@@ -315,7 +315,7 @@ nv unset interface swp1 bridge domain br_default access
 | **VLAN Configuration** | `nv set bridge domain vlan add`, `nv set interface bridge domain access` | 2 |
 | **Bond Configuration** | `nv set interface type bond`, `nv set interface bond member`, `nv set interface bridge domain` | 3 |
 | **Config Application** | `nv config apply --confirm`, `nv config confirm`, `nv config abort` | 3 |
-| **Status/History** | `nv config pending`, `nv config history`, `nv config diff`, `nv config apply {rev}` | 4 |
+| **Status/History** | `nv config diff`, `nv config history`, `nv config diff {rev}`, `nv config apply {rev}` | 4 |
 | **Removal** | `nv unset interface bridge domain access` | 1 |
 | **TOTAL** | | **15 unique commands** |
 

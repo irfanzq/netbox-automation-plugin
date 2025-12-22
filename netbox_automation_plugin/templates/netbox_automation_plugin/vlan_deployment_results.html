@@ -7,6 +7,47 @@
 
 {% block content %}
 <style>
+  /* SIMPLE FIX: Override NetBox CSS variables in dark mode - this fixes everything */
+  html[data-theme="dark"],
+  body.dark-mode {
+    --nbx-color-fg-default: #ffffff !important;
+    --bs-body-color: #ffffff !important;
+  }
+  
+  /* NetBox's exact table header selector - match their specificity */
+  html[data-theme="dark"] table th.orderable a,
+  html[data-theme="dark"] table th a,
+  html[data-theme="dark"] table thead th,
+  html[data-theme="dark"] table thead th *,
+  body.dark-mode table th.orderable a,
+  body.dark-mode table th a,
+  body.dark-mode table thead th,
+  body.dark-mode table thead th * {
+    color: #ffffff !important;
+  }
+  
+  /* All table cells in dark mode */
+  html[data-theme="dark"] table tbody td,
+  html[data-theme="dark"] table tbody td a,
+  html[data-theme="dark"] table tbody td *:not(.badge):not(.btn),
+  body.dark-mode table tbody td,
+  body.dark-mode table tbody td a,
+  body.dark-mode table tbody td *:not(.badge):not(.btn) {
+    color: #ffffff !important;
+  }
+  
+  /* Device names in accordion/form */
+  html[data-theme="dark"] .accordion-button strong,
+  html[data-theme="dark"] .accordion-button .device-name,
+  html[data-theme="dark"] .device-summary-card h6,
+  html[data-theme="dark"] .device-summary-card h6 a,
+  body.dark-mode .accordion-button strong,
+  body.dark-mode .accordion-button .device-name,
+  body.dark-mode .device-summary-card h6,
+  body.dark-mode .device-summary-card h6 a {
+    color: #ffffff !important;
+  }
+  
   /* Dark mode compatible styles - NO GREY TEXT! */
   
   /* Card text - Black in light, White in dark */
@@ -470,117 +511,47 @@
           });
         }
         
-        // Force white color on device names and table headers in dark mode - HARDCODED FIX
-        function forceDeviceNamesWhite() {
-          const isDarkMode = document.documentElement.getAttribute('data-theme') === 'dark' || document.body.classList.contains('dark-mode');
-          if (!isDarkMode) return;
+        // SIMPLE FIX: Just set inline styles directly - this always works
+        function forceWhiteText() {
+          const isDark = document.documentElement.getAttribute('data-theme') === 'dark' || document.body.classList.contains('dark-mode');
+          if (!isDark) return;
           
-          // Force white on table headers (Device, Interface, VLAN, Device Status, etc.)
-          document.querySelectorAll('.table thead th, .table thead th *, .table thead th a, .table thead th strong, .table thead th span').forEach(el => {
-            el.style.setProperty('color', '#ffffff', 'important');
+          // Table headers - use NetBox's exact selector
+          document.querySelectorAll('table th.orderable a, table th a, table thead th').forEach(el => {
+            el.style.color = '#ffffff';
           });
           
-          // Force white on all table cells (device names, interface names, VLAN names)
-          document.querySelectorAll('.table tbody td, .table tbody td a, .table tbody td *, .table tbody td strong, .table tbody td span, .table tbody td div, .table tbody td p').forEach(el => {
-            // Skip badges, buttons, and colored elements
-            if (!el.classList.contains('badge') && !el.closest('.badge') && 
-                !el.classList.contains('btn') && !el.closest('.btn') &&
+          // All table cells
+          document.querySelectorAll('table tbody td, table tbody td a').forEach(el => {
+            if (!el.closest('.badge') && !el.closest('.btn') && 
                 !el.classList.contains('text-success') && !el.classList.contains('text-info') &&
                 !el.classList.contains('text-danger') && !el.classList.contains('text-warning')) {
-              el.style.setProperty('color', '#ffffff', 'important');
+              el.style.color = '#ffffff';
             }
           });
           
-          // Specifically target first column (device names) with even more specificity
-          document.querySelectorAll('.table tbody tr').forEach(row => {
-            const firstCell = row.querySelector('td:first-child');
-            if (firstCell) {
-              firstCell.style.setProperty('color', '#ffffff', 'important');
-              const allChildren = firstCell.querySelectorAll('*');
-              allChildren.forEach(child => {
-                if (!child.classList.contains('badge') && !child.classList.contains('btn')) {
-                  child.style.setProperty('color', '#ffffff', 'important');
-                }
-              });
-            }
-          });
-          
-          // Force white on device summary card names
-          document.querySelectorAll('.device-summary-card h6, .device-summary-card h6 a, .device-summary-card h6 span, .device-summary-card h6 *').forEach(el => {
-            el.style.setProperty('color', '#ffffff', 'important');
-          });
-          
-          // Force white on card headers and titles
-          document.querySelectorAll('.card-header h5, .card-header .card-title, .card-header h5 *, .card-title, .card-title *, h5.card-title, h5.card-title *').forEach(el => {
-            el.style.setProperty('color', '#ffffff', 'important');
+          // Device names in cards
+          document.querySelectorAll('.device-summary-card h6, .device-summary-card h6 a').forEach(el => {
+            el.style.color = '#ffffff';
           });
         }
         
-        // Apply on page load
+        // Apply on page load - SIMPLE approach
         document.addEventListener('DOMContentLoaded', function() {
           applyThemeColors();
-          forceDeviceNamesWhite();
+          forceWhiteText();
           
-          // Reapply after a delay to catch Bootstrap/NetBox style application
-          setTimeout(forceDeviceNamesWhite, 100);
-          setTimeout(forceDeviceNamesWhite, 500);
-          setTimeout(forceDeviceNamesWhite, 1000);
+          // Reapply after NetBox styles load
+          setTimeout(forceWhiteText, 100);
+          setTimeout(forceWhiteText, 500);
           
-          // Listen for NetBox theme changes
-          window.addEventListener('netbox.colorModeChanged', function(e) {
-            setTimeout(applyThemeColors, 100);
-            setTimeout(forceDeviceNamesWhite, 100);
+          // Listen for theme changes
+          window.addEventListener('netbox.colorModeChanged', function() {
+            setTimeout(forceWhiteText, 100);
           });
           
-          // Also check periodically in case theme changes
-          setInterval(function() {
-            applyThemeColors();
-            forceDeviceNamesWhite();
-          }, 2000);
-          
-          // MutationObserver to watch for style changes and reapply
-          const observer = new MutationObserver(function(mutations) {
-            forceDeviceNamesWhite();
-            // Also force white on all table cells specifically
-            const isDarkMode = document.documentElement.getAttribute('data-theme') === 'dark' || document.body.classList.contains('dark-mode');
-            if (isDarkMode) {
-              document.querySelectorAll('.table tbody td, .table tbody td a, .table tbody td *').forEach(el => {
-                if (!el.classList.contains('badge') && !el.classList.contains('btn') &&
-                    !el.classList.contains('text-success') && !el.classList.contains('text-info') &&
-                    !el.classList.contains('text-danger') && !el.classList.contains('text-warning')) {
-                  el.style.setProperty('color', '#ffffff', 'important');
-                }
-              });
-            }
-          });
-          observer.observe(document.body, {
-            childList: true,
-            subtree: true,
-            attributes: true,
-            attributeFilter: ['style', 'class']
-          });
-          
-          // Additional aggressive check for table cells - run every second
-          setInterval(function() {
-            const isDarkMode = document.documentElement.getAttribute('data-theme') === 'dark' || document.body.classList.contains('dark-mode');
-            if (isDarkMode) {
-              // Force white on all table cells
-              document.querySelectorAll('.table tbody tr').forEach(row => {
-                const cells = row.querySelectorAll('td');
-                cells.forEach(cell => {
-                  cell.style.setProperty('color', '#ffffff', 'important');
-                  const allChildren = cell.querySelectorAll('*');
-                  allChildren.forEach(child => {
-                    if (!child.classList.contains('badge') && !child.classList.contains('btn') &&
-                        !child.classList.contains('text-success') && !child.classList.contains('text-info') &&
-                        !child.classList.contains('text-danger') && !child.classList.contains('text-warning')) {
-                      child.style.setProperty('color', '#ffffff', 'important');
-                    }
-                  });
-                });
-              });
-            }
-          }, 1000);
+          // Periodic check (simple, runs every 2 seconds)
+          setInterval(forceWhiteText, 2000);
         });
       </script>
 

@@ -834,17 +834,33 @@ class NAPALMDeviceManager:
         try:
             if driver_name == 'cumulus':
                 if hasattr(self.connection, 'device') and hasattr(self.connection.device, 'send_command'):
-                    # Check if there's still a pending commit
-                    pending_check = self.connection.device.send_command('nv config pending', read_timeout=10)
-                    if pending_check:
-                        # If pending shows nothing or "No pending changes", rollback worked
-                        if 'no pending' in pending_check.lower() or 'no changes' in pending_check.lower() or not pending_check.strip():
-                            return True, "Rollback verified: No pending changes detected"
+                    # Check if there's still a pending commit by checking config diff
+                    # If diff is empty or shows no changes, rollback worked
+                    try:
+                        diff_check = self.connection.device.send_command('nv config diff', read_timeout=10)
+                        if diff_check:
+                            # If diff shows nothing or "No changes", rollback worked
+                            if 'no changes' in diff_check.lower() or not diff_check.strip() or diff_check.strip() == '':
+                                return True, "Rollback verified: No pending changes detected"
+                            else:
+                                return False, f"Rollback may have failed: Pending changes still exist - {diff_check[:100]}"
                         else:
-                            return False, f"Rollback may have failed: Pending changes still exist - {pending_check[:100]}"
-                    else:
-                        # Can't verify, assume it worked
-                        return True, "Rollback assumed successful (could not verify)"
+                            # Empty diff means no pending changes
+                            return True, "Rollback verified: No pending changes detected"
+                    except Exception as diff_error:
+                        # If diff command fails, try checking history for pending revision
+                        try:
+                            history_check = self.connection.device.send_command('nv config history | head -5', read_timeout=10)
+                            if history_check:
+                                # Check if there's a pending revision (marked with *)
+                                if '*' in history_check and 'pending' in history_check.lower():
+                                    return False, f"Rollback may have failed: Pending revision still exists"
+                                else:
+                                    return True, "Rollback verified: No pending revision detected"
+                            else:
+                                return True, "Rollback assumed successful (could not verify)"
+                        except Exception:
+                            return True, "Rollback assumed successful (could not verify)"
                 return None, "Could not verify rollback (device connection unavailable)"
             elif driver_name == 'eos':
                 # For EOS, check if session still exists
@@ -1509,7 +1525,27 @@ class NAPALMDeviceManager:
                 try:
                     logger.info(f"Phase 5: All checks passed - confirming commit...")
                     logs.append(f"  Confirming commit (making changes permanent)...")
-                    self.connection.confirm_commit()
+                    
+                    # For Cumulus, manually execute nv config confirm since NAPALM's confirm_commit() may not work
+                    if driver_name == 'cumulus':
+                        if hasattr(self.connection, 'device') and hasattr(self.connection.device, 'send_command'):
+                            try:
+                                confirm_output = self.connection.device.send_command('nv config confirm', read_timeout=30)
+                                logger.info(f"Cumulus confirm output: {confirm_output}")
+                                # Check if confirm failed
+                                if confirm_output and ('error' in confirm_output.lower() or 'failed' in confirm_output.lower()):
+                                    raise Exception(f"nv config confirm failed: {confirm_output}")
+                            except Exception as confirm_error:
+                                # If manual confirm fails, try NAPALM's method as fallback
+                                logger.warning(f"Manual nv config confirm failed: {confirm_error}, trying NAPALM method...")
+                                self.connection.confirm_commit()
+                        else:
+                            # Fallback to NAPALM method if device.send_command not available
+                            self.connection.confirm_commit()
+                    else:
+                        # For other platforms (Juniper), use NAPALM's method
+                        self.connection.confirm_commit()
+                    
                     result['success'] = True
                     result['committed'] = True
                     result['message'] = f"Configuration successfully deployed and confirmed on {self.device.name}"
