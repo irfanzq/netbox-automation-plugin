@@ -1545,16 +1545,50 @@
                 button.appendChild(strongEl);
                 button.appendChild(badgeSpan);
                 
-                // Force reapply styles after element is added to DOM (Bootstrap might override)
-                setTimeout(() => {
-                  button.style.setProperty('color', textColor, 'important');
-                  strongEl.style.setProperty('color', textColor, 'important');
-                  // Also try to remove any Bootstrap classes that might interfere
-                  if (isDarkMode) {
-                    button.classList.add('text-white');
-                    strongEl.classList.add('text-white');
-                  }
-                }, 0);
+                // HARDCODED WHITE COLOR IN DARK MODE - Force reapply with MutationObserver
+                if (isDarkMode) {
+                  // Immediate application
+                  button.style.setProperty('color', '#ffffff', 'important');
+                  strongEl.style.setProperty('color', '#ffffff', 'important');
+                  button.classList.add('text-white');
+                  strongEl.classList.add('text-white');
+                  
+                  // Force white on all child elements
+                  const forceWhite = () => {
+                    button.style.setProperty('color', '#ffffff', 'important');
+                    strongEl.style.setProperty('color', '#ffffff', 'important');
+                    const allChildren = button.querySelectorAll('*');
+                    allChildren.forEach(child => {
+                      if (!child.classList.contains('badge')) {
+                        child.style.setProperty('color', '#ffffff', 'important');
+                      }
+                    });
+                  };
+                  
+                  // Multiple delayed reapplies
+                  setTimeout(forceWhite, 0);
+                  setTimeout(forceWhite, 100);
+                  setTimeout(forceWhite, 500);
+                  setTimeout(forceWhite, 1000);
+                  
+                  // MutationObserver to watch for Bootstrap style changes
+                  const observer = new MutationObserver(function(mutations) {
+                    forceWhite();
+                  });
+                  observer.observe(button, {
+                    attributes: true,
+                    attributeFilter: ['style', 'class'],
+                    childList: true,
+                    subtree: true
+                  });
+                  observer.observe(strongEl, {
+                    attributes: true,
+                    attributeFilter: ['style', 'class']
+                  });
+                  
+                  // Store observer on element for cleanup if needed
+                  button._colorObserver = observer;
+                }
                 header.appendChild(button);
                 
                 // Body

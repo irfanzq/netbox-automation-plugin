@@ -59,13 +59,35 @@
     opacity: 1 !important;
   }
   
-  /* Table text */
+  /* Table text - HARDCODED WHITE IN DARK MODE */
   .table, .table td, .table th {
     color: #212529 !important;
   }
   
   html[data-theme="dark"] .table, html[data-theme="dark"] .table td, html[data-theme="dark"] .table th,
-  body.dark-mode .table, body.dark-mode .table td, body.dark-mode .table th {
+  html[data-theme="dark"] .table a, html[data-theme="dark"] .table td a, html[data-theme="dark"] .table th a,
+  html[data-theme="dark"] .table td *, html[data-theme="dark"] .table th *,
+  body.dark-mode .table, body.dark-mode .table td, body.dark-mode .table th,
+  body.dark-mode .table a, body.dark-mode .table td a, body.dark-mode .table th a,
+  body.dark-mode .table td *, body.dark-mode .table th * {
+    color: #ffffff !important;
+  }
+  
+  /* Device names in table - HARDCODED WHITE */
+  html[data-theme="dark"] .table td:first-child,
+  html[data-theme="dark"] .table td:first-child a,
+  html[data-theme="dark"] .table td:first-child *,
+  body.dark-mode .table td:first-child,
+  body.dark-mode .table td:first-child a,
+  body.dark-mode .table td:first-child * {
+    color: #ffffff !important;
+  }
+  
+  /* Table headers - HARDCODED WHITE */
+  html[data-theme="dark"] .table thead th,
+  html[data-theme="dark"] .table thead th *,
+  body.dark-mode .table thead th,
+  body.dark-mode .table thead th * {
     color: #ffffff !important;
   }
   
@@ -370,17 +392,64 @@
           });
         }
         
+        // Force white color on device names in dark mode - HARDCODED FIX
+        function forceDeviceNamesWhite() {
+          const isDarkMode = document.documentElement.getAttribute('data-theme') === 'dark' || document.body.classList.contains('dark-mode');
+          if (!isDarkMode) return;
+          
+          // Force white on all table cells (device names, interface names, VLAN names)
+          document.querySelectorAll('.table td, .table td a, .table th, .table th a').forEach(el => {
+            // Skip badges and colored elements
+            if (!el.classList.contains('badge') && !el.closest('.badge')) {
+              el.style.setProperty('color', '#ffffff', 'important');
+            }
+          });
+          
+          // Force white on device summary card names
+          document.querySelectorAll('.device-summary-card h6, .device-summary-card h6 a, .device-summary-card h6 span').forEach(el => {
+            el.style.setProperty('color', '#ffffff', 'important');
+          });
+          
+          // Force white on all links in table
+          document.querySelectorAll('.table a').forEach(el => {
+            if (!el.classList.contains('badge') && !el.closest('.badge')) {
+              el.style.setProperty('color', '#ffffff', 'important');
+            }
+          });
+        }
+        
         // Apply on page load
         document.addEventListener('DOMContentLoaded', function() {
           applyThemeColors();
+          forceDeviceNamesWhite();
+          
+          // Reapply after a delay to catch Bootstrap/NetBox style application
+          setTimeout(forceDeviceNamesWhite, 100);
+          setTimeout(forceDeviceNamesWhite, 500);
+          setTimeout(forceDeviceNamesWhite, 1000);
           
           // Listen for NetBox theme changes
           window.addEventListener('netbox.colorModeChanged', function(e) {
             setTimeout(applyThemeColors, 100);
+            setTimeout(forceDeviceNamesWhite, 100);
           });
           
           // Also check periodically in case theme changes
-          setInterval(applyThemeColors, 2000);
+          setInterval(function() {
+            applyThemeColors();
+            forceDeviceNamesWhite();
+          }, 2000);
+          
+          // MutationObserver to watch for style changes and reapply
+          const observer = new MutationObserver(function(mutations) {
+            forceDeviceNamesWhite();
+          });
+          observer.observe(document.body, {
+            childList: true,
+            subtree: true,
+            attributes: true,
+            attributeFilter: ['style', 'class']
+          });
         });
       </script>
 
