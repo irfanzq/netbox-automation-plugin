@@ -1100,6 +1100,41 @@ class NAPALMDeviceManager:
         logs.append(f"[Phase 0.5] Baseline Collection")
         baseline = {}
         
+        # CRITICAL: Verify connection.device is initialized before baseline collection
+        # Some NAPALM drivers (especially Cumulus) may not initialize device immediately
+        if hasattr(self.connection, 'device'):
+            if self.connection.device is None:
+                logger.warning(f"Connection.device is None before baseline collection - attempting to reinitialize...")
+                logs.append(f"  [WARNING] Connection.device is None - attempting to reinitialize connection...")
+                try:
+                    # Try to close and reopen connection
+                    try:
+                        self.connection.close()
+                    except:
+                        pass
+                    # Reconnect
+                    if not self.connect():
+                        error_msg = "Failed to reinitialize connection - device object is None"
+                        logger.error(f"CRITICAL: {error_msg}")
+                        logs.append(f"  ✗ {error_msg}")
+                        result['message'] = error_msg
+                        result['logs'] = logs
+                        return result
+                    logger.info(f"Connection reinitialized successfully - device object is now available")
+                    logs.append(f"  ✓ Connection reinitialized - device object available")
+                except Exception as reconnect_error:
+                    error_msg = f"Failed to reinitialize connection: {reconnect_error}"
+                    logger.error(f"CRITICAL: {error_msg}")
+                    logs.append(f"  ✗ {error_msg}")
+                    result['message'] = error_msg
+                    result['logs'] = logs
+                    return result
+            else:
+                logger.debug(f"Connection.device is initialized: {type(self.connection.device)}")
+        else:
+            logger.warning(f"Connection object does not have 'device' attribute - may use cli() method instead")
+            logs.append(f"  [INFO] Connection uses cli() method (no device attribute)")
+        
         # Get driver_name early for bond membership check in baseline collection
         driver_name = self.get_driver_name()
 
@@ -1116,13 +1151,29 @@ class NAPALMDeviceManager:
                 
                 if driver_name == 'cumulus':
                     try:
-                        if hasattr(self.connection, 'device') and hasattr(self.connection.device, 'send_command'):
+                        # Check if we can access device commands (either via device.send_command or cli())
+                        can_access_device = (
+                            (hasattr(self.connection, 'device') and self.connection.device is not None and hasattr(self.connection.device, 'send_command')) or
+                            hasattr(self.connection, 'cli')
+                        )
+                        
+                        if can_access_device:
                             # Try multiple interface names: interface_name (could be bond or member), and bond if member
                             interfaces_to_try = [interface_name]
                             
                             # Check if interface_name is a bond member and add bond to list
                             try:
-                                bond_members_output = self.connection.device.send_command('nv show interface bond-members -o json', read_timeout=10)
+                                bond_members_command = 'nv show interface bond-members -o json'
+                                if hasattr(self.connection, 'device') and self.connection.device is not None:
+                                    bond_members_output = self.connection.device.send_command(bond_members_command, read_timeout=10)
+                                elif hasattr(self.connection, 'cli'):
+                                    cli_result = self.connection.cli([bond_members_command])
+                                    if isinstance(cli_result, dict):
+                                        bond_members_output = cli_result.get(bond_members_command, '')
+                                    else:
+                                        bond_members_output = str(cli_result) if cli_result else ''
+                                else:
+                                    bond_members_output = None
                                 if bond_members_output:
                                     import json
                                     bond_members = json.loads(bond_members_output)
@@ -1155,8 +1206,21 @@ class NAPALMDeviceManager:
                                 try:
                                     # Try to get interface stats directly using NVUE command
                                     # This works for both bond interfaces and member interfaces
+                                    # First check if connection.device is available, otherwise use cli() method
                                     stats_command = f'nv show interface {test_interface} link stats -o json'
-                                    stats_output = self.connection.device.send_command(stats_command, read_timeout=10)
+                                    
+                                    # Try connection.device.send_command first (if available)
+                                    if hasattr(self.connection, 'device') and self.connection.device is not None:
+                                        stats_output = self.connection.device.send_command(stats_command, read_timeout=10)
+                                    elif hasattr(self.connection, 'cli'):
+                                        # Fallback to NAPALM's cli() method
+                                        cli_result = self.connection.cli([stats_command])
+                                        if isinstance(cli_result, dict):
+                                            stats_output = cli_result.get(stats_command, '')
+                                        else:
+                                            stats_output = str(cli_result) if cli_result else ''
+                                    else:
+                                        raise AttributeError("Neither connection.device.send_command nor connection.cli() is available")
                                     
                                     if stats_output and stats_output.strip():
                                         import json
@@ -1178,7 +1242,16 @@ class NAPALMDeviceManager:
                                             
                                             # Get interface link state
                                             link_command = f'nv show interface {test_interface} link -o json'
-                                            link_output = self.connection.device.send_command(link_command, read_timeout=10)
+                                            if hasattr(self.connection, 'device') and self.connection.device is not None:
+                                                link_output = self.connection.device.send_command(link_command, read_timeout=10)
+                                            elif hasattr(self.connection, 'cli'):
+                                                cli_result = self.connection.cli([link_command])
+                                                if isinstance(cli_result, dict):
+                                                    link_output = cli_result.get(link_command, '')
+                                                else:
+                                                    link_output = str(cli_result) if cli_result else ''
+                                            else:
+                                                raise AttributeError("Neither connection.device.send_command nor connection.cli() is available")
                                             
                                             if link_output and link_output.strip():
                                                 link_data = json.loads(link_output)
@@ -1191,7 +1264,16 @@ class NAPALMDeviceManager:
                                                 description = ''
                                                 try:
                                                     desc_command = f'nv show interface {test_interface} description -o json'
-                                                    desc_output = self.connection.device.send_command(desc_command, read_timeout=10)
+                                                    if hasattr(self.connection, 'device') and self.connection.device is not None:
+                                                        desc_output = self.connection.device.send_command(desc_command, read_timeout=10)
+                                                    elif hasattr(self.connection, 'cli'):
+                                                        cli_result = self.connection.cli([desc_command])
+                                                        if isinstance(cli_result, dict):
+                                                            desc_output = cli_result.get(desc_command, '')
+                                                        else:
+                                                            desc_output = str(cli_result) if cli_result else ''
+                                                    else:
+                                                        desc_output = ''  # Description is optional, skip if can't access
                                                     if desc_output:
                                                         desc_data = json.loads(desc_output)
                                                         # Description structure may vary - try both nested and top-level
@@ -1334,8 +1416,19 @@ class NAPALMDeviceManager:
                             # Use driver_name from above (got it early for this check)
                             if driver_name == 'cumulus':
                                 try:
-                                    if hasattr(self.connection, 'device') and hasattr(self.connection.device, 'send_command'):
-                                        bond_members_output = self.connection.device.send_command('nv show interface bond-members -o json', read_timeout=10)
+                                    bond_members_command = 'nv show interface bond-members -o json'
+                                    if hasattr(self.connection, 'device') and self.connection.device is not None and hasattr(self.connection.device, 'send_command'):
+                                        bond_members_output = self.connection.device.send_command(bond_members_command, read_timeout=10)
+                                    elif hasattr(self.connection, 'cli'):
+                                        cli_result = self.connection.cli([bond_members_command])
+                                        if isinstance(cli_result, dict):
+                                            bond_members_output = cli_result.get(bond_members_command, '')
+                                        else:
+                                            bond_members_output = str(cli_result) if cli_result else ''
+                                    else:
+                                        bond_members_output = None
+                                    
+                                    if bond_members_output:
                                         if bond_members_output:
                                             import json
                                             try:
