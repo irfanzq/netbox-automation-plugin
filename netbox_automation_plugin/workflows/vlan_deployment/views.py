@@ -2506,16 +2506,16 @@ class VLANDeploymentView(View):
         
         if platform == 'cumulus':
             # Cumulus: VLANs are bridge-level, access is interface-level
-            # IMPORTANT: Use "vlan add" not "vlan" - "vlan" alone would OVERWRITE entire VLAN list
-            # 1. Add all VLANs to bridge (untagged + tagged) using "vlan add" for each VLAN
+            # IMPORTANT: Use "vlan {id}" - this is additive and won't overwrite existing VLANs
+            # 1. Add all VLANs to bridge (untagged + tagged) using "vlan {id}" for each VLAN
             all_vlans = set()
             if untagged_vlan:
                 all_vlans.add(untagged_vlan)
             all_vlans.update(tagged_vlans)
             
-            # Generate bridge VLAN commands - one "add" command per VLAN
+            # Generate bridge VLAN commands - one command per VLAN
             for vlan in sorted(all_vlans):
-                bridge_cmd = f"nv set bridge domain br_default vlan add {vlan}"
+                bridge_cmd = f"nv set bridge domain br_default vlan {vlan}"
                 commands.append(bridge_cmd)
                 bridge_vlans = sorted(all_vlans)
             
@@ -2772,22 +2772,24 @@ class VLANDeploymentView(View):
                     bridge_vlans = device_config_result.get('_bridge_vlans', [])
                     
                     # If bond detected, regenerate config_command with bond interface name
+                    # IMPORTANT: Include ALL VLANs (untagged + tagged) from this interface
                     if bond_member_of:
                         # Regenerate config with bond interface instead of member interface
                         target_interface = bond_member_of
-                        # Regenerate config_command using target_interface (bond)
+                        # Regenerate config_command using target_interface (bond) - include ALL VLANs
                         if platform == 'cumulus':
-                            # Regenerate bridge VLAN commands
+                            # Collect ALL VLANs from this interface (untagged + tagged)
                             all_vlans = set()
                             if untagged_vid:
                                 all_vlans.add(untagged_vid)
                             all_vlans.update(tagged_vids)
                             
                             regenerated_commands = []
+                            # Generate bridge VLAN commands for ALL VLANs
                             for vlan in sorted(all_vlans):
-                                regenerated_commands.append(f"nv set bridge domain br_default vlan add {vlan}")
+                                regenerated_commands.append(f"nv set bridge domain br_default vlan {vlan}")
                             
-                            # Set interface access VLAN using bond interface
+                            # Set interface access VLAN using bond interface (if untagged VLAN exists)
                             if untagged_vid:
                                 regenerated_commands.append(f"nv set interface {target_interface} bridge domain br_default access {untagged_vid}")
                             
@@ -2849,8 +2851,9 @@ class VLANDeploymentView(View):
                             logs.append("  (bridge VLAN information not available)")
                         logs.append("")
                     
-                    # Proposed Device Configuration - shown AFTER bond detection so it shows bond3
+                    # Proposed Device Configuration - show ALL VLANs for this interface/bond
                     logs.append("--- Proposed Device Configuration ---")
+                    # config_command already includes ALL VLANs (untagged + tagged) from this interface
                     for line in config_command.split('\n'):
                         if line.strip():
                             logs.append(f"  {line}")
@@ -3085,7 +3088,7 @@ class VLANDeploymentView(View):
                             
                             regenerated_commands = []
                             for vlan in sorted(all_vlans):
-                                regenerated_commands.append(f"nv set bridge domain br_default vlan add {vlan}")
+                                regenerated_commands.append(f"nv set bridge domain br_default vlan {vlan}")
                             
                             # Set interface access VLAN using bond interface
                             if untagged_vid:
@@ -3250,22 +3253,24 @@ class VLANDeploymentView(View):
                         logs.append("      After successful deployment, it will be auto-tagged as 'vlan-mode:access' or 'vlan-mode:tagged'.")
                         logs.append("")
                         # If bond detected, regenerate config_command with bond interface name
+                        # IMPORTANT: Include ALL VLANs (untagged + tagged) from this interface
                         if bond_member_of:
                             # Regenerate config with bond interface instead of member interface
                             target_interface = bond_member_of
-                            # Regenerate config_command using target_interface (bond)
+                            # Regenerate config_command using target_interface (bond) - include ALL VLANs
                             if platform == 'cumulus':
-                                # Regenerate bridge VLAN commands
+                                # Collect ALL VLANs from this interface (untagged + tagged)
                                 all_vlans = set()
                                 if untagged_vid:
                                     all_vlans.add(untagged_vid)
                                 all_vlans.update(tagged_vids)
                                 
                                 regenerated_commands = []
+                                # Generate bridge VLAN commands for ALL VLANs
                                 for vlan in sorted(all_vlans):
-                                    regenerated_commands.append(f"nv set bridge domain br_default vlan add {vlan}")
+                                    regenerated_commands.append(f"nv set bridge domain br_default vlan {vlan}")
                                 
-                                # Set interface access VLAN using bond interface
+                                # Set interface access VLAN using bond interface (if untagged VLAN exists)
                                 if untagged_vid:
                                     regenerated_commands.append(f"nv set interface {target_interface} bridge domain br_default access {untagged_vid}")
                                 
@@ -3283,6 +3288,7 @@ class VLANDeploymentView(View):
                         )
                         
                         logs.append("--- Proposed Device Configuration ---")
+                        # config_command already includes ALL VLANs (untagged + tagged) from this interface
                         for line in config_command.split('\n'):
                             if line.strip():
                                 logs.append(f"  {line}")
@@ -3562,7 +3568,7 @@ class VLANDeploymentView(View):
                                 
                                 regenerated_commands = []
                                 for vlan in sorted(all_vlans):
-                                    regenerated_commands.append(f"nv set bridge domain br_default vlan add {vlan}")
+                                    regenerated_commands.append(f"nv set bridge domain br_default vlan {vlan}")
                                 
                                 # Set interface access VLAN using bond interface
                                 if untagged_vid:
@@ -5133,7 +5139,7 @@ class VLANDeploymentView(View):
             
             # Add VLAN to bridge first (additive - safe, won't remove existing VLANs)
             if include_bridge_vlan:
-                commands.append(f"nv set bridge domain br_default vlan add {vlan_id}")
+                commands.append(f"nv set bridge domain br_default vlan {vlan_id}")
             
             # Set interface access VLAN - use target_interface (bond if member, NetBox bond name if migration)
             commands.append(f"nv set interface {target_interface} bridge domain br_default access {vlan_id}")
@@ -5309,6 +5315,7 @@ class VLANDeploymentView(View):
                 
                 # Check if bridge VLAN command is needed by checking device config
                 bridge_vlan_needed = (vlan_id not in bridge_vlans)
+                bridge_vlan_cmd = None  # Initialize to avoid NameError
                 
                 # Build config_text in correct order: bridge VLAN first (if needed), then interface access VLAN
                 commands_to_run = []
@@ -5335,8 +5342,8 @@ class VLANDeploymentView(View):
                 for line in config_text.split('\n'):
                     if line.strip():
                         # Skip duplicate bridge VLAN command if we already added it
-                        if bridge_vlan_needed and 'bridge domain br_default vlan' in line and 'vlan add' not in line:
-                            continue  # Skip "vlan {id}" if we already have it from bridge_vlan_needed check
+                        if bridge_vlan_needed and line.strip() == bridge_vlan_cmd:
+                            continue  # Skip duplicate bridge VLAN command if we already have it from bridge_vlan_needed check
                         # Add command if not already in final_commands
                         if line.strip() not in final_commands:
                             final_commands.append(line.strip())
@@ -5393,6 +5400,12 @@ class VLANDeploymentView(View):
                 logger.debug(f"Could not get current config before deployment: {e}")
                 current_config_before = None
                 bridge_vlans_before = []
+            
+            # IMPORTANT: Update interface_name to bond interface if bond detected
+            # This ensures all sections (proposed config, diff, Removed/Replaced, Added) use bond interface name
+            if bond_member_of and interface_name != bond_member_of:
+                logger.info(f"Updating interface_name from {interface_name} to {bond_member_of} for bond member")
+                interface_name = bond_member_of
             
             # Get NetBox current state and generate diffs (same as dry run)
             # Use original_interface_name for NetBox state (NetBox has the member interface, not the bond)

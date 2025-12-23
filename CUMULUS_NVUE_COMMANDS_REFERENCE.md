@@ -53,7 +53,7 @@ nv show interface bond3 link stats -o json
 
 ## 2. VLAN Configuration Commands
 
-### `nv set bridge domain br_default vlan add {vlan_id}`
+### `nv set bridge domain br_default vlan {vlan_id}`
 **Purpose:** Add VLAN to bridge domain (additive, safe - won't remove existing VLANs)  
 **Used in:**
 - `_generate_config_from_netbox()` - Add tagged VLANs to bridge
@@ -64,8 +64,8 @@ nv show interface bond3 link stats -o json
 
 **Example:**
 ```bash
-nv set bridge domain br_default vlan add 3010
-nv set bridge domain br_default vlan add 3020
+nv set bridge domain br_default vlan 3010
+nv set bridge domain br_default vlan 3020
 ```
 
 **Note:** This is **additive** - it adds the VLAN to the existing list without removing others.
@@ -259,14 +259,14 @@ nv unset interface swp1 bridge domain br_default access
 1. `nv config show -o json` - Read current config
 2. `nv show interface {interface} link stats -o json` - Check traffic (3x with 1s intervals)
 3. Display proposed commands (not executed):
-   - `nv set bridge domain br_default vlan add {vlan}`
+   - `nv set bridge domain br_default vlan {vlan}`
    - `nv set interface {interface} bridge domain br_default access {vlan}`
 
 ### **Normal Deployment Mode:**
 1. `nv config show -o json` - Read current config (baseline)
 2. `nv show interface {interface} link stats -o json` - Pre-deployment traffic check
 3. Execute VLAN config:
-   - `nv set bridge domain br_default vlan add {vlan}`
+   - `nv set bridge domain br_default vlan {vlan}`
    - `nv set interface {interface} bridge domain br_default access {vlan}`
 4. `nv config apply --confirm 90s` - Apply with auto-rollback
 5. `nv show interface {interface} link stats -o json` - Post-deployment traffic check
@@ -281,7 +281,7 @@ nv unset interface swp1 bridge domain br_default access
    - `nv set interface {bond_name} bond member {member}` (for each member)
    - `nv set interface {bond_name} bridge domain br_default`
 4. Execute VLAN config:
-   - `nv set bridge domain br_default vlan add {vlan}`
+   - `nv set bridge domain br_default vlan {vlan}`
    - `nv set interface {interface} bridge domain br_default access {vlan}`
 5. `nv config apply --confirm 90s` - Apply with auto-rollback
 6. `nv show interface {interface} link stats -o json` - Post-deployment traffic check
@@ -298,7 +298,7 @@ nv unset interface swp1 bridge domain br_default access
 
 ## Important Notes
 
-1. **Additive VLAN Commands:** Always use `vlan add` instead of `vlan` to avoid overwriting the entire VLAN list
+1. **Additive VLAN Commands:** Use `vlan {id}` to add VLANs to the bridge domain (this is additive and won't overwrite existing VLANs)
 2. **Bond Handling:** For bond members, VLAN config is applied to the bond interface, not the physical member
 3. **JSON Output:** Always use `-o json` flag for reliable parsing of command output
 4. **Traffic Checks:** Run `nv show interface link stats` 3 times with 1-second intervals to detect active traffic
@@ -312,7 +312,7 @@ nv unset interface swp1 bridge domain br_default access
 | Category | Commands | Count |
 |----------|----------|-------|
 | **Configuration Reading** | `nv config show`, `nv show interface link stats` | 2 |
-| **VLAN Configuration** | `nv set bridge domain vlan add`, `nv set interface bridge domain access` | 2 |
+| **VLAN Configuration** | `nv set bridge domain vlan`, `nv set interface bridge domain access` | 2 |
 | **Bond Configuration** | `nv set interface type bond`, `nv set interface bond member`, `nv set interface bridge domain` | 3 |
 | **Config Application** | `nv config apply --confirm`, `nv config confirm`, `nv config abort` | 3 |
 | **Status/History** | `nv config diff`, `nv config history`, `nv config diff {rev}`, `nv config apply {rev}` | 4 |

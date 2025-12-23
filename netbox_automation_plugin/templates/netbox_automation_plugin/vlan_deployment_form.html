@@ -8,16 +8,24 @@
 <style>
   /* MINIMAL FIX: Only device names in accordion buttons in dark mode - nothing else */
   
-  /* Device names in accordion buttons - White ONLY in dark mode */
-  html[data-theme="dark"] .accordion-button strong,
+  /* Device names in accordion buttons - Vibrant colors that work in both light and dark modes */
+  .accordion-button .device-name,
+  .accordion-button strong.device-name {
+    font-weight: 600 !important;
+  }
+  
+  /* Ensure vibrant colors are visible in dark mode with slight adjustment */
   html[data-theme="dark"] .accordion-button .device-name,
-  html[data-theme="dark"] .accordion-button span:has(.device-name),
-  body.dark-mode .accordion-button strong,
   body.dark-mode .accordion-button .device-name,
-  body.dark-mode .accordion-button span:has(.device-name),
-  body[data-bs-theme="dark"] .accordion-button strong,
   body[data-bs-theme="dark"] .accordion-button .device-name {
-    color: #ffffff !important;
+    opacity: 1 !important;
+    filter: brightness(1.2) !important; /* Slightly brighter in dark mode for better visibility */
+  }
+  
+  /* Ensure vibrant colors are visible in light mode */
+  html[data-theme="light"] .accordion-button .device-name,
+  body:not(.dark-mode) .accordion-button .device-name {
+    opacity: 1 !important;
   }
   
   /* Force dark text in ALL input fields for light mode */
@@ -1425,27 +1433,38 @@
                 button.setAttribute('data-bs-target', `#${collapseId}`);
                 button.setAttribute('aria-expanded', isFirst ? 'true' : 'false');
                 button.setAttribute('aria-controls', collapseId);
-                // Set button style explicitly for dark mode compatibility - ALWAYS WHITE IN DARK MODE
+                // Set button style - device name will have vibrant color, rest of button uses default
                 const isDarkMode = document.documentElement.getAttribute('data-theme') === 'dark' || document.body.classList.contains('dark-mode');
-                const textColor = isDarkMode ? '#ffffff' : 'var(--nbx-color-fg-default)';
+                const textColor = isDarkMode ? 'var(--nbx-color-fg-default, #ffffff)' : 'var(--nbx-color-fg-default)';
                 
-                // Apply styles to button - FORCE WHITE IN DARK MODE
-                if (isDarkMode) {
-                  button.style.setProperty('color', '#ffffff', 'important');
-                  button.classList.add('text-white');
-                } else {
-                  button.style.setProperty('color', textColor, 'important');
-                }
+                // Apply default text color to button (device name will override with vibrant color)
+                button.style.setProperty('color', textColor, 'important');
                 
-                // Create strong element separately to set explicit color - FORCE WHITE IN DARK MODE
+                // Create strong element with vibrant color that works in both light and dark modes
                 const strongEl = document.createElement('strong');
-                if (isDarkMode) {
-                  strongEl.style.setProperty('color', '#ffffff', 'important');
-                  strongEl.classList.add('text-white');
-                } else {
-                  strongEl.style.setProperty('color', textColor, 'important');
-                }
-                strongEl.style.setProperty('--bs-accordion-btn-color', isDarkMode ? '#ffffff' : textColor, 'important');
+                strongEl.className = 'device-name';
+                
+                // Vibrant colors that work in both light and dark modes
+                // Cycle through colors for visual distinction between devices
+                const vibrantColors = [
+                  '#0d6efd',  // Bootstrap primary blue - vibrant and visible in both modes
+                  '#198754',  // Bootstrap success green - vibrant and visible
+                  '#dc3545',  // Bootstrap danger red - vibrant and visible
+                  '#fd7e14',  // Bootstrap warning orange - vibrant and visible
+                  '#6f42c1',  // Bootstrap info purple - vibrant and visible
+                  '#20c997',  // Bootstrap info teal - vibrant and visible
+                  '#0dcaf0',  // Bootstrap info cyan - vibrant and visible
+                  '#ffc107',  // Bootstrap warning yellow - vibrant (darker in dark mode)
+                ];
+                
+                // Use device index to cycle through colors
+                const colorIndex = deviceIndex % vibrantColors.length;
+                const deviceColor = vibrantColors[colorIndex];
+                
+                // Apply vibrant color - works in both light and dark modes
+                strongEl.style.setProperty('color', deviceColor, 'important');
+                strongEl.style.setProperty('font-weight', '600', 'important');
+                strongEl.style.setProperty('text-shadow', isDarkMode ? '0 1px 2px rgba(0,0,0,0.3)' : 'none', 'important');
                 strongEl.textContent = deviceName;
                 
                 const badgeSpan = document.createElement('span');
@@ -1455,48 +1474,57 @@
                 button.appendChild(strongEl);
                 button.appendChild(badgeSpan);
                 
-                // HARDCODED WHITE COLOR IN DARK MODE - Force reapply with MutationObserver
+                // Ensure device name color persists (vibrant color already set above)
+                // Use MutationObserver to maintain vibrant color if DOM changes
+                const maintainDeviceColor = () => {
+                  // Ensure device name keeps its vibrant color
+                  if (strongEl && strongEl.classList.contains('device-name')) {
+                    const colorIndex = deviceIndex % vibrantColors.length;
+                    const deviceColor = vibrantColors[colorIndex];
+                    strongEl.style.setProperty('color', deviceColor, 'important');
+                  }
+                };
+                
+                // Apply immediately
+                maintainDeviceColor();
+                
+                // Watch for changes and reapply if needed
                 if (isDarkMode) {
-                  // Immediate application
-                  button.style.setProperty('color', '#ffffff', 'important');
-                  strongEl.style.setProperty('color', '#ffffff', 'important');
-                  button.classList.add('text-white');
-                  strongEl.classList.add('text-white');
-                  
-                  // Force white on all child elements
-                  const forceWhite = () => {
-                    button.style.setProperty('color', '#ffffff', 'important');
-                    strongEl.style.setProperty('color', '#ffffff', 'important');
-                    const allChildren = button.querySelectorAll('*');
-                    allChildren.forEach(child => {
-                      if (!child.classList.contains('badge')) {
-                        child.style.setProperty('color', '#ffffff', 'important');
-                      }
-                    });
-                  };
-                  
-                  // Multiple delayed reapplies
-                  setTimeout(forceWhite, 0);
-                  setTimeout(forceWhite, 100);
-                  setTimeout(forceWhite, 500);
-                  setTimeout(forceWhite, 1000);
-                  
-                  // MutationObserver to watch for Bootstrap style changes
-                  const observer = new MutationObserver(function(mutations) {
-                    forceWhite();
+                  const observer = new MutationObserver(() => {
+                    maintainDeviceColor();
                   });
+                  
                   observer.observe(button, {
                     attributes: true,
                     attributeFilter: ['style', 'class'],
                     childList: true,
                     subtree: true
                   });
-                  observer.observe(strongEl, {
-                    attributes: true,
-                    attributeFilter: ['style', 'class']
-                  });
+                  
+                  // Also force reapply after a short delay to catch any late DOM changes
+                  setTimeout(() => {
+                    maintainDeviceColor();
+                  }, 100);
                   
                   // Store observer on element for cleanup if needed
+                  button._colorObserver = observer;
+                } else {
+                  // Light mode: also maintain vibrant color
+                  const observer = new MutationObserver(() => {
+                    maintainDeviceColor();
+                  });
+                  
+                  observer.observe(button, {
+                    attributes: true,
+                    attributeFilter: ['style', 'class'],
+                    childList: true,
+                    subtree: true
+                  });
+                  
+                  setTimeout(() => {
+                    maintainDeviceColor();
+                  }, 100);
+                  
                   button._colorObserver = observer;
                 }
                 header.appendChild(button);
@@ -2367,20 +2395,31 @@
             }
             
             // MINIMAL FIX: Only device names in accordion buttons in dark mode
+            // UPDATED: Preserve vibrant device name colors - only apply default colors to other elements
             function forceWhiteText() {
               const isDark = document.documentElement.getAttribute('data-theme') === 'dark' || 
                             document.body.classList.contains('dark-mode') ||
                             document.documentElement.getAttribute('data-bs-theme') === 'dark';
-              if (!isDark) return; // Only run in dark mode
               
-              // Device names in accordion buttons ONLY - force white
+              // Only apply default colors to non-device-name elements
+              // Device names should keep their vibrant colors set in renderInterfacesAccordion
               document.querySelectorAll('.accordion-button strong, .accordion-button .device-name, .accordion-header button strong').forEach(el => {
-                if (!el.closest('.badge') && !el.closest('.btn')) {
-                  el.style.setProperty('color', '#ffffff', 'important');
-                  // Force on direct children (device name text)
+                // SKIP device-name elements - they should keep their vibrant colors
+                if (el.classList.contains('device-name')) {
+                  return; // Skip - preserve vibrant color
+                }
+                
+                // Only apply default colors to other elements (not device names)
+                if (!el.closest('.badge') && !el.closest('.btn') && !el.classList.contains('device-name')) {
+                  if (isDark) {
+                    el.style.setProperty('color', 'var(--nbx-color-fg-default, #ffffff)', 'important');
+                  }
+                  // Force on direct children (but skip device-name)
                   el.querySelectorAll('*').forEach(child => {
-                    if (!child.closest('.badge') && !child.closest('.btn')) {
-                      child.style.setProperty('color', '#ffffff', 'important');
+                    if (!child.closest('.badge') && !child.closest('.btn') && !child.classList.contains('device-name')) {
+                      if (isDark) {
+                        child.style.setProperty('color', 'var(--nbx-color-fg-default, #ffffff)', 'important');
+                      }
                     }
                   });
                 }
