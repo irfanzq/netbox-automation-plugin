@@ -1125,15 +1125,26 @@ class NornirDeviceManager:
         
         return results
 
-    def deploy_vlan(self, interface_list: List[str], vlan_id: int, platform: str, timeout: int = 90) -> Dict[str, Any]:
+    def deploy_vlan(self, interface_list: List[str], vlan_id: int, platform: str, timeout: int = 90, bond_info_map: Optional[Dict[str, Dict[str, str]]] = None) -> Dict[str, Any]:
         """
         Deploy VLAN configuration to multiple interfaces across all devices in parallel.
+        
+        CRITICAL: Interfaces on the same device are processed SEQUENTIALLY to avoid:
+        - Multiple commit-confirm sessions conflicting
+        - Conflicting revision IDs
+        - One commit overwriting another
+        - Inconsistent device state
+        
+        Devices are processed in PARALLEL (up to num_workers, default 20).
+        Interfaces per device are processed SEQUENTIALLY.
         
         Args:
             interface_list: List of interface names (e.g., ['swp7', 'swp8'])
             vlan_id: VLAN ID to configure (1-4094)
             platform: Platform type ('cumulus' or 'eos')
             timeout: Rollback timeout in seconds (default: 90)
+            bond_info_map: Optional dict mapping device_name -> {interface_name: bond_name}
+                          If provided, uses bond_name instead of interface_name for config generation
         
         Returns:
             Dictionary mapping device names to deployment results per interface
@@ -1148,40 +1159,138 @@ class NornirDeviceManager:
         if not self.nr:
             self.nr = self.initialize()
         
-        logger.info(f"Starting VLAN {vlan_id} deployment to {len(self.nr.inventory.hosts)} devices, "
-                   f"{len(interface_list)} interfaces per device, platform: {platform}")
+        num_devices = len(self.nr.inventory.hosts)
+        num_interfaces = len(interface_list)
+        total_tasks = num_devices * num_interfaces
         
-        # Deploy to all interfaces across all devices
+        logger.info(f"Starting VLAN {vlan_id} deployment to {num_devices} devices, "
+                   f"{num_interfaces} interfaces per device ({total_tasks} total tasks), "
+                   f"platform: {platform}, max {self.num_workers} parallel workers")
+        logger.info(f"Strategy: Devices in PARALLEL (up to {self.num_workers}), interfaces per device SEQUENTIALLY")
+        
+        # Group by device: process interfaces sequentially per device, devices in parallel
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        import threading
+        
         all_results = {}
+        results_lock = threading.Lock()
         
-        for interface_name in interface_list:
-            logger.info(f"Deploying VLAN {vlan_id} to interface {interface_name} across all devices...")
+        def deploy_device_interfaces(device_name: str):
+            """
+            Deploy VLAN to all interfaces on a single device SEQUENTIALLY.
+            This ensures only one commit-confirm session per device at a time.
+            """
+            device_results = {}
             
-            result = self.nr.run(
-                task=deploy_vlan_config,
-                interface_name=interface_name,
-                vlan_id=vlan_id,
-                platform=platform,
-                timeout=timeout
-            )
-            
-            # Process results for this interface
-            for host, task_result in result.items():
-                if host not in all_results:
-                    all_results[host] = {}
+            try:
+                logger.info(f"Device {device_name}: Starting sequential deployment of {num_interfaces} interfaces...")
                 
-                if task_result.failed:
-                    all_results[host][interface_name] = {
-                        'success': False,
-                        'committed': False,
-                        'rolled_back': False,
-                        'error': str(task_result.exception) if task_result.exception else 'Unknown error',
-                        'message': 'Task failed'
+                # Process interfaces sequentially for this device
+                for interface_name in interface_list:
+                    try:
+                        # Get bond interface name if available
+                        target_interface = interface_name
+                        if bond_info_map and device_name in bond_info_map:
+                            device_bond_map = bond_info_map[device_name]
+                            if interface_name in device_bond_map:
+                                target_interface = device_bond_map[interface_name]
+                                logger.info(f"[DEBUG] ✓ BOND REDIRECT: Device {device_name}: Interface {interface_name} → Bond {target_interface}")
+                                logger.info(f"[DEBUG]   Will deploy to bond interface '{target_interface}' (original: '{interface_name}')")
+                            else:
+                                logger.debug(f"[DEBUG] Device {device_name}: Interface {interface_name} not in bond map - using directly")
+                        else:
+                            logger.debug(f"[DEBUG] Device {device_name}: No bond map available - using interface {interface_name} directly")
+                        
+                        logger.info(f"Device {device_name}: Deploying VLAN {vlan_id} to interface {target_interface} (original: {interface_name})...")
+                        
+                        # Run task for this specific device only
+                        # Filter Nornir inventory to just this device
+                        device_nr = self.nr.filter(name=device_name)
+                        
+                        result = device_nr.run(
+                            task=deploy_vlan_config,
+                            interface_name=target_interface,  # Use bond interface if available
+                            original_interface_name=interface_name,  # Keep original for NetBox updates
+                            vlan_id=vlan_id,
+                            platform=platform,
+                            timeout=timeout
+                        )
+                        
+                        # Process result for this device-interface combination
+                        if device_name in result:
+                            task_result = result[device_name]
+                            
+                            if task_result.failed:
+                                device_results[interface_name] = {
+                                    'success': False,
+                                    'committed': False,
+                                    'rolled_back': False,
+                                    'error': str(task_result.exception) if task_result.exception else 'Unknown error',
+                                    'message': 'Task failed'
+                                }
+                                logger.warning(f"Device {device_name}, interface {interface_name}: Deployment failed")
+                            else:
+                                device_results[interface_name] = task_result.result
+                                logger.info(f"Device {device_name}, interface {interface_name}: Deployment completed")
+                        else:
+                            device_results[interface_name] = {
+                                'success': False,
+                                'committed': False,
+                                'rolled_back': False,
+                                'error': 'No result returned from Nornir',
+                                'message': 'Task did not return result'
+                            }
+                            logger.warning(f"Device {device_name}, interface {interface_name}: No result returned")
+                    
+                    except Exception as e:
+                        logger.error(f"Device {device_name}, interface {interface_name}: Error during deployment: {e}")
+                        device_results[interface_name] = {
+                            'success': False,
+                            'committed': False,
+                            'rolled_back': False,
+                            'error': str(e),
+                            'message': f'Deployment failed: {str(e)}'
+                        }
+                
+                # Store results thread-safely
+                with results_lock:
+                    all_results[device_name] = device_results
+                
+                logger.info(f"Device {device_name}: Completed deployment of {len(device_results)} interfaces")
+                return device_name
+                
+            except Exception as e:
+                logger.error(f"Device {device_name}: Critical error during deployment: {e}")
+                # Mark all interfaces as failed for this device
+                with results_lock:
+                    all_results[device_name] = {
+                        iface: {
+                            'success': False,
+                            'committed': False,
+                            'rolled_back': False,
+                            'error': str(e),
+                            'message': f'Device deployment failed: {str(e)}'
+                        } for iface in interface_list
                     }
-                else:
-                    all_results[host][interface_name] = task_result.result
+                return device_name
         
-        logger.info(f"VLAN deployment complete for {len(all_results)} devices")
+        # Execute device deployments in parallel (limited by num_workers)
+        # Each device processes its interfaces sequentially
+        device_names = list(self.nr.inventory.hosts.keys())
+        with ThreadPoolExecutor(max_workers=min(len(device_names), self.num_workers)) as executor:
+            futures = {executor.submit(deploy_device_interfaces, device): device for device in device_names}
+            
+            completed = 0
+            for future in as_completed(futures):
+                completed += 1
+                device_name = futures[future]
+                try:
+                    future.result()
+                    logger.debug(f"Device {device_name} deployment completed ({completed}/{num_devices})")
+                except Exception as e:
+                    logger.error(f"Device {device_name} deployment raised exception: {e}")
+        
+        logger.info(f"VLAN deployment complete for {len(all_results)} devices, {num_interfaces} interfaces")
         
         return all_results
 
@@ -1213,17 +1322,23 @@ def _render_template(template: str, device: "Device") -> str:
     return rendered
 
 
-def deploy_vlan_config(task, interface_name: str, vlan_id: int, platform: str, timeout: int = 90):
+def deploy_vlan_config(task, interface_name: str, vlan_id: int, platform: str, timeout: int = 90, original_interface_name: Optional[str] = None):
     """
     Nornir task: Deploy VLAN configuration to a device interface with safe deployment.
     Uses NAPALM's commit-confirm for Cumulus, configure session for EOS.
     
+    CRITICAL: For Cumulus bonds, interface_name should be the bond interface (e.g., 'bond3'),
+    not the member interface (e.g., 'swp3'). This ensures config is applied to the logical
+    interface that actually carries traffic.
+    
     Args:
         task: Nornir task object
-        interface_name: Interface name (e.g., 'swp7', 'Ethernet1')
+        interface_name: Target interface name (bond interface if bond member, e.g., 'bond3', 'swp7')
         vlan_id: VLAN ID to configure
         platform: Platform type ('cumulus' or 'eos')
         timeout: Rollback timeout in seconds (default: 90)
+        original_interface_name: Original interface name from form (member interface if bond, e.g., 'swp3')
+                                 Used for NetBox updates. If None, uses interface_name.
     
     Returns:
         Nornir Result with deployment status
@@ -1235,43 +1350,77 @@ def deploy_vlan_config(task, interface_name: str, vlan_id: int, platform: str, t
     logger = logging.getLogger('netbox_automation_plugin')
     device_name = task.host.name
     
+    # Use original_interface_name for NetBox lookups, interface_name for device config
+    netbox_interface_name = original_interface_name if original_interface_name else interface_name
+    
     try:
         # Get NetBox device object
         device = Device.objects.get(name=device_name)
         
         # CRITICAL: Validate interface exists in NetBox before deploying
+        # Check original interface (member) in NetBox, but deploy to bond interface on device
         from dcim.models import Interface
         try:
-            interface = Interface.objects.get(device=device, name=interface_name)
-            logger.info(f"{device_name}: Interface {interface_name} validated in NetBox")
+            interface = Interface.objects.get(device=device, name=netbox_interface_name)
+            logger.info(f"{device_name}: Interface {netbox_interface_name} validated in NetBox")
+            if interface_name != netbox_interface_name:
+                logger.info(f"{device_name}: Will deploy to bond interface {interface_name} (NetBox interface: {netbox_interface_name})")
         except Interface.DoesNotExist:
-            error_msg = f"Interface {interface_name} does not exist on device {device_name} in NetBox"
-            logger.error(error_msg)
-            return {
-                "success": False,
-                "committed": False,
-                "rolled_back": False,
-                "error": error_msg,
-                "message": error_msg,
-                "logs": [f"✗ Pre-deployment validation failed: {error_msg}"]
-            }
+            # If bond interface doesn't exist in NetBox, that's OK - we'll create it
+            # But if original interface doesn't exist, that's an error
+            if interface_name == netbox_interface_name:
+                error_msg = f"Interface {interface_name} does not exist on device {device_name} in NetBox"
+                logger.error(error_msg)
+                return {
+                    "success": False,
+                    "committed": False,
+                    "rolled_back": False,
+                    "error": error_msg,
+                    "message": error_msg,
+                    "logs": [f"✗ Pre-deployment validation failed: {error_msg}"]
+                }
+            else:
+                logger.info(f"{device_name}: Bond interface {interface_name} not in NetBox (will be created), member {netbox_interface_name} exists")
         
         # Generate platform-specific config
+        # IMPORTANT: For Cumulus, include bridge VLAN command + interface access command
+        # Load all commands at once to create single revision ID
         if platform == 'cumulus':
-            config = f"nv set interface {interface_name} bridge domain br_default access {vlan_id}"
+            # Command 1: Add VLAN to bridge domain (must be first)
+            bridge_vlan_cmd = f"nv set bridge domain br_default vlan {vlan_id}"
+            # Command 2: Set interface access VLAN
+            interface_access_cmd = f"nv set interface {interface_name} bridge domain br_default access {vlan_id}"
+            # Combine both commands - load all at once
+            config = f"{bridge_vlan_cmd}\n{interface_access_cmd}"
+            
+            # Debug logging
+            if interface_name != netbox_interface_name:
+                logger.info(f"[DEBUG] ✓ CONFIG GENERATION: Device {device_name}: Using BOND interface '{interface_name}' (member: '{netbox_interface_name}')")
+                logger.info(f"[DEBUG]   Generated commands:")
+                logger.info(f"[DEBUG]     1. {bridge_vlan_cmd}")
+                logger.info(f"[DEBUG]     2. {interface_access_cmd}")
+            else:
+                logger.info(f"[DEBUG] ✓ CONFIG GENERATION: Device {device_name}: Using interface '{interface_name}' directly (not a bond member)")
+                logger.info(f"[DEBUG]   Generated commands:")
+                logger.info(f"[DEBUG]     1. {bridge_vlan_cmd}")
+                logger.info(f"[DEBUG]     2. {interface_access_cmd}")
+            logger.info(f"[DEBUG]   Total commands: 2 (bridge VLAN + interface access)")
+            logger.info(f"[DEBUG]   Config will be loaded as single block to create one revision ID")
         elif platform == 'eos':
             config = f"interface {interface_name}\n   switchport mode access\n   switchport access vlan {vlan_id}"
         else:
             return {"success": False, "error": f"Unsupported platform: {platform}"}
         
         # Use NAPALMDeviceManager for safe deployment
+        # Pass interface_name (bond) for device config, original_interface_name (member) for NetBox
         napalm_mgr = NAPALMDeviceManager(device)
         result = napalm_mgr.deploy_config_safe(
             config=config,
             timeout=timeout,
             replace=False,
-            interface_name=interface_name,
-            vlan_id=vlan_id
+            interface_name=interface_name,  # Use bond interface for device config
+            vlan_id=vlan_id,
+            original_interface_name=netbox_interface_name  # Pass original for NetBox updates
         )
         
         return result

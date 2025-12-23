@@ -417,13 +417,24 @@ class VLANDeploymentView(View):
     def _get_bridge_vlans_from_json(self, config_data):
         """
         Extract bridge domain br_default VLAN list from JSON config.
-        Handles VLAN ranges and comma-separated values.
+        Handles VLAN ranges and comma-separated values in all formats.
+        
+        Supports three formats:
+        1. Single key with comma-separated and range: {"10,3000-3199": {}}
+        2. Single key with range and nested vni: {"3019-3099": {"vni": {"auto": {}}}}
+        3. Multiple keys (comma-separated and range) with nested vni:
+           {"2000,3000": {}, "3019-3099": {"vni": {"auto": {}}}}
+        
+        The function extracts VLAN strings from dict keys regardless of nested structures.
         Example: "10,3000-3199" -> [10, 3000, 3001, ..., 3199]
-        Returns list of VLAN IDs that are already on the bridge.
+        
+        Returns:
+            list: Sorted list of individual VLAN IDs that are already on the bridge.
         """
         bridge_vlans = []
         try:
             # Navigate to bridge section
+            # config_data is a list of dicts, each with 'set' key
             for item in config_data:
                 if isinstance(item, dict) and 'set' in item:
                     set_data = item['set']
@@ -436,12 +447,23 @@ class VLANDeploymentView(View):
                                 if isinstance(br_default_data, dict) and 'vlan' in br_default_data:
                                     vlan_data = br_default_data['vlan']
                                     
-                                    # VLAN data structure: {"10,3000-3199": {}}
+                                    # VLAN data structure examples:
+                                    # Format 1: {"10,3000-3199": {}}
+                                    # Format 2: {"3019-3099": {"vni": {"auto": {}}}}
+                                    # Format 3: {"2000,3000": {}, "3019-3099": {"vni": {"auto": {}}}}
                                     # The keys are the VLAN strings we need to parse
+                                    # The values can be empty dicts or nested structures - we ignore them
                                     if isinstance(vlan_data, dict):
-                                        # Parse each key (VLAN string)
+                                        # Parse each key (VLAN string) - values don't matter
                                         for vlan_key in vlan_data.keys():
-                                            bridge_vlans.extend(self._parse_vlan_string(vlan_key))
+                                            if isinstance(vlan_key, str):
+                                                # Parse VLAN string (handles "10,3000-3199", "3019-3099", "2000,3000", etc.)
+                                                parsed_vlans = self._parse_vlan_string(vlan_key)
+                                                bridge_vlans.extend(parsed_vlans)
+                                                logger.debug(f"Parsed bridge VLAN key '{vlan_key}' -> {len(parsed_vlans)} VLAN IDs")
+                                            elif isinstance(vlan_key, (int, float)):
+                                                # Direct VLAN ID (unlikely but handle it)
+                                                bridge_vlans.append(int(vlan_key))
                                     elif isinstance(vlan_data, list):
                                         # If it's a list, parse each item
                                         for vlan_item in vlan_data:
@@ -457,9 +479,13 @@ class VLANDeploymentView(View):
                                         bridge_vlans.append(int(vlan_data))
         except Exception as e:
             logger.debug(f"Could not extract bridge VLANs from JSON: {e}")
+            import traceback
+            logger.debug(f"Traceback: {traceback.format_exc()}")
         
         # Remove duplicates and sort
         bridge_vlans = sorted(list(set(bridge_vlans)))
+        if bridge_vlans:
+            logger.debug(f"Extracted {len(bridge_vlans)} unique bridge VLAN IDs: {bridge_vlans[:10]}{'...' if len(bridge_vlans) > 10 else ''}")
         return bridge_vlans
     
     def _parse_vlan_string(self, vlan_string):
@@ -550,6 +576,42 @@ class VLANDeploymentView(View):
             result.append(f"{start}-{end}")
         
         return ",".join(result)
+    
+    def _is_vlan_in_bridge_vlans(self, vlan_id, bridge_vlans):
+        """
+        Check if a VLAN ID already exists in bridge VLANs (handles both individual VLANs and ranges).
+        
+        Args:
+            vlan_id: VLAN ID to check (int)
+            bridge_vlans: List of existing bridge VLANs, which can be:
+                - List of integers: [3019, 3020, 3021, ...]
+                - List of strings with ranges: ["3019-3099", "4000"]
+                - Mixed: [3019, "3020-3030", 4000]
+        
+        Returns:
+            bool: True if VLAN already exists in bridge VLANs, False otherwise
+        """
+        if not bridge_vlans:
+            return False
+        
+        # Parse all bridge VLANs into a set of individual VLAN IDs
+        existing_vlan_ids = set()
+        
+        for vlan_item in bridge_vlans:
+            if isinstance(vlan_item, int):
+                existing_vlan_ids.add(vlan_item)
+            elif isinstance(vlan_item, str):
+                # Could be a range like "3019-3099" or individual like "3019"
+                parsed = self._parse_vlan_string(vlan_item)
+                existing_vlan_ids.update(parsed)
+            else:
+                # Try to convert to int
+                try:
+                    existing_vlan_ids.add(int(vlan_item))
+                except (ValueError, TypeError):
+                    pass
+        
+        return vlan_id in existing_vlan_ids
     
     def _deep_merge_dicts(self, base_dict, override_dict):
         """
@@ -1863,10 +1925,19 @@ class VLANDeploymentView(View):
         
         return '\n'.join(diff_lines)
     
-    def _generate_netbox_diff(self, current_state, proposed_state):
+    def _generate_netbox_diff(self, current_state, proposed_state, bond_info=None, interface_name=None, bond_name=None):
         """
         Generate a diff for NetBox interface state changes (comprehensive).
         Shows all VLAN-relevant changes including IP/VRF removals.
+        
+        ISSUE 5 FIX: For sync mode with bond detection, shows VLAN migration from interface to bond.
+        
+        Args:
+            current_state: Current NetBox state dict
+            proposed_state: Proposed NetBox state dict
+            bond_info: Optional bond information dict (for sync mode)
+            interface_name: Original interface name (e.g., 'swp3')
+            bond_name: Bond interface name (e.g., 'bond3')
         
         Returns:
             str: Formatted diff showing NetBox changes
@@ -1879,6 +1950,29 @@ class VLANDeploymentView(View):
         diff_lines.append("+++ Proposed NetBox State")
         diff_lines.append("")
         
+        # ISSUE 5 FIX: If bond detected in sync mode, show VLAN migration
+        if bond_info and bond_name and interface_name:
+            # Show migration message
+            diff_lines.append(f"[INFO] BOND DETECTED: VLANs will be moved from interface '{interface_name}' to bond '{bond_name}'")
+            diff_lines.append(f"  Bond '{bond_name}' will be created in NetBox (if missing)")
+            diff_lines.append("")
+            diff_lines.append(f"Interface '{interface_name}' (VLANs will be removed):")
+            old_untagged = current_state['current']['untagged_vlan'] or 'None'
+            old_tagged = ', '.join(map(str, sorted(current_state['current']['tagged_vlans']))) or 'None'
+            diff_lines.append(f"  Untagged VLAN: {old_untagged} → None (moved to bond '{bond_name}')")
+            diff_lines.append(f"  Tagged VLANs: [{old_tagged}] → [] (moved to bond '{bond_name}')")
+            diff_lines.append("")
+            diff_lines.append(f"Bond '{bond_name}' (VLANs will be added):")
+            new_untagged = proposed_state['untagged_vlan'] or 'None'
+            new_tagged = ', '.join(map(str, sorted(proposed_state['tagged_vlans']))) or 'None'
+            if old_untagged != 'None':
+                diff_lines.append(f"  Untagged VLAN: None → {old_untagged} (from interface '{interface_name}')")
+            if old_tagged != 'None':
+                diff_lines.append(f"  Tagged VLANs: [] → [{old_tagged}] (from interface '{interface_name}')")
+            diff_lines.append("")
+            return '\n'.join(diff_lines)
+        
+        # Normal mode (no bond migration)
         # Mode change
         old_mode = current_state['current']['mode'] or 'None'
         new_mode = proposed_state['mode']
@@ -2773,6 +2867,7 @@ class VLANDeploymentView(View):
                     
                     # If bond detected, regenerate config_command with bond interface name
                     # IMPORTANT: Include ALL VLANs (untagged + tagged) from this interface
+                    # ISSUE 1 FIX: Check if VLANs already exist in bridge before adding
                     if bond_member_of:
                         # Regenerate config with bond interface instead of member interface
                         target_interface = bond_member_of
@@ -2786,8 +2881,14 @@ class VLANDeploymentView(View):
                             
                             regenerated_commands = []
                             # Generate bridge VLAN commands for ALL VLANs
+                            # ISSUE 1: Only add VLANs that don't already exist in bridge
                             for vlan in sorted(all_vlans):
-                                regenerated_commands.append(f"nv set bridge domain br_default vlan {vlan}")
+                                # Check if VLAN already exists in bridge (handles ranges like "3019-3099")
+                                if not self._is_vlan_in_bridge_vlans(vlan, bridge_vlans):
+                                    regenerated_commands.append(f"nv set bridge domain br_default vlan {vlan}")
+                                    logger.debug(f"VLAN {vlan} not in bridge - will add")
+                                else:
+                                    logger.debug(f"VLAN {vlan} already exists in bridge (range or individual) - skipping")
                             
                             # Set interface access VLAN using bond interface (if untagged VLAN exists)
                             if untagged_vid:
@@ -2851,18 +2952,138 @@ class VLANDeploymentView(View):
                             logs.append("  (bridge VLAN information not available)")
                         logs.append("")
                     
-                    # Proposed Device Configuration - show ALL VLANs for this interface/bond
-                    logs.append("--- Proposed Device Configuration ---")
-                    # config_command already includes ALL VLANs (untagged + tagged) from this interface
-                    for line in config_command.split('\n'):
-                        if line.strip():
-                            logs.append(f"  {line}")
+                    # ISSUE 2 FIX: Show Current NetBox Configuration FIRST (source of truth)
+                    # Then show conflict detection, then diff
+                    logs.append("--- Current NetBox Configuration (Source of Truth) ---")
+                    netbox_current = netbox_state['current']
+                    logs.append(f"802.1Q Mode: {netbox_current['mode'] or 'None'}")
+                    logs.append(f"Untagged VLAN: {netbox_current['untagged_vlan'] or 'None'}")
+                    tagged_vlans_str = ', '.join(map(str, netbox_current['tagged_vlans'])) if netbox_current['tagged_vlans'] else 'None'
+                    logs.append(f"Tagged VLANs: [{tagged_vlans_str}]")
                     logs.append("")
+                    
+                    # Configuration Conflict Detection
+                    logs.append("--- Configuration Conflict Detection ---")
+                    # Check if device config matches NetBox
+                    device_config_has_vlan = False
+                    device_vlan_id = None
+                    if current_device_config:
+                        import re
+                        vlan_match = re.search(r'access\s+(\d+)', current_device_config.lower())
+                        if vlan_match:
+                            device_config_has_vlan = True
+                            device_vlan_id = int(vlan_match.group(1))
+                    
+                    netbox_has_vlan = netbox_current.get('untagged_vlan') is not None
+                    netbox_vlan_id = netbox_current.get('untagged_vlan')
+                    
+                    conflict_detected = False
+                    conflict_reasons = []
+                    if netbox_has_vlan and not device_config_has_vlan:
+                        conflict_detected = True
+                        conflict_reasons.append(f"NetBox has VLAN {netbox_vlan_id} configured but device has no VLAN config")
+                    elif netbox_has_vlan and device_config_has_vlan and netbox_vlan_id != device_vlan_id:
+                        conflict_detected = True
+                        conflict_reasons.append(f"VLAN mismatch: NetBox has {netbox_vlan_id}, device has {device_vlan_id}")
+                    
+                    if conflict_detected:
+                        logs.append(f"[WARN] Device config differs from NetBox config")
+                        if conflict_reasons:
+                            logs.append(f"  Conflicts detected: {', '.join(conflict_reasons)}")
+                        logs.append("")
+                        logs.append("Device Should Have (According to NetBox):")
+                        # ISSUE 4 & 6 FIX: Show ALL VLANs (untagged + tagged) from NetBox
+                        # Generate complete config from NetBox state
+                        all_netbox_vlans = set()
+                        if netbox_current.get('untagged_vlan'):
+                            all_netbox_vlans.add(netbox_current['untagged_vlan'])
+                        all_netbox_vlans.update(netbox_current.get('tagged_vlans', []))
+                        
+                        # Show bridge VLAN commands for all VLANs
+                        target_interface_for_netbox = bond_member_of if bond_member_of else interface.name
+                        for vlan in sorted(all_netbox_vlans):
+                            # Only show if not already in bridge (Issue 1)
+                            if not self._is_vlan_in_bridge_vlans(vlan, bridge_vlans):
+                                logs.append(f"  nv set bridge domain br_default vlan {vlan}")
+                        
+                        # Show interface access VLAN command
+                        if netbox_current.get('untagged_vlan'):
+                            logs.append(f"  nv set interface {target_interface_for_netbox} bridge domain br_default access {netbox_current['untagged_vlan']}")
+                        logs.append("")
+                        logs.append("Note: NetBox is the source of truth. Device may have stale/old configuration.")
+                        logs.append("      Any differences will be reconciled during deployment.")
+                    else:
+                        logs.append("[OK] Device config matches NetBox - no conflicts detected")
+                    logs.append("")
+                    
+                    # ISSUE 3 FIX: Include bridge VLANs in current config for diff generation
+                    # Build current config that includes both interface-level and bridge-level
+                    current_config_with_bridge = current_device_config or ""
+                    if platform == 'cumulus' and bridge_vlans:
+                        # Add bridge VLAN commands to current config for proper diff
+                        bridge_vlan_cmds = []
+                        for vlan_item in bridge_vlans:
+                            if isinstance(vlan_item, (int, str)):
+                                # Format as command
+                                if isinstance(vlan_item, str) and '-' in vlan_item:
+                                    # Range format
+                                    bridge_vlan_cmds.append(f"nv set bridge domain br_default vlan {vlan_item}")
+                                else:
+                                    # Individual VLAN
+                                    try:
+                                        vlan_id = int(vlan_item) if isinstance(vlan_item, str) else vlan_item
+                                        bridge_vlan_cmds.append(f"nv set bridge domain br_default vlan {vlan_id}")
+                                    except (ValueError, TypeError):
+                                        pass
+                        
+                        if bridge_vlan_cmds:
+                            if current_config_with_bridge:
+                                current_config_with_bridge = '\n'.join(bridge_vlan_cmds) + '\n' + current_config_with_bridge
+                            else:
+                                current_config_with_bridge = '\n'.join(bridge_vlan_cmds)
+                    
+                    # Regenerate diff with bridge VLANs included in current config
+                    config_diff = self._generate_config_diff(
+                        current_config_with_bridge,  # Use current config with bridge VLANs
+                        config_command, 
+                        platform, 
+                        device=device, 
+                        interface_name=target_interface_for_diff,
+                        bridge_vlans=bridge_vlans  # Pass bridge VLANs for reference
+                    )
+                    
                     logs.append("--- Configuration Diff ---")
                     for line in config_diff.split('\n'):
                         if line.strip():
                             logs.append(f"  {line}")
                     logs.append("")
+                    
+                    # ISSUE 5 FIX: Generate NetBox diff with bond info for sync mode
+                    # Get NetBox state for this interface
+                    netbox_state = self._get_netbox_current_state(device, interface.name, vlan_id)
+                    # Get bond info for NetBox diff
+                    bond_info_for_netbox = None
+                    bond_name_for_netbox = None
+                    if bond_member_of:
+                        bond_info_for_netbox = self._get_bond_interface_for_member(device, interface.name, platform=platform)
+                        bond_name_for_netbox = bond_member_of
+                    
+                    # Generate NetBox diff with bond migration info
+                    netbox_diff = self._generate_netbox_diff(
+                        netbox_state, 
+                        netbox_state['proposed'],
+                        bond_info=bond_info_for_netbox,
+                        interface_name=interface.name,
+                        bond_name=bond_name_for_netbox
+                    )
+                    
+                    # ISSUE 7 FIX: Show NetBox Configuration Changes only once (not duplicate)
+                    logs.append("--- NetBox Configuration Changes ---")
+                    for line in netbox_diff.split('\n'):
+                        if line.strip():
+                            logs.append(f"  {line}")
+                    logs.append("")
+                    
                     # Check for configs that will be overridden (WARNING only, not blocking)
                     warnings = []
                     has_conflicts = False
@@ -3834,8 +4055,8 @@ class VLANDeploymentView(View):
                     # Determine target interface (bond if member, otherwise original)
                     target_interface_for_config = bond_member_of if bond_member_of else interface_name
                     
-                    # Get proposed config (use target_interface which may be bond, pass device for additional checks)
-                    proposed_config = self._generate_vlan_config(target_interface_for_config, vlan_id, platform, device=device)
+                    # Get proposed config (use target_interface which may be bond, pass device and bridge_vlans for checks)
+                    proposed_config = self._generate_vlan_config(target_interface_for_config, vlan_id, platform, device=device, bridge_vlans=bridge_vlans)
                     
                     # Generate config diff (pass bridge VLANs to check if VLAN already exists)
                     # Use target_interface_for_config for interface_name parameter to ensure diff shows correct interface
@@ -4318,7 +4539,7 @@ class VLANDeploymentView(View):
                     target_interface_for_config = bond_member_of if bond_member_of else interface_name
                     
                     # Generate proposed config and config diff (same as dry run) (use target_interface which may be bond)
-                    proposed_config = self._generate_vlan_config(target_interface_for_config, vlan_id, platform, device=device)
+                    proposed_config = self._generate_vlan_config(target_interface_for_config, vlan_id, platform, device=device, bridge_vlans=bridge_vlans_before)
                     config_diff = self._generate_config_diff(current_config_before, proposed_config, platform, device=device, interface_name=target_interface_for_config, bridge_vlans=bridge_vlans_before)
                     
                     # Build all the sections (same as dry run)
@@ -4528,15 +4749,48 @@ class VLANDeploymentView(View):
                     pre_deployment_logs[device.name][interface_name] = logs
             
             # Now deploy using Nornir
+            # First, build bond_info_map: {device_name: {interface_name: bond_name}}
+            bond_info_map = {}
+            logger.info(f"[DEBUG] Building bond_info_map for {len(devices)} devices, {len(interface_list)} interfaces")
+            for device in devices:
+                device_bond_map = {}
+                for interface_name in interface_list:
+                    # Check if interface is a bond member
+                    try:
+                        logger.debug(f"[DEBUG] Checking bond membership for {device.name}:{interface_name}")
+                        device_config_result = self._get_current_device_config(device, interface_name, platform)
+                        bond_member_of = device_config_result.get('bond_member_of', None)
+                        if bond_member_of:
+                            device_bond_map[interface_name] = bond_member_of
+                            logger.info(f"[DEBUG] ✓ BOND DETECTED: Device {device.name}: Interface {interface_name} is member of bond {bond_member_of}")
+                            logger.info(f"[DEBUG]   Will use bond interface '{bond_member_of}' for device config (instead of '{interface_name}')")
+                        else:
+                            logger.debug(f"[DEBUG] No bond detected for {device.name}:{interface_name} - will use interface directly")
+                    except Exception as e:
+                        logger.warning(f"[DEBUG] Could not check bond membership for {device.name}:{interface_name}: {e}")
+                
+                if device_bond_map:
+                    bond_info_map[device.name] = device_bond_map
+                    logger.info(f"[DEBUG] Device {device.name}: Bond map = {device_bond_map}")
+                else:
+                    logger.debug(f"[DEBUG] Device {device.name}: No bonds detected for any interfaces")
+            
+            if bond_info_map:
+                logger.info(f"[DEBUG] Bond info map created: {bond_info_map}")
+            else:
+                logger.info(f"[DEBUG] No bonds detected - all interfaces will be configured directly")
+            
             nornir_manager = NornirDeviceManager(devices=devices)
             nornir_manager.initialize()
             
             # Deploy VLAN across all devices in parallel
+            # Pass bond_info_map so Nornir uses bond interfaces instead of member interfaces
             nornir_results = nornir_manager.deploy_vlan(
                 interface_list=interface_list,
                 vlan_id=vlan_id,
                 platform=platform,
-                timeout=90
+                timeout=90,
+                bond_info_map=bond_info_map if bond_info_map else None
             )
             
             # Process Nornir results into table format
@@ -4627,42 +4881,53 @@ class VLANDeploymentView(View):
                         if update_netbox and interface_result.get('committed', False) and vlan:
                             logs.append("")
                             logs.append("[Step 4] Updating NetBox interface assignment...")
-                            netbox_result = self._update_netbox_interface(device, interface_name, vlan)
+                            
+                            # OPTION A: Create bond in NetBox FIRST if device has bond but NetBox doesn't
+                            # This ensures bond exists before we try to update VLAN on it
+                            bond_info = self._get_bond_interface_for_member(device, interface_name, platform=platform)
+                            target_interface_for_netbox = interface_name  # Default to original interface
+                            
+                            if bond_info and bond_info.get('netbox_missing_bond'):
+                                device_bond = bond_info.get('device_bond_name')
+                                all_members = bond_info.get('all_members', [])
+                                if device_bond and all_members:
+                                    logs.append(f"[INFO] Device has bond '{device_bond}' but NetBox doesn't - creating bond first...")
+                                    bond_sync_result = self._sync_bond_to_netbox(device, device_bond, all_members, platform=platform)
+                                    if bond_sync_result['success']:
+                                        if bond_sync_result['bond_created']:
+                                            logs.append(f"[OK] Created bond '{device_bond}' in NetBox")
+                                        if bond_sync_result['members_added'] > 0:
+                                            logs.append(f"[OK] Added {bond_sync_result['members_added']} interface(s) to bond '{device_bond}' in NetBox")
+                                        target_interface_for_netbox = device_bond  # Update VLAN on bond interface
+                                        logs.append(f"[INFO] Will update VLAN configuration on bond interface '{device_bond}' (member: {interface_name})")
+                                    else:
+                                        logs.append(f"[WARN] Failed to create bond in NetBox: {bond_sync_result.get('error', 'Unknown error')}")
+                                        logs.append(f"[WARN] Will attempt to update VLAN on member interface '{interface_name}' instead")
+                            
+                            # Now update VLAN configuration on the target interface (bond if created, member otherwise)
+                            logs.append(f"[INFO] Updating NetBox interface '{target_interface_for_netbox}' with VLAN {vlan_id}...")
+                            netbox_result = self._update_netbox_interface(device, target_interface_for_netbox, vlan)
                             if netbox_result['success']:
                                 netbox_updated = "Yes"
                                 message += " | NetBox updated"
-                                logs.append(f"[OK] NetBox interface updated successfully")
-                                
-                                # Sync bond information to NetBox if device has bond but NetBox doesn't
-                                logs.append("")
-                                logs.append("[Step 4.5] Syncing bond configuration to NetBox (if needed)...")
-                                bond_info = self._get_bond_interface_for_member(device, interface_name, platform=platform)
-                                if bond_info and bond_info.get('netbox_missing_bond'):
-                                    device_bond = bond_info.get('device_bond_name')
-                                    all_members = bond_info.get('all_members', [])
-                                    if device_bond and all_members:
-                                        bond_sync_result = self._sync_bond_to_netbox(device, device_bond, all_members, platform=platform)
-                                        if bond_sync_result['success']:
-                                            if bond_sync_result['bond_created']:
-                                                logs.append(f"[OK] Created bond '{device_bond}' in NetBox")
-                                            if bond_sync_result['members_added'] > 0:
-                                                logs.append(f"[OK] Added {bond_sync_result['members_added']} interface(s) to bond '{device_bond}' in NetBox")
-                                            message += f" | Bond '{device_bond}' synced to NetBox"
-                                        else:
-                                            logs.append(f"[WARN] Failed to sync bond to NetBox: {bond_sync_result.get('error', 'Unknown error')}")
-                                            message += f" | Bond sync failed"
+                                if target_interface_for_netbox != interface_name:
+                                    logs.append(f"[OK] NetBox interface '{target_interface_for_netbox}' (bond) updated successfully (member: {interface_name})")
                                 else:
-                                    logs.append(f"[OK] Bond configuration already in sync (or interface is not part of a bond)")
+                                    logs.append(f"[OK] NetBox interface '{target_interface_for_netbox}' updated successfully")
                                 
-                                # Verify NetBox update
+                                # Verify NetBox update (use target_interface_for_netbox, not original interface_name)
                                 logs.append("")
                                 logs.append("[Step 5] Verifying NetBox update...")
-                                verification_result = self._verify_netbox_update(device, interface_name, vlan_id)
+                                verification_result = self._verify_netbox_update(device, target_interface_for_netbox, vlan_id)
                                 if verification_result['success']:
                                     if verification_result['verified']:
                                         netbox_verified = True
                                         message += " | NetBox verified"
                                         logs.append(f"[OK] NetBox verification PASSED - all checks passed")
+                                        if target_interface_for_netbox != interface_name:
+                                            logs.append(f"  Interface: {target_interface_for_netbox} (bond, member: {interface_name})")
+                                        else:
+                                            logs.append(f"  Interface: {target_interface_for_netbox}")
                                         logs.append(f"  Mode: {verification_result['details']['mode']['actual']} (expected: tagged)")
                                         logs.append(f"  Untagged VLAN: {verification_result['details']['untagged_vlan']['actual']} (expected: {vlan_id})")
                                         logs.append(f"  Tagged VLANs: {verification_result['details']['tagged_vlans']['actual']} (expected: [])")
@@ -5060,7 +5325,7 @@ class VLANDeploymentView(View):
                 'error': str(e)
             }
 
-    def _generate_vlan_config(self, interface_name, vlan_id, platform, include_bridge_vlan=True, device=None):
+    def _generate_vlan_config(self, interface_name, vlan_id, platform, include_bridge_vlan=True, device=None, bridge_vlans=None):
         """
         Generate platform-specific VLAN configuration command.
         
@@ -5080,7 +5345,8 @@ class VLANDeploymentView(View):
             vlan_id: VLAN ID (1-4094)
             platform: Platform type ('cumulus' or 'eos')
             include_bridge_vlan: If True, add bridge VLAN command for Cumulus (default: True)
-            device: Device object (optional, required to check bond membership)
+            device: Device object (optional, required to check bond membership and bridge VLANs)
+            bridge_vlans: List of existing bridge VLANs (optional, if not provided will fetch from device)
 
         Returns:
             str or list: Configuration command(s) for the platform
@@ -5137,9 +5403,33 @@ class VLANDeploymentView(View):
                 # Add bond to bridge domain
                 commands.append(f"nv set interface {netbox_bond} bridge domain br_default")
             
-            # Add VLAN to bridge first (additive - safe, won't remove existing VLANs)
+            # ISSUE 1 FIX: Add VLAN to bridge first (additive - safe, won't remove existing VLANs)
+            # But only if it doesn't already exist in bridge VLANs
             if include_bridge_vlan:
-                commands.append(f"nv set bridge domain br_default vlan {vlan_id}")
+                # Get current bridge VLANs from device config to check if VLAN already exists
+                # Use provided bridge_vlans if available, otherwise fetch from device
+                if bridge_vlans is None:
+                    bridge_vlans = []
+                    if device:
+                        try:
+                            device_config_result = self._get_current_device_config(device, interface_name, platform)
+                            bridge_vlans = device_config_result.get('_bridge_vlans', [])
+                            # Also try to get from JSON if available
+                            if not bridge_vlans:
+                                # Try to get from config_data if available
+                                config_data = device_config_result.get('_config_data')
+                                if config_data:
+                                    bridge_vlans = self._get_bridge_vlans_from_json(config_data)
+                        except Exception as e:
+                            logger.debug(f"Could not get bridge VLANs for check: {e}")
+                
+                # Only add bridge VLAN command if VLAN doesn't already exist
+                # bridge_vlans can be: list of ints, list of strings like "3019-3099" or "10,3000-3199", or mixed
+                if not self._is_vlan_in_bridge_vlans(vlan_id, bridge_vlans):
+                    commands.append(f"nv set bridge domain br_default vlan {vlan_id}")
+                    logger.debug(f"VLAN {vlan_id} not in bridge - will add")
+                else:
+                    logger.debug(f"VLAN {vlan_id} already exists in bridge (range or individual) - skipping bridge VLAN command")
             
             # Set interface access VLAN - use target_interface (bond if member, NetBox bond name if migration)
             commands.append(f"nv set interface {target_interface} bridge domain br_default access {vlan_id}")
@@ -5315,38 +5605,35 @@ class VLANDeploymentView(View):
                 
                 # Check if bridge VLAN command is needed by checking device config
                 bridge_vlan_needed = (vlan_id not in bridge_vlans)
-                bridge_vlan_cmd = None  # Initialize to avoid NameError
+                bridge_vlan_cmd = f"nv set bridge domain br_default vlan {vlan_id}"
                 
-                # Build config_text in correct order: bridge VLAN first (if needed), then interface access VLAN
-                commands_to_run = []
+                # IMPORTANT: deploy_vlan_config() already includes bridge VLAN command in config_text
+                # We need to check if it's already there and avoid duplicates
+                # Parse config_text to see if bridge VLAN command is already included
+                config_lines = [line.strip() for line in config_text.split('\n') if line.strip()]
+                has_bridge_vlan_cmd = bridge_vlan_cmd in config_lines
                 
-                if bridge_vlan_needed:
-                    # Command 1: Add VLAN to bridge domain (must be first)
-                    # This is needed because VLAN is NOT part of br_default - we checked device config
-                    bridge_vlan_cmd = f"nv set bridge domain br_default vlan {vlan_id}"
-                    commands_to_run.append(bridge_vlan_cmd)
-                    logger.info(f"VLAN {vlan_id} not on bridge - will add to bridge domain br_default")
-                else:
-                    logger.info(f"VLAN {vlan_id} already exists on bridge br_default - skipping bridge command")
-                
-                # Command 2: Process config_text (already corrected above if bond detected)
-                # Build final config_text: bridge VLAN first (if needed), then all other commands from config_text
+                # Build final config_text: bridge VLAN first (if needed and not already present), then interface access VLAN
                 final_commands = []
                 
-                # Add bridge VLAN command first if needed
-                if bridge_vlan_needed:
+                # Add bridge VLAN command first if needed and not already in config_text
+                if bridge_vlan_needed and not has_bridge_vlan_cmd:
                     final_commands.append(bridge_vlan_cmd)
+                    logger.info(f"VLAN {vlan_id} not on bridge - will add to bridge domain br_default")
+                elif not bridge_vlan_needed:
+                    logger.info(f"VLAN {vlan_id} already exists on bridge br_default - skipping bridge command")
+                elif has_bridge_vlan_cmd:
+                    logger.info(f"VLAN {vlan_id} bridge command already in config_text - will use existing")
                 
-                # Add all commands from config_text (already corrected above if bond detected)
-                # Parse config_text to extract individual commands
-                for line in config_text.split('\n'):
-                    if line.strip():
-                        # Skip duplicate bridge VLAN command if we already added it
-                        if bridge_vlan_needed and line.strip() == bridge_vlan_cmd:
-                            continue  # Skip duplicate bridge VLAN command if we already have it from bridge_vlan_needed check
-                        # Add command if not already in final_commands
-                        if line.strip() not in final_commands:
-                            final_commands.append(line.strip())
+                # Add all commands from config_text (already includes bridge VLAN + interface access if from deploy_vlan_config)
+                # Remove duplicate bridge VLAN commands if we added one above
+                for line in config_lines:
+                    # Skip duplicate bridge VLAN command if we already added it
+                    if bridge_vlan_needed and not has_bridge_vlan_cmd and line == bridge_vlan_cmd:
+                        continue  # Skip duplicate if we already added it above
+                    # Add command if not already in final_commands
+                    if line not in final_commands:
+                        final_commands.append(line)
                 
                 # Combine commands in correct order
                 config_text = "\n".join(final_commands)
@@ -5415,7 +5702,14 @@ class VLANDeploymentView(View):
             
             # Generate proposed config and config diff (same as dry run)
             # Use interface_name (target interface - bond if member) for config generation
-            proposed_config = self._generate_vlan_config(interface_name, vlan_id, platform, device=device)
+            # Get bridge VLANs if available for checking
+            bridge_vlans_for_config = []
+            try:
+                device_config_result = self._get_current_device_config(device, interface_name, platform)
+                bridge_vlans_for_config = device_config_result.get('_bridge_vlans', [])
+            except Exception:
+                pass
+            proposed_config = self._generate_vlan_config(interface_name, vlan_id, platform, device=device, bridge_vlans=bridge_vlans_for_config)
             # For config diff, use the bond interface config if available, otherwise use member config
             config_for_diff = bond_interface_config if (bond_interface_config and original_interface_name) else current_config_before
             config_diff = self._generate_config_diff(config_for_diff, proposed_config, platform, device=device, interface_name=interface_name, bridge_vlans=bridge_vlans_before)

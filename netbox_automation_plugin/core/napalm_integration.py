@@ -1249,10 +1249,35 @@ class NAPALMDeviceManager:
                                 result['logs'] = logs
                                 return result
                         else:
+                            # ISSUE 8 FIX: Add detailed diagnostic checks
+                            error_details = []
+                            if not self.connection:
+                                error_details.append("Connection object is None")
+                            elif not hasattr(self.connection, 'device'):
+                                error_details.append(f"Connection object has no 'device' attribute (connection type: {type(self.connection)})")
+                            elif self.connection.device is None:
+                                error_details.append("Connection.device is None (device object not initialized)")
+                            elif not hasattr(self.connection.device, 'send_command'):
+                                error_details.append(f"Connection.device has no 'send_command' method (device type: {type(self.connection.device)})")
+                            else:
+                                error_details.append("Unknown error - connection.device.send_command check failed")
+                            
                             error_msg = "Cannot access device.send_command for baseline collection"
                             logger.error(f"CRITICAL: {error_msg}")
+                            logger.error(f"  Diagnostic details: {error_details}")
                             logs.append(f"  ✗ {error_msg}")
-                            result['message'] = error_msg
+                            logs.append(f"  [DEBUG] Connection diagnostics:")
+                            for detail in error_details:
+                                logs.append(f"    - {detail}")
+                            if hasattr(self, 'connection') and self.connection:
+                                logs.append(f"    - Connection object exists: {self.connection is not None}")
+                                logs.append(f"    - Connection type: {type(self.connection)}")
+                                if hasattr(self.connection, 'device'):
+                                    logs.append(f"    - Connection.device exists: {self.connection.device is not None}")
+                                    if self.connection.device:
+                                        logs.append(f"    - Connection.device type: {type(self.connection.device)}")
+                                        logs.append(f"    - Connection.device has send_command: {hasattr(self.connection.device, 'send_command')}")
+                            result['message'] = f"{error_msg}. Details: {'; '.join(error_details)}"
                             result['logs'] = logs
                             return result
                     except Exception as nvue_error:
@@ -1593,14 +1618,16 @@ class NAPALMDeviceManager:
                     
                     # Provide more specific error message based on exception type
                     if exception_type in ['ConfigInvalidException', 'MergeConfigException', 'ReplaceConfigException']:
-                        error_msg = f"Config syntax error: {error_msg}. Check NVUE command syntax (e.g., use 'vlan {vlan_id}' not 'vlan add {vlan_id}')"
+                        # Show actual error from device, not generic example
                         logs.append(f"  ✗ Configuration load FAILED - Syntax Error")
                         logs.append(f"  Error Type: {exception_type}")
                         logs.append(f"  Error: {error_msg}")
-                        logs.append(f"  Common causes:")
-                        logs.append(f"    - Invalid NVUE command syntax")
-                        logs.append(f"    - Incorrect command format (e.g., 'vlan add' should be 'vlan')")
-                        logs.append(f"    - Invalid parameters or values")
+                        logs.append(f"  [DEBUG] Actual error from device:")
+                        # error_msg already contains the actual error from the exception
+                        if error_msg:
+                            logs.append(f"    {error_msg}")
+                        else:
+                            logs.append(f"    (No detailed error message available)")
                     else:
                         result['message'] = f"Failed to load configuration. {error_msg}"
                         logger.error(f"Phase 1 failed: load_config returned False")
@@ -2453,11 +2480,29 @@ class NAPALMDeviceManager:
                             if commit_warning:
                                 # Commit failed - no pending revision but changes exist
                                 # This likely means commands had syntax errors (like "vlan add" instead of "vlan")
-                                error_msg = "Commit failed - no commit-confirm session created. Commands may have had syntax errors."
+                                # Get actual error details if available
+                                actual_error = "Unknown error"
+                                try:
+                                    # Try to get error from config diff or device
+                                    if hasattr(self.connection, 'device') and hasattr(self.connection.device, 'send_command'):
+                                        diff_output = self.connection.device.send_command('nv config diff', read_timeout=10)
+                                        if diff_output and 'error' in diff_output.lower():
+                                            actual_error = diff_output.strip()
+                                        elif diff_output and 'no changes' in diff_output.lower():
+                                            actual_error = "No changes detected - config may already match applied config"
+                                        else:
+                                            actual_error = "Commit succeeded but no commit-confirm session was created"
+                                except Exception as e:
+                                    actual_error = f"Could not retrieve error details: {str(e)}"
+                                
+                                error_msg = f"Commit failed - no commit-confirm session created. {actual_error}"
                                 logger.error(f"Phase 5 failed: {error_msg}")
-                                logs.append(f"  ✗ {error_msg}")
-                                logs.append(f"  This can happen if commands had syntax errors during load_config")
-                                logs.append(f"  Example: 'nv set bridge domain br_default vlan add 3000' should be 'nv set bridge domain br_default vlan 3000'")
+                                logs.append(f"  ✗ Commit failed - no commit-confirm session created")
+                                logs.append(f"  Error: {actual_error}")
+                                logs.append(f"  Possible causes:")
+                                logs.append(f"    - Config syntax errors during load (check config commands)")
+                                logs.append(f"    - Config already matches applied config (no changes to commit)")
+                                logs.append(f"    - Commit-confirm mechanism failed (device issue)")
                                 
                                 # Check current state - if changes are applied but not in commit-confirm, we need to save them
                                 try:
