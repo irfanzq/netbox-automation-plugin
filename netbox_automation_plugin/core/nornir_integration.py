@@ -1177,80 +1177,215 @@ class NornirDeviceManager:
         
         def deploy_device_interfaces(device_name: str):
             """
-            Deploy VLAN to all interfaces on a single device SEQUENTIALLY.
-            This ensures only one commit-confirm session per device at a time.
+            Deploy VLAN to all interfaces on a single device in ONE commit-confirm session.
+            Batches all interface configs together for efficiency.
             """
             device_results = {}
             
             try:
-                logger.info(f"Device {device_name}: Starting sequential deployment of {num_interfaces} interfaces...")
+                logger.info(f"Device {device_name}: Starting batched deployment of {num_interfaces} interfaces in single session...")
                 
-                # Process interfaces sequentially for this device
-                for interface_name in interface_list:
+                # Build config for all interfaces on this device
+                from netbox_automation_plugin.core.napalm_integration import NAPALMDeviceManager
+                from dcim.models import Device
+                
+                device = Device.objects.get(name=device_name)
+                napalm_mgr = NAPALMDeviceManager(device)
+                
+                # Check if bridge VLAN already exists (for Cumulus only)
+                bridge_vlans = []
+                bridge_vlan_needed = True
+                if platform == 'cumulus':
                     try:
-                        # Get bond interface name if available
-                        target_interface = interface_name
-                        if bond_info_map and device_name in bond_info_map:
-                            device_bond_map = bond_info_map[device_name]
-                            if interface_name in device_bond_map:
-                                target_interface = device_bond_map[interface_name]
-                                logger.info(f"[DEBUG] ✓ BOND REDIRECT: Device {device_name}: Interface {interface_name} → Bond {target_interface}")
-                                logger.info(f"[DEBUG]   Will deploy to bond interface '{target_interface}' (original: '{interface_name}')")
-                            else:
-                                logger.debug(f"[DEBUG] Device {device_name}: Interface {interface_name} not in bond map - using directly")
-                        else:
-                            logger.debug(f"[DEBUG] Device {device_name}: No bond map available - using interface {interface_name} directly")
-                        
-                        logger.info(f"Device {device_name}: Deploying VLAN {vlan_id} to interface {target_interface} (original: {interface_name})...")
-                        
-                        # Run task for this specific device only
-                        # Filter Nornir inventory to just this device
-                        device_nr = self.nr.filter(name=device_name)
-                        
-                        result = device_nr.run(
-                            task=deploy_vlan_config,
-                            interface_name=target_interface,  # Use bond interface if available
-                            original_interface_name=interface_name,  # Keep original for NetBox updates
-                            vlan_id=vlan_id,
-                            platform=platform,
-                            timeout=timeout
-                        )
-                        
-                        # Process result for this device-interface combination
-                        if device_name in result:
-                            task_result = result[device_name]
-                            
-                            if task_result.failed:
-                                device_results[interface_name] = {
-                                    'success': False,
-                                    'committed': False,
-                                    'rolled_back': False,
-                                    'error': str(task_result.exception) if task_result.exception else 'Unknown error',
-                                    'message': 'Task failed'
-                                }
-                                logger.warning(f"Device {device_name}, interface {interface_name}: Deployment failed")
-                            else:
-                                device_results[interface_name] = task_result.result
-                                logger.info(f"Device {device_name}, interface {interface_name}: Deployment completed")
-                        else:
-                            device_results[interface_name] = {
-                                'success': False,
-                                'committed': False,
-                                'rolled_back': False,
-                                'error': 'No result returned from Nornir',
-                                'message': 'Task did not return result'
-                            }
-                            logger.warning(f"Device {device_name}, interface {interface_name}: No result returned")
-                    
+                        if napalm_mgr.connect():
+                            connection = napalm_mgr.connection
+                            try:
+                                # Get bridge VLANs from device config
+                                if hasattr(connection, 'cli'):
+                                    config_show_output = connection.cli(['nv config show -o json'])
+                                elif hasattr(connection, 'device') and hasattr(connection.device, 'send_command'):
+                                    config_show_output = connection.device.send_command('nv config show -o json', read_timeout=60)
+                                else:
+                                    config_show_output = None
+                                
+                                if config_show_output:
+                                    # Extract JSON string
+                                    if isinstance(config_show_output, dict):
+                                        config_json_str = config_show_output.get('nv config show -o json') or list(config_show_output.values())[0] if config_show_output else None
+                                    else:
+                                        config_json_str = str(config_show_output).strip()
+                                    
+                                    if config_json_str:
+                                        import json
+                                        config_data = json.loads(config_json_str)
+                                        
+                                        # Extract bridge VLANs from JSON (same logic as views.py)
+                                        # config_data is a list of dicts, each with 'set' key
+                                        bridge_vlans = []
+                                        try:
+                                            if isinstance(config_data, list):
+                                                for item in config_data:
+                                                    if isinstance(item, dict) and 'set' in item:
+                                                        set_data = item['set']
+                                                        if isinstance(set_data, dict) and 'bridge' in set_data:
+                                                            bridge_data = set_data['bridge']
+                                                            if isinstance(bridge_data, dict) and 'domain' in bridge_data:
+                                                                domain_data = bridge_data['domain']
+                                                                if isinstance(domain_data, dict) and 'br_default' in domain_data:
+                                                                    br_default_data = domain_data['br_default']
+                                                                    if isinstance(br_default_data, dict) and 'vlan' in br_default_data:
+                                                                        vlan_data = br_default_data['vlan']
+                                                                        if isinstance(vlan_data, dict):
+                                                                            # The keys are the VLAN strings we need to parse
+                                                                            for vlan_key in vlan_data.keys():
+                                                                                if isinstance(vlan_key, str):
+                                                                                    bridge_vlans.append(vlan_key)
+                                        except Exception as e:
+                                            logger.debug(f"Could not parse bridge VLANs from JSON: {e}")
+                                        
+                                        # Check if VLAN already exists using same logic as views.py
+                                        bridge_vlan_needed = True
+                                        if bridge_vlans:
+                                            # Parse all bridge VLANs into individual VLAN IDs
+                                            existing_vlan_ids = set()
+                                            for vlan_item in bridge_vlans:
+                                                if isinstance(vlan_item, int):
+                                                    existing_vlan_ids.add(vlan_item)
+                                                elif isinstance(vlan_item, str):
+                                                    # Parse ranges and comma-separated values
+                                                    parts = vlan_item.replace(' ', '').split(',')
+                                                    for part in parts:
+                                                        if '-' in part:
+                                                            try:
+                                                                start, end = map(int, part.split('-'))
+                                                                existing_vlan_ids.update(range(start, end + 1))
+                                                            except:
+                                                                pass
+                                                        else:
+                                                            try:
+                                                                existing_vlan_ids.add(int(part))
+                                                            except:
+                                                                pass
+                                            
+                                            if vlan_id in existing_vlan_ids:
+                                                bridge_vlan_needed = False
+                                                logger.info(f"Device {device_name}: VLAN {vlan_id} already exists in bridge - will skip bridge VLAN command")
+                            except Exception as e:
+                                logger.warning(f"Could not get bridge VLANs from {device_name}: {e}")
+                                # Continue - will add command anyway (idempotent)
+                            finally:
+                                napalm_mgr.disconnect()
                     except Exception as e:
-                        logger.error(f"Device {device_name}, interface {interface_name}: Error during deployment: {e}")
+                        logger.warning(f"Could not connect to {device_name} to check bridge VLANs: {e}")
+                        # Continue - will add command anyway (idempotent)
+                
+                # Build combined config for all interfaces
+                all_config_lines = []
+                interface_mapping = {}  # {original_interface: target_interface} for NetBox updates
+                
+                for interface_name in interface_list:
+                    # Get bond interface name if available
+                    target_interface = interface_name
+                    if bond_info_map and device_name in bond_info_map:
+                        device_bond_map = bond_info_map[device_name]
+                        if interface_name in device_bond_map:
+                            target_interface = device_bond_map[interface_name]
+                            logger.info(f"[DEBUG] ✓ BOND REDIRECT: Device {device_name}: Interface {interface_name} → Bond {target_interface}")
+                        else:
+                            logger.debug(f"[DEBUG] Device {device_name}: Interface {interface_name} not in bond map - using directly")
+                    else:
+                        logger.debug(f"[DEBUG] Device {device_name}: No bond map available - using interface {interface_name} directly")
+                    
+                    interface_mapping[interface_name] = target_interface
+                    
+                    # Generate config for this interface
+                    if platform == 'cumulus':
+                        # Bridge VLAN command (only add once, and only if needed)
+                        if bridge_vlan_needed and not any('nv set bridge domain br_default vlan' in line for line in all_config_lines):
+                            all_config_lines.append(f"nv set bridge domain br_default vlan {vlan_id}")
+                        # Interface access command
+                        all_config_lines.append(f"nv set interface {target_interface} bridge domain br_default access {vlan_id}")
+                    elif platform == 'eos':
+                        all_config_lines.append(f"interface {target_interface}")
+                        all_config_lines.append(f"   switchport mode access")
+                        all_config_lines.append(f"   switchport access vlan {vlan_id}")
+                
+                # Combine all configs into single string
+                combined_config = '\n'.join(all_config_lines)
+                logger.info(f"Device {device_name}: Combined config for {num_interfaces} interfaces ({len(all_config_lines)} commands)")
+                
+                # Deploy combined config in single session
+                if not napalm_mgr.connect():
+                    error_msg = f"Failed to connect to {device_name}"
+                    logger.error(error_msg)
+                    # Mark all interfaces as failed
+                    for interface_name in interface_list:
                         device_results[interface_name] = {
                             'success': False,
                             'committed': False,
                             'rolled_back': False,
-                            'error': str(e),
-                            'message': f'Deployment failed: {str(e)}'
+                            'error': error_msg,
+                            'message': error_msg,
+                            'logs': [f"✗ Connection failed: {error_msg}"]
                         }
+                    return device_name
+                
+                try:
+                    # Add header to logs showing all interfaces being deployed together
+                    combined_logs = []
+                    combined_logs.append("=" * 80)
+                    combined_logs.append(f"[BATCHED DEPLOYMENT] Device: {device_name}")
+                    combined_logs.append(f"[BATCHED DEPLOYMENT] Deploying VLAN {vlan_id} to {num_interfaces} interface(s) in SINGLE commit-confirm session")
+                    combined_logs.append("=" * 80)
+                    combined_logs.append("")
+                    combined_logs.append("Interfaces being configured:")
+                    for interface_name in interface_list:
+                        target_interface = interface_mapping[interface_name]
+                        if target_interface != interface_name:
+                            combined_logs.append(f"  - {interface_name} → {target_interface} (bond detected)")
+                        else:
+                            combined_logs.append(f"  - {interface_name}")
+                    combined_logs.append("")
+                    combined_logs.append(f"Combined configuration ({len(all_config_lines)} commands):")
+                    for line in all_config_lines:
+                        combined_logs.append(f"  {line}")
+                    combined_logs.append("")
+                    
+                    # Deploy all interfaces in one commit-confirm session
+                    deploy_result = napalm_mgr.deploy_config_safe(
+                        config=combined_config,
+                        timeout=timeout,
+                        replace=False,
+                        interface_name=None,  # Multiple interfaces, no single interface_name
+                        vlan_id=vlan_id
+                    )
+                    
+                    # Prepend batched deployment header to logs
+                    if deploy_result.get('logs'):
+                        deploy_result['logs'] = combined_logs + deploy_result['logs']
+                    
+                    # Create result for each interface (all share same deployment result)
+                    for interface_name in interface_list:
+                        target_interface = interface_mapping[interface_name]
+                        interface_result = deploy_result.copy()
+                        interface_result['original_interface_name'] = interface_name
+                        interface_result['target_interface'] = target_interface
+                        interface_result['logs'] = deploy_result.get('logs', [])
+                        # Add note about batched deployment
+                        if interface_result['logs']:
+                            interface_result['logs'].append("")
+                            interface_result['logs'].append(f"[NOTE] This interface ({interface_name}) was deployed as part of a batched session with {num_interfaces} interface(s) on device {device_name}")
+                            if target_interface != interface_name:
+                                interface_result['logs'].append(f"[NOTE] Configuration was applied to bond interface '{target_interface}' (member interface: '{interface_name}')")
+                        device_results[interface_name] = interface_result
+                    
+                    if deploy_result.get('success'):
+                        logger.info(f"Device {device_name}: Successfully deployed VLAN {vlan_id} to {num_interfaces} interfaces in single session")
+                    else:
+                        logger.warning(f"Device {device_name}: Deployment failed for {num_interfaces} interfaces: {deploy_result.get('error', 'Unknown error')}")
+                
+                finally:
+                    napalm_mgr.disconnect()
                 
                 # Store results thread-safely
                 with results_lock:
@@ -1412,16 +1547,20 @@ def deploy_vlan_config(task, interface_name: str, vlan_id: int, platform: str, t
             return {"success": False, "error": f"Unsupported platform: {platform}"}
         
         # Use NAPALMDeviceManager for safe deployment
-        # Pass interface_name (bond) for device config, original_interface_name (member) for NetBox
+        # Pass interface_name (bond) for device config
+        # Note: original_interface_name is stored in the task context for NetBox updates later
         napalm_mgr = NAPALMDeviceManager(device)
         result = napalm_mgr.deploy_config_safe(
             config=config,
             timeout=timeout,
             replace=False,
             interface_name=interface_name,  # Use bond interface for device config
-            vlan_id=vlan_id,
-            original_interface_name=netbox_interface_name  # Pass original for NetBox updates
+            vlan_id=vlan_id
         )
+        
+        # Store original_interface_name in result for NetBox updates
+        if original_interface_name:
+            result['original_interface_name'] = original_interface_name
         
         return result
         

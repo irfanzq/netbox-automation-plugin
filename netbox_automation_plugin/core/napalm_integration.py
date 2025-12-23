@@ -2089,6 +2089,9 @@ class NAPALMDeviceManager:
                     logger.info(f"commit_config() returned: {commit_result}")
                     logs.append(f"  [DEBUG] commit_config() return value: {commit_result}")
                     logs.append(f"  [DEBUG] commit_config() return type: {type(commit_result)}")
+                    # Store commit result for later diagnostics
+                    result['_commit_result'] = commit_result
+                    result['_config_commands'] = config
                     
                     # Check if there's actually a diff to apply (Cumulus won't create revision if no changes)
                     if driver_name == 'cumulus':
@@ -2575,27 +2578,87 @@ class NAPALMDeviceManager:
                                 # This likely means commands had syntax errors (like "vlan add" instead of "vlan")
                                 # Get actual error details if available
                                 actual_error = "Unknown error"
+                                detailed_diagnostics = []
+                                
                                 try:
                                     # Try to get error from config diff or device
                                     if hasattr(self.connection, 'device') and hasattr(self.connection.device, 'send_command'):
+                                        # Check 1: What does nv config diff show?
                                         diff_output = self.connection.device.send_command('nv config diff', read_timeout=10)
-                                        if diff_output and 'error' in diff_output.lower():
-                                            actual_error = diff_output.strip()
-                                        elif diff_output and 'no changes' in diff_output.lower():
-                                            actual_error = "No changes detected - config may already match applied config"
+                                        detailed_diagnostics.append(f"[DEBUG] nv config diff output:")
+                                        if diff_output:
+                                            detailed_diagnostics.append(f"  {diff_output[:500]}")
+                                            if 'error' in diff_output.lower():
+                                                actual_error = diff_output.strip()
+                                            elif 'no changes' in diff_output.lower():
+                                                actual_error = "No changes detected - config already matches applied config"
+                                            else:
+                                                actual_error = "Commit succeeded but no commit-confirm session was created"
                                         else:
-                                            actual_error = "Commit succeeded but no commit-confirm session was created"
+                                            detailed_diagnostics.append(f"  (empty output)")
+                                        
+                                        # Check 2: What does nv config history show?
+                                        history_output = self.connection.device.send_command('nv config history | head -10', read_timeout=10)
+                                        detailed_diagnostics.append(f"[DEBUG] nv config history output:")
+                                        if history_output:
+                                            detailed_diagnostics.append(f"  {history_output[:500]}")
+                                        else:
+                                            detailed_diagnostics.append(f"  (empty output)")
+                                        
+                                        # Check 3: What did commit_config() actually return?
+                                        commit_result = result.get('_commit_result')
+                                        if commit_result is not None:
+                                            detailed_diagnostics.append(f"[DEBUG] commit_config() return value: {commit_result}")
+                                            detailed_diagnostics.append(f"[DEBUG] commit_config() return type: {type(commit_result)}")
+                                        
+                                        # Check 4: Check for pending commits now
+                                        pending_check = self.connection.device.send_command('nv config revision -o json', read_timeout=10)
+                                        detailed_diagnostics.append(f"[DEBUG] nv config revision -o json:")
+                                        if pending_check:
+                                            try:
+                                                import json
+                                                rev_data = json.loads(pending_check)
+                                                pending_found = False
+                                                for rev_id, rev_info in rev_data.items():
+                                                    if isinstance(rev_info, dict) and rev_info.get('state') == 'confirm':
+                                                        pending_found = True
+                                                        detailed_diagnostics.append(f"  Found pending revision: {rev_id}")
+                                                if not pending_found:
+                                                    detailed_diagnostics.append(f"  No pending revisions found in JSON")
+                                            except:
+                                                detailed_diagnostics.append(f"  {pending_check[:200]}")
+                                        else:
+                                            detailed_diagnostics.append(f"  (empty output)")
+                                        
+                                        # Check 5: What commands were actually sent?
+                                        config_commands = result.get('_config_commands', 'N/A')
+                                        detailed_diagnostics.append(f"[DEBUG] Commands that were loaded:")
+                                        if config_commands:
+                                            for line in str(config_commands).split('\n')[:10]:
+                                                detailed_diagnostics.append(f"  {line}")
+                                        
                                 except Exception as e:
                                     actual_error = f"Could not retrieve error details: {str(e)}"
+                                    detailed_diagnostics.append(f"[DEBUG] Exception during diagnostics: {str(e)}")
+                                    import traceback
+                                    detailed_diagnostics.append(f"[DEBUG] Traceback: {traceback.format_exc()}")
                                 
                                 error_msg = f"Commit failed - no commit-confirm session created. {actual_error}"
                                 logger.error(f"Phase 5 failed: {error_msg}")
                                 logs.append(f"  ✗ Commit failed - no commit-confirm session created")
                                 logs.append(f"  Error: {actual_error}")
-                                logs.append(f"  Possible causes:")
-                                logs.append(f"    - Config syntax errors during load (check config commands)")
-                                logs.append(f"    - Config already matches applied config (no changes to commit)")
-                                logs.append(f"    - Commit-confirm mechanism failed (device issue)")
+                                logs.append(f"")
+                                logs.append(f"  === DETAILED DIAGNOSTICS ===")
+                                for diag_line in detailed_diagnostics:
+                                    logs.append(f"  {diag_line}")
+                                logs.append(f"")
+                                logs.append(f"  === ROOT CAUSE ANALYSIS ===")
+                                logs.append(f"  The commit-confirm session was not created. Possible reasons:")
+                                logs.append(f"    1. Config already matches applied config (no changes to commit)")
+                                logs.append(f"    2. Config syntax errors during load (check commands above)")
+                                logs.append(f"    3. Commit command failed silently (check device logs)")
+                                logs.append(f"    4. Timing issue - revision not yet visible")
+                                logs.append(f"    5. Concurrent commit from another process")
                                 
                                 # Check current state - if changes are applied but not in commit-confirm, we need to save them
                                 try:
@@ -2608,18 +2671,33 @@ class NAPALMDeviceManager:
                                             save_output = self.connection.device.send_command("nv config save", read_timeout=30)
                                             logger.info(f"Config saved: {save_output}")
                                             logs.append(f"  ✓ Config saved - changes are now permanent")
+                                            logs.append(f"  ⚠ WARNING: Changes were saved WITHOUT commit-confirm protection")
+                                            logs.append(f"  ⚠ This means no automatic rollback is available")
                                             result['success'] = True
-                                            result['committed'] = True
-                                            result['message'] = f"Configuration applied and saved (commit-confirm session was not created, but changes were saved)"
+                                            result['committed'] = False  # NOT committed via commit-confirm, but saved
+                                            result['message'] = f"Configuration applied and saved (commit-confirm session was not created, but changes were saved without rollback protection)"
                                             logs.append(f"")
                                             logs.append(f"=== DEPLOYMENT COMPLETED (WITH WARNING) ===")
                                             result['logs'] = logs
                                             return result
+                                        else:
+                                            # No changes - config already matches
+                                            logger.warning(f"No changes detected - config already matches applied config")
+                                            logs.append(f"  ℹ No changes detected - config already matches applied config")
+                                            result['success'] = True
+                                            result['committed'] = False  # Nothing to commit
+                                            result['message'] = f"Configuration already matches applied config (no changes needed)"
+                                            logs.append(f"")
+                                            logs.append(f"=== DEPLOYMENT COMPLETED (NO CHANGES) ===")
+                                            result['logs'] = logs
+                                            return result
                                 except Exception as save_error:
-                                    logger.error(f"Failed to save config: {save_error}")
+                                    logger.error(f"Failed to check/save config: {save_error}")
+                                    logs.append(f"  ✗ Failed to check/save config: {str(save_error)}")
                                 
                                 result['message'] = error_msg
                                 result['logs'] = logs
+                                result['committed'] = False  # NOT committed
                                 return result
                             
                             # No captured revision ID - try NAPALM's method (may fail, but worth trying)

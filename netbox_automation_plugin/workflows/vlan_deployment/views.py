@@ -5027,7 +5027,8 @@ class VLANDeploymentView(View):
                                     target_interface_for_stats = bond_interface_for_stats
                             
                             pre_traffic_stats = pre_deployment_logs.get(device.name, {}).get(f"{interface_name}_pre_traffic")
-                            post_traffic_stats = self._check_interface_traffic_stats(device, interface_name, platform, bond_interface=bond_interface_for_stats)
+                            # Use target_interface_for_stats (bond if detected) for traffic check
+                            post_traffic_stats = self._check_interface_traffic_stats(device, target_interface_for_stats, platform, bond_interface=None)
                             
                             logs.append("")
                             logs.append("=" * 80)
@@ -5070,23 +5071,60 @@ class VLANDeploymentView(View):
                             # This ensures bond exists before we try to update VLAN on it
                             bond_info = self._get_bond_interface_for_member(device, interface_name, platform=platform)
                             target_interface_for_netbox = interface_name  # Default to original interface
+                            member_interface_name = interface_name  # Store original member interface name
                             
-                            if bond_info and bond_info.get('netbox_missing_bond'):
+                            # Check if bond is detected (either missing in NetBox or already exists)
+                            if bond_info:
                                 device_bond = bond_info.get('device_bond_name')
                                 all_members = bond_info.get('all_members', [])
-                                if device_bond and all_members:
-                                    logs.append(f"[INFO] Device has bond '{device_bond}' but NetBox doesn't - creating bond first...")
-                                    bond_sync_result = self._sync_bond_to_netbox(device, device_bond, all_members, platform=platform)
-                                    if bond_sync_result['success']:
-                                        if bond_sync_result['bond_created']:
-                                            logs.append(f"[OK] Created bond '{device_bond}' in NetBox")
-                                        if bond_sync_result['members_added'] > 0:
-                                            logs.append(f"[OK] Added {bond_sync_result['members_added']} interface(s) to bond '{device_bond}' in NetBox")
-                                        target_interface_for_netbox = device_bond  # Update VLAN on bond interface
+                                
+                                if device_bond:
+                                    # Bond detected - will update VLAN on bond interface
+                                    target_interface_for_netbox = device_bond
+                                    
+                                    # If bond doesn't exist in NetBox, create it first
+                                    if bond_info.get('netbox_missing_bond') and all_members:
+                                        logs.append(f"[INFO] Device has bond '{device_bond}' but NetBox doesn't - creating bond first...")
+                                        bond_sync_result = self._sync_bond_to_netbox(device, device_bond, all_members, platform=platform)
+                                        if bond_sync_result['success']:
+                                            if bond_sync_result['bond_created']:
+                                                logs.append(f"[OK] Created bond '{device_bond}' in NetBox")
+                                            if bond_sync_result['members_added'] > 0:
+                                                logs.append(f"[OK] Added {bond_sync_result['members_added']} interface(s) to bond '{device_bond}' in NetBox")
+                                        else:
+                                            logs.append(f"[WARN] Failed to create bond in NetBox: {bond_sync_result.get('error', 'Unknown error')}")
+                                            logs.append(f"[WARN] Will attempt to update VLAN on member interface '{interface_name}' instead")
+                                            target_interface_for_netbox = interface_name  # Fallback to member interface
+                                    
+                                    # IMPORTANT: Remove VLANs from member interface (swp3) since they're being moved to bond
+                                    # This applies whether bond was just created or already existed
+                                    if target_interface_for_netbox == device_bond:  # Only if we're actually using the bond
+                                        logs.append(f"[INFO] Removing VLANs from member interface '{interface_name}' (VLANs moved to bond '{device_bond}')...")
+                                        member_interface = Interface.objects.filter(device=device, name=interface_name).first()
+                                        if member_interface:
+                                            old_untagged = member_interface.untagged_vlan.vid if member_interface.untagged_vlan else None
+                                            old_tagged = list(member_interface.tagged_vlans.values_list('vid', flat=True))
+                                            
+                                            if old_untagged or old_tagged:
+                                                member_interface.untagged_vlan = None
+                                                member_interface.tagged_vlans.clear()
+                                                member_interface.mode = None  # Clear mode when removing VLANs
+                                                member_interface.save()
+                                                
+                                                removed_vlans = []
+                                                if old_untagged:
+                                                    removed_vlans.append(f"untagged VLAN {old_untagged}")
+                                                if old_tagged:
+                                                    removed_vlans.append(f"tagged VLANs {old_tagged}")
+                                                logs.append(f"[OK] Removed {', '.join(removed_vlans)} from member interface '{interface_name}'")
+                                                logger.info(f"Removed VLANs from member interface {interface_name} on {device.name}: {', '.join(removed_vlans)}")
+                                            else:
+                                                logs.append(f"[INFO] Member interface '{interface_name}' had no VLANs to remove")
+                                        else:
+                                            logs.append(f"[WARN] Member interface '{interface_name}' not found in NetBox - cannot remove VLANs")
+                                    
+                                    if target_interface_for_netbox == device_bond:
                                         logs.append(f"[INFO] Will update VLAN configuration on bond interface '{device_bond}' (member: {interface_name})")
-                                    else:
-                                        logs.append(f"[WARN] Failed to create bond in NetBox: {bond_sync_result.get('error', 'Unknown error')}")
-                                        logs.append(f"[WARN] Will attempt to update VLAN on member interface '{interface_name}' instead")
                             
                             # Now update VLAN configuration on the target interface (bond if created, member otherwise)
                             logs.append(f"[INFO] Updating NetBox interface '{target_interface_for_netbox}' with VLAN {vlan_id}...")
