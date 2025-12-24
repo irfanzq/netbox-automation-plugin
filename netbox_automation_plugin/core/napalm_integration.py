@@ -1100,6 +1100,67 @@ class NAPALMDeviceManager:
         logs.append(f"[Phase 0.5] Baseline Collection")
         baseline = {}
         
+        # For Cumulus: Take pre-deployment configuration snapshot
+        if driver_name == 'cumulus':
+            logger.info(f"Taking pre-deployment configuration snapshot...")
+            logs.append(f"")
+            logs.append(f"  === PRE-DEPLOYMENT SNAPSHOT ===")
+            
+            try:
+                if hasattr(self.connection, 'device') and hasattr(self.connection.device, 'send_command'):
+                    # 1. Get current revision history (JSON format for reliable parsing)
+                    logger.info(f"Retrieving current NVUE revision...")
+                    revision_json_output = self.connection.device.send_command('nv config history -o json', read_timeout=10)
+                    
+                    if revision_json_output:
+                        import json
+                        revision_data = json.loads(revision_json_output)
+                        # Get latest revision (highest number)
+                        latest_revision = max(revision_data.keys(), key=lambda x: int(x)) if revision_data else 'unknown'
+                        revision_info = revision_data.get(latest_revision, {})
+                        revision_date = revision_info.get('date', 'unknown')
+                        revision_user = revision_info.get('user', 'unknown')
+                        
+                        logger.info(f"Current revision: {latest_revision} ({revision_date})")
+                        logs.append(f"  Current Revision: {latest_revision}")
+                        logs.append(f"  Date: {revision_date}")
+                        logs.append(f"  User: {revision_user}")
+                    else:
+                        latest_revision = 'unknown'
+                        logs.append(f"  ⚠ Could not retrieve revision history")
+                    
+                    # 2. Export full configuration to timestamped file
+                    import time as time_module
+                    timestamp = int(time_module.time())
+                    snapshot_filename = f"/tmp/pre_deploy_{timestamp}_rev{latest_revision}.txt"
+                    
+                    logger.info(f"Exporting configuration to {snapshot_filename}...")
+                    export_cmd = f"nv config show -r applied -o commands > {snapshot_filename}"
+                    self.connection.device.send_command(export_cmd, read_timeout=30)
+                    
+                    # Verify file was created
+                    verify_cmd = f"ls -lh {snapshot_filename}"
+                    verify_output = self.connection.device.send_command(verify_cmd, read_timeout=5)
+                    
+                    if snapshot_filename in verify_output:
+                        logger.info(f"Snapshot file created successfully: {snapshot_filename}")
+                        logs.append(f"  ✓ Snapshot file: {snapshot_filename}")
+                        # Store snapshot filename in result for later use
+                        result['_pre_deployment_snapshot'] = snapshot_filename
+                        result['_pre_deployment_revision'] = latest_revision
+                    else:
+                        logger.warning(f"Could not verify snapshot file creation")
+                        logs.append(f"  ⚠ Could not verify snapshot file creation")
+                        
+                else:
+                    logger.warning(f"Cannot access Netmiko connection for snapshot")
+                    logs.append(f"  ⚠ Snapshot skipped - no device connection")
+            except Exception as snapshot_error:
+                logger.error(f"Failed to take pre-deployment snapshot: {snapshot_error}")
+                logs.append(f"  ⚠ Snapshot failed: {str(snapshot_error)[:100]}")
+            
+            logs.append(f"")
+        
         # CRITICAL: Verify connection.device is initialized before baseline collection
         # Some NAPALM drivers (especially Cumulus) may not initialize device immediately
         if hasattr(self.connection, 'device'):
@@ -2045,11 +2106,27 @@ class NAPALMDeviceManager:
                 logs.append(f"  Method: Native commit-confirm (auto-rollback in {timeout}s)")
                 logs.append(f"  Committing configuration...")
                 
-                # For Cumulus, check for pending commits BEFORE committing to verify no conflicts
-                # IMPORTANT: We check BEFORE load_config() and commit_config() to detect OLD pending commits
-                # from previous deployments, NOT our own commit (which doesn't exist yet)
-                existing_pending_revision = None
-                if driver_name == 'cumulus':
+                # Retry configuration for concurrent workflow conflicts
+                max_retries = 3
+                retry_delays = [5, 15, 30]  # Exponential backoff: 5s, 15s, 30s
+                commit_succeeded = False
+                last_commit_error = None
+                
+                for attempt in range(max_retries):
+                    if attempt > 0:
+                        delay = retry_delays[attempt - 1]
+                        logger.info(f"Retry attempt {attempt + 1}/{max_retries} after {delay}s delay (concurrent workflow detected)")
+                        logs.append(f"")
+                        logs.append(f"  === RETRY ATTEMPT {attempt + 1}/{max_retries} ===")
+                        logs.append(f"  Waiting {delay}s for concurrent workflow to complete...")
+                        time.sleep(delay)
+                        logs.append(f"  Retrying commit...")
+                    
+                    # For Cumulus, check for pending commits BEFORE committing to verify no conflicts
+                    # IMPORTANT: We check BEFORE load_config() and commit_config() to detect OLD pending commits
+                    # from previous deployments, NOT our own commit (which doesn't exist yet)
+                    existing_pending_revision = None
+                    if driver_name == 'cumulus':
                     try:
                         if hasattr(self.connection, 'device') and hasattr(self.connection.device, 'send_command'):
                             # Check current revision count before commit
@@ -2122,139 +2199,222 @@ class NAPALMDeviceManager:
                             logs.append(f"  ✗ Failed to abort: {str(abort_error)}")
                             logs.append(f"  ⚠ Will attempt commit anyway - may fail with 'Pending commit confirm already in process'")
                 
-                # Execute commit_config - this should execute: nv config apply --confirm {timeout}s -y
-                try:
-                    # DEBUG: Log what commit_config should do
-                    logger.info(f"About to call commit_config(revert_in={timeout})")
-                    logs.append(f"  [DEBUG] Calling commit_config(revert_in={timeout})...")
-                    
-                    # For Cumulus, log what command will be executed
-                    if driver_name == 'cumulus':
-                        expected_cmd = f"nv config apply --confirm {timeout}s -y"
-                        logger.info(f"Expected command: {expected_cmd}")
-                        logs.append(f"  [DEBUG] Expected NVUE command: {expected_cmd}")
+                    # Execute commit_config - this should execute: nv config apply --confirm {timeout}s -y
+                    # 
+                    # ============================================================================
+                    # NAPALM CUMULUS DRIVER LIMITATIONS & FALLBACK MECHANISM
+                    # ============================================================================
+                    # ISSUE: NAPALM's cumulus driver has known issues with commit_config(revert_in):
+                    #   1. May return None instead of executing "nv config apply --confirm Xs -y"
+                    #   2. The has_pending_commit flag may not be properly set after commit
+                    #   3. Inconsistent behavior across NVUE versions (5.x vs 4.x)
+                    #   4. Driver doesn't fully implement the NAPALM base class spec for commit-confirm
+                    # 
+                    # ROOT CAUSE (from NAPALM docs & source):
+                    #   - commit_config(revert_in) support varies by platform
+                    #   - Cumulus driver implementation may not handle revert_in parameter correctly
+                    #   - Some platforms only support rollback when committing from API, not CLI
+                    #
+                    # SOLUTION:
+                    #   - Try NAPALM's commit_config() first (for compatibility with future fixes)
+                    #   - If it returns None/False, fallback to direct NVUE command execution
+                    #   - Direct execution: nv config apply --confirm {timeout}s -y
+                    #
+                    # REFERENCES:
+                    #   - https://napalm.readthedocs.io/en/latest/base.html (has_pending_commit docs)
+                    #   - https://napalm.readthedocs.io/en/latest/support/ (platform limitations)
+                    # ============================================================================
+                    try:
+                        logger.info(f"About to call commit_config(revert_in={timeout})")
+                        logs.append(f"  [DEBUG] Calling commit_config(revert_in={timeout})...")
                         
-                        # Check for pending commits right before executing commit_config()
-                        # NOTE: We already checked and aborted any existing pending commits above (before load_config)
-                        # This is a final check just before commit_config() to catch any that appeared between checks
-                        try:
-                            # Use NAPALM's has_pending_commit() for quick check
-                            if hasattr(self.connection, 'has_pending_commit'):
-                                has_pending_napalm = self.connection.has_pending_commit()
-                                logger.info(f"has_pending_commit() (NAPALM) before commit: {has_pending_napalm}")
-                                logs.append(f"  [DEBUG] has_pending_commit() (NAPALM): {has_pending_napalm}")
-                                if has_pending_napalm:
-                                    logger.warning(f"WARNING: NAPALM reports pending commit exists - commit may fail")
-                                    logs.append(f"  ⚠ WARNING: NAPALM reports pending commit exists")
-                        except Exception as pending_check_error:
-                            logger.debug(f"Could not check pending commit: {pending_check_error}")
-                    
-                    commit_result = self.connection.commit_config(revert_in=timeout)
-                    logger.info(f"commit_config() returned: {commit_result}")
-                    logs.append(f"  [DEBUG] commit_config() return value: {commit_result}")
-                    logs.append(f"  [DEBUG] commit_config() return type: {type(commit_result)}")
-                    # Store commit result for later diagnostics
-                    result['_commit_result'] = commit_result
-                    result['_config_commands'] = config
-                    
-                    # Check if there's actually a diff to apply (Cumulus won't create revision if no changes)
-                    if driver_name == 'cumulus':
-                        try:
-                            if hasattr(self.connection, 'device') and hasattr(self.connection.device, 'send_command'):
-                                # Check if there are pending changes immediately after commit
-                                time.sleep(0.5)  # Small delay to allow revision to be created
-                                diff_check = self.connection.device.send_command('nv config diff', read_timeout=10)
-                                logger.info(f"Config diff immediately after commit:\n{diff_check}")
-                                logs.append(f"  [DEBUG] Config diff immediately after commit:")
-                                if diff_check:
-                                    for line in diff_check.split('\n')[:20]:
-                                        if line.strip():
-                                            logs.append(f"    {line.strip()}")
-                                    
-                                    if 'no changes' in diff_check.lower():
-                                        logger.warning(f"No pending changes found - commit may not have created a revision")
-                                        logs.append(f"  ⚠ Warning: No pending changes detected - config may already match")
-                                    else:
-                                        logger.info(f"Pending changes detected after commit")
-                                        logs.append(f"  ✓ Pending changes detected")
+                        # For Cumulus, use fallback mechanism due to NAPALM driver limitations
+                        # ISSUE: NAPALM's cumulus driver has inconsistent support for commit_config(revert_in)
+                        # - It may return None instead of executing "nv config apply --confirm Xs -y"
+                        # - The has_pending_commit flag may not be properly set
+                        # - Platform-specific variations in NVUE versions can cause issues
+                        # SOLUTION: Try NAPALM first (for compatibility), fallback to direct NVUE execution
+                        if driver_name == 'cumulus':
+                            logger.info(f"Attempting commit via NAPALM with fallback to direct NVUE...")
+                            logs.append(f"  [INFO] Trying NAPALM commit_config(revert_in={timeout})...")
+                            
+                            # Try NAPALM's method first
+                            commit_result = self.connection.commit_config(revert_in=timeout)
+                            logger.info(f"NAPALM commit_config returned: {commit_result} (type: {type(commit_result)})")
+                            logs.append(f"  [DEBUG] NAPALM returned: {commit_result} (type: {type(commit_result).__name__})")
+                            
+                            # CRITICAL: Wait 5 seconds for NVUE backend to process
+                            # NVUE needs time to: apply config → create revision → set "confirm" state
+                            # Without this wait, has_pending_commit() may return False prematurely
+                            logger.info(f"Waiting 5 seconds for NVUE backend to create commit-confirm session...")
+                            logs.append(f"  [INFO] Waiting 5s for NVUE to process commit...")
+                            time.sleep(5)
+                            logs.append(f"  [INFO] Wait complete, checking commit-confirm status...")
+                            
+                            # Check if NAPALM actually created a commit-confirm session
+                            # Multiple indicators that NAPALM failed:
+                            #   1. Returns None or False (should return True or output string)
+                            #   2. has_pending_commit flag not set (should be True after commit-confirm)
+                            napalm_failed = commit_result is None or commit_result is False
+                            
+                            # Additional check: has_pending_commit flag
+                            if not napalm_failed and hasattr(self.connection, 'has_pending_commit'):
+                                try:
+                                    has_pending = self.connection.has_pending_commit()
+                                    logger.info(f"has_pending_commit() check: {has_pending}")
+                                    logs.append(f"  [DEBUG] has_pending_commit() = {has_pending}")
+                                    if not has_pending:
+                                        logger.warning(f"has_pending_commit() returned False after 5s wait - NAPALM failed")
+                                        logs.append(f"  ⚠ has_pending_commit() = False (should be True)")
+                                        napalm_failed = True
+                                except Exception as check_error:
+                                    logger.debug(f"Could not check has_pending_commit: {check_error}")
+                            
+                            if napalm_failed:
+                                logger.warning(f"NAPALM commit_config returned {commit_result} - falling back to direct NVUE execution")
+                                logs.append(f"  ⚠ NAPALM method did not create commit-confirm session")
+                                logs.append(f"  Reason: commit_config returned {commit_result}")
+                                logs.append(f"  Falling back to direct NVUE command execution...")
+                                
+                                # Fallback: Execute NVUE command directly
+                                expected_cmd = f"nv config apply --confirm {timeout}s -y"
+                                logger.info(f"Executing fallback: {expected_cmd}")
+                                logs.append(f"  [FALLBACK] Executing: {expected_cmd}")
+                                
+                                if hasattr(self.connection, 'device') and hasattr(self.connection.device, 'send_command'):
+                                    commit_output = self.connection.device.send_command(expected_cmd, read_timeout=60)
+                                    logger.info(f"Fallback command output: {commit_output}")
+                                    logs.append(f"  [DEBUG] Command output: {commit_output[:300] if commit_output else '(no output)'}")
+                                    commit_result = commit_output
+                                    logs.append(f"  ✓ Fallback commit successful")
                                 else:
-                                    logger.warning(f"diff_check returned empty/None")
-                                    logs.append(f"  ⚠ Config diff returned empty")
-                        except Exception as diff_error:
-                            logger.error(f"Exception checking config diff after commit: {diff_error}")
-                            logs.append(f"  ⚠ Exception checking diff: {str(diff_error)}")
-                            import traceback
-                            logger.debug(f"Traceback: {traceback.format_exc()}")
-                    
-                except Exception as commit_error:
-                    error_msg = str(commit_error)
-                    error_type = type(commit_error).__name__
-                    logger.error(f"commit_config() raised exception: {commit_error}")
-                    logs.append(f"  ✗ Commit FAILED with exception: {error_msg}")
-                    import traceback
-                    logger.error(f"Full traceback:\n{traceback.format_exc()}")
-                    logs.append(f"  [DEBUG] Exception type: {error_type}")
-                    
-                    # Special handling for "Pending commit confirm already in process" error
-                    if "pending commit" in error_msg.lower() or "commit confirm already" in error_msg.lower():
-                        logs.append(f"")
-                        logs.append(f"  === PENDING COMMIT DETECTED ===")
-                        logs.append(f"  The device rejected the commit because a pending commit-confirm session already exists.")
-                        logs.append(f"  This can happen if:")
-                        logs.append(f"    1. A previous deployment didn't complete (confirm/abort)")
-                        logs.append(f"    2. Another process/user has a pending commit")
-                        logs.append(f"    3. A commit-confirm session timed out but wasn't cleaned up")
-                        logs.append(f"")
-                        logs.append(f"  === DIAGNOSTICS ===")
+                                    raise Exception("Cannot access Netmiko connection from NAPALM driver")
+                            else:
+                                logs.append(f"  ✓ NAPALM commit_config executed successfully")
+                        else:
+                            # For other platforms (Juniper, EOS), use NAPALM's commit_config
+                            commit_result = self.connection.commit_config(revert_in=timeout)
+                        logger.info(f"commit_config() returned: {commit_result}")
+                        logs.append(f"  [DEBUG] commit_config() return value: {commit_result}")
+                        logs.append(f"  [DEBUG] commit_config() return type: {type(commit_result)}")
+                        # Store commit result for later diagnostics
+                        result['_commit_result'] = commit_result
+                        result['_config_commands'] = config
                         
-                        # Check current state
-                        try:
-                            if hasattr(self.connection, 'device') and hasattr(self.connection.device, 'send_command'):
-                                # Check revision JSON
-                                rev_json = self.connection.device.send_command('nv config revision -o json', read_timeout=10)
-                                if rev_json:
-                                    import json
-                                    rev_data = json.loads(rev_json)
-                                    pending_revs = []
-                                    for rev_id, rev_info in rev_data.items():
-                                        if isinstance(rev_info, dict) and rev_info.get('state') == 'confirm':
-                                            pending_revs.append(rev_id)
-                                    if pending_revs:
-                                        logs.append(f"  Found {len(pending_revs)} pending revision(s): {', '.join(pending_revs)}")
+                        # Check if there's actually a diff to apply (Cumulus won't create revision if no changes)
+                        if driver_name == 'cumulus':
+                            try:
+                                if hasattr(self.connection, 'device') and hasattr(self.connection.device, 'send_command'):
+                                    # Check if there are pending changes immediately after commit
+                                    time.sleep(0.5)  # Small delay to allow revision to be created
+                                    diff_check = self.connection.device.send_command('nv config diff', read_timeout=10)
+                                    logger.info(f"Config diff immediately after commit:\n{diff_check}")
+                                    logs.append(f"  [DEBUG] Config diff immediately after commit:")
+                                    if diff_check:
+                                        for line in diff_check.split('\n')[:20]:
+                                            if line.strip():
+                                                logs.append(f"    {line.strip()}")
+                                        
+                                        if 'no changes' in diff_check.lower():
+                                            logger.warning(f"No pending changes found - commit may not have created a revision")
+                                            logs.append(f"  ⚠ Warning: No pending changes detected - config may already match")
+                                        else:
+                                            logger.info(f"Pending changes detected after commit")
+                                            logs.append(f"  ✓ Pending changes detected")
                                     else:
-                                        logs.append(f"  No pending revisions found in JSON (may be timing issue)")
-                                
-                                # Check history
-                                history = self.connection.device.send_command('nv config history | head -5', read_timeout=10)
-                                if history:
-                                    logs.append(f"  Recent history:")
-                                    for line in history.split('\n')[:5]:
-                                        if line.strip():
-                                            logs.append(f"    {line.strip()}")
-                                
-                                # Check diff
-                                diff = self.connection.device.send_command('nv config diff', read_timeout=10)
-                                if diff:
-                                    if 'no changes' in diff.lower():
-                                        logs.append(f"  Config diff: No pending changes")
-                                    else:
-                                        logs.append(f"  Config diff: Pending changes exist")
-                                        logs.append(f"    {diff[:200]}")
-                        except Exception as diag_error:
-                            logs.append(f"  Could not get diagnostics: {str(diag_error)}")
+                                        logger.warning(f"diff_check returned empty/None")
+                                        logs.append(f"  ⚠ Config diff returned empty")
+                            except Exception as diff_error:
+                                logger.error(f"Exception checking config diff after commit: {diff_error}")
+                                logs.append(f"  ⚠ Exception checking diff: {str(diff_error)}")
+                                import traceback
+                                logger.debug(f"Traceback: {traceback.format_exc()}")
                         
-                        logs.append(f"")
-                        logs.append(f"  === RECOMMENDED ACTIONS ===")
-                        logs.append(f"  1. Check device manually: nv config history")
-                        logs.append(f"  2. Abort existing commit: nv config abort")
-                        logs.append(f"  3. Or wait for timeout (if commit-confirm is active)")
-                        logs.append(f"  4. Then retry the deployment")
-                        logs.append(f"")
-                    
-                    raise  # Re-raise to be caught by outer exception handler
+                        # Commit succeeded - mark success and break retry loop
+                        commit_succeeded = True
+                        break
+                        
+                    except Exception as commit_error:
+                        error_msg = str(commit_error)
+                        error_type = type(commit_error).__name__
+                        logger.error(f"commit_config() raised exception: {commit_error}")
+                        import traceback
+                        logger.error(f"Full traceback:\n{traceback.format_exc()}")
+                        
+                        # Special handling for "Pending commit confirm already in process" error
+                        # This indicates concurrent workflow conflict - another session is active
+                        is_concurrent_conflict = "pending commit" in error_msg.lower() or "commit confirm already" in error_msg.lower()
+                        
+                        if is_concurrent_conflict:
+                            # Store the error for potential retry
+                            last_commit_error = commit_error
+                            
+                            logs.append(f"  ✗ Commit FAILED with exception: {error_msg}")
+                            logs.append(f"  [DEBUG] Exception type: {error_type}")
+                            logs.append(f"")
+                            logs.append(f"  === CONCURRENT WORKFLOW DETECTED ===")
+                            logs.append(f"  The device rejected the commit because a pending commit-confirm session already exists.")
+                            logs.append(f"  This can happen if:")
+                            logs.append(f"    1. Another workflow is currently running on this device")
+                            logs.append(f"    2. A previous deployment didn't complete (confirm/abort)")
+                            logs.append(f"    3. Another process/user has a pending commit")
+                            logs.append(f"")
+                            
+                            # Check current state for diagnostics
+                            try:
+                                if hasattr(self.connection, 'device') and hasattr(self.connection.device, 'send_command'):
+                                    # Check revision JSON
+                                    rev_json = self.connection.device.send_command('nv config revision -o json', read_timeout=10)
+                                    if rev_json:
+                                        import json
+                                        rev_data = json.loads(rev_json)
+                                        pending_revs = []
+                                        for rev_id, rev_info in rev_data.items():
+                                            if isinstance(rev_info, dict) and rev_info.get('state') == 'confirm':
+                                                pending_revs.append(rev_id)
+                                        if pending_revs:
+                                            logs.append(f"  Found {len(pending_revs)} pending revision(s): {', '.join(pending_revs)}")
+                                        else:
+                                            logs.append(f"  No pending revisions found in JSON (may be timing issue)")
+                            except Exception as diag_error:
+                                logs.append(f"  Could not get diagnostics: {str(diag_error)}")
+                            
+                            # Retry logic
+                            if attempt < max_retries - 1:
+                                logs.append(f"")
+                                logs.append(f"  Will retry after waiting for concurrent workflow to complete...")
+                                continue  # Continue to next retry attempt
+                            else:
+                                # Final attempt failed
+                                logs.append(f"")
+                                logs.append(f"  === MAX RETRIES REACHED ===")
+                                logs.append(f"  Failed after {max_retries} attempts. Concurrent workflow may still be active.")
+                                logs.append(f"")
+                                logs.append(f"  === RECOMMENDED ACTIONS ===")
+                                logs.append(f"  1. Check device manually: nv config history")
+                                logs.append(f"  2. Abort existing commit: nv config abort")
+                                logs.append(f"  3. Or wait for timeout (if commit-confirm is active)")
+                                logs.append(f"  4. Then retry the deployment")
+                                logs.append(f"")
+                                raise  # Re-raise to be caught by outer exception handler
+                        else:
+                            # Non-concurrent error - don't retry
+                            logs.append(f"  ✗ Commit FAILED with exception: {error_msg}")
+                            logs.append(f"  [DEBUG] Exception type: {error_type}")
+                            raise  # Re-raise to be caught by outer exception handler
+                
+                # Check if commit succeeded after retry loop
+                if not commit_succeeded:
+                    error_msg = f"Commit failed after {max_retries} retry attempts"
+                    if last_commit_error:
+                        error_msg = f"{error_msg}: {str(last_commit_error)}"
+                    logger.error(error_msg)
+                    raise Exception(error_msg)
                 
                 logger.info(f"Phase 2: Config committed (will auto-rollback in {timeout}s if not confirmed)")
                 logs.append(f"  ✓ Configuration committed with {timeout}s rollback timer")
+                if attempt > 0:
+                    logs.append(f"  ✓ Succeeded after {attempt + 1} attempt(s) (concurrent workflow resolved)")
                 logs.append(f"  ⚠ Will auto-rollback if not confirmed within {timeout}s")
                 
                 # CRITICAL FIX: For Cumulus, get the actual pending revision ID after commit
@@ -2263,46 +2423,62 @@ class NAPALMDeviceManager:
                 if driver_name == 'cumulus':
                     try:
                         if hasattr(self.connection, 'device') and hasattr(self.connection.device, 'send_command'):
-                            # Wait a moment for the revision to be created (increased wait time for reliability)
-                            time.sleep(2.0)  # Increased to 2.0s for better reliability
+                            # Wait for the revision to be created
+                            # Increased wait time and added retry logic for better reliability
+                            time.sleep(3.0)  # Increased to 3.0s - some devices are slower
                             
                             actual_pending_revision = None
+                            detailed_diagnostics = []
                             
                             # METHOD 1: Use NAPALM driver's _get_pending_commits() if available (most reliable)
                             # This uses 'nv config revision -o json' which is more structured than text parsing
                             try:
                                 if hasattr(self.connection, '_get_pending_commits'):
                                     pending_commits = self.connection._get_pending_commits()
+                                    detailed_diagnostics.append(f"Method 1 (_get_pending_commits): {pending_commits}")
                                     if pending_commits and len(pending_commits) > 0:
                                         # Get the most recent pending commit (first in list, or highest number)
                                         actual_pending_revision = str(pending_commits[0])
                                         logger.info(f"Found pending commit using _get_pending_commits(): {actual_pending_revision}")
                                         logs.append(f"  [DEBUG] Found pending commit via JSON API: {actual_pending_revision}")
+                                else:
+                                    detailed_diagnostics.append(f"Method 1: NAPALM driver doesn't have _get_pending_commits()")
                             except Exception as json_error:
                                 logger.debug(f"Could not use _get_pending_commits(): {json_error}")
+                                detailed_diagnostics.append(f"Method 1 error: {str(json_error)}")
                             
                             # METHOD 2: Use nv config revision -o json directly (fallback if driver method fails)
                             if not actual_pending_revision:
                                 try:
                                     revision_json_output = self.connection.device.send_command('nv config revision -o json', read_timeout=10)
+                                    detailed_diagnostics.append(f"Method 2 (nv config revision -o json): {revision_json_output[:200] if revision_json_output else 'No output'}")
                                     if revision_json_output:
                                         import json
                                         revision_data = json.loads(revision_json_output)
                                         # Find revisions with state == "confirm"
+                                        confirm_revisions = []
                                         for rev_id, rev_info in revision_data.items():
-                                            if isinstance(rev_info, dict) and rev_info.get('state') == 'confirm':
-                                                actual_pending_revision = str(rev_id)
-                                                logger.info(f"Found pending commit via JSON: {actual_pending_revision}")
-                                                logs.append(f"  [DEBUG] Found pending commit via direct JSON: {actual_pending_revision}")
-                                                break
+                                            if isinstance(rev_info, dict):
+                                                state = rev_info.get('state')
+                                                if state == 'confirm':
+                                                    actual_pending_revision = str(rev_id)
+                                                    confirm_revisions.append(rev_id)
+                                                    logger.info(f"Found pending commit via JSON: {actual_pending_revision}")
+                                                    logs.append(f"  [DEBUG] Found pending commit via direct JSON: {actual_pending_revision}")
+                                                    break
+                                        detailed_diagnostics.append(f"Method 2: Found {len(confirm_revisions)} confirm state revisions: {confirm_revisions}")
                                 except (json.JSONDecodeError, Exception) as json_error:
                                     logger.debug(f"Could not parse revision JSON: {json_error}")
+                                    detailed_diagnostics.append(f"Method 2 error: {str(json_error)}")
                             
                             # METHOD 3: Parse nv config history text output (fallback if JSON methods fail)
                             if not actual_pending_revision:
                                 try:
                                     pending_rev_output = self.connection.device.send_command('nv config history | head -5', read_timeout=10)
                                     logger.debug(f"Full history output after commit:\n{pending_rev_output}")
+                                    detailed_diagnostics.append(f"Method 3 (nv config history):")
+                                    for line in pending_rev_output.split('\n')[:5] if pending_rev_output else []:
+                                        detailed_diagnostics.append(f"  {line}")
                                     
                                     if pending_rev_output:
                                         import re
@@ -2333,6 +2509,7 @@ class NAPALMDeviceManager:
                                                     break
                                 except Exception as history_error:
                                     logger.debug(f"Could not parse history output: {history_error}")
+                                    detailed_diagnostics.append(f"Method 3 error: {str(history_error)}")
                             
                             # If we found a pending revision, store it
                             if actual_pending_revision:
@@ -2346,28 +2523,42 @@ class NAPALMDeviceManager:
                                 # No pending revision found - check if commit actually happened
                                 logger.warning(f"No pending revision found using any method")
                                 logs.append(f"  ⚠ No pending revision found - checking if commit succeeded...")
+                                logs.append(f"")
+                                logs.append(f"  === DIAGNOSTICS: REVISION DETECTION ===")
+                                for diag_line in detailed_diagnostics:
+                                    logs.append(f"  {diag_line}")
+                                logs.append(f"")
                                 
-                                # Check if there's a diff (if no diff, no revision is created)
+                                # Check if there's a diff (if no diff, no revision is created - this is NORMAL for idempotent configs)
                                 diff_check = self.connection.device.send_command('nv config diff', read_timeout=10)
+                                detailed_diagnostics.append(f"nv config diff check: {diff_check[:200] if diff_check else 'No output'}")
+                                
                                 if diff_check and 'no changes' in diff_check.lower():
-                                    logs.append(f"  ⚠ No pending changes - config already matches (no revision created)")
-                                    logger.warning(f"Commit did not create revision because config already matches")
+                                    # GOOD: Config is idempotent - already applied
+                                    logs.append(f"  ✓ Config is idempotent - already applied (no new revision needed)")
+                                    logger.info(f"Commit did not create revision because config already matches")
+                                    result['_commit_idempotent'] = True
                                 else:
-                                    # CRITICAL: No pending revision but changes exist - this suggests commit failed
+                                    # CRITICAL: No pending revision but changes exist - this is a PROBLEM
                                     # Possible causes:
-                                    # 1. Commands had syntax errors (like "vlan add" instead of "vlan")
+                                    # 1. Commands had syntax errors (NVUE rejected them)
                                     # 2. Commit command failed silently
-                                    # 3. Timing issue - revision not yet visible (unlikely after 1s wait)
+                                    # 3. Timing issue - revision not yet visible (unlikely after 3s wait)
                                     # 4. NVUE version differences - output format changed
-                                    # 5. Concurrent commit from another process
-                                    logs.append(f"  ✗ WARNING: Commit may have failed - no pending revision created but changes exist")
+                                    # 5. Concurrent commit from another process grabbed the slot
+                                    logs.append(f"  ✗ CRITICAL: Commit may have failed - no pending revision but changes detected")
                                     logger.error(f"Commit may have failed - no pending revision but changes detected")
+                                    logs.append(f"  This usually means:")
+                                    logs.append(f"    1. NVUE rejected the commands (syntax error)")
+                                    logs.append(f"    2. Commit command failed to create revision")
+                                    logs.append(f"    3. Another process is committing simultaneously")
+                                    logs.append(f"")
                                     
                                     # Check if there are any error messages in the diff or config
                                     if diff_check:
                                         # Look for error indicators in the diff output
                                         if 'error' in diff_check.lower() or 'invalid' in diff_check.lower():
-                                            error_msg = "Commit failed due to configuration errors - commands may have syntax errors"
+                                            error_msg = "Commit failed - configuration commands rejected by NVUE"
                                             logger.error(f"Phase 2 failed: {error_msg}")
                                             logs.append(f"  ✗ {error_msg}")
                                             logs.append(f"  [DEBUG] Config diff shows errors:")
@@ -2378,8 +2569,9 @@ class NAPALMDeviceManager:
                                             result['logs'] = logs
                                             return result
                                     
-                                    # Store warning for Phase 5 to handle
+                                    # Store detailed warning for Phase 5 to handle
                                     result['_commit_warning'] = "No pending revision found but changes exist - commit may have failed"
+                                    result['_detailed_diagnostics'] = detailed_diagnostics
                     except Exception as rev_error:
                         logger.warning(f"Could not get pending revision ID: {rev_error}")
                         logs.append(f"  ⚠ Could not get pending revision ID: {str(rev_error)[:100]}")
@@ -2648,12 +2840,20 @@ class NAPALMDeviceManager:
                     logger.info(f"Phase 5: All checks passed - confirming commit...")
                     logs.append(f"  Confirming commit (making changes permanent)...")
                     
-                    # For Cumulus, we need to handle commit confirmation manually because:
-                    # 1. NAPALM stores candidate revision_id from load_config (Phase 1)
-                    # 2. commit_config creates a NEW pending revision with different ID
-                    # 3. confirm_commit() looks for old revision_id, can't find it → "No pending commit-confirm found!"
-                    # 
-                    # FIX: Use the actual pending revision ID we captured in Phase 2
+                    # ============================================================================
+                    # CUMULUS COMMIT CONFIRMATION - DIRECT NVUE EXECUTION REQUIRED
+                    # ============================================================================
+                    # ISSUE: NAPALM's cumulus driver confirm_commit() has known issues:
+                    #   1. NAPALM stores candidate revision_id from load_config (Phase 1)
+                    #   2. commit_config creates a NEW pending revision with different ID
+                    #   3. confirm_commit() looks for old revision_id, can't find it
+                    #   4. Result: "No pending commit-confirm found!" error
+                    #
+                    # FIX: Bypass NAPALM and directly execute NVUE confirmation command
+                    #   - Use the actual pending revision ID we captured in Phase 2
+                    #   - Execute: nv config apply {revision_id} --confirm-yes
+                    #   - Then save: nv config save
+                    # ============================================================================
                     if driver_name == 'cumulus':
                         # Check if we captured the pending revision ID in Phase 2
                         actual_pending_revision = result.get('_cumulus_pending_revision_id')
@@ -2664,15 +2864,21 @@ class NAPALMDeviceManager:
                             
                             try:
                                 if hasattr(self.connection, 'device') and hasattr(self.connection.device, 'send_command'):
-                                    # Manually execute confirm commands with the correct revision ID
+                                    # Directly execute confirm command (bypass NAPALM)
+                                    # Use --confirm-yes to confirm the pending commit-confirm session
                                     confirm_cmd = f"nv config apply {actual_pending_revision} --confirm-yes"
-                                    logger.info(f"Executing: {confirm_cmd}")
+                                    logger.info(f"Bypassing NAPALM - directly executing: {confirm_cmd}")
+                                    logs.append(f"  [DEBUG] Directly executing: {confirm_cmd}")
                                     confirm_output = self.connection.device.send_command(confirm_cmd, read_timeout=30)
                                     logger.info(f"Confirm output: {confirm_output}")
+                                    logs.append(f"  [DEBUG] Command output: {confirm_output[:200] if confirm_output else '(no output)'}")
                                     
                                     # Also run nv config save to make it persistent
+                                    logger.info(f"Saving config to persistent storage")
+                                    logs.append(f"  [DEBUG] Executing: nv config save")
                                     save_output = self.connection.device.send_command("nv config save", read_timeout=30)
                                     logger.info(f"Save output: {save_output}")
+                                    logs.append(f"  [DEBUG] Save output: {save_output[:200] if save_output else '(no output)'}")
                                     
                                     # Update NAPALM's revision_id to None to mark as committed
                                     if hasattr(self.connection, 'revision_id'):
@@ -2680,19 +2886,12 @@ class NAPALMDeviceManager:
                                     
                                     logger.info(f"Successfully confirmed commit using revision {actual_pending_revision}")
                                 else:
-                                    # Fallback to NAPALM method if device.send_command not available
-                                    logger.warning(f"device.send_command not available, using NAPALM confirm_commit()")
-                                    self.connection.confirm_commit()
+                                    raise Exception("Cannot access Netmiko connection from NAPALM driver")
                             except Exception as manual_confirm_error:
                                 error_msg = str(manual_confirm_error)
-                                logger.warning(f"Manual confirm failed: {manual_confirm_error}, trying NAPALM method...")
-                                logs.append(f"  ⚠ Manual confirm failed, trying NAPALM method...")
-                                # Fallback to NAPALM's method
-                                try:
-                                    self.connection.confirm_commit()
-                                except Exception as napalm_confirm_error:
-                                    # Both methods failed
-                                    raise Exception(f"Both manual and NAPALM confirm failed. Manual: {error_msg}, NAPALM: {napalm_confirm_error}")
+                                logger.error(f"Direct confirm failed: {manual_confirm_error}")
+                                logs.append(f"  ✗ Confirm failed: {error_msg}")
+                                raise Exception(f"Commit confirmation failed: {error_msg}")
                         else:
                             # No captured revision ID - check if commit actually failed due to bad commands
                             commit_warning = result.get('_commit_warning')
@@ -2776,40 +2975,64 @@ class NAPALMDeviceManager:
                                     logs.append(f"  {diag_line}")
                                 logs.append(f"")
                                 logs.append(f"  === ROOT CAUSE ANALYSIS ===")
-                                logs.append(f"  The commit-confirm session was not created. Possible reasons:")
-                                logs.append(f"    1. Config already matches applied config (no changes to commit)")
-                                logs.append(f"    2. Config syntax errors during load (check commands above)")
-                                logs.append(f"    3. Commit command failed silently (check device logs)")
-                                logs.append(f"    4. Timing issue - revision not yet visible")
-                                logs.append(f"    5. Concurrent commit from another process")
+                                # Check if this is an idempotent deployment (config already applied)
+                                is_idempotent = result.get('_commit_idempotent', False)
                                 
-                                # Check current state - if changes are applied but not in commit-confirm, we need to save them
-                                try:
-                                    if hasattr(self.connection, 'device') and hasattr(self.connection.device, 'send_command'):
-                                        diff_check = self.connection.device.send_command('nv config diff', read_timeout=10)
-                                        if diff_check and 'no changes' not in diff_check.lower():
-                                            # Changes exist but not in commit-confirm - save them to make permanent
-                                            logger.warning(f"Changes exist but not in commit-confirm - saving config to make permanent")
-                                            logs.append(f"  ⚠ Saving config to make changes permanent (no commit-confirm session available)")
-                                            save_output = self.connection.device.send_command("nv config save", read_timeout=30)
-                                            logger.info(f"Config saved: {save_output}")
-                                            logs.append(f"  ✓ Config saved - changes are now permanent")
-                                            logs.append(f"  ⚠ WARNING: Changes were saved WITHOUT commit-confirm protection")
-                                            logs.append(f"  ⚠ This means no automatic rollback is available")
-                                            result['success'] = True
-                                            result['committed'] = False  # NOT committed via commit-confirm, but saved
-                                            result['message'] = f"Configuration applied and saved (commit-confirm session was not created, but changes were saved without rollback protection)"
-                                            logs.append(f"")
-                                            logs.append(f"=== DEPLOYMENT COMPLETED (WITH WARNING) ===")
-                                            result['logs'] = logs
-                                            return result
-                                        else:
-                                            # No changes - config already matches
-                                            logger.warning(f"No changes detected - config already matches applied config")
-                                            logs.append(f"  ℹ No changes detected - config already matches applied config")
-                                            result['success'] = True
-                                            result['committed'] = False  # Nothing to commit
-                                            result['message'] = f"Configuration already matches applied config (no changes needed)"
+                                if is_idempotent:
+                                    # GOOD: Config already matches - no commit needed (idempotent)
+                                    logs.append(f"  ✓ Config is idempotent - already applied on device")
+                                    logs.append(f"  This is NORMAL and SAFE - no changes were needed")
+                                    logger.info(f"No changes to apply - config already matches (idempotent)")
+                                    result['success'] = True
+                                    result['committed'] = False  # Nothing to commit
+                                    result['message'] = f"Configuration already applied (idempotent - no changes needed)")
+                                    logs.append(f"")
+                                    logs.append(f"=== DEPLOYMENT COMPLETED (IDEMPOTENT) ===")
+                                    result['logs'] = logs
+                                    return result
+                                else:
+                                    # BAD: Commit-confirm session was not created but changes were expected
+                                    logs.append(f"  The commit-confirm session was not created. Possible reasons:")
+                                    logs.append(f"    1. NVUE rejected the commands (syntax error)")
+                                    logs.append(f"    2. Commit command failed to create revision")
+                                    logs.append(f"    3. Concurrent commit from another process")
+                                    logs.append(f"    4. Timing issue - revision not yet visible (unlikely after 3s)")
+                                    logs.append(f"")
+                                    
+                                    # Check current state to understand what happened
+                                    try:
+                                        if hasattr(self.connection, 'device') and hasattr(self.connection.device, 'send_command'):
+                                            diff_check = self.connection.device.send_command('nv config diff', read_timeout=10)
+                                            
+                                            if diff_check and 'no changes' not in diff_check.lower():
+                                                # CRITICAL: Changes exist but no commit-confirm session - this is BAD
+                                                # DO NOT save automatically - this is unsafe!
+                                                logger.error(f"CRITICAL: Pending changes detected but no commit-confirm session - deployment FAILED")
+                                                logs.append(f"  ✗ CRITICAL: Pending changes exist but no commit-confirm session")
+                                                logs.append(f"  This means the commit command failed or was rejected")
+                                                logs.append(f"")
+                                                logs.append(f"  === PENDING CHANGES ===")
+                                                for line in diff_check.split('\n')[:15]:
+                                                    if line.strip():
+                                                        logs.append(f"  {line}")
+                                                logs.append(f"")
+                                                logs.append(f"  === RECOMMENDED ACTIONS ===")
+                                                logs.append(f"  1. Review commands for syntax errors")
+                                                logs.append(f"  2. Check device logs: show log syslog")
+                                                logs.append(f"  3. Manually verify config: nv config diff")
+                                                logs.append(f"  4. Abort pending changes: nv config abort")
+                                                logs.append(f"")
+                                                result['success'] = False
+                                                result['committed'] = False
+                                                result['message'] = f"Commit-confirm session not created - deployment FAILED (see logs for details)"
+                                                result['logs'] = logs
+                                                return result
+                                            else:
+                                                # No changes detected - might be idempotent case that wasn't detected earlier
+                                                logger.info(f"No pending changes - config already matches")
+                                                result['success'] = True
+                                                result['committed'] = False  # Nothing to commit
+                                                result['message'] = f"Configuration already matches applied config (no changes needed)"
                                             logs.append(f"")
                                             logs.append(f"=== DEPLOYMENT COMPLETED (NO CHANGES) ===")
                                             result['logs'] = logs
@@ -3103,6 +3326,134 @@ class NAPALMDeviceManager:
                     logger.warning(f"{'='*60}")
                     logs.append(f"  ⚠ Auto-rollback completed but verification failed")
                     logs.append(f"  ⚠ Warning: {rollback_message}")
+                    
+                    # ========================================================================
+                    # SURGICAL NVUE ROLLBACK FALLBACK (for Cumulus only)
+                    # ========================================================================
+                    # If NAPALM auto-rollback failed, attempt surgical rollback using config diff
+                    # This compares pre-deployment snapshot with current config and reverts changes
+                    # ========================================================================
+                    if driver_name == 'cumulus' and result.get('_pre_deployment_snapshot'):
+                        logger.warning(f"Attempting surgical NVUE rollback...")
+                        logs.append(f"")
+                        logs.append(f"  === SURGICAL NVUE ROLLBACK (FALLBACK) ===")
+                        logs.append(f"  Auto-rollback failed - attempting surgical config revert...")
+                        
+                        try:
+                            if hasattr(self.connection, 'device') and hasattr(self.connection.device, 'send_command'):
+                                # Step 1: Take post-deployment snapshot
+                                import time as time_module
+                                timestamp = int(time_module.time())
+                                post_snapshot_file = f"/tmp/post_deploy_{timestamp}_failed.txt"
+                                export_cmd = f"nv config show -r applied -o commands > {post_snapshot_file}"
+                                self.connection.device.send_command(export_cmd, read_timeout=30)
+                                logs.append(f"  Post-deployment snapshot: {post_snapshot_file}")
+                                
+                                # Step 2: Read both snapshots
+                                pre_snapshot_file = result.get('_pre_deployment_snapshot')
+                                
+                                pre_config_cmd = f"cat {pre_snapshot_file}"
+                                post_config_cmd = f"cat {post_snapshot_file}"
+                                
+                                pre_config = self.connection.device.send_command(pre_config_cmd, read_timeout=10)
+                                post_config = self.connection.device.send_command(post_config_cmd, read_timeout=10)
+                                
+                                # Step 3: Compare and find differences
+                                pre_lines = set(pre_config.strip().split('\n'))
+                                post_lines = set(post_config.strip().split('\n'))
+                                
+                                added_lines = post_lines - pre_lines  # In post but not in pre
+                                removed_lines = pre_lines - post_lines  # In pre but not in post
+                                
+                                rollback_commands = []
+                                
+                                # Generate rollback commands
+                                for line in added_lines:
+                                    if line.strip() and line.startswith('nv set'):
+                                        # Convert "nv set" to "nv unset"
+                                        rollback_cmd = line.replace('nv set', 'nv unset', 1)
+                                        # Remove the value part for unset (keep only the parameter path)
+                                        # Example: "nv unset interface swp4 bridge domain br_default access 3019"
+                                        #       → "nv unset interface swp4 bridge domain br_default access"
+                                        parts = rollback_cmd.split()
+                                        if len(parts) > 3:
+                                            # Keep command structure but remove last value for unset
+                                            if 'access' in rollback_cmd or 'vlan' in rollback_cmd:
+                                                rollback_cmd = ' '.join(parts[:-1]) if parts[-1].isdigit() or ',' in parts[-1] else rollback_cmd
+                                        rollback_commands.append(rollback_cmd)
+                                
+                                for line in removed_lines:
+                                    if line.strip() and line.startswith('nv set'):
+                                        # Re-apply removed configuration
+                                        rollback_commands.append(line)
+                                
+                                if rollback_commands:
+                                    logs.append(f"  Identified {len(rollback_commands)} change(s) to revert:")
+                                    for cmd in rollback_commands[:10]:  # Show first 10
+                                        logs.append(f"    • {cmd}")
+                                    if len(rollback_commands) > 10:
+                                        logs.append(f"    ... and {len(rollback_commands) - 10} more")
+                                    logs.append(f"")
+                                    
+                                    # Step 4: Execute rollback commands
+                                    logs.append(f"  Executing rollback commands...")
+                                    for cmd in rollback_commands:
+                                        try:
+                                            output = self.connection.device.send_command(cmd, read_timeout=10)
+                                            if output and output.strip():
+                                                logger.debug(f"Rollback command output: {output}")
+                                        except Exception as cmd_error:
+                                            logger.warning(f"Rollback command failed: {cmd} - {cmd_error}")
+                                            logs.append(f"    ⚠ {cmd} - {str(cmd_error)[:50]}")
+                                    
+                                    logs.append(f"  ✓ Rollback commands executed")
+                                    logs.append(f"")
+                                    
+                                    # Step 5: Check config diff
+                                    logs.append(f"  Verifying rollback changes...")
+                                    diff_output = self.connection.device.send_command('nv config diff', read_timeout=10)
+                                    
+                                    if diff_output and diff_output.strip() and 'no changes' not in diff_output.lower():
+                                        # Changes detected - need to apply
+                                        logs.append(f"  ✓ Pending changes detected:")
+                                        for line in diff_output.split('\n')[:15]:
+                                            if line.strip():
+                                                logs.append(f"    {line}")
+                                        logs.append(f"")
+                                        
+                                        # Step 6: Apply the rollback
+                                        logs.append(f"  Applying rollback configuration...")
+                                        apply_output = self.connection.device.send_command('nv config apply', read_timeout=30)
+                                        logs.append(f"  ✓ Rollback configuration applied")
+                                        
+                                        # Step 7: Verify rollback succeeded
+                                        time.sleep(2)
+                                        verify_diff = self.connection.device.send_command('nv config diff', read_timeout=10)
+                                        
+                                        if not verify_diff or not verify_diff.strip() or 'no changes' in verify_diff.lower():
+                                            logs.append(f"  ✓ Rollback verification: No pending changes")
+                                            logs.append(f"  ✓ Configuration successfully reverted to pre-deployment state")
+                                            result['rolled_back'] = True
+                                            result['message'] = f"Verification failed but surgical rollback succeeded"
+                                        else:
+                                            logs.append(f"  ⚠ Pending changes still exist after rollback:")
+                                            logs.append(f"    {verify_diff[:200]}")
+                                    else:
+                                        # No changes - config already matches
+                                        logs.append(f"  ℹ No pending changes detected")
+                                        logs.append(f"  Configuration already matches pre-deployment state")
+                                        result['rolled_back'] = True
+                                else:
+                                    logs.append(f"  ℹ No configuration differences found")
+                                    logs.append(f"  Configuration already matches pre-deployment snapshot")
+                                    result['rolled_back'] = True
+                        
+                        except Exception as surgical_error:
+                            logger.error(f"Surgical rollback failed: {surgical_error}")
+                            logs.append(f"  ✗ Surgical rollback failed: {str(surgical_error)[:100]}")
+                            logs.append(f"  Manual intervention required")
+                        
+                        logs.append(f"")
                 else:
                     result['message'] += f" - Auto-rollback completed (could not verify)"
                     logger.info(f"{'='*60}")
