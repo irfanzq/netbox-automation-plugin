@@ -2843,22 +2843,11 @@ class VLANDeploymentView(View):
                         }
                     }
                     
-                    # Generate deployment logs
+                    # Generate deployment logs - match normal mode structure
                     logs = []
                     logs.append("=" * 80)
                     logs.append("SYNC MODE DRY RUN - PREVIEW ONLY")
                     logs.append("=" * 80)
-                    logs.append("")
-                    logs.append(f"Device: {device.name}")
-                    logs.append(f"Interface: {interface.name}")
-                    logs.append(f"Platform: {platform.upper()}")
-                    logs.append("")
-                    logs.append("--- NetBox VLAN Configuration (Source of Truth) ---")
-                    if untagged_vid:
-                        logs.append(f"Untagged VLAN: {untagged_vid}")
-                    if tagged_vids:
-                        logs.append(f"Tagged VLANs: {', '.join(map(str, tagged_vids))}")
-                    logs.append(f"Mode: {config_info['mode']}")
                     logs.append("")
                     
                     # Get bond info FIRST before showing proposed config (so proposed config shows bond3)
@@ -3094,6 +3083,89 @@ class VLANDeploymentView(View):
                             logs.append(f"  {line}")
                     logs.append("")
                     
+                    # Configuration Changes (What Will Be Applied) - same as normal mode
+                    logs.append("--- Configuration Changes (What Will Be Applied) ---")
+                    logs.append("")
+                    logs.append("Note: Only VLAN-related configurations will be changed.")
+                    logs.append("      Other configurations (link state, type, breakout, etc.) are preserved.")
+                    logs.append("")
+                    
+                    # Determine what's being replaced
+                    target_interface_for_changes = bond_member_of if bond_member_of else interface.name
+                    config_to_check_for_old_vlan = bond_interface_config if (bond_interface_config and bond_member_of) else current_device_config
+                    if config_to_check_for_old_vlan:
+                        import re
+                        old_vlan_match = re.search(r'access\s+(\d+)', config_to_check_for_old_vlan)
+                        if old_vlan_match:
+                            old_vlan = old_vlan_match.group(1)
+                            logs.append(f"Removed/Replaced:")
+                            logs.append(f"  - nv set interface {target_interface_for_changes} bridge domain br_default access {old_vlan}")
+                        else:
+                            logs.append(f"Removed/Replaced:")
+                            logs.append(f"  (no existing access VLAN to replace)")
+                    else:
+                        logs.append(f"Removed/Replaced:")
+                        logs.append(f"  (no existing configuration to replace)")
+                    logs.append("")
+                    
+                    # Show what's being added - filter out bridge VLANs that already exist
+                    logs.append("Added:")
+                    config_lines_to_show = [line.strip() for line in config_command.split('\n') if line.strip()]
+                    import re
+                    for line in config_lines_to_show:
+                        bridge_vlan_match = re.match(r'nv set bridge domain br_default vlan (\d+)', line)
+                        if bridge_vlan_match:
+                            vlan_id_to_check = int(bridge_vlan_match.group(1))
+                            if not self._is_vlan_in_bridge_vlans(vlan_id_to_check, bridge_vlans):
+                                logs.append(f"  + {line}")
+                        else:
+                            # Not a bridge VLAN command - always show
+                            logs.append(f"  + {line}")
+                    logs.append("")
+                    
+                    # Pre-Deployment Traffic Check (Cumulus only) - same as normal mode
+                    target_interface_for_stats = interface.name
+                    bond_interface_for_stats = None
+                    try:
+                        interface_obj = Interface.objects.get(device=device, name=interface.name)
+                        if hasattr(interface_obj, 'lag') and interface_obj.lag:
+                            bond_interface_for_stats = interface_obj.lag.name
+                            target_interface_for_stats = bond_interface_for_stats
+                        else:
+                            bond_info_for_stats = self._get_bond_interface_for_member(device, interface.name, platform=platform)
+                            bond_interface_for_stats = bond_info_for_stats['bond_name'] if bond_info_for_stats else None
+                            if bond_interface_for_stats:
+                                target_interface_for_stats = bond_interface_for_stats
+                    except Interface.DoesNotExist:
+                        bond_info_for_stats = self._get_bond_interface_for_member(device, interface.name, platform=platform)
+                        bond_interface_for_stats = bond_info_for_stats['bond_name'] if bond_info_for_stats else None
+                        if bond_interface_for_stats:
+                            target_interface_for_stats = bond_interface_for_stats
+                    
+                    if platform == 'cumulus':
+                        traffic_stats = self._check_interface_traffic_stats(device, target_interface_for_stats, platform, bond_interface=None)
+                        logs.append("--- Pre-Deployment Traffic Check ---")
+                        if traffic_stats.get('has_traffic'):
+                            in_pkts = traffic_stats.get('in_pkts_total', 0)
+                            out_pkts = traffic_stats.get('out_pkts_total', 0)
+                            logs.append(f"[WARN] Active traffic detected on interface '{target_interface_for_stats}'")
+                            logs.append(f"  in-pkts: {in_pkts:,}")
+                            logs.append(f"  out-pkts: {out_pkts:,}")
+                            logs.append(f"  WARNING: Replacing VLAN configuration will disrupt existing traffic!")
+                        else:
+                            logs.append(f"[OK] No active traffic detected on interface '{target_interface_for_stats}'")
+                        logs.append("")
+                    
+                    logs.append("=" * 80)
+                    logs.append("STARTING DEPLOYMENT")
+                    logs.append("=" * 80)
+                    logs.append("")
+                    logs.append("")
+                    logs.append("=" * 80)
+                    logs.append("DEPLOYMENT EXECUTION LOGS")
+                    logs.append("=" * 80)
+                    logs.append("")
+                    
                     # Check for configs that will be overridden (WARNING only, not blocking)
                     warnings = []
                     has_conflicts = False
@@ -3289,9 +3361,288 @@ class VLANDeploymentView(View):
                         'risk_level': risk_level,
                     })
                 else:
-                    # Actual deployment
+                    # Actual deployment - generate preview logs first (same structure as dry run)
                     untagged_vid = config_info['untagged_vlan']
                     tagged_vids = config_info['tagged_vlans']
+                    
+                    # Generate preview logs with same structure as dry run (for consistency)
+                    # This ensures deployment mode has the same logging structure as normal mode
+                    preview_logs = []
+                    preview_logs.append("=" * 80)
+                    preview_logs.append("DEPLOYMENT MODE - CONFIGURATION PREVIEW")
+                    preview_logs.append("=" * 80)
+                    preview_logs.append("")
+                    
+                    # Get current device config for preview
+                    device_config_result = self._get_current_device_config(device, interface.name, platform)
+                    current_device_config = device_config_result.get('current_config', 'Unable to fetch')
+                    bond_member_of = device_config_result.get('bond_member_of')
+                    bond_interface_config = device_config_result.get('bond_interface_config')
+                    bridge_vlans = device_config_result.get('_bridge_vlans', [])
+                    
+                    # Current Device Configuration section
+                    preview_logs.append("--- Current Device Configuration (Real from Device) ---")
+                    preview_logs.append("")
+                    if bond_member_of:
+                        preview_logs.append(f"Bond Membership: Interface '{interface.name}' is a member of bond '{bond_member_of}'")
+                        preview_logs.append(f"Note: VLAN configuration will be applied to bond '{bond_member_of}', not to '{interface.name}' directly.")
+                        preview_logs.append("")
+                        preview_logs.append(f"Interface-Level Configuration (for '{interface.name}'):")
+                        if current_device_config and current_device_config.strip() and not "ERROR:" in current_device_config:
+                            for line in current_device_config.split('\n'):
+                                if line.strip():
+                                    preview_logs.append(f"  {line}")
+                        else:
+                            preview_logs.append("  (no configuration found for this interface)")
+                        preview_logs.append("")
+                        preview_logs.append(f"Bond Interface '{bond_member_of}' Configuration:")
+                        if bond_interface_config and bond_interface_config.strip():
+                            for line in bond_interface_config.split('\n'):
+                                if line.strip():
+                                    preview_logs.append(f"  {line}")
+                        else:
+                            preview_logs.append("  (unable to retrieve bond interface configuration)")
+                    else:
+                        preview_logs.append(f"Interface-Level Configuration:")
+                        if current_device_config and current_device_config.strip() and not "ERROR:" in current_device_config:
+                            for line in current_device_config.split('\n'):
+                                if line.strip():
+                                    preview_logs.append(f"  {line}")
+                        else:
+                            preview_logs.append("  (unable to retrieve or no configuration)")
+                    preview_logs.append("")
+                    
+                    # Bridge-Level Configuration
+                    if platform == 'cumulus':
+                        preview_logs.append("Bridge-Level Configuration (br_default):")
+                        if bridge_vlans and len(bridge_vlans) > 0:
+                            vlan_list_str = self._format_vlan_list(bridge_vlans)
+                            preview_logs.append(f"  nv set bridge domain br_default vlan {vlan_list_str}")
+                        else:
+                            preview_logs.append("  (bridge VLAN information not available)")
+                        preview_logs.append("")
+                    
+                    # Proposed Device Configuration
+                    target_interface_for_preview = bond_member_of if bond_member_of else interface.name
+                    preview_logs.append("--- Proposed Device Configuration ---")
+                    # Regenerate config_command with bond interface if needed
+                    preview_config_command = config_command
+                    if bond_member_of and target_interface_for_preview != interface.name:
+                        if platform == 'cumulus':
+                            all_vlans = set()
+                            if untagged_vid:
+                                all_vlans.add(untagged_vid)
+                            all_vlans.update(tagged_vids)
+                            regenerated_commands = []
+                            for vlan in sorted(all_vlans):
+                                if not self._is_vlan_in_bridge_vlans(vlan, bridge_vlans):
+                                    regenerated_commands.append(f"nv set bridge domain br_default vlan {vlan}")
+                            if untagged_vid:
+                                regenerated_commands.append(f"nv set interface {target_interface_for_preview} bridge domain br_default access {untagged_vid}")
+                            preview_config_command = '\n'.join(regenerated_commands)
+                    for line in preview_config_command.split('\n'):
+                        if line.strip():
+                            preview_logs.append(f"  {line}")
+                    preview_logs.append("")
+                    
+                    # Current NetBox Configuration
+                    netbox_current = {
+                        'untagged_vlan': interface.untagged_vlan.vid if interface.untagged_vlan else None,
+                        'tagged_vlans': list(interface.tagged_vlans.values_list('vid', flat=True)),
+                        'mode': getattr(interface, 'mode', None),
+                        'ip_addresses': [str(ip.address) for ip in interface.ip_addresses.all()],
+                        'vrf': interface.vrf.name if hasattr(interface, 'vrf') and interface.vrf else None,
+                        'cable_status': 'Connected' if interface.cable else 'Not Connected',
+                        'enabled': interface.enabled if hasattr(interface, 'enabled') else True,
+                        'port_channel_member': bool(interface.lag) if hasattr(interface, 'lag') else False,
+                    }
+                    preview_logs.append("--- Current NetBox Configuration (Source of Truth) ---")
+                    preview_logs.append(f"802.1Q Mode: {netbox_current['mode'] or 'None'}")
+                    preview_logs.append(f"Untagged VLAN: {netbox_current['untagged_vlan'] or 'None'}")
+                    tagged_vlans_str = ', '.join(map(str, netbox_current['tagged_vlans'])) if netbox_current['tagged_vlans'] else 'None'
+                    preview_logs.append(f"Tagged VLANs: [{tagged_vlans_str}]")
+                    ip_addresses_str = ', '.join(netbox_current['ip_addresses']) if netbox_current['ip_addresses'] else 'None'
+                    preview_logs.append(f"IP Addresses: {ip_addresses_str}")
+                    preview_logs.append(f"VRF: {netbox_current['vrf'] or 'None'}")
+                    preview_logs.append(f"Cable Status: {netbox_current['cable_status']}")
+                    preview_logs.append(f"Enabled: {netbox_current['enabled']}")
+                    preview_logs.append(f"Port-Channel Member: {netbox_current['port_channel_member']}")
+                    preview_logs.append("")
+                    
+                    # Configuration Conflict Detection
+                    preview_logs.append("--- Configuration Conflict Detection ---")
+                    device_config_has_vlan = False
+                    device_vlan_id = None
+                    if current_device_config:
+                        import re
+                        vlan_match = re.search(r'access\s+(\d+)', current_device_config.lower())
+                        if vlan_match:
+                            device_config_has_vlan = True
+                            device_vlan_id = int(vlan_match.group(1))
+                    netbox_has_vlan = netbox_current.get('untagged_vlan') is not None
+                    netbox_vlan_id = netbox_current.get('untagged_vlan')
+                    conflict_detected = False
+                    if netbox_has_vlan and not device_config_has_vlan:
+                        conflict_detected = True
+                        preview_logs.append(f"[WARN] Device config differs from NetBox config")
+                        preview_logs.append(f"  Conflicts detected: NetBox has VLAN {netbox_vlan_id} configured but device has no VLAN config")
+                        preview_logs.append("")
+                        preview_logs.append("Device Should Have (According to NetBox):")
+                        all_netbox_vlans = set()
+                        if netbox_current.get('untagged_vlan'):
+                            all_netbox_vlans.add(netbox_current['untagged_vlan'])
+                        all_netbox_vlans.update(netbox_current.get('tagged_vlans', []))
+                        for vlan in sorted(all_netbox_vlans):
+                            if not self._is_vlan_in_bridge_vlans(vlan, bridge_vlans):
+                                preview_logs.append(f"  nv set bridge domain br_default vlan {vlan}")
+                        if netbox_current.get('untagged_vlan'):
+                            preview_logs.append(f"  nv set interface {target_interface_for_preview} bridge domain br_default access {netbox_current['untagged_vlan']}")
+                        preview_logs.append("")
+                        preview_logs.append("Note: NetBox is the source of truth. Device may have stale/old configuration.")
+                        preview_logs.append("      Any differences will be reconciled during deployment.")
+                    else:
+                        preview_logs.append("[OK] Device config matches NetBox - no conflicts detected")
+                    preview_logs.append("")
+                    
+                    # Config Diff
+                    target_interface_for_diff = bond_member_of if bond_member_of else interface.name
+                    current_config_with_bridge = current_device_config or ""
+                    if platform == 'cumulus' and bridge_vlans:
+                        bridge_vlan_cmds = []
+                        for vlan_item in bridge_vlans:
+                            if isinstance(vlan_item, (int, str)):
+                                if isinstance(vlan_item, str) and '-' in vlan_item:
+                                    bridge_vlan_cmds.append(f"nv set bridge domain br_default vlan {vlan_item}")
+                                else:
+                                    try:
+                                        vlan_id = int(vlan_item) if isinstance(vlan_item, str) else vlan_item
+                                        bridge_vlan_cmds.append(f"nv set bridge domain br_default vlan {vlan_id}")
+                                    except (ValueError, TypeError):
+                                        pass
+                        if bridge_vlan_cmds:
+                            if current_config_with_bridge:
+                                current_config_with_bridge = '\n'.join(bridge_vlan_cmds) + '\n' + current_config_with_bridge
+                            else:
+                                current_config_with_bridge = '\n'.join(bridge_vlan_cmds)
+                    config_diff = self._generate_config_diff(
+                        current_config_with_bridge,
+                        preview_config_command,
+                        platform,
+                        device=device,
+                        interface_name=target_interface_for_diff,
+                        bridge_vlans=bridge_vlans
+                    )
+                    preview_logs.append("--- Config Diff ---")
+                    preview_logs.append("(Shows what will be removed/replaced and what will be added)")
+                    preview_logs.append("")
+                    for line in config_diff.split('\n'):
+                        if line.strip():
+                            preview_logs.append(f"  {line}")
+                    preview_logs.append("")
+                    
+                    # NetBox Configuration Changes
+                    netbox_state = self._get_netbox_current_state(device, interface.name, untagged_vid or (tagged_vids[0] if tagged_vids else None))
+                    bond_info_for_netbox = None
+                    bond_name_for_netbox = None
+                    if bond_member_of:
+                        bond_info_for_netbox = self._get_bond_interface_for_member(device, interface.name, platform=platform)
+                        bond_name_for_netbox = bond_member_of
+                        if bond_info_for_netbox is None:
+                            bond_info_for_netbox = {
+                                'bond_name': bond_member_of,
+                                'netbox_bond_name': None,
+                                'device_bond_name': bond_member_of,
+                                'netbox_missing_bond': True
+                            }
+                    netbox_diff = self._generate_netbox_diff(
+                        netbox_state,
+                        netbox_state['proposed'],
+                        bond_info=bond_info_for_netbox,
+                        interface_name=interface.name,
+                        bond_name=bond_name_for_netbox
+                    )
+                    preview_logs.append("--- NetBox Configuration Changes ---")
+                    for line in netbox_diff.split('\n'):
+                        if line.strip():
+                            preview_logs.append(f"  {line}")
+                    preview_logs.append("")
+                    
+                    # Configuration Changes (What Will Be Applied)
+                    preview_logs.append("--- Configuration Changes (What Will Be Applied) ---")
+                    preview_logs.append("")
+                    preview_logs.append("Note: Only VLAN-related configurations will be changed.")
+                    preview_logs.append("      Other configurations (link state, type, breakout, etc.) are preserved.")
+                    preview_logs.append("")
+                    config_to_check_for_old_vlan = bond_interface_config if (bond_interface_config and bond_member_of) else current_device_config
+                    if config_to_check_for_old_vlan:
+                        import re
+                        old_vlan_match = re.search(r'access\s+(\d+)', config_to_check_for_old_vlan)
+                        if old_vlan_match:
+                            old_vlan = old_vlan_match.group(1)
+                            preview_logs.append(f"Removed/Replaced:")
+                            preview_logs.append(f"  - nv set interface {target_interface_for_preview} bridge domain br_default access {old_vlan}")
+                        else:
+                            preview_logs.append(f"Removed/Replaced:")
+                            preview_logs.append(f"  (no existing access VLAN to replace)")
+                    else:
+                        preview_logs.append(f"Removed/Replaced:")
+                        preview_logs.append(f"  (no existing configuration to replace)")
+                    preview_logs.append("")
+                    preview_logs.append("Added:")
+                    config_lines_to_show = [line.strip() for line in preview_config_command.split('\n') if line.strip()]
+                    import re
+                    for line in config_lines_to_show:
+                        bridge_vlan_match = re.match(r'nv set bridge domain br_default vlan (\d+)', line)
+                        if bridge_vlan_match:
+                            vlan_id_to_check = int(bridge_vlan_match.group(1))
+                            if not self._is_vlan_in_bridge_vlans(vlan_id_to_check, bridge_vlans):
+                                preview_logs.append(f"  + {line}")
+                        else:
+                            preview_logs.append(f"  + {line}")
+                    preview_logs.append("")
+                    
+                    # Pre-Deployment Traffic Check
+                    target_interface_for_stats = interface.name
+                    bond_interface_for_stats = None
+                    try:
+                        interface_obj = Interface.objects.get(device=device, name=interface.name)
+                        if hasattr(interface_obj, 'lag') and interface_obj.lag:
+                            bond_interface_for_stats = interface_obj.lag.name
+                            target_interface_for_stats = bond_interface_for_stats
+                        else:
+                            bond_info_for_stats = self._get_bond_interface_for_member(device, interface.name, platform=platform)
+                            bond_interface_for_stats = bond_info_for_stats['bond_name'] if bond_info_for_stats else None
+                            if bond_interface_for_stats:
+                                target_interface_for_stats = bond_interface_for_stats
+                    except Interface.DoesNotExist:
+                        bond_info_for_stats = self._get_bond_interface_for_member(device, interface.name, platform=platform)
+                        bond_interface_for_stats = bond_info_for_stats['bond_name'] if bond_info_for_stats else None
+                        if bond_interface_for_stats:
+                            target_interface_for_stats = bond_interface_for_stats
+                    
+                    if platform == 'cumulus':
+                        traffic_stats = self._check_interface_traffic_stats(device, target_interface_for_stats, platform, bond_interface=None)
+                        preview_logs.append("--- Pre-Deployment Traffic Check ---")
+                        if traffic_stats.get('has_traffic'):
+                            in_pkts = traffic_stats.get('in_pkts_total', 0)
+                            out_pkts = traffic_stats.get('out_pkts_total', 0)
+                            preview_logs.append(f"[WARN] Active traffic detected on interface '{target_interface_for_stats}'")
+                            preview_logs.append(f"  in-pkts: {in_pkts:,}")
+                            preview_logs.append(f"  out-pkts: {out_pkts:,}")
+                            preview_logs.append(f"  WARNING: Replacing VLAN configuration will disrupt existing traffic!")
+                        else:
+                            preview_logs.append(f"[OK] No active traffic detected on interface '{target_interface_for_stats}'")
+                        preview_logs.append("")
+                    
+                    preview_logs.append("=" * 80)
+                    preview_logs.append("STARTING DEPLOYMENT")
+                    preview_logs.append("=" * 80)
+                    preview_logs.append("")
+                    preview_logs.append("")
+                    preview_logs.append("=" * 80)
+                    preview_logs.append("DEPLOYMENT EXECUTION LOGS")
+                    preview_logs.append("=" * 80)
+                    preview_logs.append("")
                     
                     # Pre-deployment traffic check (Cumulus only)
                     target_interface_for_stats = config_info.get('target_interface', interface.name)
@@ -3342,59 +3693,7 @@ class VLANDeploymentView(View):
                             logger.info(f"Regenerated config_command with bond interface {target_interface} instead of {interface.name}")
                         # For EOS, would need similar regeneration
                     
-                    # Add "Configuration Changes (What Will Be Applied)" section before deployment
-                    logs_for_deployment = []
-                    logs_for_deployment.append("--- Configuration Changes (What Will Be Applied) ---")
-                    logs_for_deployment.append("")
-                    logs_for_deployment.append("Note: Only VLAN-related configurations will be changed.")
-                    logs_for_deployment.append("      Other configurations (link state, type, breakout, etc.) are preserved.")
-                    logs_for_deployment.append("")
-                    
-                    # Determine what's being replaced
-                    # Get current config to check for existing access VLAN
-                    import re  # Import re for regex matching
-                    current_config_for_check = None
-                    bond_config_for_check = None
-                    try:
-                        device_config_result = self._get_current_device_config(device, interface.name, platform)
-                        current_config_for_check = device_config_result.get('current_config')
-                        bond_config_for_check = device_config_result.get('bond_interface_config')
-                    except Exception:
-                        pass
-                    
-                    config_to_check = bond_config_for_check if (bond_config_for_check and target_interface != interface.name) else current_config_for_check
-                    if config_to_check:
-                        old_vlan_match = re.search(r'access\s+(\d+)', config_to_check)
-                        if old_vlan_match:
-                            old_vlan = old_vlan_match.group(1)
-                            logs_for_deployment.append("Removed/Replaced:")
-                            logs_for_deployment.append(f"  - nv set interface {target_interface} bridge domain br_default access {old_vlan}")
-                        else:
-                            logs_for_deployment.append("Removed/Replaced:")
-                            logs_for_deployment.append("  (no existing access VLAN to replace)")
-                    else:
-                        logs_for_deployment.append("Removed/Replaced:")
-                        logs_for_deployment.append("  (no existing configuration to replace)")
-                    logs_for_deployment.append("")
-                    
-                    # Show what's being added - filter out bridge VLANs that already exist
-                    logs_for_deployment.append("Added:")
-                    config_lines = [line.strip() for line in config_command.split('\n') if line.strip()]
-                    for line in config_lines:
-                        # Check if this is a bridge VLAN command and if VLAN already exists
-                        bridge_vlan_match = re.match(r'nv set bridge domain br_default vlan (\d+)', line)
-                        if bridge_vlan_match:
-                            vlan_id_to_check = int(bridge_vlan_match.group(1))
-                            if not self._is_vlan_in_bridge_vlans(vlan_id_to_check, bridge_vlans_for_check):
-                                logs_for_deployment.append(f"  + {line}")
-                            else:
-                                logger.debug(f"Skipping bridge VLAN command for {vlan_id_to_check} - already exists in bridge")
-                        else:
-                            # Not a bridge VLAN command (e.g., interface access command) - always show
-                            logs_for_deployment.append(f"  + {line}")
-                    logs_for_deployment.append("")
-                    
-                    # Prepend deployment logs with "Configuration Changes" section
+                    # Deploy configuration
                     result = self._deploy_config_to_device(
                         device, 
                         target_interface,  # Use bond interface for deployment
@@ -3404,15 +3703,18 @@ class VLANDeploymentView(View):
                         original_interface_name=interface.name  # Keep original for display/logging
                     )
                     
-                    # Prepend the "Configuration Changes" section to result logs
+                    # Append deployment execution logs to the preview logs
                     if result.get('logs'):
-                        result['logs'] = logs_for_deployment + result['logs']
-                    else:
-                        result['logs'] = logs_for_deployment
+                        for log_line in result['logs']:
+                            preview_logs.append(log_line)
                     
-                    # Post-deployment traffic check (Cumulus only)
+                    # Store combined logs in result (preview + deployment execution)
+                    result['logs'] = preview_logs
+                    
+                    # Post-deployment traffic check (Cumulus only) - use bond interface if detected
                     if platform == 'cumulus' and result.get('success') and result.get('committed'):
-                        post_traffic_stats = self._check_interface_traffic_stats(device, interface.name, platform, bond_interface=target_interface_for_stats if target_interface_for_stats != interface.name else None)
+                        # Use target_interface_for_stats (bond if detected) for traffic check
+                        post_traffic_stats = self._check_interface_traffic_stats(device, target_interface_for_stats, platform, bond_interface=None)
                         if pre_traffic_stats and post_traffic_stats:
                             pre_in = pre_traffic_stats.get('in_pkts_total', 0)
                             pre_out = pre_traffic_stats.get('out_pkts_total', 0)
@@ -3879,7 +4181,44 @@ class VLANDeploymentView(View):
                                 
                                 config_command = '\n'.join(regenerated_commands)
                                 logger.info(f"Regenerated config_command with bond interface {target_interface} instead of {interface.name}")
+                                logger.debug(f"Regenerated config_command: {config_command}")
                             # For EOS, would need similar regeneration
+                        
+                        # CRITICAL: Ensure config_command uses target_interface (bond3) not interface.name (swp3)
+                        # Replace any remaining instances of interface.name with target_interface in config_command
+                        if target_interface != interface.name and platform == 'cumulus':
+                            # Final safety check - replace any remaining member interface with bond interface
+                            original_config_command = config_command
+                            config_command = config_command.replace(f"interface {interface.name} ", f"interface {target_interface} ")
+                            config_command = config_command.replace(f"interface {interface.name}\n", f"interface {target_interface}\n")
+                            config_command = config_command.replace(f"nv set interface {interface.name} ", f"nv set interface {target_interface} ")
+                            config_command = config_command.replace(f"nv set interface {interface.name}\n", f"nv set interface {target_interface}\n")
+                            if config_command.strip().endswith(f"interface {interface.name}"):
+                                config_command = config_command.replace(f"interface {interface.name}", f"interface {target_interface}")
+                            if f"nv set interface {interface.name}" in config_command:
+                                config_command = config_command.replace(f"nv set interface {interface.name}", f"nv set interface {target_interface}")
+                            
+                            if original_config_command != config_command:
+                                logger.warning(f"CRITICAL FIX: Replaced {interface.name} with {target_interface} in config_command")
+                                logger.debug(f"Original: {original_config_command}")
+                                logger.debug(f"Fixed: {config_command}")
+                            
+                            # Verify no member interface remains
+                            if f"nv set interface {interface.name}" in config_command:
+                                logger.error(f"ERROR: Member interface {interface.name} still found in config_command after replacement!")
+                                logger.error(f"Config command: {config_command}")
+                                # Force regenerate one more time
+                                all_vlans = set()
+                                if untagged_vid:
+                                    all_vlans.add(untagged_vid)
+                                all_vlans.update(tagged_vids)
+                                regenerated_commands = []
+                                for vlan in sorted(all_vlans):
+                                    regenerated_commands.append(f"nv set bridge domain br_default vlan {vlan}")
+                                if untagged_vid:
+                                    regenerated_commands.append(f"nv set interface {target_interface} bridge domain br_default access {untagged_vid}")
+                                config_command = '\n'.join(regenerated_commands)
+                                logger.error(f"FORCED REGENERATION: {config_command}")
                         
                         result = self._deploy_config_to_device(
                             device, 
