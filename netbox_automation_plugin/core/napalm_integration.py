@@ -1062,6 +1062,9 @@ class NAPALMDeviceManager:
         logger.info(f"{'='*60}")
         logger.info(f"SAFE DEPLOYMENT: {self.device.name} (timeout={timeout}s, replace={replace})")
         logger.info(f"{'='*60}")
+        
+        # Get driver name early - needed for platform-specific logic
+        driver_name = self.get_driver_name()
 
         logs.append(f"[Phase 0] Connection Establishment")
         logs.append(f"  Device: {self.device.name}")

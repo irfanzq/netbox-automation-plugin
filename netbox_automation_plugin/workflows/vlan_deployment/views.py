@@ -1957,19 +1957,19 @@ class VLANDeploymentView(View):
             diff_lines.append(f"[INFO] BOND DETECTED: VLANs will be moved from interface '{interface_name}' to bond '{bond_name}'")
             diff_lines.append(f"  Bond '{bond_name}' will be created in NetBox (if missing)")
             diff_lines.append("")
-            diff_lines.append(f"Interface '{interface_name}' (VLANs will be removed):")
+            diff_lines.append(f"Interface '{interface_name}' (VLANs will be cleared):")
             old_untagged = current_state['current']['untagged_vlan'] or 'None'
             old_tagged = ', '.join(map(str, sorted(current_state['current']['tagged_vlans']))) or 'None'
-            diff_lines.append(f"  Untagged VLAN: {old_untagged} → None (moved to bond '{bond_name}')")
-            diff_lines.append(f"  Tagged VLANs: [{old_tagged}] → [] (moved to bond '{bond_name}')")
+            diff_lines.append(f"  Untagged VLAN: {old_untagged} → None (cleared - migrating to bond)")
+            diff_lines.append(f"  Tagged VLANs: [{old_tagged}] → [] (cleared - migrating to bond)")
             diff_lines.append("")
-            diff_lines.append(f"Bond '{bond_name}' (VLANs will be added):")
+            diff_lines.append(f"Bond '{bond_name}' (VLANs migrated from '{interface_name}'):")
             new_untagged = proposed_state['untagged_vlan'] or 'None'
             new_tagged = ', '.join(map(str, sorted(proposed_state['tagged_vlans']))) or 'None'
             if old_untagged != 'None':
-                diff_lines.append(f"  Untagged VLAN: None → {old_untagged} (from interface '{interface_name}')")
+                diff_lines.append(f"  Untagged VLAN: None → {old_untagged} (migrated from member interface)")
             if old_tagged != 'None':
-                diff_lines.append(f"  Tagged VLANs: [] → [{old_tagged}] (from interface '{interface_name}')")
+                diff_lines.append(f"  Tagged VLANs: [] → [{old_tagged}] (migrated from member interface)")
             diff_lines.append("")
             return '\n'.join(diff_lines)
         
@@ -2750,21 +2750,133 @@ class VLANDeploymentView(View):
             List of result dicts (one per interface), same format as _deploy_config_to_device
         """
         if dry_run or not interfaces_with_configs:
-            # For dry run, return preview results only (no actual deployment)
-            results = []
+            # For dry run, return a SINGLE consolidated result showing all interfaces
+            # This matches the actual deployment behavior where all interfaces are deployed together
+            if not interfaces_with_configs:
+                return []
+            
+            # Consolidate all interface preview logs into one with proposed configs consolidated
+            consolidated_logs = []
+            consolidated_logs.append("=" * 80)
+            consolidated_logs.append(f"DEVICE-LEVEL DEPLOYMENT: {device.name}")
+            consolidated_logs.append(f"Deploying {len(interfaces_with_configs)} interface(s) - DRY RUN")
+            consolidated_logs.append("=" * 80)
+            consolidated_logs.append("")
+            
+            # Collect proposed sections from all interfaces for consolidation
+            all_proposed_configs = []
+            all_config_commands = []
+            
+            # Add each interface's CURRENT state (not proposed)
+            for idx, item in enumerate(interfaces_with_configs, 1):
+                consolidated_logs.append(f"[{idx}/{len(interfaces_with_configs)}] Interface: {item['interface'].name}")
+                consolidated_logs.append("=" * 80)
+                
+                # Parse preview logs to separate current vs proposed sections
+                preview_logs = item.get('preview_logs', [])
+                if isinstance(preview_logs, list):
+                    in_proposed_section = False
+                    for line in preview_logs:
+                        # Detect start of proposed/diff/changes sections to skip
+                        # KEEP: NetBox Configuration Changes (shows bond migration - important!)
+                        if any(marker in line for marker in [
+                            '--- Proposed Device Configuration',
+                            '--- Config Diff ---',
+                            '--- Configuration Changes (What Will Be Applied)',
+                            '--- Pre-Deployment Traffic Check'
+                        ]):
+                            in_proposed_section = True
+                            # Collect proposed config for consolidation
+                            if '--- Proposed Device Configuration' in line:
+                                all_proposed_configs.append({
+                                    'interface': item['interface'].name,
+                                    'config': item.get('config_command', ''),
+                                    'target_interface': item.get('target_interface', item['interface'].name)
+                                })
+                            continue
+                        
+                        # Detect end of sections we want to skip
+                        if in_proposed_section and line.strip().startswith('---'):
+                            in_proposed_section = False
+                            # Don't skip this line - it might be NetBox Configuration Changes
+                            # Fall through to add it
+                        
+                        # Only add lines that are NOT in proposed sections
+                        if not in_proposed_section:
+                            consolidated_logs.append(line)
+                else:
+                    consolidated_logs.append(str(preview_logs))
+                
+                consolidated_logs.append("")
+                
+                # Collect config commands
+                config_cmd = item.get('config_command', '')
+                if config_cmd:
+                    all_config_commands.append({
+                        'interface': item['interface'].name,
+                        'target': item.get('target_interface', item['interface'].name),
+                        'commands': config_cmd
+                    })
+            
+            # Add consolidated proposed configuration section
+            consolidated_logs.append("=" * 80)
+            consolidated_logs.append("CONSOLIDATED PROPOSED CONFIGURATION (ALL INTERFACES)")
+            consolidated_logs.append("=" * 80)
+            consolidated_logs.append("")
+            consolidated_logs.append("--- Proposed Device Configuration ---")
+            consolidated_logs.append("Commands that will be applied in single batch:")
+            consolidated_logs.append("")
+            consolidated_logs.append("[NOTE] When bond is detected:")
+            consolidated_logs.append("       - Commands use BOND interface (e.g., bond3), not member interface (e.g., swp3)")
+            consolidated_logs.append("       - NetBox changes affect BOND, VLANs migrated from member to bond")
+            consolidated_logs.append("       - Traffic checks run on BOND interface, not member")
+            consolidated_logs.append("")
+            for config_item in all_config_commands:
+                if config_item['commands']:
+                    if config_item['interface'] != config_item['target']:
+                        # Bond detected
+                        consolidated_logs.append(f"  Member Interface: {config_item['interface']} → Target: {config_item['target']} (BOND)")
+                    else:
+                        # Direct interface
+                        consolidated_logs.append(f"  Interface: {config_item['interface']}")
+                    for line in config_item['commands'].split('\n'):
+                        if line.strip():
+                            consolidated_logs.append(f"    {line.strip()}")
+                    consolidated_logs.append("")
+            
+            # Add batching summary at the end
+            consolidated_logs.append("=" * 80)
+            consolidated_logs.append("BATCHED DEPLOYMENT SUMMARY")
+            consolidated_logs.append("=" * 80)
+            consolidated_logs.append("")
+            consolidated_logs.append(f"[BATCH] All {len(interfaces_with_configs)} interface(s) would be deployed together")
+            consolidated_logs.append(f"        in a single atomic commit-confirm session.")
+            consolidated_logs.append("")
+            consolidated_logs.append("Interfaces in this batch:")
             for item in interfaces_with_configs:
-                result = {
-                    'success': True,
-                    'committed': False,
-                    'rolled_back': False,
-                    'message': 'Dry run - no deployment performed',
-                    'logs': item.get('preview_logs', []),
-                    'device': device,
-                    'interface': item['interface'].name,
-                    'dry_run': True
-                }
-                results.append(result)
-            return results
+                consolidated_logs.append(f"  - {item['interface'].name}")
+            consolidated_logs.append("")
+            consolidated_logs.append("Benefits of batched deployment:")
+            consolidated_logs.append("  [OK] Single commit-confirm session (no conflicts)")
+            consolidated_logs.append("  [OK] Atomic rollback (all-or-nothing)")
+            consolidated_logs.append("  [OK] Faster execution (one SSH session)")
+            consolidated_logs.append("  [OK] Consistent state (all interfaces updated simultaneously)")
+            consolidated_logs.append("")
+            
+            # Return a SINGLE result for all interfaces
+            result = {
+                'success': True,
+                'committed': False,
+                'rolled_back': False,
+                'message': f'Dry run - would deploy {len(interfaces_with_configs)} interface(s)',
+                'logs': consolidated_logs,
+                'device': device,
+                'interface': f"Batched ({len(interfaces_with_configs)} interfaces)",
+                'dry_run': True,
+                '_interface_count': len(interfaces_with_configs),
+                '_interface_names': [item['interface'].name for item in interfaces_with_configs]
+            }
+            return [result]  # Return as single-item list for consistency
         
         # Build combined config for all interfaces
         all_config_lines = []
@@ -2861,7 +2973,7 @@ class VLANDeploymentView(View):
                         'rolled_back': False,
                         'error': error_msg,
                         'message': error_msg,
-                        'logs': item.get('preview_logs', []) + [f"✗ Connection failed: {error_msg}"],
+                        'logs': item.get('preview_logs', []) + [f"[FAIL] Connection failed: {error_msg}"],
                         'device': device,
                         'interface': item['interface'].name,
                         'dry_run': False
@@ -2962,7 +3074,7 @@ class VLANDeploymentView(View):
                 enhanced_error_logs.append("DEPLOYMENT FAILURE ANALYSIS")
                 enhanced_error_logs.append("=" * 80)
                 enhanced_error_logs.append("")
-                enhanced_error_logs.append("⚠ ATOMIC DEPLOYMENT FAILED - ALL INTERFACES ROLLED BACK")
+                enhanced_error_logs.append("[WARN] ATOMIC DEPLOYMENT FAILED - ALL INTERFACES ROLLED BACK")
                 enhanced_error_logs.append("")
                 
                 if failed_interface:
@@ -3127,7 +3239,7 @@ class VLANDeploymentView(View):
             consolidated_error_logs.append("=" * 80)
             consolidated_error_logs.append("DEPLOYMENT ERROR")
             consolidated_error_logs.append("=" * 80)
-            consolidated_error_logs.append(f"✗ Deployment failed: {str(e)}")
+            consolidated_error_logs.append(f"[FAIL] Deployment failed: {str(e)}")
             consolidated_error_logs.append(f"Error type: {type(e).__name__}")
             consolidated_error_logs.append("")
             
@@ -3216,6 +3328,7 @@ class VLANDeploymentView(View):
             # Collect all interfaces with their configs for batched deployment
             interfaces_with_configs = []
             dry_run_device_interfaces = []  # Track interfaces for dry run summary
+            sync_dry_run_interface_data = []  # Collect all interface data for consolidated dry run result
             
             # Get device bridge VLANs ONCE per device (not per interface)
             device_bridge_vlans = []
@@ -3292,9 +3405,9 @@ class VLANDeploymentView(View):
                     logs.append("SYNC MODE DRY RUN - PREVIEW ONLY")
                     logs.append("=" * 80)
                     logs.append("")
-                    logs.append("ℹ️  NOTE: This interface will be deployed in a BATCHED commit with all other")
-                    logs.append(f"   interfaces on device '{device.name}' in a single atomic session.")
-                    logs.append("   All interface configs will be applied together with one commit-confirm.")
+                    logs.append("[NOTE] This interface will be deployed in a BATCHED commit with all other")
+                    logs.append(f"       interfaces on device '{device.name}' in a single atomic session.")
+                    logs.append("       All interface configs will be applied together with one commit-confirm.")
                     logs.append("")
                     
                     # Get bond info FIRST before showing proposed config (so proposed config shows bond3)
@@ -3782,21 +3895,15 @@ class VLANDeploymentView(View):
                         overall_status_text = "PASS"
                         risk_level = "LOW"
                     
-                    results.append({
-                        'device': device,  # Store Device object, not just name
-                        'interface': interface.name,
+                    # Collect interface data for consolidated result (instead of appending individual results)
+                    sync_dry_run_interface_data.append({
+                        'interface': interface,
+                        'interface_name': interface.name,
                         'vlan_id': vlan_id,
                         'vlan_name': vlan_name,
-                        'status': 'success',
-                        'message': f'Would sync from NetBox: {vlan_display}',
-                        'current_config': current_device_config,
-                        'proposed_config': config_command,
-                        'config_diff': config_diff,
-                        'netbox_state': netbox_state,
-                        'deployment_logs': '\n'.join(logs),
-                        'config_source': config_source,
-                        'dry_run': True,
-                        # Status fields for table display
+                        'vlan_display': vlan_display,
+                        'logs': logs,
+                        'config_command': config_command,
                         'device_status': device_status_text,
                         'interface_status': interface_status_text,
                         'overall_status': overall_status_text,
@@ -4149,45 +4256,122 @@ class VLANDeploymentView(View):
                         'tagged_vids': tagged_vids
                     })
             
-            # Add device-level summary for dry run
-            if dry_run and dry_run_device_interfaces:
-                summary_logs = []
-                summary_logs.append("=" * 80)
-                summary_logs.append(f"BATCHED DEPLOYMENT SUMMARY - {device.name}")
-                summary_logs.append("=" * 80)
-                summary_logs.append("")
-                summary_logs.append(f"📦 Batch Configuration: All {len(dry_run_device_interfaces)} interface(s) will be deployed together")
-                summary_logs.append(f"   in a single atomic commit-confirm session on device '{device.name}'.")
-                summary_logs.append("")
-                summary_logs.append("Interfaces in this batch:")
-                for iface_name in dry_run_device_interfaces:
-                    summary_logs.append(f"  • {iface_name}")
-                summary_logs.append("")
-                summary_logs.append("Benefits of batched deployment:")
-                summary_logs.append("  ✓ Single commit-confirm session (no conflicts between interfaces)")
-                summary_logs.append("  ✓ Atomic rollback (all-or-nothing - if any interface fails, all revert)")
-                summary_logs.append("  ✓ Faster execution (one SSH session, one commit)")
-                summary_logs.append("  ✓ Consistent state (all interfaces updated simultaneously)")
-                summary_logs.append("")
-                summary_logs.append("Rollback protection:")
-                summary_logs.append("  • 90-second commit-confirm timer")
-                summary_logs.append("  • Auto-rollback if not confirmed")
-                summary_logs.append("  • Surgical NVUE rollback as fallback")
-                summary_logs.append("")
+            # Add consolidated dry run result for all interfaces on this device
+            if dry_run and sync_dry_run_interface_data:
+                # Create single consolidated result showing all interfaces
+                consolidated_logs = []
+                consolidated_logs.append("=" * 80)
+                consolidated_logs.append(f"DEVICE-LEVEL DEPLOYMENT: {device.name}")
+                consolidated_logs.append(f"Deploying {len(sync_dry_run_interface_data)} interface(s) - DRY RUN (SYNC MODE)")
+                consolidated_logs.append("=" * 80)
+                consolidated_logs.append("")
                 
+                # Add each interface's CURRENT state (not proposed)
+                for idx, iface_data in enumerate(sync_dry_run_interface_data, 1):
+                    consolidated_logs.append(f"[{idx}/{len(sync_dry_run_interface_data)}] Interface: {iface_data['interface_name']}")
+                    consolidated_logs.append("=" * 80)
+                    
+                    # Parse logs to show only current state sections
+                    # KEEP: NetBox Configuration Changes (shows bond migration - important!)
+                    in_proposed_section = False
+                    for line in iface_data['logs']:
+                        # Detect start of proposed/diff/changes sections to skip
+                        if any(marker in line for marker in [
+                            '--- Proposed Device Configuration',
+                            '--- Config Diff ---',
+                            '--- Configuration Changes (What Will Be Applied)',
+                            '--- Pre-Deployment Traffic Check'
+                        ]):
+                            in_proposed_section = True
+                            continue
+                        
+                        # Detect end of sections we want to skip
+                        if in_proposed_section and line.strip().startswith('---'):
+                            in_proposed_section = False
+                            # Fall through to add this line
+                        
+                        # Only add lines that are NOT in proposed sections
+                        if not in_proposed_section:
+                            consolidated_logs.append(line)
+                    
+                    consolidated_logs.append("")
+                
+                # Add consolidated proposed configuration section
+                consolidated_logs.append("=" * 80)
+                consolidated_logs.append("CONSOLIDATED PROPOSED CONFIGURATION (ALL INTERFACES)")
+                consolidated_logs.append("=" * 80)
+                consolidated_logs.append("")
+                consolidated_logs.append("--- Proposed Device Configuration ---")
+                consolidated_logs.append("Commands that will be applied in single batch:")
+                consolidated_logs.append("")
+                consolidated_logs.append("[NOTE] When bond is detected:")
+                consolidated_logs.append("       - Commands use BOND interface (e.g., bond3), not member interface (e.g., swp3)")
+                consolidated_logs.append("       - NetBox changes affect BOND, VLANs migrated from member to bond")
+                consolidated_logs.append("       - Traffic checks run on BOND interface, not member")
+                consolidated_logs.append("")
+                for iface_data in sync_dry_run_interface_data:
+                    if iface_data.get('config_command'):
+                        # Check if bond by looking at commands (contains bond interface name)
+                        has_bond = False
+                        for line in iface_data['config_command'].split('\n'):
+                            if line.strip() and 'bond' in line.lower() and 'nv set interface bond' in line:
+                                has_bond = True
+                                break
+                        
+                        if has_bond:
+                            consolidated_logs.append(f"  Member Interface: {iface_data['interface_name']} → Target: BOND (detected)")
+                        else:
+                            consolidated_logs.append(f"  Interface: {iface_data['interface_name']}")
+                        
+                        for line in iface_data['config_command'].split('\n'):
+                            if line.strip():
+                                consolidated_logs.append(f"    {line.strip()}")
+                        consolidated_logs.append("")
+                
+                # Add batching summary at the end
+                consolidated_logs.append("=" * 80)
+                consolidated_logs.append("BATCHED DEPLOYMENT SUMMARY - SYNC MODE")
+                consolidated_logs.append("=" * 80)
+                consolidated_logs.append("")
+                consolidated_logs.append(f"[BATCH] All {len(sync_dry_run_interface_data)} interface(s) would be deployed together")
+                consolidated_logs.append(f"        in a single atomic commit-confirm session.")
+                consolidated_logs.append("")
+                consolidated_logs.append("Interfaces in this batch:")
+                for iface_data in sync_dry_run_interface_data:
+                    consolidated_logs.append(f"  - {iface_data['interface_name']}")
+                consolidated_logs.append("")
+                consolidated_logs.append("Benefits of batched deployment:")
+                consolidated_logs.append("  [OK] Single commit-confirm session (no conflicts)")
+                consolidated_logs.append("  [OK] Atomic rollback (all-or-nothing)")
+                consolidated_logs.append("  [OK] Faster execution (one SSH session)")
+                consolidated_logs.append("  [OK] Consistent state (all interfaces updated simultaneously)")
+                consolidated_logs.append("")
+                
+                # Determine overall status (worst case among all interfaces)
+                overall_status = "PASS"
+                risk_level = "LOW"
+                for iface_data in sync_dry_run_interface_data:
+                    if iface_data.get('overall_status') == "WARN":
+                        overall_status = "WARN"
+                        risk_level = "MEDIUM"
+                        break
+                
+                # Create single consolidated result
                 results.append({
                     'device': device,
-                    'interface': f"Batch Summary ({len(dry_run_device_interfaces)} interfaces)",
+                    'interface': f"Batched ({len(sync_dry_run_interface_data)} interfaces)",
                     'vlan_id': 'N/A',
-                    'vlan_name': 'Batch Deployment',
-                    'status': 'info',
-                    'message': f'Batched deployment preview for {len(dry_run_device_interfaces)} interface(s)',
-                    'deployment_logs': '\n'.join(summary_logs),
+                    'vlan_name': 'Sync Mode - Batch Deployment',
+                    'status': 'success',
+                    'message': f'Would sync {len(sync_dry_run_interface_data)} interface(s) from NetBox',
+                    'deployment_logs': '\n'.join(consolidated_logs),
                     'dry_run': True,
                     'device_status': "PASS",
                     'interface_status': "INFO",
-                    'overall_status': "INFO",
-                    'risk_level': "LOW",
+                    'overall_status': overall_status,
+                    'risk_level': risk_level,
+                    '_interface_count': len(sync_dry_run_interface_data),
+                    '_interface_names': [iface_data['interface_name'] for iface_data in sync_dry_run_interface_data],
                 })
             
             # Deploy all interfaces for this device in single commit-confirm session
@@ -4279,6 +4463,7 @@ class VLANDeploymentView(View):
                 # Collect all interfaces with their configs for batched deployment
                 untagged_interfaces_with_configs = []
                 dry_run_device_interfaces_untagged = []  # Track interfaces for dry run summary
+                sync_dry_run_interface_data_untagged = []  # Collect all interface data for consolidated dry run result
                 
                 # Get device bridge VLANs ONCE per device (not per interface)
                 device_bridge_vlans = []
@@ -4354,9 +4539,9 @@ class VLANDeploymentView(View):
                         logs.append("SYNC MODE DRY RUN - PREVIEW ONLY (UNTAGGED INTERFACE)")
                         logs.append("=" * 80)
                         logs.append("")
-                        logs.append("ℹ️  NOTE: This interface will be deployed in a BATCHED commit with all other")
-                        logs.append(f"   interfaces on device '{device.name}' in a single atomic session.")
-                        logs.append("   All interface configs will be applied together with one commit-confirm.")
+                        logs.append("[NOTE] This interface will be deployed in a BATCHED commit with all other")
+                        logs.append(f"       interfaces on device '{device.name}' in a single atomic session.")
+                        logs.append("       All interface configs will be applied together with one commit-confirm.")
                         logs.append("")
                         logs.append(f"Device: {device.name}")
                         logs.append(f"Interface: {interface.name}")
@@ -4626,22 +4811,15 @@ class VLANDeploymentView(View):
                             overall_status_text = "PASS"
                             risk_level = "LOW"
                         
-                        results.append({
-                            'device': device,  # Store Device object, not just name
-                            'interface': interface.name,
+                        # Collect interface data for consolidated result (instead of appending individual results)
+                        sync_dry_run_interface_data_untagged.append({
+                            'interface': interface,
+                            'interface_name': interface.name,
                             'vlan_id': vlan_id,
                             'vlan_name': vlan_name,
-                            'status': 'success',
-                            'message': f'Would sync from NetBox: {vlan_display} (will be auto-tagged)',
-                            'current_config': current_device_config,
-                            'proposed_config': config_command,
-                            'config_diff': config_diff,
-                            'netbox_state': netbox_state,
-                            'deployment_logs': '\n'.join(logs),
-                            'config_source': config_source,
-                            'dry_run': True,
-                            'section': 'untagged',
-                            # Status fields for table display
+                            'vlan_display': vlan_display,
+                            'logs': logs,
+                            'config_command': config_command,
                             'device_status': device_status_text,
                             'interface_status': interface_status_text,
                             'overall_status': overall_status_text,
@@ -4753,45 +4931,127 @@ class VLANDeploymentView(View):
                             'tagged_vids': tagged_vids
                         })
             
-            # Add device-level summary for dry run (untagged interfaces)
-            if dry_run and dry_run_device_interfaces_untagged:
-                summary_logs = []
-                summary_logs.append("=" * 80)
-                summary_logs.append(f"BATCHED DEPLOYMENT SUMMARY - {device.name} (UNTAGGED INTERFACES)")
-                summary_logs.append("=" * 80)
-                summary_logs.append("")
-                summary_logs.append(f"📦 Batch Configuration: All {len(dry_run_device_interfaces_untagged)} untagged interface(s) will be")
-                summary_logs.append(f"   deployed together in a single atomic commit-confirm session on device '{device.name}'.")
-                summary_logs.append("")
-                summary_logs.append("Untagged interfaces in this batch:")
-                for iface_name in dry_run_device_interfaces_untagged:
-                    summary_logs.append(f"  • {iface_name}")
-                summary_logs.append("")
-                summary_logs.append("Auto-tagging after deployment:")
-                summary_logs.append("  • All interfaces will be auto-tagged as 'vlan-mode:access' or 'vlan-mode:tagged'")
-                summary_logs.append("  • Conflicting tags (uplink/routed) will be replaced if detected")
-                summary_logs.append("")
-                summary_logs.append("Benefits of batched deployment:")
-                summary_logs.append("  ✓ Single commit-confirm session (no conflicts between interfaces)")
-                summary_logs.append("  ✓ Atomic rollback (all-or-nothing - if any interface fails, all revert)")
-                summary_logs.append("  ✓ Faster execution (one SSH session, one commit)")
-                summary_logs.append("  ✓ Consistent state (all interfaces updated simultaneously)")
-                summary_logs.append("")
+            # Add consolidated dry run result for all untagged interfaces on this device
+            if dry_run and sync_dry_run_interface_data_untagged:
+                # Create single consolidated result showing all interfaces
+                consolidated_logs = []
+                consolidated_logs.append("=" * 80)
+                consolidated_logs.append(f"DEVICE-LEVEL DEPLOYMENT: {device.name}")
+                consolidated_logs.append(f"Deploying {len(sync_dry_run_interface_data_untagged)} interface(s) - DRY RUN (SYNC MODE - UNTAGGED)")
+                consolidated_logs.append("=" * 80)
+                consolidated_logs.append("")
                 
+                # Add each interface's CURRENT state (not proposed)
+                for idx, iface_data in enumerate(sync_dry_run_interface_data_untagged, 1):
+                    consolidated_logs.append(f"[{idx}/{len(sync_dry_run_interface_data_untagged)}] Interface: {iface_data['interface_name']}")
+                    consolidated_logs.append("=" * 80)
+                    
+                    # Parse logs to show only current state sections
+                    # KEEP: NetBox Configuration Changes (shows bond migration - important!)
+                    in_proposed_section = False
+                    for line in iface_data['logs']:
+                        # Detect start of proposed/diff/changes sections to skip
+                        if any(marker in line for marker in [
+                            '--- Proposed Device Configuration',
+                            '--- Config Diff ---',
+                            '--- Configuration Changes (What Will Be Applied)',
+                            '--- Pre-Deployment Traffic Check'
+                        ]):
+                            in_proposed_section = True
+                            continue
+                        
+                        # Detect end of sections we want to skip
+                        if in_proposed_section and line.strip().startswith('---'):
+                            in_proposed_section = False
+                            # Fall through to add this line
+                        
+                        # Only add lines that are NOT in proposed sections
+                        if not in_proposed_section:
+                            consolidated_logs.append(line)
+                    
+                    consolidated_logs.append("")
+                
+                # Add consolidated proposed configuration section
+                consolidated_logs.append("=" * 80)
+                consolidated_logs.append("CONSOLIDATED PROPOSED CONFIGURATION (ALL INTERFACES)")
+                consolidated_logs.append("=" * 80)
+                consolidated_logs.append("")
+                consolidated_logs.append("--- Proposed Device Configuration ---")
+                consolidated_logs.append("Commands that will be applied in single batch:")
+                consolidated_logs.append("")
+                consolidated_logs.append("[NOTE] When bond is detected:")
+                consolidated_logs.append("       - Commands use BOND interface (e.g., bond3), not member interface (e.g., swp3)")
+                consolidated_logs.append("       - NetBox changes affect BOND, VLANs migrated from member to bond")
+                consolidated_logs.append("       - Traffic checks run on BOND interface, not member")
+                consolidated_logs.append("")
+                for iface_data in sync_dry_run_interface_data_untagged:
+                    if iface_data.get('config_command'):
+                        # Check if bond by looking at commands (contains bond interface name)
+                        has_bond = False
+                        for line in iface_data['config_command'].split('\n'):
+                            if line.strip() and 'bond' in line.lower() and 'nv set interface bond' in line:
+                                has_bond = True
+                                break
+                        
+                        if has_bond:
+                            consolidated_logs.append(f"  Member Interface: {iface_data['interface_name']} → Target: BOND (detected)")
+                        else:
+                            consolidated_logs.append(f"  Interface: {iface_data['interface_name']}")
+                        
+                        for line in iface_data['config_command'].split('\n'):
+                            if line.strip():
+                                consolidated_logs.append(f"    {line.strip()}")
+                        consolidated_logs.append("")
+                
+                # Add batching summary at the end
+                consolidated_logs.append("=" * 80)
+                consolidated_logs.append("BATCHED DEPLOYMENT SUMMARY - SYNC MODE (UNTAGGED INTERFACES)")
+                consolidated_logs.append("=" * 80)
+                consolidated_logs.append("")
+                consolidated_logs.append(f"[BATCH] All {len(sync_dry_run_interface_data_untagged)} untagged interface(s) would be deployed")
+                consolidated_logs.append(f"        together in a single atomic commit-confirm session.")
+                consolidated_logs.append("")
+                consolidated_logs.append("Untagged interfaces in this batch:")
+                for iface_data in sync_dry_run_interface_data_untagged:
+                    consolidated_logs.append(f"  - {iface_data['interface_name']}")
+                consolidated_logs.append("")
+                consolidated_logs.append("Auto-tagging after deployment:")
+                consolidated_logs.append("  - All interfaces will be auto-tagged as 'vlan-mode:access' or 'vlan-mode:tagged'")
+                consolidated_logs.append("  - Conflicting tags (uplink/routed) will be replaced if detected")
+                consolidated_logs.append("")
+                consolidated_logs.append("Benefits of batched deployment:")
+                consolidated_logs.append("  [OK] Single commit-confirm session (no conflicts)")
+                consolidated_logs.append("  [OK] Atomic rollback (all-or-nothing)")
+                consolidated_logs.append("  [OK] Faster execution (one SSH session)")
+                consolidated_logs.append("  [OK] Consistent state (all interfaces updated simultaneously)")
+                consolidated_logs.append("")
+                
+                # Determine overall status (worst case among all interfaces)
+                overall_status = "PASS"
+                risk_level = "LOW"
+                for iface_data in sync_dry_run_interface_data_untagged:
+                    if iface_data.get('overall_status') == "WARN":
+                        overall_status = "WARN"
+                        risk_level = "MEDIUM"
+                        break
+                
+                # Create single consolidated result
                 results.append({
                     'device': device,
-                    'interface': f"Batch Summary ({len(dry_run_device_interfaces_untagged)} untagged interfaces)",
+                    'interface': f"Batched ({len(sync_dry_run_interface_data_untagged)} untagged interfaces)",
                     'vlan_id': 'N/A',
-                    'vlan_name': 'Batch Deployment',
-                    'status': 'info',
-                    'message': f'Batched deployment preview for {len(dry_run_device_interfaces_untagged)} untagged interface(s)',
-                    'deployment_logs': '\n'.join(summary_logs),
+                    'vlan_name': 'Sync Mode - Batch Deployment (Untagged)',
+                    'status': 'success',
+                    'message': f'Would sync {len(sync_dry_run_interface_data_untagged)} untagged interface(s) from NetBox',
+                    'deployment_logs': '\n'.join(consolidated_logs),
                     'dry_run': True,
                     'section': 'untagged',
                     'device_status': "PASS",
                     'interface_status': "INFO",
-                    'overall_status': "INFO",
-                    'risk_level': "LOW",
+                    'overall_status': overall_status,
+                    'risk_level': risk_level,
+                    '_interface_count': len(sync_dry_run_interface_data_untagged),
+                    '_interface_names': [iface_data['interface_name'] for iface_data in sync_dry_run_interface_data_untagged],
                 })
             
             # Deploy all untagged interfaces for this device in single commit-confirm session
@@ -5135,9 +5395,9 @@ class VLANDeploymentView(View):
                     logs.append("DRY RUN MODE - PREVIEW ONLY")
                     logs.append("=" * 80)
                     logs.append("")
-                    logs.append("ℹ️  NOTE: All interfaces on each device will be deployed in a BATCHED commit.")
-                    logs.append("   All interface configs will be applied together in a single atomic session")
-                    logs.append("   with one commit-confirm to avoid conflicts and ensure atomic rollback.")
+                    logs.append("[NOTE] All interfaces on each device will be deployed in a BATCHED commit.")
+                    logs.append("       All interface configs will be applied together in a single atomic session")
+                    logs.append("       with one commit-confirm to avoid conflicts and ensure atomic rollback.")
                     logs.append("")
                     
                     # Device and Platform Info (Always shown)
@@ -5862,8 +6122,8 @@ class VLANDeploymentView(View):
                         bond_member_of = device_config_result.get('bond_member_of', None)
                         if bond_member_of:
                             device_bond_map[interface_name] = bond_member_of
-                            logger.info(f"[DEBUG] ✓ BOND DETECTED: Device {device.name}: Interface {interface_name} is member of bond {bond_member_of}")
-                            logger.info(f"[DEBUG]   Will use bond interface '{bond_member_of}' for device config (instead of '{interface_name}')")
+                            logger.info(f"[DEBUG] [OK] BOND DETECTED: Device {device.name}: Interface {interface_name} is member of bond {bond_member_of}")
+                            logger.info(f"[DEBUG]     Will use bond interface '{bond_member_of}' for device config (instead of '{interface_name}')")
                         else:
                             logger.debug(f"[DEBUG] No bond detected for {device.name}:{interface_name} - will use interface directly")
                     except Exception as e:
