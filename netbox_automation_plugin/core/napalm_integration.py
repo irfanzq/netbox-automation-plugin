@@ -2127,77 +2127,77 @@ class NAPALMDeviceManager:
                     # from previous deployments, NOT our own commit (which doesn't exist yet)
                     existing_pending_revision = None
                     if driver_name == 'cumulus':
-                    try:
-                        if hasattr(self.connection, 'device') and hasattr(self.connection.device, 'send_command'):
-                            # Check current revision count before commit
-                            history_before = self.connection.device.send_command('nv config history | head -5', read_timeout=10)
-                            logger.debug(f"Config history before commit:\n{history_before}")
-                            
-                            # Check if there are any pending commits that might conflict (from PREVIOUS deployments)
-                            # Use JSON method for reliable detection
-                            try:
-                                revision_json_before = self.connection.device.send_command('nv config revision -o json', read_timeout=10)
-                                if revision_json_before:
-                                    import json
-                                    rev_data_before = json.loads(revision_json_before)
-                                    for rev_id, rev_info in rev_data_before.items():
-                                        if isinstance(rev_info, dict) and rev_info.get('state') == 'confirm':
-                                            existing_pending_revision = rev_id
-                                            logger.warning(f"Found EXISTING pending commit-confirm from previous deployment: revision {rev_id}")
-                                            logs.append(f"  ⚠ WARNING: Found existing pending commit-confirm from PREVIOUS deployment")
-                                            logs.append(f"  Pending revision ID: {rev_id}")
-                                            logs.append(f"  This will block new commits - will attempt to abort it")
-                                            break
-                            except Exception as json_error:
-                                logger.debug(f"Could not check revision JSON before commit: {json_error}")
-                            
-                            # Fallback: Check history text output
-                            if not existing_pending_revision:
-                                pending_before = self.connection.device.send_command('nv config history | grep -i "pending\\|confirm\\|\\*" | head -1', read_timeout=10)
-                                if pending_before and ('*' in pending_before or 'pending' in pending_before.lower() or 'confirm' in pending_before.lower()):
-                                    logger.warning(f"Found existing pending commit in history: {pending_before}")
-                                    logs.append(f"  ⚠ WARNING: Found existing pending commit in history - may conflict")
-                                    # Try to extract revision ID
-                                    import re
-                                    rev_match = re.search(r'Revision:\s*(\d+)', pending_before)
-                                    if not rev_match:
-                                        rev_match = re.search(r'^\s*(\d+)\s*\*', pending_before)
-                                    if rev_match:
-                                        existing_pending_revision = rev_match.group(1)
-                    except Exception as check_error:
-                        logger.debug(f"Could not check pre-commit state: {check_error}")
-                    
-                    # If we found an existing pending commit from a previous deployment, abort it
-                    if existing_pending_revision:
                         try:
-                            logger.warning(f"Aborting existing pending commit {existing_pending_revision} from previous deployment...")
-                            logs.append(f"  Attempting to abort existing pending commit {existing_pending_revision}...")
-                            abort_output = self.connection.device.send_command('nv config abort', read_timeout=30)
-                            logger.info(f"Abort output: {abort_output}")
-                            logs.append(f"  Abort command output: {abort_output[:200]}")
-                            
-                            # Wait a moment and verify it's gone
-                            time.sleep(1)
-                            recheck_json = self.connection.device.send_command('nv config revision -o json', read_timeout=10)
-                            if recheck_json:
-                                import json
-                                recheck_data = json.loads(recheck_json)
-                                still_pending = any(
-                                    isinstance(rev_info, dict) and rev_info.get('state') == 'confirm'
-                                    for rev_info in recheck_data.values()
-                                )
-                                if not still_pending:
-                                    logger.info(f"Successfully aborted existing pending commit - can proceed with new commit")
-                                    logs.append(f"  ✓ Successfully aborted existing pending commit - proceeding with new commit")
-                                    existing_pending_revision = None
-                                else:
-                                    logger.error(f"Abort failed - pending commit still exists")
-                                    logs.append(f"  ✗ Abort failed - pending commit still exists")
-                                    logs.append(f"  ⚠ Will attempt commit anyway - may fail with 'Pending commit confirm already in process'")
-                        except Exception as abort_error:
-                            logger.error(f"Failed to abort existing pending commit: {abort_error}")
-                            logs.append(f"  ✗ Failed to abort: {str(abort_error)}")
-                            logs.append(f"  ⚠ Will attempt commit anyway - may fail with 'Pending commit confirm already in process'")
+                            if hasattr(self.connection, 'device') and hasattr(self.connection.device, 'send_command'):
+                                # Check current revision count before commit
+                                history_before = self.connection.device.send_command('nv config history | head -5', read_timeout=10)
+                                logger.debug(f"Config history before commit:\n{history_before}")
+                                
+                                # Check if there are any pending commits that might conflict (from PREVIOUS deployments)
+                                # Use JSON method for reliable detection
+                                try:
+                                    revision_json_before = self.connection.device.send_command('nv config revision -o json', read_timeout=10)
+                                    if revision_json_before:
+                                        import json
+                                        rev_data_before = json.loads(revision_json_before)
+                                        for rev_id, rev_info in rev_data_before.items():
+                                            if isinstance(rev_info, dict) and rev_info.get('state') == 'confirm':
+                                                existing_pending_revision = rev_id
+                                                logger.warning(f"Found EXISTING pending commit-confirm from previous deployment: revision {rev_id}")
+                                                logs.append(f"  ⚠ WARNING: Found existing pending commit-confirm from PREVIOUS deployment")
+                                                logs.append(f"  Pending revision ID: {rev_id}")
+                                                logs.append(f"  This will block new commits - will attempt to abort it")
+                                                break
+                                except Exception as json_error:
+                                    logger.debug(f"Could not check revision JSON before commit: {json_error}")
+                                
+                                # Fallback: Check history text output
+                                if not existing_pending_revision:
+                                    pending_before = self.connection.device.send_command('nv config history | grep -i "pending\\|confirm\\|\\*" | head -1', read_timeout=10)
+                                    if pending_before and ('*' in pending_before or 'pending' in pending_before.lower() or 'confirm' in pending_before.lower()):
+                                        logger.warning(f"Found existing pending commit in history: {pending_before}")
+                                        logs.append(f"  ⚠ WARNING: Found existing pending commit in history - may conflict")
+                                        # Try to extract revision ID
+                                        import re
+                                        rev_match = re.search(r'Revision:\s*(\d+)', pending_before)
+                                        if not rev_match:
+                                            rev_match = re.search(r'^\s*(\d+)\s*\*', pending_before)
+                                        if rev_match:
+                                            existing_pending_revision = rev_match.group(1)
+                        except Exception as check_error:
+                            logger.debug(f"Could not check pre-commit state: {check_error}")
+                        
+                        # If we found an existing pending commit from a previous deployment, abort it
+                        if existing_pending_revision:
+                            try:
+                                logger.warning(f"Aborting existing pending commit {existing_pending_revision} from previous deployment...")
+                                logs.append(f"  Attempting to abort existing pending commit {existing_pending_revision}...")
+                                abort_output = self.connection.device.send_command('nv config abort', read_timeout=30)
+                                logger.info(f"Abort output: {abort_output}")
+                                logs.append(f"  Abort command output: {abort_output[:200]}")
+                                
+                                # Wait a moment and verify it's gone
+                                time.sleep(1)
+                                recheck_json = self.connection.device.send_command('nv config revision -o json', read_timeout=10)
+                                if recheck_json:
+                                    import json
+                                    recheck_data = json.loads(recheck_json)
+                                    still_pending = any(
+                                        isinstance(rev_info, dict) and rev_info.get('state') == 'confirm'
+                                        for rev_info in recheck_data.values()
+                                    )
+                                    if not still_pending:
+                                        logger.info(f"Successfully aborted existing pending commit - can proceed with new commit")
+                                        logs.append(f"  ✓ Successfully aborted existing pending commit - proceeding with new commit")
+                                        existing_pending_revision = None
+                                    else:
+                                        logger.error(f"Abort failed - pending commit still exists")
+                                        logs.append(f"  ✗ Abort failed - pending commit still exists")
+                                        logs.append(f"  ⚠ Will attempt commit anyway - may fail with 'Pending commit confirm already in process'")
+                            except Exception as abort_error:
+                                logger.error(f"Failed to abort existing pending commit: {abort_error}")
+                                logs.append(f"  ✗ Failed to abort: {str(abort_error)}")
+                                logs.append(f"  ⚠ Will attempt commit anyway - may fail with 'Pending commit confirm already in process'")
                 
                     # Execute commit_config - this should execute: nv config apply --confirm {timeout}s -y
                     # 
@@ -2985,7 +2985,7 @@ class NAPALMDeviceManager:
                                     logger.info(f"No changes to apply - config already matches (idempotent)")
                                     result['success'] = True
                                     result['committed'] = False  # Nothing to commit
-                                    result['message'] = f"Configuration already applied (idempotent - no changes needed)")
+                                    result['message'] = f"Configuration already applied (idempotent - no changes needed)"
                                     logs.append(f"")
                                     logs.append(f"=== DEPLOYMENT COMPLETED (IDEMPOTENT) ===")
                                     result['logs'] = logs
@@ -3033,18 +3033,18 @@ class NAPALMDeviceManager:
                                                 result['success'] = True
                                                 result['committed'] = False  # Nothing to commit
                                                 result['message'] = f"Configuration already matches applied config (no changes needed)"
-                                            logs.append(f"")
-                                            logs.append(f"=== DEPLOYMENT COMPLETED (NO CHANGES) ===")
-                                            result['logs'] = logs
-                                            return result
-                                except Exception as save_error:
-                                    logger.error(f"Failed to check/save config: {save_error}")
-                                    logs.append(f"  ✗ Failed to check/save config: {str(save_error)}")
-                                
-                                result['message'] = error_msg
-                                result['logs'] = logs
-                                result['committed'] = False  # NOT committed
-                                return result
+                                                logs.append(f"")
+                                                logs.append(f"=== DEPLOYMENT COMPLETED (NO CHANGES) ===")
+                                                result['logs'] = logs
+                                                return result
+                                    except Exception as save_error:
+                                        logger.error(f"Failed to check/save config: {save_error}")
+                                        logs.append(f"  ✗ Failed to check/save config: {str(save_error)}")
+                                    
+                                    result['message'] = error_msg
+                                    result['logs'] = logs
+                                    result['committed'] = False  # NOT committed
+                                    return result
                             
                             # No captured revision ID - try NAPALM's method (may fail, but worth trying)
                             logger.warning(f"No pending revision ID captured in Phase 2, using NAPALM confirm_commit()")
