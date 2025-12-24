@@ -1370,13 +1370,43 @@ class NornirDeviceManager:
                         interface_result = deploy_result.copy()
                         interface_result['original_interface_name'] = interface_name
                         interface_result['target_interface'] = target_interface
-                        interface_result['logs'] = deploy_result.get('logs', [])
-                        # Add note about batched deployment
+                        interface_result['logs'] = deploy_result.get('logs', []).copy()  # Copy to avoid modifying shared list
+                        
+                        # Add interface-specific note about batched deployment BEFORE the completion message
+                        # Find where "=== Deployment Completed ===" appears and insert note before it
                         if interface_result['logs']:
-                            interface_result['logs'].append("")
-                            interface_result['logs'].append(f"[NOTE] This interface ({interface_name}) was deployed as part of a batched session with {num_interfaces} interface(s) on device {device_name}")
+                            completion_idx = None
+                            for i, log_line in enumerate(interface_result['logs']):
+                                if "=== Deployment Completed ===" in log_line:
+                                    completion_idx = i
+                                    break
+                            
+                            # Prepare note lines
+                            note_lines = []
+                            note_lines.append("")
+                            note_lines.append("--- Batched Deployment Information ---")
                             if target_interface != interface_name:
-                                interface_result['logs'].append(f"[NOTE] Configuration was applied to bond interface '{target_interface}' (member interface: '{interface_name}')")
+                                # Bond detected - show both interfaces clearly
+                                note_lines.append(f"Interface '{interface_name}' (member) → '{target_interface}' (bond) was deployed as part of a batched session")
+                                note_lines.append(f"with {num_interfaces} interface(s) on device {device_name} in a single commit-confirm session.")
+                                note_lines.append(f"Configuration was applied to bond interface '{target_interface}' (not member interface '{interface_name}').")
+                            else:
+                                # No bond - just show the interface
+                                note_lines.append(f"Interface '{interface_name}' was deployed as part of a batched session")
+                                note_lines.append(f"with {num_interfaces} interface(s) on device {device_name} in a single commit-confirm session.")
+                            note_lines.append("")
+                            
+                            # Insert note before completion message, or at the end if not found
+                            if completion_idx is not None:
+                                interface_result['logs'] = (
+                                    interface_result['logs'][:completion_idx] + 
+                                    note_lines + 
+                                    interface_result['logs'][completion_idx:]
+                                )
+                            else:
+                                # If no completion message found, append at the end
+                                interface_result['logs'].extend(note_lines)
+                        
                         device_results[interface_name] = interface_result
                     
                     if deploy_result.get('success'):
