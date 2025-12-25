@@ -1012,6 +1012,165 @@ class NAPALMDeviceManager:
             logger.warning(f"Error verifying rollback: {e}")
             return None, f"Could not verify rollback: {str(e)}"
     
+    def _check_for_pending_commits(self, driver_name):
+        """
+        Check if there are any pending commits on the device.
+        
+        Args:
+            driver_name: Platform driver name (cumulus, eos, etc.)
+        
+        Returns:
+            bool: True if pending commit exists, False otherwise
+        """
+        try:
+            if driver_name == 'cumulus':
+                if hasattr(self.connection, 'device') and hasattr(self.connection.device, 'send_command'):
+                    # Method 1: Check via JSON (most reliable)
+                    try:
+                        revision_json = self.connection.device.send_command('nv config revision -o json', read_timeout=10)
+                        if revision_json:
+                            import json
+                            rev_data = json.loads(revision_json)
+                            for rev_id, rev_info in rev_data.items():
+                                if isinstance(rev_info, dict) and rev_info.get('state') == 'confirm':
+                                    logger.info(f"Found pending commit via JSON: revision {rev_id}")
+                                    return True
+                    except Exception as json_error:
+                        logger.debug(f"Could not check pending commits via JSON: {json_error}")
+                    
+                    # Method 2: Check via has_pending_commit() (NAPALM method)
+                    try:
+                        has_pending = self.connection.has_pending_commit()
+                        if has_pending:
+                            logger.info(f"Found pending commit via NAPALM has_pending_commit()")
+                            return True
+                    except Exception as napalm_error:
+                        logger.debug(f"Could not check pending commits via NAPALM: {napalm_error}")
+                    
+                    # Method 3: Check history text output (fallback)
+                    try:
+                        history_output = self.connection.device.send_command('nv config history | head -5', read_timeout=10)
+                        if history_output and ('Currently pending' in history_output or 'pending [rev_id:' in history_output.lower()):
+                            logger.info(f"Found pending commit via history text")
+                            return True
+                    except Exception as history_error:
+                        logger.debug(f"Could not check pending commits via history: {history_error}")
+                    
+                    # No pending commits found
+                    return False
+                    
+            elif driver_name == 'eos':
+                # For EOS, check if our session still exists
+                if hasattr(self, '_eos_session_name') and hasattr(self, '_eos_netmiko_conn'):
+                    try:
+                        session_name = self._eos_session_name
+                        netmiko_conn = self._eos_netmiko_conn
+                        sessions_output = netmiko_conn.send_command('show configuration sessions', read_timeout=10)
+                        if session_name in sessions_output:
+                            logger.info(f"Found pending EOS session: {session_name}")
+                            return True
+                    except:
+                        pass
+                return False
+            else:
+                # Other platforms - assume no pending commit
+                return False
+                
+        except Exception as e:
+            logger.warning(f"Error checking for pending commits: {e}")
+            return False
+    
+    def _clear_pending_commit(self, driver_name, logs=None):
+        """
+        Clear/abort any pending commit-confirm session on the device.
+        
+        Args:
+            driver_name: Platform driver name (cumulus, eos, etc.)
+            logs: Optional list to append log messages to
+        
+        Returns:
+            bool: True if successfully cleared, False otherwise
+        """
+        if logs is None:
+            logs = []
+        
+        try:
+            if driver_name == 'cumulus':
+                if hasattr(self.connection, 'device') and hasattr(self.connection.device, 'send_command'):
+                    logger.info("Attempting to clear pending commit on Cumulus device...")
+                    
+                    # Use nv config abort to abort pending commit-confirm session
+                    try:
+                        abort_output = self.connection.device.send_command('nv config abort', read_timeout=30)
+                        logger.info(f"Abort output: {abort_output}")
+                        
+                        # Wait a moment for the abort to take effect
+                        time.sleep(2)
+                        
+                        # Verify it's gone
+                        still_pending = self._check_for_pending_commits(driver_name)
+                        if not still_pending:
+                            logger.info("Successfully cleared pending commit")
+                            return True
+                        else:
+                            logger.warning("Pending commit still exists after abort command")
+                            # Try nv config apply (confirm it) as fallback
+                            try:
+                                logger.info("Attempting to confirm pending commit instead...")
+                                apply_output = self.connection.device.send_command('nv config apply', read_timeout=30)
+                                logger.info(f"Apply output: {apply_output}")
+                                time.sleep(2)
+                                
+                                still_pending_after_apply = self._check_for_pending_commits(driver_name)
+                                if not still_pending_after_apply:
+                                    logger.info("Successfully confirmed pending commit")
+                                    return True
+                                else:
+                                    logger.error("Could not clear pending commit via abort or apply")
+                                    return False
+                            except Exception as apply_error:
+                                logger.error(f"Failed to confirm pending commit: {apply_error}")
+                                return False
+                    except Exception as abort_error:
+                        logger.error(f"Failed to abort pending commit: {abort_error}")
+                        return False
+                else:
+                    logger.warning("Cannot clear pending commit - no device connection")
+                    return False
+                    
+            elif driver_name == 'eos':
+                # For EOS, abort the session
+                if hasattr(self, '_eos_session_name') and hasattr(self, '_eos_netmiko_conn'):
+                    try:
+                        session_name = self._eos_session_name
+                        netmiko_conn = self._eos_netmiko_conn
+                        logger.info(f"Attempting to abort EOS session: {session_name}")
+                        
+                        abort_output = netmiko_conn.send_command(f'configure session {session_name} abort', read_timeout=30)
+                        logger.info(f"Abort output: {abort_output}")
+                        
+                        # Verify it's gone
+                        time.sleep(2)
+                        still_pending = self._check_for_pending_commits(driver_name)
+                        if not still_pending:
+                            logger.info("Successfully cleared EOS session")
+                            return True
+                        else:
+                            logger.warning("EOS session still exists after abort")
+                            return False
+                    except Exception as eos_abort_error:
+                        logger.error(f"Failed to abort EOS session: {eos_abort_error}")
+                        return False
+                return False
+            else:
+                # Other platforms - not supported
+                logger.info(f"Pending commit clear not supported for platform: {driver_name}")
+                return False
+                
+        except Exception as e:
+            logger.error(f"Error clearing pending commit: {e}")
+            return False
+    
     def deploy_config_safe(self, config, replace=True, timeout=60, 
                           checks=['connectivity', 'interfaces', 'lldp'],
                           critical_interfaces=None, min_neighbors=0, 
@@ -1118,19 +1277,33 @@ class NAPALMDeviceManager:
                     if revision_json_output:
                         import json
                         revision_data = json.loads(revision_json_output)
-                        # Get latest revision (highest number)
-                        latest_revision = max(revision_data.keys(), key=lambda x: int(x)) if revision_data else 'unknown'
-                        revision_info = revision_data.get(latest_revision, {})
-                        revision_date = revision_info.get('date', 'unknown')
-                        revision_user = revision_info.get('user', 'unknown')
+                        # Get latest revision (highest number) - filter out non-numeric revision IDs
+                        # NVUE can have internal revisions like 'rev_178_apply_1/start' that should be ignored
+                        numeric_revisions = []
+                        for rev_id in revision_data.keys():
+                            try:
+                                numeric_revisions.append(int(rev_id))
+                            except (ValueError, TypeError):
+                                # Skip non-numeric revision IDs (internal/temporary revisions)
+                                logger.debug(f"Skipping non-numeric revision ID: {rev_id}")
+                                continue
                         
-                        logger.info(f"Current revision: {latest_revision} ({revision_date})")
-                        logs.append(f"  Current Revision: {latest_revision}")
-                        logs.append(f"  Date: {revision_date}")
-                        logs.append(f"  User: {revision_user}")
+                        if numeric_revisions:
+                            latest_revision = str(max(numeric_revisions))
+                            revision_info = revision_data.get(latest_revision, {})
+                            revision_date = revision_info.get('date', 'unknown')
+                            revision_user = revision_info.get('user', 'unknown')
+                            
+                            logger.info(f"Current revision: {latest_revision} ({revision_date})")
+                            logs.append(f"  Current Revision: {latest_revision}")
+                            logs.append(f"  Date: {revision_date}")
+                            logs.append(f"  User: {revision_user}")
+                        else:
+                            latest_revision = 'unknown'
+                            logs.append(f"  [WARN] No numeric revision IDs found in history")
                     else:
                         latest_revision = 'unknown'
-                        logs.append(f"  ⚠ Could not retrieve revision history")
+                        logs.append(f"  [WARN] Could not retrieve revision history")
                     
                     # 2. Export full configuration to timestamped file
                     import time as time_module
@@ -2542,39 +2715,72 @@ class NAPALMDeviceManager:
                                     logger.info(f"Commit did not create revision because config already matches")
                                     result['_commit_idempotent'] = True
                                 else:
-                                    # CRITICAL: No pending revision but changes exist - this is a PROBLEM
-                                    # Possible causes:
-                                    # 1. Commands had syntax errors (NVUE rejected them)
-                                    # 2. Commit command failed silently
-                                    # 3. Timing issue - revision not yet visible (unlikely after 3s wait)
-                                    # 4. NVUE version differences - output format changed
-                                    # 5. Concurrent commit from another process grabbed the slot
-                                    logs.append(f"  ✗ CRITICAL: Commit may have failed - no pending revision but changes detected")
-                                    logger.error(f"Commit may have failed - no pending revision but changes detected")
-                                    logs.append(f"  This usually means:")
-                                    logs.append(f"    1. NVUE rejected the commands (syntax error)")
-                                    logs.append(f"    2. Commit command failed to create revision")
-                                    logs.append(f"    3. Another process is committing simultaneously")
+                                    # CRITICAL: No pending revision but changes exist
+                                    # This means NAPALM claimed success but didn't actually create commit-confirm session
+                                    # TRIGGER FALLBACK: Use direct NVUE commands
+                                    logs.append(f"  [WARN] NAPALM claimed success but no commit-confirm session created")
+                                    logger.warning(f"NAPALM commit succeeded but no pending revision - triggering fallback")
+                                    logs.append(f"  Triggering FALLBACK: Direct NVUE commit-confirm command")
                                     logs.append(f"")
                                     
-                                    # Check if there are any error messages in the diff or config
-                                    if diff_check:
-                                        # Look for error indicators in the diff output
-                                        if 'error' in diff_check.lower() or 'invalid' in diff_check.lower():
-                                            error_msg = "Commit failed - configuration commands rejected by NVUE"
-                                            logger.error(f"Phase 2 failed: {error_msg}")
-                                            logs.append(f"  ✗ {error_msg}")
-                                            logs.append(f"  [DEBUG] Config diff shows errors:")
-                                            for line in diff_check.split('\n')[:20]:
-                                                if line.strip() and ('error' in line.lower() or 'invalid' in line.lower()):
-                                                    logs.append(f"    {line.strip()}")
-                                            result['message'] = error_msg
-                                            result['logs'] = logs
-                                            return result
+                                    # Check if there are any error messages first
+                                    if diff_check and ('error' in diff_check.lower() or 'invalid' in diff_check.lower()):
+                                        error_msg = "Commit failed - configuration commands rejected by NVUE"
+                                        logger.error(f"Phase 2 failed: {error_msg}")
+                                        logs.append(f"  [FAIL] {error_msg}")
+                                        logs.append(f"  [DEBUG] Config diff shows errors:")
+                                        for line in diff_check.split('\n')[:20]:
+                                            if line.strip() and ('error' in line.lower() or 'invalid' in line.lower()):
+                                                logs.append(f"    {line.strip()}")
+                                        result['message'] = error_msg
+                                        result['logs'] = logs
+                                        return result
                                     
-                                    # Store detailed warning for Phase 5 to handle
-                                    result['_commit_warning'] = "No pending revision found but changes exist - commit may have failed"
-                                    result['_detailed_diagnostics'] = detailed_diagnostics
+                                    # FALLBACK: Execute direct NVUE commit-confirm command
+                                    try:
+                                        logger.info(f"FALLBACK: Executing direct NVUE command: nv config apply --confirm {timeout}s -y")
+                                        logs.append(f"  [FALLBACK] Executing: nv config apply --confirm {timeout}s -y")
+                                        
+                                        fallback_output = self.connection.device.send_command(
+                                            f'nv config apply --confirm {timeout}s -y',
+                                            read_timeout=120,
+                                            expect_string=r'#'
+                                        )
+                                        
+                                        logger.info(f"FALLBACK command output: {fallback_output}")
+                                        logs.append(f"  [DEBUG] NVUE output: {fallback_output[:200] if fallback_output else 'No output'}")
+                                        
+                                        # Wait for NVUE backend to process
+                                        time.sleep(3)
+                                        
+                                        # Check again for pending revision
+                                        try:
+                                            revision_json_check = self.connection.device.send_command('nv config revision -o json', read_timeout=10)
+                                            if revision_json_check:
+                                                import json
+                                                rev_data_check = json.loads(revision_json_check)
+                                                for rev_id, rev_info in rev_data_check.items():
+                                                    if isinstance(rev_info, dict) and rev_info.get('state') == 'confirm':
+                                                        actual_pending_revision = rev_id
+                                                        result['_cumulus_pending_revision_id'] = actual_pending_revision
+                                                        logger.info(f"FALLBACK SUCCESS: Found pending revision {actual_pending_revision}")
+                                                        logs.append(f"  [OK] Fallback successful - pending revision {actual_pending_revision} created")
+                                                        break
+                                        except Exception as fallback_check_error:
+                                            logger.warning(f"Could not verify fallback commit: {fallback_check_error}")
+                                        
+                                        if not actual_pending_revision:
+                                            # Fallback also failed
+                                            logs.append(f"  [FAIL] Fallback command did not create commit-confirm session")
+                                            logs.append(f"  This indicates a deeper NVUE issue")
+                                            result['_commit_warning'] = "Fallback also failed - no commit-confirm session created"
+                                            result['_detailed_diagnostics'] = detailed_diagnostics
+                                        
+                                    except Exception as fallback_error:
+                                        logger.error(f"FALLBACK FAILED: {fallback_error}")
+                                        logs.append(f"  [FAIL] Fallback command failed: {str(fallback_error)[:200]}")
+                                        result['_commit_warning'] = f"Fallback failed: {str(fallback_error)}"
+                                        result['_detailed_diagnostics'] = detailed_diagnostics
                     except Exception as rev_error:
                         logger.warning(f"Could not get pending revision ID: {rev_error}")
                         logs.append(f"  ⚠ Could not get pending revision ID: {str(rev_error)[:100]}")
@@ -3106,6 +3312,34 @@ class NAPALMDeviceManager:
                     logs.append(f"  ✓ Commit CONFIRMED - changes are now PERMANENT")
                     logs.append(f"")
                     
+                    # POST-DEPLOYMENT VERIFICATION: Ensure no pending commit remains
+                    logs.append(f"[Post-Deployment Verification] Checking for leftover pending commits...")
+                    pending_after_success = self._check_for_pending_commits(driver_name)
+                    
+                    if pending_after_success:
+                        logger.warning(f"WARNING: Pending commit detected after 'successful' deployment - deployment may not have confirmed properly!")
+                        logs.append(f"  [WARN] Pending commit still exists after confirmation!")
+                        logs.append(f"  This indicates the commit confirmation did not complete properly.")
+                        logs.append(f"  Attempting to clear...")
+                        
+                        # Try to confirm/clear the pending commit
+                        clear_success = self._clear_pending_commit(driver_name, logs)
+                        
+                        if clear_success:
+                            logs.append(f"  [OK] Pending commit cleared successfully")
+                            result['message'] += " (had to clear leftover pending commit)"
+                        else:
+                            logs.append(f"  [FAIL] Could not clear pending commit - manual intervention required")
+                            result['success'] = False
+                            result['message'] = "Deployment incomplete - pending commit remains on device"
+                            logs.append(f"")
+                            logs.append(f"=== DEPLOYMENT INCOMPLETE ===")
+                            result['logs'] = logs
+                            return result
+                    else:
+                        logs.append(f"  [OK] No pending commits - deployment confirmed successfully")
+                    logs.append(f"")
+                    
                     # Show summary of commands that were actually applied
                     removed = result.get('_removed_commands', [])
                     added = result.get('_added_commands', [])
@@ -3144,6 +3378,27 @@ class NAPALMDeviceManager:
                     # Verify if rollback actually happened
                     rollback_status, rollback_message = self._verify_rollback(driver_name)
                     result['rolled_back'] = rollback_status if rollback_status is not None else True
+                    
+                    # POST-ROLLBACK CLEANUP: Ensure no pending commit remains
+                    logs.append(f"")
+                    logs.append(f"[Post-Rollback Cleanup] Checking for leftover pending commits...")
+                    pending_after_rollback = self._check_for_pending_commits(driver_name)
+                    
+                    if pending_after_rollback:
+                        logger.warning(f"Pending commit detected after rollback - attempting to clear...")
+                        logs.append(f"  [WARN] Pending commit still exists after rollback")
+                        logs.append(f"  Attempting to clear pending commit...")
+                        
+                        clear_success = self._clear_pending_commit(driver_name, logs)
+                        
+                        if clear_success:
+                            logs.append(f"  [OK] Pending commit cleared successfully")
+                        else:
+                            logs.append(f"  [FAIL] Could not clear pending commit automatically")
+                            logs.append(f"  Manual cleanup required: nv config abort")
+                    else:
+                        logs.append(f"  [OK] No pending commits - device is in stable state")
+                    logs.append(f"")
                     
                     if rollback_status is True:
                         result['message'] += f" - Auto-rollback completed"
@@ -3249,6 +3504,16 @@ class NAPALMDeviceManager:
                     logs.append(f"  ⚠ Session will auto-rollback after timer expires")
                     logs.append(f"")
                     
+                    # POST-EOS-FAILURE CLEANUP: Ensure session will rollback
+                    logs.append(f"[Post-Failure Cleanup] Checking EOS session status...")
+                    pending_eos_session = self._check_for_pending_commits(driver_name)
+                    
+                    if pending_eos_session:
+                        logs.append(f"  [OK] EOS session still exists - will auto-rollback after timer expires")
+                    else:
+                        logs.append(f"  [INFO] EOS session already cleared")
+                    logs.append(f"")
+                    
                     # Add rollback information
                     logs.append(f"--- Rollback Information ---")
                     logs.append(f"Platform: EOS")
@@ -3312,6 +3577,28 @@ class NAPALMDeviceManager:
                 # Verify if rollback actually happened
                 rollback_status, rollback_message = self._verify_rollback(driver_name)
                 result['rolled_back'] = rollback_status if rollback_status is not None else True
+                
+                # POST-VERIFICATION-FAILURE CLEANUP: Ensure no pending commit remains
+                logs.append(f"")
+                logs.append(f"[Post-Rollback Cleanup] Checking for leftover pending commits...")
+                pending_after_verification_failure = self._check_for_pending_commits(driver_name)
+                
+                if pending_after_verification_failure:
+                    logger.warning(f"Pending commit detected after verification failure rollback - attempting to clear...")
+                    logs.append(f"  [WARN] Pending commit still exists after rollback")
+                    logs.append(f"  Attempting to abort pending commit...")
+                    
+                    clear_success = self._clear_pending_commit(driver_name, logs)
+                    
+                    if clear_success:
+                        logs.append(f"  [OK] Pending commit cleared - device is now in stable state")
+                    else:
+                        logs.append(f"  [FAIL] Could not clear pending commit automatically")
+                        logs.append(f"  WARNING: Device may be in unstable state with pending commit")
+                        logs.append(f"  Manual cleanup required: nv config abort")
+                else:
+                    logs.append(f"  [OK] No pending commits - device is in stable state")
+                logs.append(f"")
                 
                 if rollback_status is True:
                     result['message'] += f" - Auto-rollback completed"

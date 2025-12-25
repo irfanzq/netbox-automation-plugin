@@ -2917,6 +2917,7 @@ class VLANDeploymentView(View):
         if platform == 'cumulus' and bridge_vlans_to_add:
             # Check existing bridge VLANs to avoid duplicates
             bridge_vlans = []
+            bridge_vlans_fetched = False
             try:
                 napalm_mgr = NAPALMDeviceManager(device)
                 if napalm_mgr.connect():
@@ -2939,17 +2940,36 @@ class VLANDeploymentView(View):
                                 import json
                                 config_data = json.loads(config_json_str)
                                 bridge_vlans = self._get_bridge_vlans_from_json(config_data)
-                    except Exception:
-                        pass
+                                bridge_vlans_fetched = True
+                                logger.info(f"[BATCHED] Fetched {len(bridge_vlans)} existing bridge VLANs: {sorted(bridge_vlans)[:20]}")
+                    except Exception as fetch_error:
+                        logger.warning(f"[BATCHED] Could not fetch existing bridge VLANs: {fetch_error}")
                     finally:
                         napalm_mgr.disconnect()
-            except Exception:
-                pass
+            except Exception as connect_error:
+                logger.warning(f"[BATCHED] Could not connect to fetch bridge VLANs: {connect_error}")
             
             # Add only VLANs that don't already exist
+            vlans_to_add = []
+            vlans_already_exist = []
             for vlan_id in sorted(bridge_vlans_to_add):
-                if not self._is_vlan_in_bridge_vlans(vlan_id, bridge_vlans):
+                if not bridge_vlans_fetched:
+                    # If we couldn't fetch bridge VLANs, add all VLANs (safe but may cause format changes)
+                    # This is the old behavior - better than failing
+                    vlans_to_add.append(vlan_id)
+                elif not self._is_vlan_in_bridge_vlans(vlan_id, bridge_vlans):
+                    vlans_to_add.append(vlan_id)
+                else:
+                    vlans_already_exist.append(vlan_id)
+            
+            if vlans_already_exist:
+                logger.info(f"[BATCHED] Skipping {len(vlans_already_exist)} VLANs that already exist on bridge: {vlans_already_exist}")
+            if vlans_to_add:
+                logger.info(f"[BATCHED] Adding {len(vlans_to_add)} new VLANs to bridge: {vlans_to_add}")
+                for vlan_id in vlans_to_add:
                     all_config_lines.insert(0, f"nv set bridge domain br_default vlan {vlan_id}")
+            else:
+                logger.info(f"[BATCHED] No new bridge VLANs to add (all already exist)")
         
         # Combine all configs
         combined_config = '\n'.join(all_config_lines)
@@ -3341,12 +3361,76 @@ class VLANDeploymentView(View):
                     logger.warning(f"Could not fetch bridge VLANs for device {device.name}: {e}")
             
             for interface in device_interfaces:
+                # PRE-CHECK: Detect bond membership BEFORE generating config
+                # This ensures _generate_config_from_netbox() has bond info to work with
+                bond_detected_early = None
+                logger.info(f"[PRE-CHECK] Starting bond detection for {device.name}:{interface.name}")
+                try:
+                    device_config_check = self._get_current_device_config(device, interface.name, platform)
+                    bond_detected_early = device_config_check.get('bond_member_of')
+                    if bond_detected_early:
+                        logger.info(f"[PRE-CHECK] ✓ {device.name}:{interface.name} is member of bond {bond_detected_early}")
+                    else:
+                        logger.info(f"[PRE-CHECK] {device.name}:{interface.name} is NOT a bond member")
+                except Exception as e:
+                    logger.error(f"[PRE-CHECK] FAILED to check bond membership for {device.name}:{interface.name}: {e}")
+                    import traceback
+                    logger.error(f"[PRE-CHECK] Traceback: {traceback.format_exc()}")
+                
                 # Generate config from NetBox state (pass existing bridge VLANs to avoid redundant commands)
+                logger.info(f"[CONFIG GEN] Calling _generate_config_from_netbox() for {device.name}:{interface.name}")
                 config_info = self._generate_config_from_netbox(device, interface, platform, existing_bridge_vlans=device_bridge_vlans)
                 config_commands = config_info['commands']
+                logger.info(f"[CONFIG GEN] Generated {len(config_commands)} commands, target_interface={config_info.get('target_interface')}, is_bond_member={config_info.get('is_bond_member')}")
+                
+                # CRITICAL FIX: If bond was detected in pre-check but config_info doesn't have it, FORCE regeneration
+                actual_target_interface = config_info.get('target_interface', interface.name)
+                if bond_detected_early and actual_target_interface == interface.name:
+                    logger.warning(f"[CRITICAL FIX] Bond {bond_detected_early} was detected but config_info still has member interface {interface.name}")
+                    logger.warning(f"[CRITICAL FIX] Forcing regeneration of commands with bond interface {bond_detected_early}")
+                    
+                    # Regenerate commands with correct bond interface
+                    untagged_vid = config_info.get('untagged_vlan')
+                    tagged_vids = config_info.get('tagged_vlans', [])
+                    
+                    if platform == 'cumulus':
+                        all_vlans = set()
+                        if untagged_vid:
+                            all_vlans.add(untagged_vid)
+                        all_vlans.update(tagged_vids)
+                        
+                        regenerated_commands = []
+                        for vlan_vid in sorted(all_vlans):
+                            if not self._is_vlan_in_bridge_vlans(vlan_vid, device_bridge_vlans):
+                                regenerated_commands.append(f"nv set bridge domain br_default vlan {vlan_vid}")
+                        
+                        if untagged_vid:
+                            regenerated_commands.append(f"nv set interface {bond_detected_early} bridge domain br_default access {untagged_vid}")
+                        
+                        config_commands = regenerated_commands
+                        # Update config_info with correct target
+                        config_info['target_interface'] = bond_detected_early
+                        config_info['is_bond_member'] = True
+                        logger.info(f"[CRITICAL FIX] ✓ Regenerated {len(regenerated_commands)} commands using bond {bond_detected_early}")
+                        logger.info(f"[CRITICAL FIX] Commands: {', '.join(regenerated_commands)}")
+                elif bond_detected_early and actual_target_interface == bond_detected_early:
+                    logger.info(f"[CRITICAL FIX] ✓ Bond detection worked! target_interface={actual_target_interface}")
+                elif not bond_detected_early:
+                    logger.info(f"[CRITICAL FIX] No bond detected in pre-check for {interface.name}")
                 
                 # Combine commands into single config string (for deployment)
                 config_command = '\n'.join(config_commands) if isinstance(config_commands, list) else config_commands
+                logger.info(f"[CONFIG FINAL] Final config_command for {interface.name}: {config_command[:100]}...")
+                
+                # VALIDATION: Double-check commands don't contain member interface in bridge/access commands
+                if f"interface {interface.name} bridge" in config_command:
+                    logger.error(f"[VALIDATION FAIL] ✗ Commands STILL contain member interface {interface.name} in bridge config!")
+                    logger.error(f"[VALIDATION FAIL] Commands: {config_command}")
+                    logger.error(f"[VALIDATION FAIL] config_info: {config_info}")
+                    logger.error(f"[VALIDATION FAIL] bond_detected_early: {bond_detected_early}")
+                    logger.error(f"[VALIDATION FAIL] This WILL cause 'bridge cannot be configured on bond member' error!")
+                else:
+                    logger.info(f"[VALIDATION PASS] ✓ Commands do NOT contain member interface in bridge config")
                 
                 if dry_run:
                     # Dry run mode - show what would be deployed
@@ -3711,15 +3795,8 @@ class VLANDeploymentView(View):
                             logs.append(f"[OK] No active traffic detected on interface '{target_interface_for_stats}'")
                         logs.append("")
                     
-                    logs.append("=" * 80)
-                    logs.append("STARTING DEPLOYMENT")
-                    logs.append("=" * 80)
-                    logs.append("")
-                    logs.append("")
-                    logs.append("=" * 80)
-                    logs.append("DEPLOYMENT EXECUTION LOGS")
-                    logs.append("=" * 80)
-                    logs.append("")
+                    # Note: "STARTING DEPLOYMENT" and "DEPLOYMENT EXECUTION LOGS" headers are added once 
+                    # in the consolidated result, not per-interface to avoid duplicates
                     
                     # Check for configs that will be overridden (WARNING only, not blocking)
                     warnings = []
@@ -4182,15 +4259,8 @@ class VLANDeploymentView(View):
                             preview_logs.append(f"[OK] No active traffic detected on interface '{target_interface_for_stats}'")
                         preview_logs.append("")
                     
-                    preview_logs.append("=" * 80)
-                    preview_logs.append("STARTING DEPLOYMENT")
-                    preview_logs.append("=" * 80)
-                    preview_logs.append("")
-                    preview_logs.append("")
-                    preview_logs.append("=" * 80)
-                    preview_logs.append("DEPLOYMENT EXECUTION LOGS")
-                    preview_logs.append("=" * 80)
-                    preview_logs.append("")
+                    # Note: "STARTING DEPLOYMENT" and "DEPLOYMENT EXECUTION LOGS" headers are added once 
+                    # in the consolidated result, not per-interface to avoid duplicates
                     
                     # Pre-deployment traffic check (Cumulus only)
                     target_interface_for_stats = config_info.get('target_interface', interface.name)
