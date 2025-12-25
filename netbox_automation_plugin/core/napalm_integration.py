@@ -127,6 +127,8 @@ class NAPALMDeviceManager:
             # Special handling for platform-specific drivers
             if driver_name == 'cumulus':
                 # Cumulus-specific optional args
+                # Note: use_nvue is set AFTER connection.open() (see below) because the driver
+                # doesn't read it from optional_args - it auto-detects based on 'net' command support
                 cumulus_args = optional_args.copy()
                 # Add any Cumulus-specific settings here if needed
                 # e.g., cumulus_args['use_keys'] = True
@@ -159,6 +161,16 @@ class NAPALMDeviceManager:
             for attempt in range(max_retries):
                 try:
                     self.connection.open()
+                    
+                    # CRITICAL FIX: Force use_nvue=True for Cumulus devices
+                    # The driver auto-detects use_nvue by checking if 'net' commands fail,
+                    # but modern Cumulus devices support both 'net' and 'nv' commands.
+                    # If 'net' works, use_nvue stays False, causing commit_config(revert_in=90) to return None.
+                    # We MUST force use_nvue=True to enable commit-confirm support.
+                    if driver_name == 'cumulus' and hasattr(self.connection, 'use_nvue'):
+                        if not self.connection.use_nvue:
+                            logger.info(f"Force-enabling use_nvue=True for Cumulus device (required for commit-confirm)")
+                            self.connection.use_nvue = True
                     
                     # CRITICAL: Verify that the device object was properly initialized
                     # The NAPALM driver's device object (Netmiko connection) must exist
@@ -2428,13 +2440,13 @@ class NAPALMDeviceManager:
                             logs.append(f"  [INFO] Wait complete, checking commit-confirm status...")
                             
                             # Check if NAPALM actually created a commit-confirm session
-                            # Multiple indicators that NAPALM failed:
-                            #   1. Returns None or False (should return True or output string)
-                            #   2. has_pending_commit flag not set (should be True after commit-confirm)
-                            napalm_failed = commit_result is None or commit_result is False
+                            # CRITICAL: commit_config(revert_in=90) returns None for Cumulus, but it DOES work!
+                            # The real indicator of success is has_pending_commit() = True
+                            # So we check has_pending_commit() FIRST, not the return value
+                            napalm_failed = False
                             
-                            # Additional check: has_pending_commit flag
-                            if not napalm_failed and hasattr(self.connection, 'has_pending_commit'):
+                            # Primary check: has_pending_commit flag (this is the real indicator)
+                            if hasattr(self.connection, 'has_pending_commit'):
                                 try:
                                     has_pending = self.connection.has_pending_commit()
                                     logger.info(f"has_pending_commit() check: {has_pending}")
@@ -2443,13 +2455,30 @@ class NAPALMDeviceManager:
                                         logger.warning(f"has_pending_commit() returned False after 5s wait - NAPALM failed")
                                         logs.append(f"  ⚠ has_pending_commit() = False (should be True)")
                                         napalm_failed = True
+                                    else:
+                                        # has_pending_commit() = True means it worked, even if commit_result is None
+                                        logger.info(f"✓ NAPALM commit-confirm session created successfully (has_pending_commit=True)")
+                                        logs.append(f"  ✓ NAPALM commit-confirm session created successfully")
+                                        if commit_result is None:
+                                            logger.info(f"Note: commit_config returned None (expected for Cumulus driver)")
+                                            logs.append(f"  [INFO] commit_config returned None (expected behavior for Cumulus)")
                                 except Exception as check_error:
                                     logger.debug(f"Could not check has_pending_commit: {check_error}")
+                                    # If we can't check has_pending_commit, fall back to checking return value
+                                    if commit_result is None or commit_result is False:
+                                        logger.warning(f"Cannot verify has_pending_commit and commit_result is {commit_result} - assuming failure")
+                                        napalm_failed = True
+                            else:
+                                # No has_pending_commit method - fall back to checking return value
+                                if commit_result is None or commit_result is False:
+                                    logger.warning(f"No has_pending_commit() method and commit_result is {commit_result} - assuming failure")
+                                    napalm_failed = True
                             
                             if napalm_failed:
                                 logger.warning(f"NAPALM commit_config returned {commit_result} - falling back to direct NVUE execution")
                                 logs.append(f"  ⚠ NAPALM method did not create commit-confirm session")
                                 logs.append(f"  Reason: commit_config returned {commit_result}")
+                                logs.append(f"  Note: This is expected behavior for Cumulus - NAPALM driver doesn't return a value for commit-confirm")
                                 logs.append(f"  Falling back to direct NVUE command execution...")
                                 
                                 # Fallback: Execute NVUE command directly
