@@ -2556,6 +2556,32 @@ class VLANDeploymentView(View):
             'untagged': untagged_interfaces_by_device,
         }
 
+    def _generate_bond_deletion_commands(self, bond_name, platform):
+        """Generate commands to delete a bond interface from the device."""
+        commands = []
+        if platform == 'cumulus':
+            commands.append(f"nv unset interface {bond_name}")
+        elif platform == 'eos':
+            commands.append(f"no interface {bond_name}")
+        return commands
+
+    def _generate_bond_creation_commands(self, bond_name, member_interfaces, platform):
+        """Generate commands to create a bond interface (minimum config - no EVPN)."""
+        commands = []
+        if platform == 'cumulus':
+            commands.append(f"nv set interface {bond_name} type bond")
+            for member in member_interfaces:
+                commands.append(f"nv set interface {bond_name} bond member {member}")
+            commands.append(f"nv set interface {bond_name} bond lacp-rate fast")
+            commands.append(f"nv set interface {bond_name} bond lacp-bypass on")
+            commands.append(f"nv set interface {bond_name} bridge domain br_default")
+        elif platform == 'eos':
+            commands.append(f"interface {bond_name}")
+            for member in member_interfaces:
+                commands.append(f"interface {member}")
+                commands.append(f"   channel-group {bond_name.replace('Port-Channel', '')} mode active")
+        return commands
+
     def _generate_config_from_netbox(self, device, interface, platform, existing_bridge_vlans=None):
         """
         Generate platform-specific config based on NetBox interface state.
@@ -2863,6 +2889,20 @@ class VLANDeploymentView(View):
             consolidated_logs.append("  [OK] Consistent state (all interfaces updated simultaneously)")
             consolidated_logs.append("")
             
+            # Collect all VLANs for display
+            all_vlan_ids = set()
+            for item in interfaces_with_configs:
+                # Collect untagged VLAN
+                if item.get('untagged_vid'):
+                    all_vlan_ids.add(int(item['untagged_vid']))
+                # Collect tagged VLANs
+                if item.get('tagged_vids'):
+                    for vid in item['tagged_vids']:
+                        all_vlan_ids.add(int(vid))
+                # Fallback: use vlan_id if other fields not available
+                if item.get('vlan_id') and not item.get('untagged_vid') and not item.get('tagged_vids'):
+                    all_vlan_ids.add(int(item['vlan_id']))
+            
             # Return a SINGLE result for all interfaces
             result = {
                 'success': True,
@@ -2873,6 +2913,10 @@ class VLANDeploymentView(View):
                 'device': device,
                 'interface': f"Batched ({len(interfaces_with_configs)} interfaces)",
                 'dry_run': True,
+                'vlan_id': sorted(all_vlan_ids) if all_vlan_ids else [],  # Store as list for smart rendering
+                'vlan_count': len(all_vlan_ids),
+                'interfaces_count': len(interfaces_with_configs),
+                'is_batched': True,  # Flag for table renderer
                 '_interface_count': len(interfaces_with_configs),
                 '_interface_names': [item['interface'].name for item in interfaces_with_configs]
             }
@@ -3213,8 +3257,16 @@ class VLANDeploymentView(View):
             all_interface_names = [item['interface'].name for item in interfaces_with_configs]
             all_vlan_ids = set()
             for item in interfaces_with_configs:
-                if item.get('vlan_id'):
-                    all_vlan_ids.add(str(item['vlan_id']))
+                # Collect untagged VLAN
+                if item.get('untagged_vid'):
+                    all_vlan_ids.add(int(item['untagged_vid']))
+                # Collect tagged VLANs
+                if item.get('tagged_vids'):
+                    for vid in item['tagged_vids']:
+                        all_vlan_ids.add(int(vid))
+                # Fallback: use vlan_id if other fields not available
+                if item.get('vlan_id') and not item.get('untagged_vid') and not item.get('tagged_vids'):
+                    all_vlan_ids.add(int(item['vlan_id']))
             
             # Create single result entry for the device
             device_result = deploy_result.copy()
@@ -3222,10 +3274,12 @@ class VLANDeploymentView(View):
             device_result['device'] = device
             device_result['interface'] = ', '.join(all_interface_names)  # Show all interfaces
             device_result['target_interface'] = ', '.join(all_interface_names)
-            device_result['vlan_id'] = ', '.join(sorted(all_vlan_ids)) if all_vlan_ids else 'N/A'
+            device_result['vlan_id'] = sorted(all_vlan_ids) if all_vlan_ids else []  # Store as list for smart rendering
+            device_result['vlan_count'] = len(all_vlan_ids)
             device_result['dry_run'] = False
             device_result['interfaces_count'] = len(interfaces_with_configs)
             device_result['all_interfaces'] = all_interface_names
+            device_result['is_batched'] = True  # Flag for table renderer
             
             # Add status fields
             device_result['device_status'] = "PASS"
@@ -3265,6 +3319,17 @@ class VLANDeploymentView(View):
             
             all_interface_names = [item['interface'].name for item in interfaces_with_configs]
             
+            # Collect VLANs for error display
+            error_vlan_ids = set()
+            for item in interfaces_with_configs:
+                if item.get('untagged_vid'):
+                    error_vlan_ids.add(int(item['untagged_vid']))
+                if item.get('tagged_vids'):
+                    for vid in item['tagged_vids']:
+                        error_vlan_ids.add(int(vid))
+                if item.get('vlan_id') and not item.get('untagged_vid') and not item.get('tagged_vids'):
+                    error_vlan_ids.add(int(item['vlan_id']))
+            
             error_result = {
                 'success': False,
                 'committed': False,
@@ -3275,8 +3340,11 @@ class VLANDeploymentView(View):
                 'device': device,
                 'interface': ', '.join(all_interface_names),
                 'dry_run': False,
+                'vlan_id': sorted(error_vlan_ids) if error_vlan_ids else [],
+                'vlan_count': len(error_vlan_ids),
                 'interfaces_count': len(interfaces_with_configs),
-                'all_interfaces': all_interface_names
+                'all_interfaces': all_interface_names,
+                'is_batched': True
             }
             all_results.append(error_result)
         finally:
@@ -3362,25 +3430,60 @@ class VLANDeploymentView(View):
             
             for interface in device_interfaces:
                 # PRE-CHECK: Detect bond membership BEFORE generating config
-                # This ensures _generate_config_from_netbox() has bond info to work with
                 bond_detected_early = None
+                netbox_bond = None
+                bond_creation_commands = []
+                bond_deletion_commands = []
+                bond_traffic_warning = None
+                old_bond_name = None
+                
                 logger.info(f"[PRE-CHECK] Starting bond detection for {device.name}:{interface.name}")
+                
+                # Check device bond
                 try:
                     device_config_check = self._get_current_device_config(device, interface.name, platform)
                     bond_detected_early = device_config_check.get('bond_member_of')
-                    if bond_detected_early:
-                        logger.info(f"[PRE-CHECK] ✓ {device.name}:{interface.name} is member of bond {bond_detected_early}")
-                    else:
-                        logger.info(f"[PRE-CHECK] {device.name}:{interface.name} is NOT a bond member")
                 except Exception as e:
-                    logger.error(f"[PRE-CHECK] FAILED to check bond membership for {device.name}:{interface.name}: {e}")
-                    import traceback
-                    logger.error(f"[PRE-CHECK] Traceback: {traceback.format_exc()}")
+                    logger.error(f"[PRE-CHECK] FAILED to check device bond: {e}")
                 
-                # Generate config from NetBox state (pass existing bridge VLANs to avoid redundant commands)
+                # Check NetBox bond
+                if hasattr(interface, 'lag') and interface.lag:
+                    netbox_bond = interface.lag.name
+                
+                # Handle bond scenarios
+                if netbox_bond and not bond_detected_early:
+                    # Scenario 3: CREATE
+                    logger.info(f"[BOND AUTO-CREATE] Will create bond {netbox_bond}")
+                    bond_creation_commands = self._generate_bond_creation_commands(netbox_bond, [interface.name], platform)
+                    bond_detected_early = netbox_bond
+                elif bond_detected_early and netbox_bond and bond_detected_early != netbox_bond:
+                    # Scenario 4: MIGRATE (NetBox is source of truth!)
+                    logger.warning(f"[BOND MIGRATION] Device={bond_detected_early}, NetBox={netbox_bond} -> using NetBox")
+                    old_bond_name = bond_detected_early
+                    try:
+                        traffic_check = self._check_interface_traffic_stats(device, old_bond_name, platform)
+                        if traffic_check.get('has_traffic'):
+                            bond_traffic_warning = f"[TRAFFIC] Bond '{old_bond_name}' is carrying traffic!"
+                    except Exception:
+                        pass
+                    bond_deletion_commands = self._generate_bond_deletion_commands(old_bond_name, platform)
+                    bond_creation_commands = self._generate_bond_creation_commands(netbox_bond, [interface.name], platform)
+                    bond_detected_early = netbox_bond
+                
+                # Generate config from NetBox state
                 logger.info(f"[CONFIG GEN] Calling _generate_config_from_netbox() for {device.name}:{interface.name}")
                 config_info = self._generate_config_from_netbox(device, interface, platform, existing_bridge_vlans=device_bridge_vlans)
                 config_commands = config_info['commands']
+                
+                # PREPEND bond deletion + creation commands if needed
+                if bond_deletion_commands or bond_creation_commands:
+                    all_bond_commands = bond_deletion_commands + bond_creation_commands
+                    config_commands = all_bond_commands + config_commands
+                    config_info['commands'] = config_commands
+                    config_info['bond_migrated'] = bool(bond_deletion_commands)
+                    config_info['old_bond_name'] = old_bond_name
+                    config_info['bond_traffic_warning'] = bond_traffic_warning
+                
                 logger.info(f"[CONFIG GEN] Generated {len(config_commands)} commands, target_interface={config_info.get('target_interface')}, is_bond_member={config_info.get('is_bond_member')}")
                 
                 # CRITICAL FIX: If bond was detected in pre-check but config_info doesn't have it, FORCE regeneration
@@ -4323,7 +4426,10 @@ class VLANDeploymentView(View):
                         'target_interface_for_stats': target_interface_for_stats,
                         'config_info': config_info,
                         'untagged_vid': untagged_vid,
-                        'tagged_vids': tagged_vids
+                        'tagged_vids': tagged_vids,
+                        'bond_migrated': config_info.get('bond_migrated', False),
+                        'old_bond_name': config_info.get('old_bond_name'),
+                        'bond_traffic_warning': config_info.get('bond_traffic_warning')
                     })
             
             # Add consolidated dry run result for all interfaces on this device
@@ -4546,10 +4652,51 @@ class VLANDeploymentView(View):
                         logger.warning(f"Could not fetch bridge VLANs for device {device.name}: {e}")
                 
                 for interface in device_interfaces:
-                    # interface is already an Interface object from _get_interfaces_for_sync
-                    # Generate config from NetBox state (pass existing bridge VLANs to avoid redundant commands)
+                    # PRE-CHECK: Bond detection for untagged
+                    bond_detected_early = None
+                    netbox_bond = None
+                    bond_creation_commands = []
+                    bond_deletion_commands = []
+                    bond_traffic_warning = None
+                    old_bond_name = None
+                    
+                    try:
+                        device_config_check = self._get_current_device_config(device, interface.name, platform)
+                        bond_detected_early = device_config_check.get('bond_member_of')
+                    except Exception:
+                        pass
+                    
+                    if hasattr(interface, 'lag') and interface.lag:
+                        netbox_bond = interface.lag.name
+                    
+                    # Handle bond scenarios
+                    if netbox_bond and not bond_detected_early:
+                        bond_creation_commands = self._generate_bond_creation_commands(netbox_bond, [interface.name], platform)
+                        bond_detected_early = netbox_bond
+                    elif bond_detected_early and netbox_bond and bond_detected_early != netbox_bond:
+                        old_bond_name = bond_detected_early
+                        try:
+                            traffic_check = self._check_interface_traffic_stats(device, old_bond_name, platform)
+                            if traffic_check.get('has_traffic'):
+                                bond_traffic_warning = f"[TRAFFIC] Bond '{old_bond_name}' is carrying traffic!"
+                        except Exception:
+                            pass
+                        bond_deletion_commands = self._generate_bond_deletion_commands(old_bond_name, platform)
+                        bond_creation_commands = self._generate_bond_creation_commands(netbox_bond, [interface.name], platform)
+                        bond_detected_early = netbox_bond
+                    
+                    # Generate config from NetBox state
                     config_info = self._generate_config_from_netbox(device, interface, platform, existing_bridge_vlans=device_bridge_vlans)
                     config_commands = config_info['commands']
+                    
+                    # PREPEND bond commands
+                    if bond_deletion_commands or bond_creation_commands:
+                        all_bond_commands = bond_deletion_commands + bond_creation_commands
+                        config_commands = all_bond_commands + config_commands
+                        config_info['commands'] = config_commands
+                        config_info['bond_migrated'] = bool(bond_deletion_commands)
+                        config_info['old_bond_name'] = old_bond_name
+                        config_info['bond_traffic_warning'] = bond_traffic_warning
                     
                     # Combine commands into single config string (for deployment)
                     config_command = '\n'.join(config_commands) if isinstance(config_commands, list) else config_commands
@@ -4998,7 +5145,10 @@ class VLANDeploymentView(View):
                             'target_interface_for_stats': target_interface_for_stats,
                             'config_info': config_info,
                             'untagged_vid': untagged_vid,
-                            'tagged_vids': tagged_vids
+                            'tagged_vids': tagged_vids,
+                            'bond_migrated': config_info.get('bond_migrated', False),
+                            'old_bond_name': config_info.get('old_bond_name'),
+                            'bond_traffic_warning': config_info.get('bond_traffic_warning')
                         })
             
             # Add consolidated dry run result for all untagged interfaces on this device
@@ -5336,564 +5486,225 @@ class VLANDeploymentView(View):
         logger.info(f"VLAN Deployment: {len(devices)} devices, {len(interface_list)} interfaces, platform: {platform}")
 
         if dry_run:
-            # Dry run mode - generate comprehensive preview with validation and diffs
+            # Dry run mode - use batched deployment preview (same structure as actual deployment)
             # First, run tag validation
             validation_results = self._validate_tags_for_dry_run(devices, interface_list)
             
-            # Calculate summary statistics
-            total_devices = len(devices)
-            total_interfaces = len(devices) * len(interface_list)
-            would_pass = 0
-            would_warn = 0
-            would_block = 0
+            # Use batched deployment approach for dry run (same as sync mode and actual deployment)
+            logger.info(f"[DRY RUN] Generating batched preview for {len(devices)} device(s), {len(interface_list)} interface(s)")
             
             for device in devices:
-                device_validation = validation_results['device_validation'].get(device.name, {})
+                interfaces_with_configs = []
                 
                 for interface_name in interface_list:
-                    interface_key = f"{device.name}:{interface_name}"
-                    interface_validation = validation_results['interface_validation'].get(interface_key, {})
+                    try:
+                        interface_obj = Interface.objects.get(device=device, name=interface_name)
+                    except Interface.DoesNotExist:
+                        # Interface not found - add error result
+                        results.append({
+                            "device": device,
+                            "interface": interface_name,
+                            "vlan_id": vlan_id,
+                            "vlan_name": vlan_name,
+                            "status": "error",
+                            "config_applied": "No",
+                            "netbox_updated": "No",
+                            "message": "Interface not found in NetBox",
+                            "deployment_logs": "Interface not found in NetBox",
+                        })
+                        continue
                     
-                    # Count status
-                    if device_validation.get('status') == 'block' or interface_validation.get('status') == 'block':
-                        would_block += 1
-                    elif device_validation.get('status') == 'warn' or interface_validation.get('status') == 'warn':
-                        would_warn += 1
-                    else:
-                        would_pass += 1
-            
-            for device in devices:
-                device_validation = validation_results['device_validation'].get(device.name, {})
-                
-                # Get device info
-                device_ip = str(device.primary_ip4.address).split('/')[0] if device.primary_ip4 else (str(device.primary_ip6.address).split('/')[0] if device.primary_ip6 else 'N/A')
-                device_site = device.site.name if device.site else 'N/A'
-                device_location = device.location.name if device.location else 'N/A'
-                device_role = device.role.name if device.role else 'N/A'
-                
-                for interface_name in interface_list:
-                    interface_key = f"{device.name}:{interface_name}"
-                    interface_validation = validation_results['interface_validation'].get(interface_key, {})
+                    # Pre-check: Detect bond early (device config takes priority)
+                    bond_detected_early = None
+                    bond_info = self._get_bond_interface_for_member(device, interface_name, platform=platform)
+                    if bond_info:
+                        bond_detected_early = bond_info.get('bond_name')
+                        logger.info(f"[BOND PRE-CHECK] Device has bond: {bond_detected_early} for member {interface_name}")
                     
-                    # Get interface details
-                    interface_details = self._get_interface_details(device, interface_name)
+                    # Check NetBox for bond (LAG)
+                    netbox_bond = None
+                    if hasattr(interface_obj, 'lag') and interface_obj.lag:
+                        netbox_bond = interface_obj.lag.name
+                        logger.info(f"[BOND PRE-CHECK] NetBox has bond: {netbox_bond} for interface {interface_name}")
                     
-                    # Get current device config FIRST (needed for bond detection and for diff generation)
-                    device_config_result = self._get_current_device_config(device, interface_name, platform)
-                    current_device_config = device_config_result.get('current_config', 'Unable to fetch')
-                    config_source = device_config_result.get('source', 'error')
-                    config_timestamp = device_config_result.get('timestamp', 'N/A')
-                    device_uptime = device_config_result.get('device_uptime', None)
-                    bridge_vlans = device_config_result.get('_bridge_vlans', [])  # Get bridge VLANs if available
-                    bond_member_of = device_config_result.get('bond_member_of', None)  # Get bond info for proposed config generation
+                    # Bond auto-creation or migration logic
+                    bond_deletion_commands = []
+                    bond_creation_commands = []
+                    old_bond_name = None
+                    bond_traffic_warning = False
                     
-                    # Determine target interface (bond if member, otherwise original)
-                    target_interface_for_config = bond_member_of if bond_member_of else interface_name
+                    if netbox_bond and not bond_detected_early:
+                        # NetBox has bond, device doesn't - CREATE bond on device
+                        logger.info(f"[BOND AUTO-CREATE] Creating bond {netbox_bond} on device (missing)")
+                        member_interfaces = []
+                        try:
+                            lag_interfaces = Interface.objects.filter(device=device, lag=interface_obj.lag)
+                            member_interfaces = [iface.name for iface in lag_interfaces]
+                        except Exception as e:
+                            logger.warning(f"Could not get LAG members: {e}")
+                            member_interfaces = [interface_name]
+                        
+                        bond_creation_commands = self._generate_bond_creation_commands(
+                            netbox_bond, member_interfaces, platform
+                        )
+                        bond_detected_early = netbox_bond
+                        
+                    elif bond_detected_early and netbox_bond and bond_detected_early != netbox_bond:
+                        # Name mismatch - DELETE old bond, CREATE new bond with NetBox name
+                        logger.warning(f"[BOND MISMATCH] Device has {bond_detected_early}, NetBox has {netbox_bond} - migrating to NetBox name")
+                        old_bond_name = bond_detected_early
+                        
+                        # Check for traffic on existing bond (disruption warning)
+                        traffic_stats = self._check_interface_traffic_stats(device, interface_name, platform, bond_interface=bond_detected_early)
+                        if traffic_stats.get('has_traffic'):
+                            bond_traffic_warning = True
+                            logger.warning(f"[TRAFFIC WARNING] Bond {bond_detected_early} is carrying traffic - migration will disrupt!")
+                        
+                        # Get all members for the bond
+                        member_interfaces = []
+                        try:
+                            lag_interfaces = Interface.objects.filter(device=device, lag=interface_obj.lag)
+                            member_interfaces = [iface.name for iface in lag_interfaces]
+                        except Exception as e:
+                            logger.warning(f"Could not get LAG members: {e}")
+                            member_interfaces = [interface_name]
+                        
+                        # Generate deletion commands for old bond
+                        bond_deletion_commands = self._generate_bond_deletion_commands(
+                            bond_detected_early, member_interfaces, platform
+                        )
+                        
+                        # Generate creation commands for new bond
+                        bond_creation_commands = self._generate_bond_creation_commands(
+                            netbox_bond, member_interfaces, platform
+                        )
+                        
+                        # Force NetBox bond name for all subsequent config
+                        bond_detected_early = netbox_bond
                     
-                    # Get proposed config (use target_interface which may be bond, pass device and bridge_vlans for checks)
-                    proposed_config = self._generate_vlan_config(target_interface_for_config, vlan_id, platform, device=device, bridge_vlans=bridge_vlans)
+                    # Determine target interface (use bond if detected/created)
+                    target_interface = bond_detected_early if bond_detected_early else interface_name
                     
-                    # Generate config diff (pass bridge VLANs to check if VLAN already exists)
-                    # Use target_interface_for_config for interface_name parameter to ensure diff shows correct interface
-                    config_diff = self._generate_config_diff(current_device_config, proposed_config, platform, device=device, interface_name=target_interface_for_config, bridge_vlans=bridge_vlans)
+                    # Get untagged/tagged VLANs from NetBox
+                    untagged_vid = None
+                    tagged_vids = []
+                    if interface_obj.untagged_vlan:
+                        untagged_vid = interface_obj.untagged_vlan.vid
+                    if interface_obj.tagged_vlans.exists():
+                        tagged_vids = [v.vid for v in interface_obj.tagged_vlans.all()]
                     
-                    # Get NetBox current and proposed state
-                    netbox_state = self._get_netbox_current_state(device, interface_name, vlan_id)
+                    # Generate configuration commands
+                    try:
+                        device_config_result = self._get_current_device_config(device, interface_name, platform)
+                        bridge_vlans = device_config_result.get('_bridge_vlans', [])
+                    except Exception as e:
+                        logger.error(f"Failed to fetch bridge VLANs for {device.name}: {e}")
+                        bridge_vlans = []
                     
-                    # Get bond information for NetBox diff (if bond detected)
-                    bond_info_for_netbox = None
-                    bond_name_for_netbox = None
-                    if bond_member_of:
-                        bond_info_for_netbox = self._get_bond_interface_for_member(device, interface_name, platform=platform)
-                        bond_name_for_netbox = bond_member_of
-                    
-                    netbox_diff = self._generate_netbox_diff(
-                        netbox_state, 
-                        netbox_state['proposed'],
-                        bond_info=bond_info_for_netbox,
-                        interface_name=interface_name,
-                        bond_name=bond_name_for_netbox
+                    config_command = self._generate_config_from_netbox(
+                        device, interface_obj, platform,
+                        existing_bridge_vlans=bridge_vlans,
+                        force_bond_interface=bond_detected_early
                     )
                     
-                    # Generate validation table
-                    validation_table = self._generate_validation_table(device_validation, interface_validation)
+                    # Prepend bond deletion/creation commands if any
+                    if bond_deletion_commands or bond_creation_commands:
+                        combined_commands = []
+                        combined_commands.extend(bond_deletion_commands)
+                        combined_commands.extend(bond_creation_commands)
+                        combined_commands.append(config_command)
+                        config_command = '\n'.join(combined_commands)
                     
-                    # Generate risk assessment
-                    current_vlan = netbox_state['current']['untagged_vlan']
-                    risk_assessment = self._generate_risk_assessment(device_validation, interface_validation, current_vlan, vlan_id)
+                    # Generate preview logs (current state, conflicts, proposed config, etc.)
+                    preview_logs = []
+                    preview_logs.append("=" * 80)
+                    preview_logs.append(f"DRY RUN - Interface: {interface_name}")
+                    preview_logs.append("=" * 80)
+                    preview_logs.append("")
                     
-                    # Generate rollback info (include current config for manual rollback)
-                    rollback_info = self._generate_rollback_info(device, interface_name, vlan_id, platform, timeout=90, current_config=current_device_config)
+                    # Show bond info if detected
+                    if bond_detected_early:
+                        preview_logs.append("--- Bond Information ---")
+                        preview_logs.append(f"[NOTE] Interface '{interface_name}' is part of bond '{bond_detected_early}'")
+                        preview_logs.append(f"       Configuration will be applied to bond '{bond_detected_early}'")
+                        
+                        # Show bond creation/migration warnings
+                        if bond_creation_commands and not bond_deletion_commands:
+                            preview_logs.append(f"[BOND AUTO-CREATE] Bond '{bond_detected_early}' will be created on device")
+                            preview_logs.append("                    (NetBox has bond, device doesn't)")
+                        elif bond_deletion_commands:
+                            preview_logs.append(f"[BOND MIGRATION] Migrating from '{old_bond_name}' to '{bond_detected_early}'")
+                            preview_logs.append(f"                 Old bond '{old_bond_name}' will be deleted")
+                            preview_logs.append(f"                 New bond '{bond_detected_early}' will be created")
+                            if bond_traffic_warning:
+                                preview_logs.append(f"                 [TRAFFIC DISRUPTION WARNING] Bond '{old_bond_name}' is carrying traffic!")
+                        preview_logs.append("")
                     
-                    # Determine overall status
-                    is_blocked = (device_validation.get('status') == 'block' or interface_validation.get('status') == 'block')
-                    if is_blocked:
-                        overall_status = "error"
-                        status_message = "Would BLOCK deployment"
-                        overall_status_text = "BLOCKED"
-                    elif device_validation.get('status') == 'warn' or interface_validation.get('status') == 'warn':
-                        overall_status = "success"
-                        status_message = "Would WARN but allow deployment"
-                        overall_status_text = "WARN"
+                    # Show current device config
+                    preview_logs.append("--- Current Device Configuration ---")
+                    device_config_result = self._get_current_device_config(device, interface_name, platform)
+                    current_config = device_config_result.get('current_config', '(unable to fetch)')
+                    if current_config and not current_config.startswith('ERROR:'):
+                        for line in current_config.split('\n'):
+                            if line.strip():
+                                preview_logs.append(f"  {line}")
                     else:
-                        overall_status = "success"
-                        status_message = "Would PASS validation"
-                        overall_status_text = "PASS"
+                        preview_logs.append("  (no configuration or unable to fetch)")
+                    preview_logs.append("")
                     
-                    # Extract status text for table display
-                    device_status_text = "PASS" if device_validation.get('status') == 'pass' else "BLOCK"
-                    interface_status_text = interface_validation.get('status', 'pass').upper()
-                    if interface_status_text == 'PASS':
-                        interface_status_text = "PASS"
-                    elif interface_status_text == 'WARN':
-                        interface_status_text = "WARN"
-                    elif interface_status_text == 'BLOCK':
-                        interface_status_text = "BLOCK"
-                    else:
-                        interface_status_text = "PASS"
+                    # Show NetBox current state
+                    preview_logs.append("--- Current NetBox Configuration ---")
+                    preview_logs.append(f"802.1Q Mode: {interface_obj.mode or 'N/A'}")
+                    preview_logs.append(f"Untagged VLAN: {untagged_vid or 'None'}")
+                    tagged_str = ', '.join(map(str, tagged_vids)) if tagged_vids else 'None'
+                    preview_logs.append(f"Tagged VLANs: [{tagged_str}]")
+                    preview_logs.append("")
                     
-                    # Extract risk level from risk assessment
-                    risk_level = "LOW"
-                    if "HIGH" in risk_assessment or "HIGH Risk" in risk_assessment:
-                        risk_level = "HIGH"
-                    elif "MEDIUM" in risk_assessment or "MEDIUM Risk" in risk_assessment:
-                        risk_level = "MEDIUM"
-                    
-                    # Build comprehensive deployment logs
-                    logs = []
-                    logs.append("=" * 80)
-                    logs.append("DRY RUN MODE - PREVIEW ONLY")
-                    logs.append("=" * 80)
-                    logs.append("")
-                    logs.append("[NOTE] All interfaces on each device will be deployed in a BATCHED commit.")
-                    logs.append("       All interface configs will be applied together in a single atomic session")
-                    logs.append("       with one commit-confirm to avoid conflicts and ensure atomic rollback.")
-                    logs.append("")
-                    
-                    # Device and Platform Info (Always shown)
-                    logs.append("--- Device & Platform Information ---")
-                    logs.append(f"Device: {device.name} ({device_role})")
-                    logs.append(f"Site: {device_site} / Location: {device_location}")
-                    logs.append(f"IP Address: {device_ip}")
-                    logs.append(f"Platform: {platform.upper()}")
-                    logs.append("")
-                    
-                    # Interface Details (Always shown)
-                    logs.append("--- Interface Details ---")
-                    logs.append(f"Interface: {interface_name}")
-                    logs.append(f"Type: {interface_details.get('type', 'Unknown')}")
-                    logs.append(f"Description: {interface_details.get('description', 'No description')}")
-                    logs.append(f"Cable Status: {'[OK] Cabled' if interface_details.get('cabled') else '[FAIL] Not cabled'}")
-                    if interface_details.get('connected_device'):
-                        logs.append(f"Connected To: {interface_details.get('connected_device')} ({interface_details.get('connected_role', 'Unknown')})")
-                    if interface_details.get('port_channel_member'):
-                        logs.append(f"Port-Channel Member: Yes (member of {interface_details.get('port_channel_name')})")
-                    logs.append("")
-                    
-                    # Validation Breakdown Table (Always shown)
-                    logs.append(validation_table)
-                    logs.append("")
-                    
-                    # Risk Assessment (Always shown)
-                    logs.append(risk_assessment)
-                    logs.append("")
-                    
-                    # Connection Status (Always shown)
-                    logs.append("--- Device Config Source ---")
-                    if config_source == 'device':
-                        logs.append(f"[OK] Connected to device successfully")
-                        if device_uptime:
-                            logs.append(f"Device uptime: {device_uptime}")
-                        if config_timestamp != 'N/A':
-                            logs.append(f"Config fetched at: {config_timestamp}")
-                    elif config_source == 'netbox':
-                        logs.append(f"[WARN] Device unreachable - using NetBox inference")
-                        logs.append(f"Note: Actual device config may differ from NetBox state")
-                    else:
-                        # config_source == 'error'
-                        device_was_connected = device_config_result.get('device_connected', False)
-                        if device_was_connected:
-                            # Device was connected but config retrieval failed (parsing error, etc.)
-                            logs.append(f"[FAIL] Device connected but config retrieval failed")
-                            if 'ERROR:' in current_device_config:
-                                # Extract error message
-                                error_msg = current_device_config.replace('ERROR: Could not retrieve config from device: ', '')
-                                logs.append(f"Error: {error_msg}")
-                            else:
-                                error_details = device_config_result.get('error', 'Unknown error')
-                                logs.append(f"Error: {error_details}")
-                        else:
-                            # Device was not connected and NetBox inference also failed
-                            logs.append(f"[FAIL] Device unreachable and NetBox inference failed")
-                            if 'ERROR:' in current_device_config:
-                                error_msg = current_device_config.replace('ERROR: Could not retrieve config from device: ', '')
-                                logs.append(f"Error details: {error_msg}")
-                            else:
-                                error_details = device_config_result.get('error', 'Unknown error')
-                                if error_details:
-                                    logs.append(f"Error: {error_details}")
-                    logs.append("")
-                    
-                    # Current Device Configuration (Always shown - collected from device)
-                    logs.append("--- Current Device Configuration (Real from Device) ---")
-                    logs.append("")
-                    
-                    # Check if interface is a bond member
-                    bond_member_of = device_config_result.get('bond_member_of')
-                    bond_interface_config = device_config_result.get('bond_interface_config')
-                    
-                    if bond_member_of:
-                        logs.append(f"Bond Membership: Interface '{interface_name}' is a member of bond '{bond_member_of}'")
-                        logs.append(f"Note: VLAN configuration will be applied to bond '{bond_member_of}', not to '{interface_name}' directly.")
-                        logs.append("")
-                        logs.append(f"Interface-Level Configuration (for '{interface_name}'):")
-                        if current_device_config and current_device_config.strip() and not "(no configuration" in current_device_config and not "ERROR:" in current_device_config:
-                            for line in current_device_config.split('\n'):
-                                if line.strip():
-                                    logs.append(f"  {line}")
-                        else:
-                            logs.append("  (no configuration found for this interface)")
-                        logs.append("")
-                        logs.append(f"Bond Interface '{bond_member_of}' Configuration:")
-                        if bond_interface_config and bond_interface_config.strip():
-                            for line in bond_interface_config.split('\n'):
-                                if line.strip():
-                                    logs.append(f"  {line}")
-                        else:
-                            logs.append("  (unable to retrieve bond interface configuration)")
-                    else:
-                        # Not a bond member - show interface config normally
-                        logs.append(f"Interface-Level Configuration:")
-                        if current_device_config and current_device_config.strip() and not "(no configuration" in current_device_config and not "ERROR:" in current_device_config:
-                            for line in current_device_config.split('\n'):
-                                if line.strip():
-                                    logs.append(f"  {line}")
-                        else:
-                            logs.append("  (no configuration found or unable to retrieve)")
-                    logs.append("")
-                    
-                    # Bridge-Level Configuration (for Cumulus - always show)
+                    # Traffic check
+                    pre_traffic_stats = {}
+                    target_interface_for_stats = bond_detected_early if bond_detected_early else interface_name
                     if platform == 'cumulus':
-                        logs.append("Bridge-Level Configuration (br_default):")
-                        if bridge_vlans and len(bridge_vlans) > 0:
-                            # Format VLAN list nicely - show ranges if possible (as it appears in config)
-                            vlan_list_str = self._format_vlan_list(bridge_vlans)
-                            # Show actual NVUE command that configures this
-                            logs.append(f"  nv set bridge domain br_default vlan {vlan_list_str}")
+                        preview_logs.append("--- Pre-Deployment Traffic Check ---")
+                        pre_traffic_stats = self._check_interface_traffic_stats(device, interface_name, platform, bond_interface=bond_detected_early)
+                        if pre_traffic_stats.get('has_traffic'):
+                            in_pkts = pre_traffic_stats.get('in_pkts_total', 0)
+                            out_pkts = pre_traffic_stats.get('out_pkts_total', 0)
+                            preview_logs.append(f"[WARN] Active traffic on '{target_interface_for_stats}': in={in_pkts:,}, out={out_pkts:,}")
                         else:
-                            logs.append("  (bridge VLAN information not available)")
-                        logs.append("")
+                            preview_logs.append(f"[OK] No active traffic on '{target_interface_for_stats}'")
+                        preview_logs.append("")
                     
-                    # Current NetBox Configuration (Always shown - source of truth)
-                    logs.append("--- Current NetBox Configuration (Source of Truth) ---")
-                    netbox_current = netbox_state['current']
-                    logs.append(f"802.1Q Mode: {netbox_current['mode'] or 'None'}")
-                    logs.append(f"Untagged VLAN: {netbox_current['untagged_vlan'] or 'None'}")
-                    tagged_vlans_str = ', '.join(map(str, netbox_current['tagged_vlans'])) if netbox_current['tagged_vlans'] else 'None'
-                    logs.append(f"Tagged VLANs: [{tagged_vlans_str}]")
-                    ip_addresses_str = ', '.join(netbox_current['ip_addresses']) if netbox_current['ip_addresses'] else 'None'
-                    logs.append(f"IP Addresses: {ip_addresses_str}")
-                    logs.append(f"VRF: {netbox_current['vrf'] or 'None'}")
-                    logs.append(f"Cable Status: {netbox_current['cable_status']}")
-                    if netbox_current['connected_to']:
-                        logs.append(f"Connected To: {netbox_current['connected_to']}")
-                    logs.append(f"Enabled: {netbox_current['enabled']}")
-                    logs.append(f"Port-Channel Member: {netbox_current['port_channel_member']}")
-                    logs.append("")
+                    # Store config info for later
+                    config_info = {
+                        'bond_migrated': bool(bond_deletion_commands),
+                        'old_bond_name': old_bond_name,
+                        'bond_traffic_warning': bond_traffic_warning
+                    }
                     
-                    # Conflict Detection (Always shown - useful for understanding issues)
-                    device_has_ip = bool(netbox_current['ip_addresses'])
-                    device_has_vrf = bool(netbox_current['vrf'])
-                    
-                    # Check if device config from device matches NetBox
-                    device_config_has_ip = 'ip address' in current_device_config.lower() if current_device_config else False
-                    device_config_has_vrf = 'vrf' in current_device_config.lower() if current_device_config else False
-                    
-                    # Check if device has VLAN config
-                    device_config_has_vlan = False
-                    device_vlan_id = None
-                    if current_device_config:
-                        # Check for access VLAN in config
-                        import re
-                        vlan_match = re.search(r'access\s+(\d+)', current_device_config.lower())
-                        if vlan_match:
-                            device_config_has_vlan = True
-                            device_vlan_id = int(vlan_match.group(1))
-                    
-                    # NetBox has VLAN configured?
-                    netbox_has_vlan = netbox_current.get('untagged_vlan') is not None
-                    netbox_vlan_id = netbox_current.get('untagged_vlan')
-                    
-                    conflict_detected = False
-                    conflict_reasons = []
-                    
-                    # Check IP/VRF conflicts
-                    if device_config_has_ip != device_has_ip:
-                        conflict_detected = True
-                        conflict_reasons.append("IP address mismatch")
-                    if device_config_has_vrf != device_has_vrf:
-                        conflict_detected = True
-                        conflict_reasons.append("VRF mismatch")
-                    
-                    # Check VLAN conflicts: NetBox has VLAN but device doesn't, or different VLAN
-                    if netbox_has_vlan and not device_config_has_vlan:
-                        conflict_detected = True
-                        conflict_reasons.append(f"NetBox has VLAN {netbox_vlan_id} configured but device has no VLAN config")
-                    elif netbox_has_vlan and device_config_has_vlan and netbox_vlan_id != device_vlan_id:
-                        conflict_detected = True
-                        conflict_reasons.append(f"VLAN mismatch: NetBox has {netbox_vlan_id}, device has {device_vlan_id}")
-                    elif not netbox_has_vlan and device_config_has_vlan:
-                        conflict_detected = True
-                        conflict_reasons.append(f"Device has VLAN {device_vlan_id} configured but NetBox has no VLAN")
-                    
-                    logs.append("--- Configuration Conflict Detection ---")
-                    if conflict_detected:
-                        logs.append(f"[WARN] Device config differs from NetBox config")
-                        if conflict_reasons:
-                            logs.append(f"  Conflicts detected: {', '.join(conflict_reasons)}")
-                        logs.append("")
-                        logs.append("Device Should Have (According to NetBox):")
-                        # ISSUE 1 FIX: Generate config from NetBox's ACTUAL configuration, not from proposed_config
-                        # proposed_config contains the VLAN from form input, but we need to show what NetBox actually has
-                        # Determine target interface (bond if member, otherwise original)
-                        target_interface_for_netbox = target_interface_for_config if 'target_interface_for_config' in locals() else interface_name
-                        if bond_info:
-                            target_interface_for_netbox = bond_info['bond_name']
-                        
-                        # Generate config from NetBox's actual state
-                        netbox_config_lines = []
-                        if platform == 'cumulus':
-                            # Show bridge VLAN commands for all VLANs in NetBox
-                            all_netbox_vlans = set()
-                            if netbox_current.get('untagged_vlan'):
-                                all_netbox_vlans.add(netbox_current['untagged_vlan'])
-                            all_netbox_vlans.update(netbox_current.get('tagged_vlans', []))
-                            
-                            for vlan_vid in sorted(all_netbox_vlans):
-                                # Only show if not already in bridge (to avoid duplicates)
-                                if not self._is_vlan_in_bridge_vlans(vlan_vid, bridge_vlans):
-                                    netbox_config_lines.append(f"nv set bridge domain br_default vlan {vlan_vid}")
-                            
-                            # Show interface access VLAN command (untagged VLAN)
-                            if netbox_current.get('untagged_vlan'):
-                                netbox_config_lines.append(f"nv set interface {target_interface_for_netbox} bridge domain br_default access {netbox_current['untagged_vlan']}")
-                        elif platform == 'eos':
-                            # EOS commands
-                            if netbox_current.get('untagged_vlan'):
-                                netbox_config_lines.append(f"interface {target_interface_for_netbox}")
-                                netbox_config_lines.append(f"  switchport access vlan {netbox_current['untagged_vlan']}")
-                        
-                        # Display the config
-                        if netbox_config_lines:
-                            for line in netbox_config_lines:
-                                logs.append(f"  {line}")
-                        else:
-                            logs.append("  (no VLAN configuration in NetBox)")
-                        logs.append("")
-                        logs.append("Note: NetBox is the source of truth. Device may have stale/old configuration.")
-                        logs.append("      Any differences will be reconciled during deployment.")
-                    else:
-                        logs.append("[OK] Device config matches NetBox - no conflicts detected")
-                    logs.append("")
-                    
-                    # Check bond information from both NetBox and device config (side-by-side)
-                    logs.append("--- Bond Configuration Check ---")
-                    target_interface_for_stats = interface_name
-                    bond_interface_for_stats = None
-                    bond_info = self._get_bond_interface_for_member(device, interface_name, platform=platform)
-                    
-                    if bond_info:
-                        bond_interface_for_stats = bond_info['bond_name']
-                        target_interface_for_stats = bond_interface_for_stats
-                        
-                        # Always warn if interface is a bond member (inform user that config will be applied to bond)
-                        bond_name = bond_info.get('bond_name', 'unknown')
-                        logs.append(f"[INFO] BOND MEMBER DETECTED:")
-                        logs.append(f"  Interface '{interface_name}' is a member of bond '{bond_name}'")
-                        logs.append(f"  VLAN configuration will be applied to bond '{bond_name}', not to '{interface_name}' directly.")
-                        # Update status to WARN to inform user
-                        if interface_status_text == "PASS":
-                            interface_status_text = "WARN"
-                        if overall_status_text == "PASS":
-                            overall_status_text = "WARN"
-                        if risk_level == "LOW":
-                            risk_level = "MEDIUM"
-                        logs.append("")
-                        
-                        # Check for bond mismatches
-                        if bond_info.get('has_mismatch'):
-                            netbox_bond = bond_info.get('netbox_bond_name', 'N/A')
-                            device_bond = bond_info.get('device_bond_name', 'N/A')
-                            logs.append(f"[WARN] BOND MISMATCH DETECTED:")
-                            logs.append(f"  NetBox has bond: '{netbox_bond}'")
-                            logs.append(f"  Device config has bond: '{device_bond}'")
-                            logs.append(f"  NetBox bond will be used as source of truth.")
-                            logs.append(f"  Device bond will be migrated to match NetBox during deployment.")
-                            # Update status to WARN
-                            if interface_status_text == "PASS":
-                                interface_status_text = "WARN"
-                            if overall_status_text == "PASS":
-                                overall_status_text = "WARN"
-                            if risk_level == "LOW":
-                                risk_level = "MEDIUM"
-                        
-                        # Check if NetBox is missing bond info
-                        if bond_info.get('netbox_missing_bond'):
-                            device_bond = bond_info.get('device_bond_name', 'N/A')
-                            all_members = bond_info.get('all_members', [])
-                            members_str = ', '.join(all_members) if all_members else 'unknown'
-                            logs.append(f"[WARN] NETBOX MISSING BOND CONFIGURATION:")
-                            logs.append(f"  Device has bond: '{device_bond}' with members: [{members_str}]")
-                            logs.append(f"  NetBox does not have this bond defined.")
-                            logs.append(f"  RECOMMENDATION: Create bond '{device_bond}' in NetBox and add interfaces [{members_str}] to it, then re-run dry run.")
-                            logs.append(f"  NOTE: In deployment mode, bond will be automatically created in NetBox after successful config deployment.")
-                            # Update status to WARN
-                            if interface_status_text == "PASS":
-                                interface_status_text = "WARN"
-                            if overall_status_text == "PASS":
-                                overall_status_text = "WARN"
-                            if risk_level == "LOW":
-                                risk_level = "MEDIUM"
-                    else:
-                        logs.append(f"[OK] Interface is not part of a bond (checked both NetBox and device config)")
-                    
-                    logs.append("")
-                    
-                    # Check for active traffic on interface (Cumulus only)
-                    if platform == 'cumulus':
-                        logs.append("--- Traffic Statistics Check ---")
-                        traffic_stats = self._check_interface_traffic_stats(device, interface_name, platform, bond_interface=bond_interface_for_stats)
-                        if traffic_stats.get('has_traffic'):
-                            in_pkts = traffic_stats.get('in_pkts_total', 0)
-                            out_pkts = traffic_stats.get('out_pkts_total', 0)
-                            logs.append(f"[WARN] ACTIVE TRAFFIC DETECTED on interface '{target_interface_for_stats}'")
-                            logs.append(f"  in-pkts: {in_pkts:,}")
-                            logs.append(f"  out-pkts: {out_pkts:,}")
-                            logs.append(f"  WARNING: Replacing VLAN configuration will disrupt existing traffic!")
-                            # Update status to WARN if traffic detected
-                            if interface_status_text == "PASS":
-                                interface_status_text = "WARN"
-                            if overall_status_text == "PASS":
-                                overall_status_text = "WARN"
-                            if risk_level == "LOW":
-                                risk_level = "MEDIUM"
-                        elif traffic_stats.get('error'):
-                            logs.append(f"[INFO] Could not check traffic stats: {traffic_stats.get('error')}")
-                        else:
-                            logs.append(f"[OK] No active traffic detected on interface '{target_interface_for_stats}'")
-                        logs.append("")
-                    
-                    # OPTION D: Conditional display based on validation status
-                    if is_blocked:
-                        # When BLOCKED: Hide proposed changes (current config already shown above for all scenarios)
-                        logs.append("--- Deployment Status ---")
-                        logs.append(f"[BLOCKED] Deployment will not proceed due to validation failures above.")
-                        logs.append("")
-                        logs.append("Current configurations are shown for reference above.")
-                        logs.append("Fix blocking conditions and re-run to preview deployment changes.")
-                        logs.append("")
-                        logs.append("Proposed configuration, diffs, and rollback information are hidden")
-                        logs.append("because deployment is blocked. These will be shown once validation passes.")
-                        logs.append("")
-                    else:
-                        # When PASS/WARN: Show proposed configs and diffs (current config already shown in conflict section if needed)
-                        logs.append("--- Deployment Status ---")
-                        logs.append(f"[{status_message}] Deployment would proceed. Changes shown below.")
-                        logs.append("")
-                        
-                        # Configuration Changes (What Will Be Applied) - same as deployment mode
-                        logs.append("--- Configuration Changes (What Will Be Applied) ---")
-                        logs.append("")
-                        logs.append("Note: Only VLAN-related configurations will be changed.")
-                        logs.append("      Other configurations (link state, type, breakout, etc.) are preserved.")
-                        logs.append("")
-                        
-                        # Parse proposed_config to show what will be applied
-                        if proposed_config and proposed_config.strip():
-                            # Filter out bridge VLAN commands that already exist
-                            config_lines = [line.strip() for line in proposed_config.split('\n') if line.strip()]
-                            final_commands_to_show = []
-                            
-                            # Config is already filtered by _generate_config_from_netbox
-                            if config_lines:
-                                logs.append("Added:")
-                                for line in config_lines:
-                                    logs.append(f"  + {line}")
-                            else:
-                                logs.append("Added:")
-                                logs.append("  (no new commands - all VLANs already exist on device)")
-                        else:
-                            logs.append("(no configuration changes)")
-                        logs.append("")
-                        
-                        logs.append("--- Config Diff ---")
-                        logs.append("(Shows what will be removed/replaced and what will be added)")
-                        logs.append("")
-                        for line in config_diff.split('\n'):
-                            logs.append(f"  {line}")
-                        logs.append("")
-                        
-                        # NetBox Changes Diff (Only shown when deployment would proceed)
-                        logs.append("--- NetBox Configuration Changes ---")
-                        for line in netbox_diff.split('\n'):
-                            logs.append(f"  {line}")
-                        logs.append("")
-                        
-                        # Rollback Information - NOT shown in dry run (only relevant for actual deployment)
-                    
-                    # Summary Statistics (for first interface only, to avoid repetition)
-                    if interface_name == interface_list[0]:
-                        logs.append("--- Summary Statistics ---")
-                        logs.append(f"Total Devices: {total_devices}")
-                        logs.append(f"Total Interfaces: {total_interfaces}")
-                        logs.append(f"Would Pass: {would_pass}")
-                        logs.append(f"Would Warn: {would_warn}")
-                        logs.append(f"Would Block: {would_block}")
-                        logs.append("")
-                    
-                    # Actionable Next Steps
-                    logs.append("--- Next Steps ---")
-                    if device_validation.get('status') == 'block':
-                        logs.append("1. Run Tagging Workflow to tag device as 'automation-ready:vlan'")
-                        logs.append("2. Re-run this dry run to verify validation passes")
-                    if interface_validation.get('status') == 'block':
-                        logs.append("1. Fix interface issues (cable, tags, etc.)")
-                        logs.append("2. Re-run this dry run to verify validation passes")
-                    if interface_validation.get('status') == 'warn':
-                        logs.append("1. Consider running Tagging Workflow to properly tag interface")
-                        logs.append("2. Review interface configuration before deploying")
-                    if device_validation.get('status') != 'block' and interface_validation.get('status') != 'block':
-                        logs.append("1. Review all changes above")
-                        logs.append("2. If changes look correct, proceed with actual deployment")
-                    logs.append("")
-                    
-                    # Final Status
-                    logs.append("=" * 80)
-                    logs.append(f"Final Status: {status_message}")
-                    logs.append("=" * 80)
-                    
-                    results.append({
-                        "device": device,
-                        "interface": interface_name,
-                        "vlan_id": vlan_id,
-                        "vlan_name": vlan_name,
-                        "status": overall_status,
-                        "config_applied": "Dry Run",
-                        "netbox_updated": "Preview",
-                        "message": f"{status_message} | Platform: {platform}",
-                        "deployment_logs": '\n'.join(logs),
-                        "validation_status": validation_table,
-                        "device_config_diff": config_diff,
-                        "netbox_diff": netbox_diff,
-                        "config_source": config_source,
-                        "risk_assessment": risk_assessment,
-                        "rollback_info": rollback_info,
-                        # New fields for scalable table view
-                        "device_status": device_status_text,
-                        "interface_status": interface_status_text,
-                        "overall_status": overall_status_text,
-                        "risk_level": risk_level,
+                    # Add to batch
+                    interfaces_with_configs.append({
+                        'interface': interface_obj,
+                        'config_command': config_command,
+                        'target_interface': target_interface,
+                        'vlan_id': vlan_id,
+                        'preview_logs': preview_logs,
+                        'pre_traffic_stats': pre_traffic_stats,
+                        'target_interface_for_stats': target_interface_for_stats,
+                        'config_info': config_info,
+                        'untagged_vid': untagged_vid,
+                        'tagged_vids': tagged_vids,
+                        'bond_migrated': config_info.get('bond_migrated', False),
+                        'old_bond_name': config_info.get('old_bond_name'),
+                        'bond_traffic_warning': config_info.get('bond_traffic_warning')
                     })
+                
+                # Generate consolidated batched dry run result for this device
+                if interfaces_with_configs:
+                    batched_result = self._batch_deploy_interfaces_per_device(
+                        device, interfaces_with_configs, platform, dry_run=True
+                    )
+                    results.extend(batched_result)
+
         else:
             # Deploy mode - use Nornir for parallel execution
             # First, build pre-deployment logs (same sections as dry run) for each device/interface
@@ -6178,323 +5989,102 @@ class VLANDeploymentView(View):
                     
                     pre_deployment_logs[device.name][interface_name] = logs
             
-            # Now deploy using Nornir
-            # First, build bond_info_map: {device_name: {interface_name: bond_name}}
-            bond_info_map = {}
-            logger.info(f"[DEBUG] Building bond_info_map for {len(devices)} devices, {len(interface_list)} interfaces")
+            # ================================================================
+            # BATCHED DEPLOYMENT - All interfaces per device in single session
+            # ================================================================
+            logger.info(f"[BATCH] Deploying {len(interface_list)} interface(s) per device in ONE atomic session")
+            
             for device in devices:
-                device_bond_map = {}
+                interfaces_with_configs = []
+                
                 for interface_name in interface_list:
-                    # Check if interface is a bond member
                     try:
-                        logger.debug(f"[DEBUG] Checking bond membership for {device.name}:{interface_name}")
-                        device_config_result = self._get_current_device_config(device, interface_name, platform)
-                        bond_member_of = device_config_result.get('bond_member_of', None)
-                        if bond_member_of:
-                            device_bond_map[interface_name] = bond_member_of
-                            logger.info(f"[DEBUG] [OK] BOND DETECTED: Device {device.name}: Interface {interface_name} is member of bond {bond_member_of}")
-                            logger.info(f"[DEBUG]     Will use bond interface '{bond_member_of}' for device config (instead of '{interface_name}')")
-                        else:
-                            logger.debug(f"[DEBUG] No bond detected for {device.name}:{interface_name} - will use interface directly")
-                    except Exception as e:
-                        logger.warning(f"[DEBUG] Could not check bond membership for {device.name}:{interface_name}: {e}")
-                
-                if device_bond_map:
-                    bond_info_map[device.name] = device_bond_map
-                    logger.info(f"[DEBUG] Device {device.name}: Bond map = {device_bond_map}")
-                else:
-                    logger.debug(f"[DEBUG] Device {device.name}: No bonds detected for any interfaces")
-            
-            if bond_info_map:
-                logger.info(f"[DEBUG] Bond info map created: {bond_info_map}")
-            else:
-                logger.info(f"[DEBUG] No bonds detected - all interfaces will be configured directly")
-            
-            nornir_manager = NornirDeviceManager(devices=devices)
-            nornir_manager.initialize()
-            
-            # Deploy VLAN across all devices in parallel
-            # Pass bond_info_map so Nornir uses bond interfaces instead of member interfaces
-            nornir_results = nornir_manager.deploy_vlan(
-                interface_list=interface_list,
-                vlan_id=vlan_id,
-                platform=platform,
-                timeout=90,
-                bond_info_map=bond_info_map if bond_info_map else None
-            )
-            
-            # Process Nornir results into table format
-            for device in devices:
-                device_results = nornir_results.get(device.name, {})
-                
-                for interface_name in interface_list:
-                    interface_result = device_results.get(interface_name, {
-                        'success': False,
-                        'error': 'No result returned from Nornir'
+                        interface_obj = Interface.objects.get(device=device, name=interface_name)
+                    except Interface.DoesNotExist:
+                        results.append({
+                            "device": device, "interface": interface_name, "vlan_id": vlan_id, "vlan_name": vlan_name,
+                            "status": "error", "config_applied": "No", "netbox_updated": "No",
+                            "message": "Interface not found in NetBox", "deployment_logs": "Interface not found",
+                            "device_status": "FAIL", "interface_status": "FAIL", "overall_status": "FAILED", "risk_level": "HIGH",
+                        })
+                        continue
+                    
+                    # Bond detection & migration
+                    bond_detected_early = None
+                    netbox_bond = None
+                    bond_creation_commands = []
+                    bond_deletion_commands = []
+                    old_bond_name = None
+                    
+                    try:
+                        device_config_check = self._get_current_device_config(device, interface_name, platform)
+                        bond_detected_early = device_config_check.get('bond_member_of')
+                    except Exception:
+                        pass
+                    
+                    if hasattr(interface_obj, 'lag') and interface_obj.lag:
+                        netbox_bond = interface_obj.lag.name
+                    
+                    if netbox_bond and not bond_detected_early:
+                        bond_creation_commands = self._generate_bond_creation_commands(netbox_bond, [interface_name], platform)
+                        bond_detected_early = netbox_bond
+                    elif bond_detected_early and netbox_bond and bond_detected_early != netbox_bond:
+                        old_bond_name = bond_detected_early
+                        bond_deletion_commands = self._generate_bond_deletion_commands(old_bond_name, platform)
+                        bond_creation_commands = self._generate_bond_creation_commands(netbox_bond, [interface_name], platform)
+                        bond_detected_early = netbox_bond
+                    
+                    # Generate VLAN config
+                    config_commands = []
+                    target_interface = bond_detected_early if bond_detected_early else interface_name
+                    
+                    if bond_deletion_commands:
+                        config_commands.extend(bond_deletion_commands)
+                    if bond_creation_commands:
+                        config_commands.extend(bond_creation_commands)
+                    
+                    if platform == 'cumulus':
+                        config_commands.append(f"nv set bridge domain br_default vlan {vlan_id}")
+                        config_commands.append(f"nv set interface {target_interface} bridge domain br_default access {vlan_id}")
+                    elif platform == 'eos':
+                        config_commands.append(f"interface {target_interface}")
+                        config_commands.append(f"   switchport mode access")
+                        config_commands.append(f"   switchport access vlan {vlan_id}")
+                    
+                    interfaces_with_configs.append({
+                        'interface': interface_obj,
+                        'vlan_id': vlan_id,
+                        'target_interface': target_interface,
+                        'config_commands': config_commands,
+                        'bond_migrated': bool(bond_deletion_commands),
+                        'old_bond_name': old_bond_name,
                     })
+                
+                # Deploy all interfaces for this device in ONE batch
+                if interfaces_with_configs:
+                    batched_result = self._batch_deploy_interfaces_per_device(device, interfaces_with_configs, platform, dry_run=False)
+                    deployment_success = batched_result.get('status') == 'success'
+                    deployment_logs = batched_result.get('deployment_logs', '')
                     
-                    # Start with pre-deployment logs
-                    logs = pre_deployment_logs.get(device.name, {}).get(interface_name, [])
-                    
-                    # Append deployment execution logs from Nornir result
-                    deployment_logs = interface_result.get('logs', []) if isinstance(interface_result.get('logs'), list) else []
-                    if deployment_logs:
-                        logs.append("")
-                        logs.append("=" * 80)
-                        logs.append("DEPLOYMENT EXECUTION LOGS")
-                        logs.append("=" * 80)
-                        logs.append("")
-                        for log_line in deployment_logs:
-                            logs.append(log_line)
-                    
-                    if interface_result.get('success'):
-                        status = "success"
-                        config_applied = "Yes"
-                        message = interface_result.get('message', 'Configuration deployed successfully')
-                        
-                        # Post-deployment traffic check (Cumulus only)
-                        if platform == 'cumulus' and interface_result.get('committed', False):
-                            target_interface_for_stats = interface_name
-                            bond_interface_for_stats = None
-                            try:
-                                interface_obj = Interface.objects.get(device=device, name=interface_name)
-                                if hasattr(interface_obj, 'lag') and interface_obj.lag:
-                                    bond_interface_for_stats = interface_obj.lag.name
-                                    target_interface_for_stats = bond_interface_for_stats
-                                else:
-                                    bond_info_for_stats = self._get_bond_interface_for_member(device, interface_name, platform=platform)
-                                    bond_interface_for_stats = bond_info_for_stats['bond_name'] if bond_info_for_stats else None
-                                    if bond_interface_for_stats:
-                                        target_interface_for_stats = bond_interface_for_stats
-                            except Interface.DoesNotExist:
-                                bond_info_for_stats = self._get_bond_interface_for_member(device, interface_name, platform=platform)
-                                bond_interface_for_stats = bond_info_for_stats['bond_name'] if bond_info_for_stats else None
-                                if bond_interface_for_stats:
-                                    target_interface_for_stats = bond_interface_for_stats
-                            
-                            pre_traffic_stats = pre_deployment_logs.get(device.name, {}).get(f"{interface_name}_pre_traffic")
-                            # Use target_interface_for_stats (bond if detected) for traffic check
-                            post_traffic_stats = self._check_interface_traffic_stats(device, target_interface_for_stats, platform, bond_interface=None)
-                            
-                            logs.append("")
-                            logs.append("=" * 80)
-                            logs.append("POST-DEPLOYMENT TRAFFIC CHECK")
-                            logs.append("=" * 80)
-                            logs.append("")
-                            
-                            if pre_traffic_stats and post_traffic_stats:
-                                pre_in = pre_traffic_stats.get('in_pkts_total', 0)
-                                pre_out = pre_traffic_stats.get('out_pkts_total', 0)
-                                post_in = post_traffic_stats.get('in_pkts_total', 0)
-                                post_out = post_traffic_stats.get('out_pkts_total', 0)
-                                in_increment = post_in - pre_in
-                                out_increment = post_out - pre_out
-                                logs.append(f"Pre-deployment:  in-pkts: {pre_in:,}, out-pkts: {pre_out:,}")
-                                logs.append(f"Post-deployment: in-pkts: {post_in:,}, out-pkts: {post_out:,}")
-                                logs.append(f"Traffic change:  in-pkts: +{in_increment:,}, out-pkts: +{out_increment:,}")
-                                if post_traffic_stats.get('has_traffic'):
-                                    logs.append(f"[OK] Interface '{target_interface_for_stats}' is still passing traffic after deployment")
-                                else:
-                                    logs.append(f"[WARN] No traffic detected on interface '{target_interface_for_stats}' after deployment - verify connectivity")
-                            elif post_traffic_stats:
-                                post_in = post_traffic_stats.get('in_pkts_total', 0)
-                                post_out = post_traffic_stats.get('out_pkts_total', 0)
-                                logs.append(f"Post-deployment: in-pkts: {post_in:,}, out-pkts: {post_out:,}")
-                                if post_traffic_stats.get('has_traffic'):
-                                    logs.append(f"[OK] Interface '{target_interface_for_stats}' is passing traffic after deployment")
-                                else:
-                                    logs.append(f"[WARN] No traffic detected on interface '{target_interface_for_stats}' after deployment - verify connectivity")
-                            logs.append("")
-                        
-                        # Update NetBox if requested and deployment was committed
+                    for iface_data in interfaces_with_configs:
+                        interface_name = iface_data['interface'].name
                         netbox_updated = "No"
-                        netbox_verified = False
-                        if update_netbox and interface_result.get('committed', False) and vlan:
-                            logs.append("")
-                            logs.append("[Step 4] Updating NetBox interface assignment...")
-                            
-                            # OPTION A: Create bond in NetBox FIRST if device has bond but NetBox doesn't
-                            # This ensures bond exists before we try to update VLAN on it
-                            bond_info = self._get_bond_interface_for_member(device, interface_name, platform=platform)
-                            target_interface_for_netbox = interface_name  # Default to original interface
-                            member_interface_name = interface_name  # Store original member interface name
-                            
-                            # Check if bond is detected (either missing in NetBox or already exists)
-                            if bond_info:
-                                device_bond = bond_info.get('device_bond_name')
-                                all_members = bond_info.get('all_members', [])
-                                
-                                if device_bond:
-                                    # Bond detected - will update VLAN on bond interface
-                                    target_interface_for_netbox = device_bond
-                                    
-                                    # If bond doesn't exist in NetBox, create it first
-                                    if bond_info.get('netbox_missing_bond') and all_members:
-                                        logs.append(f"[INFO] Device has bond '{device_bond}' but NetBox doesn't - creating bond first...")
-                                        bond_sync_result = self._sync_bond_to_netbox(device, device_bond, all_members, platform=platform)
-                                        if bond_sync_result['success']:
-                                            if bond_sync_result['bond_created']:
-                                                logs.append(f"[OK] Created bond '{device_bond}' in NetBox")
-                                            if bond_sync_result['members_added'] > 0:
-                                                logs.append(f"[OK] Added {bond_sync_result['members_added']} interface(s) to bond '{device_bond}' in NetBox")
-                                            if bond_sync_result.get('vlans_migrated', 0) > 0:
-                                                migrated_from = bond_sync_result.get('vlans_migrated_from', [])
-                                                if migrated_from:
-                                                    interface_names = ', '.join(migrated_from)
-                                                    logs.append(f"[OK] Migrated VLANs from member interface(s) {interface_names} to bond '{device_bond}' in NetBox")
-                                                else:
-                                                    logs.append(f"[OK] Migrated VLANs from {bond_sync_result['vlans_migrated']} member interface(s) to bond '{device_bond}' in NetBox")
-                                        else:
-                                            logs.append(f"[WARN] Failed to create bond in NetBox: {bond_sync_result.get('error', 'Unknown error')}")
-                                            logs.append(f"[WARN] Will attempt to update VLAN on member interface '{interface_name}' instead")
-                                            target_interface_for_netbox = interface_name  # Fallback to member interface
-                                    
-                                    # IMPORTANT: Remove VLANs from member interface (swp3) since they're being moved to bond
-                                    # This applies whether bond was just created or already existed
-                                    if target_interface_for_netbox == device_bond:  # Only if we're actually using the bond
-                                        logs.append(f"[INFO] Removing VLANs from member interface '{interface_name}' (VLANs moved to bond '{device_bond}')...")
-                                        member_interface = Interface.objects.filter(device=device, name=interface_name).first()
-                                        if member_interface:
-                                            old_untagged = member_interface.untagged_vlan.vid if member_interface.untagged_vlan else None
-                                            old_tagged = list(member_interface.tagged_vlans.values_list('vid', flat=True))
-                                            
-                                            if old_untagged or old_tagged:
-                                                member_interface.untagged_vlan = None
-                                                member_interface.tagged_vlans.clear()
-                                                member_interface.mode = None  # Clear mode when removing VLANs
-                                                member_interface.save()
-                                                
-                                                removed_vlans = []
-                                                if old_untagged:
-                                                    removed_vlans.append(f"untagged VLAN {old_untagged}")
-                                                if old_tagged:
-                                                    removed_vlans.append(f"tagged VLANs {old_tagged}")
-                                                logs.append(f"[OK] Removed {', '.join(removed_vlans)} from member interface '{interface_name}'")
-                                                logger.info(f"Removed VLANs from member interface {interface_name} on {device.name}: {', '.join(removed_vlans)}")
-                                            else:
-                                                logs.append(f"[INFO] Member interface '{interface_name}' had no VLANs to remove")
-                                        else:
-                                            logs.append(f"[WARN] Member interface '{interface_name}' not found in NetBox - cannot remove VLANs")
-                                    
-                                    if target_interface_for_netbox == device_bond:
-                                        logs.append(f"[INFO] Will update VLAN configuration on bond interface '{device_bond}' (member: {interface_name})")
-                            
-                            # Now update VLAN configuration on the target interface (bond if created, member otherwise)
-                            logs.append(f"[INFO] Updating NetBox interface '{target_interface_for_netbox}' with VLAN {vlan_id}...")
-                            netbox_result = self._update_netbox_interface(device, target_interface_for_netbox, vlan)
-                            if netbox_result['success']:
-                                netbox_updated = "Yes"
-                                message += " | NetBox updated"
-                                if target_interface_for_netbox != interface_name:
-                                    logs.append(f"[OK] NetBox interface '{target_interface_for_netbox}' (bond) updated successfully (member: {interface_name})")
-                                else:
-                                    logs.append(f"[OK] NetBox interface '{target_interface_for_netbox}' updated successfully")
-                                
-                                # Verify NetBox update (use target_interface_for_netbox, not original interface_name)
-                                logs.append("")
-                                logs.append("[Step 5] Verifying NetBox update...")
-                                verification_result = self._verify_netbox_update(device, target_interface_for_netbox, vlan_id)
-                                if verification_result['success']:
-                                    if verification_result['verified']:
-                                        netbox_verified = True
-                                        message += " | NetBox verified"
-                                        logs.append(f"[OK] NetBox verification PASSED - all checks passed")
-                                        if target_interface_for_netbox != interface_name:
-                                            logs.append(f"  Interface: {target_interface_for_netbox} (bond, member: {interface_name})")
-                                        else:
-                                            logs.append(f"  Interface: {target_interface_for_netbox}")
-                                        logs.append(f"  Mode: {verification_result['details']['mode']['actual']} (expected: tagged)")
-                                        logs.append(f"  Untagged VLAN: {verification_result['details']['untagged_vlan']['actual']} (expected: {vlan_id})")
-                                        logs.append(f"  Tagged VLANs: {verification_result['details']['tagged_vlans']['actual']} (expected: [])")
-                                        logs.append(f"  IP Addresses: {verification_result['details']['ip_addresses']['actual']} (expected: [])")
-                                        logs.append(f"  VRF: {verification_result['details']['vrf']['actual']} (expected: None)")
-                                    else:
-                                        netbox_verified = False
-                                        message += " | NetBox verification FAILED"
-                                        logs.append(f"[FAIL] NetBox verification FAILED - issues found:")
-                                        for issue in verification_result['issues']:
-                                            logs.append(f"  - {issue}")
-                                        logs.append(f"  Details:")
-                                        for key, detail in verification_result['details'].items():
-                                            logs.append(f"    {key}: expected={detail['expected']}, actual={detail['actual']}, verified={detail['verified']}")
-                                else:
-                                    netbox_verified = False
-                                    message += " | NetBox verification error"
-                                    logs.append(f"[WARN] NetBox verification error: {verification_result.get('issues', ['Unknown error'])[0]}")
-                            else:
-                                netbox_updated = "Failed"
-                                message += f" | NetBox update failed: {netbox_result['error']}"
-                                logs.append(f"[FAIL] NetBox update failed: {netbox_result['error']}")
-                        elif interface_result.get('rolled_back', False):
-                            netbox_updated = "Skipped"
-                            message += " | NetBox update skipped (deployment rolled back)"
-                            logs.append(f"[WARN] NetBox update skipped (deployment was rolled back)")
-                        else:
-                            logs.append(f"[WARN] NetBox update skipped (deployment not committed)")
-                    else:
-                        # ISSUE 4 FIX: Ensure error logs are properly displayed
-                        status = "error"
-                        config_applied = "Failed"
-                        netbox_updated = "No"
-                        error_message = interface_result.get('error', 'Unknown error')
-                        message = error_message
+                        if update_netbox and deployment_success and vlan:
+                            netbox_result = self._update_netbox_interface(device, interface_name, vlan_id)
+                            netbox_updated = "Yes" if netbox_result.get('success') else "Failed"
                         
-                        # Add detailed error information to logs
-                        logs.append("")
-                        logs.append("=== Deployment Error ===")
-                        logs.append(f"Status: ERROR")
-                        logs.append(f"Error: {error_message}")
-                        
-                        # Include any error details from the result
-                        if interface_result.get('message'):
-                            logs.append(f"Details: {interface_result.get('message')}")
-                        
-                        # Include deployment logs if available
-                        if deployment_logs:
-                            logs.append("")
-                            logs.append("Deployment execution logs (for debugging):")
-                            for log_line in deployment_logs:
-                                logs.append(f"  {log_line}")
-                        
-                        # Log the full result for debugging
-                        logger.error(f"Deployment failed for {device.name}:{interface_name} - {error_message}")
-                        logger.error(f"Full result: {interface_result}")
-                    
-                    # Add final summary to logs
-                    logs.append("")
-                    logs.append("=== Deployment Completed ===")
-                    logs.append(f"Final Status: {status.upper()}")
-                    logs.append(f"Config Applied: {config_applied}")
-                    logs.append(f"NetBox Updated: {netbox_updated}")
-                    
-                    # Determine status fields for table display (similar to dry run)
-                    device_status_text = "PASS"  # In deployment, device is already validated
-                    interface_status_text = "PASS" if status == "success" else "BLOCK"
-                    overall_status_text = "PASS" if status == "success" else "BLOCKED"
-                    
-                    # Determine risk level based on deployment result
-                    risk_level = "LOW"
-                    if status == "error":
-                        risk_level = "HIGH"
-                    elif not netbox_updated or netbox_updated == "Failed":
-                        risk_level = "MEDIUM"
-                    
-                    results.append({
-                        "device": device,
-                        "interface": interface_name,
-                        "vlan_id": vlan_id,
-                        "vlan_name": vlan_name,
-                        "status": status,
-                        "config_applied": config_applied,
-                        "netbox_updated": netbox_updated,
-                        "message": message,
-                        "deployment_logs": '\n'.join(logs) if logs else message,
-                        # Status fields for table badges
-                        "device_status": device_status_text,
-                        "interface_status": interface_status_text,
-                        "overall_status": overall_status_text,
-                        "risk_level": risk_level,
-                    })
+                        results.append({
+                            "device": device, "interface": interface_name, "vlan_id": vlan_id, "vlan_name": vlan_name,
+                            "status": batched_result.get('status', 'error'),
+                            "config_applied": "Yes" if deployment_success else "Failed",
+                            "netbox_updated": netbox_updated,
+                            "message": batched_result.get('message', 'Deployed'),
+                            "deployment_logs": deployment_logs,
+                            "device_status": "PASS" if deployment_success else "FAIL",
+                            "interface_status": "PASS" if deployment_success else "FAIL",
+                            "overall_status": "PASS" if deployment_success else "FAILED",
+                            "risk_level": "LOW" if deployment_success else "HIGH",
+                        })
 
         return results
 

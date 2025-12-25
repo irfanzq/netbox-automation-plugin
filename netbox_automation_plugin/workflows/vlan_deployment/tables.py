@@ -88,9 +88,48 @@ class VLANDeploymentResultTable(NetBoxTable):
     )
 
     def render_vlan(self, record):
-        """Render VLAN ID and name."""
+        """Render VLAN ID with smart summary for batched deployments."""
         vlan_id = record.get('vlan_id', 'N/A')
         vlan_name = record.get('vlan_name', '')
+        is_batched = record.get('is_batched', False)
+        interfaces_count = record.get('interfaces_count', 0)
+        
+        # Handle batched deployments (multiple interfaces with potentially many VLANs)
+        if is_batched and isinstance(vlan_id, list):
+            vlan_count = len(vlan_id)
+            
+            if vlan_count == 0:
+                return format_html('<span class="text-muted">No VLANs</span>')
+            elif vlan_count == 1:
+                # Single VLAN
+                single_vlan = vlan_id[0]
+                if vlan_name:
+                    return format_html('{} ({})', single_vlan, vlan_name)
+                return format_html('{}', single_vlan)
+            elif vlan_count <= 3:
+                # Show all VLANs (2-3 VLANs)
+                vlan_str = ', '.join(map(str, vlan_id))
+                return format_html('{}', vlan_str)
+            elif vlan_count <= 10:
+                # Show first 3 + count
+                first_three = ', '.join(map(str, vlan_id[:3]))
+                return format_html('{}... <span class="badge bg-secondary" title="Total VLANs: {}">{} VLANs</span>', 
+                                   first_three, vlan_count, vlan_count)
+            else:
+                # Check if VLANs form a continuous range
+                sorted_vlans = sorted(vlan_id)
+                is_range = all(sorted_vlans[i] + 1 == sorted_vlans[i + 1] for i in range(len(sorted_vlans) - 1))
+                
+                if is_range:
+                    # Show as range
+                    return format_html('{}-{} <span class="badge bg-secondary" title="Continuous range">{} VLANs</span>', 
+                                       sorted_vlans[0], sorted_vlans[-1], vlan_count)
+                else:
+                    # Show summary with interface count
+                    return format_html('<span class="badge bg-info" title="Multiple VLANs across {} interfaces">Multiple ({} VLANs)</span>', 
+                                       interfaces_count, vlan_count)
+        
+        # Handle single interface deployment (original behavior)
         if vlan_name:
             return format_html('{} ({})', vlan_id, vlan_name)
         return format_html('{}', vlan_id)
