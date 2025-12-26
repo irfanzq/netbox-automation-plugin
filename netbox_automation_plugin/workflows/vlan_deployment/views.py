@@ -2647,8 +2647,8 @@ class VLANDeploymentView(View):
                 # Skip if VLAN already exists in bridge (check ranges and individual VLANs)
                 if existing_bridge_vlans is None or not self._is_vlan_in_bridge_vlans(vlan_vid, existing_bridge_vlans):
                     bridge_cmd = f"nv set bridge domain br_default vlan {vlan_vid}"
-                commands.append(bridge_cmd)
-                bridge_vlans = sorted(all_vlans)
+                    commands.append(bridge_cmd)
+            bridge_vlans = sorted(all_vlans)
             
             # 2. Set interface access VLAN (untagged) - use target_interface (bond if member)
             if untagged_vlan:
@@ -4746,7 +4746,6 @@ class VLANDeploymentView(View):
                                             # Bond exists in NetBox - check if VLANs need migration
                                             # Check if member interface has VLANs that should be on bond
                                             try:
-                                                from dcim.models import Interface
                                                 member_iface = Interface.objects.get(device=device, name=interface.name)
                                                 if member_iface.untagged_vlan or member_iface.tagged_vlans.exists():
                                                     # Member has VLANs - need to migrate to bond
@@ -5652,7 +5651,6 @@ class VLANDeploymentView(View):
                                             # Bond exists in NetBox - check if VLANs need migration
                                             # Check if member interface has VLANs that should be on bond
                                             try:
-                                                from dcim.models import Interface
                                                 member_iface = Interface.objects.get(device=device, name=interface.name)
                                                 if member_iface.untagged_vlan or member_iface.tagged_vlans.exists():
                                                     # Member has VLANs - need to migrate to bond
@@ -6528,7 +6526,6 @@ class VLANDeploymentView(View):
                                             # Bond exists in NetBox - check if VLANs need migration
                                             # Check if member interface has VLANs that should be on bond
                                             try:
-                                                from dcim.models import Interface
                                                 member_iface = Interface.objects.get(device=device, name=interface_name)
                                                 if member_iface.untagged_vlan or member_iface.tagged_vlans.exists():
                                                     # Member has VLANs - need to migrate to bond
