@@ -1178,7 +1178,7 @@
                 groupFields.style.visibility = 'hidden';
                 groupFields.setAttribute('style', 'display: none !important; visibility: hidden !important;');
                 console.log('Applied styles - singleFields.display:', singleFields.style.display, 'groupFields.display:', groupFields.style.display);
-              } else {
+              } else if (scope === 'group') {
                 console.log('>>> Showing group device fields, hiding single fields');
                 // Use multiple methods to ensure it works
                 singleFields.style.display = 'none';
@@ -2078,9 +2078,13 @@
                   const syncCheckbox = document.getElementById('id_sync_netbox_to_device');
                   if (!syncCheckbox || !syncCheckbox.checked) {
                     console.log('About to call filterVLANsByDevices with:', selectedDeviceIds);
-                    setTimeout(() => {
-                      filterVLANsByDevices(selectedDeviceIds);
-                    }, 100);
+                    if (selectedDeviceIds && selectedDeviceIds.length > 0) {
+                      setTimeout(() => {
+                        filterVLANsByDevices(selectedDeviceIds);
+                      }, 200);
+                    } else {
+                      console.warn('No device IDs to filter VLANs');
+                    }
                   }
                 })
                 .catch(error => {
@@ -2715,27 +2719,44 @@
               const devicesSelect = document.getElementById('id_devices');
               if (devicesSelect) {
                 function loadInterfacesBasedOnSyncMode() {
+                  console.log('loadInterfacesBasedOnSyncMode called');
                   const syncCheckbox = document.getElementById('id_sync_netbox_to_device');
                   if (syncCheckbox && syncCheckbox.checked) {
+                    console.log('Sync mode active, loading interfaces for sync');
                     loadInterfacesForSync();
                   } else {
-                  loadCommonInterfaces();
+                    console.log('Normal mode, loading common interfaces');
+                    loadCommonInterfaces();
+                  }
                 }
-              }
 
-                devicesSelect.addEventListener('change', loadInterfacesBasedOnSyncMode);
+                // Add native change event listener
+                devicesSelect.addEventListener('change', function() {
+                  console.log('Device selection changed (native event)');
+                  loadInterfacesBasedOnSyncMode();
+                });
                 
                 // Listen for TomSelect events (NetBox's default)
                 if (devicesSelect.tomselect) {
-                  devicesSelect.tomselect.on('change', loadInterfacesBasedOnSyncMode);
+                  console.log('TomSelect found, adding change listener');
+                  devicesSelect.tomselect.on('change', function() {
+                    console.log('Device selection changed (TomSelect event)');
+                    loadInterfacesBasedOnSyncMode();
+                  });
                 } else {
                   // Wait for TomSelect to initialize
+                  console.log('Waiting for TomSelect to initialize...');
                   const checkTomSelect = setInterval(function() {
                     if (devicesSelect.tomselect) {
-                      devicesSelect.tomselect.on('change', loadInterfacesBasedOnSyncMode);
+                      console.log('TomSelect initialized, adding change listener');
+                      devicesSelect.tomselect.on('change', function() {
+                        console.log('Device selection changed (TomSelect event - delayed)');
+                        loadInterfacesBasedOnSyncMode();
+                      });
                       clearInterval(checkTomSelect);
                       const currentValue = devicesSelect.tomselect.getValue();
                       if (currentValue && (Array.isArray(currentValue) ? currentValue.length > 0 : currentValue)) {
+                        console.log('Devices already selected, loading interfaces...');
                         loadInterfacesBasedOnSyncMode();
                       }
                     }
@@ -2964,6 +2985,7 @@
                     groupFields.style.display = 'block';
                     groupFields.style.visibility = 'visible';
                     groupFields.setAttribute('style', 'display: block !important; visibility: visible !important;');
+                    console.log('Group fields should now be visible');
                   } else {
                     console.log('Setting single mode - showing single, hiding group');
                     singleFields.style.display = 'block';
@@ -2972,6 +2994,7 @@
                     groupFields.style.display = 'none';
                     groupFields.style.visibility = 'hidden';
                     groupFields.setAttribute('style', 'display: none !important; visibility: hidden !important;');
+                    console.log('Single fields should now be visible');
                   }
                 }
               } catch (e) {
