@@ -717,6 +717,17 @@
   body.dark-mode .form-check-label strong {
     color: #ffffff !important;
   }
+  
+  /* Hide VLAN config container when sync mode is active - MULTIPLE SELECTORS */
+  #vlan-config-container.hidden-by-sync,
+  body:has(#id_sync_netbox_to_device:checked) #vlan-config-container {
+    display: none !important;
+    visibility: hidden !important;
+    height: 0 !important;
+    overflow: hidden !important;
+    margin: 0 !important;
+    padding: 0 !important;
+  }
 </style>
   <div class="row">
     <div class="col-md-12">
@@ -814,7 +825,7 @@
             </div>
 
             {# Device Group Mode Fields #}
-            <div id="group-device-fields" style="display: none;">
+            <div id="group-device-fields">
               <div class="mb-3">
                 <label for="{{ form.site.id_for_label }}" class="form-label required">{{ form.site.label }}</label>
                 {{ form.site }}
@@ -902,7 +913,7 @@
             </div>
 
             {# VLAN Configuration Fields - Only shown in normal mode (not sync mode) #}
-            <div id="vlan-config-container" class="mb-3" style="{% if form.sync_netbox_to_device.value %}display: none !important; visibility: hidden !important; height: 0 !important; overflow: hidden !important;{% endif %}">
+            <div id="vlan-config-container" class="mb-3 vlan-config-fields">
               {# Untagged VLAN - Dropdown selection #}
               <div class="mb-3">
                 <label for="{{ form.untagged_vlan.id_for_label }}" class="form-label">{{ form.untagged_vlan.label }}</label>
@@ -1108,15 +1119,15 @@
               if (!scopeRadio) {
                 console.warn('No deployment scope radio button is checked - using default "single"');
                 // Default to single mode if no radio is checked
-              const singleFields = document.getElementById('single-device-fields');
-              const groupFields = document.getElementById('group-device-fields');
+                const singleFields = document.getElementById('single-device-fields');
+                const groupFields = document.getElementById('group-device-fields');
                 console.log('Default mode - singleFields:', !!singleFields, 'groupFields:', !!groupFields);
                 if (singleFields) {
-                  singleFields.style.display = 'block';
+                  singleFields.setAttribute('style', 'display: block !important;');
                   console.log('Set singleFields display to block');
                 }
                 if (groupFields) {
-                  groupFields.style.display = 'none';
+                  groupFields.setAttribute('style', 'display: none !important;');
                   console.log('Set groupFields display to none');
                 }
                 return;
@@ -1142,13 +1153,13 @@
 
               if (scope === 'single') {
                 console.log('>>> Showing single device fields, hiding group fields');
-                singleFields.style.display = 'block';
-                groupFields.style.display = 'none';
+                singleFields.setAttribute('style', 'display: block !important;');
+                groupFields.setAttribute('style', 'display: none !important;');
                 console.log('Applied styles - singleFields.display:', singleFields.style.display, 'groupFields.display:', groupFields.style.display);
               } else {
                 console.log('>>> Showing group device fields, hiding single fields');
-                singleFields.style.display = 'none';
-                groupFields.style.display = 'block';
+                singleFields.setAttribute('style', 'display: none !important;');
+                groupFields.setAttribute('style', 'display: block !important;');
                 console.log('Applied styles - singleFields.display:', singleFields.style.display, 'groupFields.display:', groupFields.style.display);
               }
               
@@ -1200,7 +1211,15 @@
                 // Hide VLAN configuration container (untagged and tagged VLAN fields)
                 if (vlanConfigContainer) {
                   console.log('Hiding VLAN config container');
+                  vlanConfigContainer.style.display = 'none';
+                  vlanConfigContainer.style.visibility = 'hidden';
+                  vlanConfigContainer.style.height = '0';
+                  vlanConfigContainer.style.overflow = 'hidden';
+                  vlanConfigContainer.style.margin = '0';
+                  vlanConfigContainer.style.padding = '0';
                   vlanConfigContainer.setAttribute('style', 'display: none !important; visibility: hidden !important; height: 0 !important; overflow: hidden !important; margin: 0 !important; padding: 0 !important;');
+                  vlanConfigContainer.classList.add('hidden-by-sync');
+                  console.log('VLAN container hidden and class added');
                 } else {
                   console.warn('VLAN config container not found');
                 }
@@ -1282,7 +1301,13 @@
                 // Show VLAN configuration container (normal mode)
                 if (vlanConfigContainer) {
                   console.log('Showing VLAN config container');
-                  vlanConfigContainer.setAttribute('style', 'display: block !important; visibility: visible !important; height: auto !important; overflow: visible !important;');
+                  vlanConfigContainer.style.display = 'block';
+                  vlanConfigContainer.style.visibility = 'visible';
+                  vlanConfigContainer.style.height = 'auto';
+                  vlanConfigContainer.style.overflow = 'visible';
+                  vlanConfigContainer.removeAttribute('style');
+                  vlanConfigContainer.classList.remove('hidden-by-sync');
+                  console.log('VLAN container shown and class removed');
                 }
                 
                 // Show and enable fields
@@ -2534,7 +2559,10 @@
               
               // Set initial state first (critical - this must run on page load)
               console.log('Step 1: Calling updateFieldVisibility...');
-              updateFieldVisibility();
+              // Use setTimeout to ensure DOM is fully ready
+              setTimeout(() => {
+                updateFieldVisibility();
+              }, 50);
               
               console.log('Step 2: Calling updateSyncModeState...');
               updateSyncModeState();
@@ -2595,7 +2623,18 @@
               // Listen for sync mode checkbox changes
               const syncCheckbox = document.getElementById('id_sync_netbox_to_device');
               if (syncCheckbox) {
-                syncCheckbox.addEventListener('change', updateSyncModeState);
+                syncCheckbox.addEventListener('change', function() {
+                  updateSyncModeState();
+                  // Also run immediate check after a short delay to ensure it takes effect
+                  setTimeout(runImmediateSyncCheck, 50);
+                });
+                // Also check immediately in case checkbox is already checked
+                if (syncCheckbox.checked) {
+                  setTimeout(function() {
+                    updateSyncModeState();
+                    runImmediateSyncCheck();
+                  }, 100);
+                }
               }
 
               // Listen for device selection changes (single mode)
@@ -2774,19 +2813,104 @@
               try {
                 const syncCheckbox = document.getElementById('id_sync_netbox_to_device');
                 const vlanConfigContainer = document.getElementById('vlan-config-container');
-                if (syncCheckbox && vlanConfigContainer) {
-                  if (syncCheckbox.checked) {
+                const untaggedVlanField = document.getElementById('id_untagged_vlan');
+                const taggedVlansField = document.getElementById('id_tagged_vlans');
+                
+                console.log('runImmediateSyncCheck - checkbox found:', !!syncCheckbox, 'checked:', syncCheckbox ? syncCheckbox.checked : false);
+                console.log('runImmediateSyncCheck - container found:', !!vlanConfigContainer);
+                
+                if (syncCheckbox && syncCheckbox.checked) {
+                  console.log('Immediate sync check: Hiding VLAN fields');
+                  
+                  // Hide main container with multiple methods
+                  if (vlanConfigContainer) {
+                    vlanConfigContainer.style.display = 'none';
+                    vlanConfigContainer.style.visibility = 'hidden';
+                    vlanConfigContainer.style.height = '0';
+                    vlanConfigContainer.style.overflow = 'hidden';
+                    vlanConfigContainer.style.margin = '0';
+                    vlanConfigContainer.style.padding = '0';
                     vlanConfigContainer.setAttribute('style', 'display: none !important; visibility: hidden !important; height: 0 !important; overflow: hidden !important; margin: 0 !important; padding: 0 !important;');
+                    vlanConfigContainer.classList.add('hidden-by-sync');
+                    console.log('Container hidden, style:', vlanConfigContainer.getAttribute('style'));
+                  }
+                  
+                  // Hide individual field containers as backup
+                  if (untaggedVlanField) {
+                    untaggedVlanField.disabled = true;
+                    const untaggedContainer = untaggedVlanField.closest('.mb-3');
+                    if (untaggedContainer) {
+                      untaggedContainer.style.display = 'none';
+                      untaggedContainer.setAttribute('style', 'display: none !important;');
+                      console.log('Untagged container hidden');
+                    }
+                  }
+                  
+                  if (taggedVlansField) {
+                    taggedVlansField.disabled = true;
+                    const taggedContainer = taggedVlansField.closest('.mb-3');
+                    if (taggedContainer) {
+                      taggedContainer.style.display = 'none';
+                      taggedContainer.setAttribute('style', 'display: none !important;');
+                      console.log('Tagged container hidden');
+                    }
+                  }
+                } else if (syncCheckbox && !syncCheckbox.checked) {
+                  // Show fields if not in sync mode
+                  if (vlanConfigContainer) {
+                    vlanConfigContainer.style.display = 'block';
+                    vlanConfigContainer.style.visibility = 'visible';
+                    vlanConfigContainer.style.height = 'auto';
+                    vlanConfigContainer.style.overflow = 'visible';
+                    vlanConfigContainer.removeAttribute('style');
+                    vlanConfigContainer.classList.remove('hidden-by-sync');
                   }
                 }
               } catch (e) {
-                console.warn('Immediate sync check failed:', e);
+                console.error('Immediate sync check failed:', e);
               }
+            }
+            
+            // Run immediate field visibility check
+            function runImmediateFieldVisibility() {
+              try {
+                const scopeRadio = document.querySelector('input[name="deployment_scope"]:checked');
+                const singleFields = document.getElementById('single-device-fields');
+                const groupFields = document.getElementById('group-device-fields');
+                
+                if (singleFields && groupFields) {
+                  if (scopeRadio && scopeRadio.value === 'group') {
+                    singleFields.setAttribute('style', 'display: none !important;');
+                    groupFields.setAttribute('style', 'display: block !important;');
+                  } else {
+                    singleFields.setAttribute('style', 'display: block !important;');
+                    groupFields.setAttribute('style', 'display: none !important;');
+                  }
+                }
+              } catch (e) {
+                console.warn('Immediate field visibility check failed:', e);
+              }
+            }
+            
+            // Run sync check multiple times to ensure it catches the checkbox state
+            function runSyncCheckMultipleTimes() {
+              runImmediateSyncCheck();
+              setTimeout(runImmediateSyncCheck, 50);
+              setTimeout(runImmediateSyncCheck, 100);
+              setTimeout(runImmediateSyncCheck, 200);
+              setTimeout(runImmediateSyncCheck, 500);
+            }
+            
+            // Run immediately if DOM is ready
+            if (document.readyState !== 'loading') {
+              runImmediateFieldVisibility();
+              runSyncCheckMultipleTimes();
             }
             
             if (document.readyState === 'loading') {
               document.addEventListener('DOMContentLoaded', function() {
-                runImmediateSyncCheck();
+                runImmediateFieldVisibility();
+                runSyncCheckMultipleTimes();
                 initVlanDeploymentForm();
                 // Force white text on device names - AGGRESSIVE timing
                 forceWhiteText();
@@ -2820,7 +2944,8 @@
               });
             } else {
               // DOM is already ready
-              runImmediateSyncCheck();
+              runImmediateFieldVisibility();
+              runSyncCheckMultipleTimes();
               initVlanDeploymentForm();
               forceWhiteText();
               setTimeout(forceWhiteText, 50);
