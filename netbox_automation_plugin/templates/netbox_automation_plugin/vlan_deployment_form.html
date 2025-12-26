@@ -901,32 +901,27 @@
               {% endif %}
             </div>
 
-            {# VLAN ID - Text input with autocomplete dropdown #}
-            <div class="mb-3">
-              <label for="id_vlan_id" class="form-label required">{{ form.vlan_id.label }}</label>
-              <div style="position: relative; max-width: 500px;">
-                <input
-                  type="text"
-                  id="id_vlan_id"
-                  name="vlan_id"
-                  class="form-control"
-                  list="vlan_datalist"
-                  placeholder="Type VLAN ID (e.g., 100) or click to see dropdown"
-                  min="1"
-                  max="4094"
-                  required
-                  value="{{ form.vlan_id.value|default:'' }}"
-                  autocomplete="off"
-                />
-                <datalist id="vlan_datalist">
-                  <!-- Will be populated dynamically with VLANs from device's location -->
-                </datalist>
+            {# VLAN Configuration Fields - Only shown in normal mode (not sync mode) #}
+            <div id="vlan-config-container" class="mb-3">
+              {# Untagged VLAN - Dropdown selection #}
+              <div class="mb-3">
+                <label for="{{ form.untagged_vlan.id_for_label }}" class="form-label">{{ form.untagged_vlan.label }}</label>
+                {{ form.untagged_vlan }}
+                <div class="form-text" style="color: var(--nbx-color-fg-default) !important;">{{ form.untagged_vlan.help_text }}</div>
+                {% if form.untagged_vlan.errors %}
+                  <div class="invalid-feedback d-block">{{ form.untagged_vlan.errors }}</div>
+                {% endif %}
               </div>
-              <div class="form-text" style="color: var(--nbx-color-fg-default) !important;">Click on the input field above to see available VLANs in the dropdown menu.</div>
-              
-              {% if form.vlan_id.errors %}
-                <div class="invalid-feedback d-block">{{ form.vlan_id.errors }}</div>
-              {% endif %}
+
+              {# Tagged VLANs - Multi-select dropdown #}
+              <div class="mb-3">
+                <label for="{{ form.tagged_vlans.id_for_label }}" class="form-label">{{ form.tagged_vlans.label }}</label>
+                {{ form.tagged_vlans }}
+                <div class="form-text" style="color: var(--nbx-color-fg-default) !important;">{{ form.tagged_vlans.help_text }}</div>
+                {% if form.tagged_vlans.errors %}
+                  <div class="invalid-feedback d-block">{{ form.tagged_vlans.errors }}</div>
+                {% endif %}
+              </div>
             </div>
 
             {# Deployment Options - Mutually exclusive #}
@@ -1170,8 +1165,9 @@
               console.log('=== updateSyncModeState called ===');
               
               const syncCheckbox = document.getElementById('id_sync_netbox_to_device');
-              const vlanIdField = document.getElementById('id_vlan_id');
-              const vlanIdLabel = document.querySelector('label[for="id_vlan_id"]');
+              const vlanConfigContainer = document.getElementById('vlan-config-container');
+              const untaggedVlanField = document.getElementById('id_untagged_vlan');
+              const taggedVlansField = document.getElementById('id_tagged_vlans');
               const interfacesManualField = document.getElementById('id_interfaces_manual');
               const interfacesManualLabel = document.querySelector('label[for="id_interfaces_manual"]');
               const syncModeInfo = document.getElementById('sync-mode-info');
@@ -1181,8 +1177,9 @@
               
               console.log('Elements found:', {
                 syncCheckbox: !!syncCheckbox,
-                vlanIdField: !!vlanIdField,
-                vlanIdLabel: !!vlanIdLabel,
+                vlanConfigContainer: !!vlanConfigContainer,
+                untaggedVlanField: !!untaggedVlanField,
+                taggedVlansField: !!taggedVlansField,
                 interfacesManualField: !!interfacesManualField,
                 interfacesManualContainer: !!document.getElementById('interfaces_manual_container'),
                 syncModeInfo: !!syncModeInfo,
@@ -1198,35 +1195,22 @@
               console.log('>>> Sync mode checkbox checked:', isSyncMode);
               
               if (isSyncMode) {
-                console.log('>>> APPLYING SYNC MODE - greying out and hiding fields');
+                console.log('>>> APPLYING SYNC MODE - hiding VLAN fields');
                 
-                // Disable and grey out VLAN ID field
-                if (vlanIdField) {
-                  console.log('Grey out VLAN ID field');
-                  vlanIdField.disabled = true;
-                  vlanIdField.style.opacity = '0.6';
-                  vlanIdField.style.cursor = 'not-allowed';
-                  vlanIdField.style.backgroundColor = 'var(--nbx-color-bg-secondary, #f8f9fa)';
-                  vlanIdField.required = false;
-                  vlanIdField.placeholder = 'Read from NetBox interface config';
-                  console.log('VLAN ID field updated - disabled:', vlanIdField.disabled, 'opacity:', vlanIdField.style.opacity);
-                  
-                  // Grey out the parent div that contains the VLAN ID field
-                  const vlanIdContainer = vlanIdField.closest('.mb-3');
-                  if (vlanIdContainer) {
-                    vlanIdContainer.style.opacity = '0.6';
-                    vlanIdContainer.style.pointerEvents = 'none';
-                    console.log('VLAN ID container greyed out');
-                  } else {
-                    console.warn('VLAN ID container not found');
-                  }
+                // Hide VLAN configuration container (untagged and tagged VLAN fields)
+                if (vlanConfigContainer) {
+                  console.log('Hiding VLAN config container');
+                  vlanConfigContainer.style.display = 'none';
                 } else {
-                  console.error('VLAN ID field not found!');
+                  console.warn('VLAN config container not found');
                 }
                 
-                if (vlanIdLabel) {
-                  vlanIdLabel.classList.remove('required');
-                  console.log('Removed required class from VLAN ID label');
+                // Disable fields if they exist
+                if (untaggedVlanField) {
+                  untaggedVlanField.disabled = true;
+                }
+                if (taggedVlansField) {
+                  taggedVlansField.disabled = true;
                 }
                 
                 // Hide additional interfaces field and its container
@@ -1278,28 +1262,20 @@
                   interfacesContainer.innerHTML = '<p class="text-muted mb-0" style="color: var(--nbx-color-fg-default) !important; opacity: 1 !important;">Select devices first to load interfaces from NetBox</p>';
                 }
               } else {
-                console.log('>>> REMOVING SYNC MODE - enabling all fields');
+                console.log('>>> REMOVING SYNC MODE - showing VLAN fields');
                 
-                // Enable all fields (normal mode)
-                if (vlanIdField) {
-                  console.log('Enable VLAN ID field');
-                  vlanIdField.disabled = false;
-                  vlanIdField.style.opacity = '1';
-                  vlanIdField.style.cursor = 'auto';
-                  vlanIdField.style.backgroundColor = '';
-                  vlanIdField.required = true;
-                  vlanIdField.placeholder = 'e.g., 100';
-                  console.log('VLAN ID field enabled - disabled:', vlanIdField.disabled, 'opacity:', vlanIdField.style.opacity);
-                  
-                  // Show the parent div that contains the VLAN ID field
-                  const vlanIdContainer = vlanIdField.closest('.mb-3');
-                  if (vlanIdContainer) {
-                    vlanIdContainer.style.opacity = '1';
-                    vlanIdContainer.style.pointerEvents = 'auto';
-                    console.log('VLAN ID container enabled');
-                  }
-                } else {
-                  console.error('VLAN ID field not found when removing sync mode!');
+                // Show VLAN configuration container (normal mode)
+                if (vlanConfigContainer) {
+                  console.log('Showing VLAN config container');
+                  vlanConfigContainer.style.display = 'block';
+                }
+                
+                // Enable fields
+                if (untaggedVlanField) {
+                  untaggedVlanField.disabled = false;
+                }
+                if (taggedVlansField) {
+                  taggedVlansField.disabled = false;
                 }
                 
                 if (vlanIdLabel) {
@@ -2116,11 +2092,17 @@
             function filterVLANsByDevices(deviceIds) {
               console.log('filterVLANsByDevices called with:', deviceIds);
 
-              const datalist = document.getElementById('vlan_datalist');
+              const untaggedVlanSelect = document.getElementById('id_untagged_vlan');
+              const taggedVlansSelect = document.getElementById('id_tagged_vlans');
 
               if (deviceIds.length === 0) {
-                // Reset VLAN datalist
-                datalist.innerHTML = '';
+                // Reset VLAN dropdowns
+                if (untaggedVlanSelect) {
+                  untaggedVlanSelect.innerHTML = '<option value="">---------</option>';
+                }
+                if (taggedVlansSelect) {
+                  taggedVlansSelect.innerHTML = '<option value="">---------</option>';
+                }
                 return;
               }
 
@@ -2140,19 +2122,32 @@
                 .then(data => {
                   console.log('VLAN data received:', data);
 
-                  // Populate datalist with VLAN suggestions (for dropdown)
-                  datalist.innerHTML = ''; // Clear existing options
-
-                  if (data.vlans && data.vlans.length > 0) {
+                  // Populate untagged VLAN dropdown
+                  if (untaggedVlanSelect && data.vlans && data.vlans.length > 0) {
+                    untaggedVlanSelect.innerHTML = '<option value="">---------</option>';
                     data.vlans.forEach(vlan => {
                       const option = document.createElement('option');
-                      option.value = vlan.vid;
-                      option.textContent = vlan.name ? `${vlan.vid} - ${vlan.name}` : vlan.vid;
-                      datalist.appendChild(option);
+                      option.value = vlan.id;
+                      option.textContent = vlan.display || `${vlan.vid} - ${vlan.name || ''}`;
+                      untaggedVlanSelect.appendChild(option);
                     });
-                    console.log(`Populated datalist dropdown with ${data.vlans.length} VLANs from device location`);
-                  } else {
-                    console.log('No VLANs found for this location, user can still type custom VLAN ID');
+                    console.log(`Populated untagged VLAN dropdown with ${data.vlans.length} VLANs`);
+                  }
+
+                  // Populate tagged VLANs dropdown
+                  if (taggedVlansSelect && data.vlans && data.vlans.length > 0) {
+                    taggedVlansSelect.innerHTML = '<option value="">---------</option>';
+                    data.vlans.forEach(vlan => {
+                      const option = document.createElement('option');
+                      option.value = vlan.id;
+                      option.textContent = vlan.display || `${vlan.vid} - ${vlan.name || ''}`;
+                      taggedVlansSelect.appendChild(option);
+                    });
+                    console.log(`Populated tagged VLANs dropdown with ${data.vlans.length} VLANs`);
+                  }
+
+                  if (!data.vlans || data.vlans.length === 0) {
+                    console.log('No VLANs found for this location');
                   }
                 })
                 .catch(error => {
@@ -2163,13 +2158,19 @@
             // Filter VLANs by site when site is selected (group mode)
             function filterVLANsBySite() {
               const siteSelect = document.getElementById('id_site');
-              const siteId = siteSelect.value;
+              const siteId = siteSelect ? siteSelect.value : '';
               
-              const datalist = document.getElementById('vlan_datalist');
+              const untaggedVlanSelect = document.getElementById('id_untagged_vlan');
+              const taggedVlansSelect = document.getElementById('id_tagged_vlans');
 
               if (!siteId) {
-                // Clear datalist if no site selected
-                datalist.innerHTML = '';
+                // Clear dropdowns if no site selected
+                if (untaggedVlanSelect) {
+                  untaggedVlanSelect.innerHTML = '<option value="">---------</option>';
+                }
+                if (taggedVlansSelect) {
+                  taggedVlansSelect.innerHTML = '<option value="">---------</option>';
+                }
                 return;
               }
 
@@ -2177,19 +2178,32 @@
               fetch(`/plugins/automation/vlan-deployment/get-vlans/?site_id=${siteId}`)
                 .then(response => response.json())
                 .then(data => {
-                  // Populate datalist with VLAN suggestions (for dropdown)
-                  datalist.innerHTML = ''; // Clear existing options
-
-                  if (data.vlans && data.vlans.length > 0) {
+                  // Populate untagged VLAN dropdown
+                  if (untaggedVlanSelect && data.vlans && data.vlans.length > 0) {
+                    untaggedVlanSelect.innerHTML = '<option value="">---------</option>';
                     data.vlans.forEach(vlan => {
                       const option = document.createElement('option');
-                      option.value = vlan.vid;
-                      option.textContent = vlan.name ? `${vlan.vid} - ${vlan.name}` : vlan.vid;
-                      datalist.appendChild(option);
+                      option.value = vlan.id;
+                      option.textContent = vlan.display || `${vlan.vid} - ${vlan.name || ''}`;
+                      untaggedVlanSelect.appendChild(option);
                     });
-                    console.log(`Populated datalist dropdown with ${data.vlans.length} VLANs from site`);
-                  } else {
-                    console.log('No VLANs found for this site, user can still type custom VLAN ID');
+                    console.log(`Populated untagged VLAN dropdown with ${data.vlans.length} VLANs from site`);
+                  }
+
+                  // Populate tagged VLANs dropdown
+                  if (taggedVlansSelect && data.vlans && data.vlans.length > 0) {
+                    taggedVlansSelect.innerHTML = '<option value="">---------</option>';
+                    data.vlans.forEach(vlan => {
+                      const option = document.createElement('option');
+                      option.value = vlan.id;
+                      option.textContent = vlan.display || `${vlan.vid} - ${vlan.name || ''}`;
+                      taggedVlansSelect.appendChild(option);
+                    });
+                    console.log(`Populated tagged VLANs dropdown with ${data.vlans.length} VLANs from site`);
+                  }
+
+                  if (!data.vlans || data.vlans.length === 0) {
+                    console.log('No VLANs found for this site');
                   }
                 })
                 .catch(error => {

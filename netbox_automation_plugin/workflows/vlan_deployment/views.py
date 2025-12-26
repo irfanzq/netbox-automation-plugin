@@ -31,7 +31,8 @@ class VLANDeploymentView(View):
 
     def get(self, request):
         form = VLANDeploymentForm()
-        # Form uses vlan_id (IntegerField), not a ModelChoiceField, so no queryset to set
+        # Form uses untagged_vlan and tagged_vlans (ModelChoiceField/ModelMultipleChoiceField)
+        # Querysets are populated dynamically via JavaScript based on selected devices/site
         return render(request, self.template_name_form, {"form": form})
 
     def post(self, request):
@@ -4533,7 +4534,7 @@ class VLANDeploymentView(View):
                                 bond_needs_sync = True
                             else:
                                 # Bond exists - check if VLANs are still on member interfaces
-                                from dcim.models import Interface
+                                # Interface is already imported at the top of the file
                                 bond_interface = Interface.objects.filter(
                                     device=interface.device,
                                     name=device_bond
