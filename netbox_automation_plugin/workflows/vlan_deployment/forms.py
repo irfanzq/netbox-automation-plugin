@@ -93,16 +93,27 @@ class VLANDeploymentForm(forms.Form):
         help_text=_("Select device role for group deployment (e.g., Network Leaf)."),
     )
 
-    # Simple VLAN ID input - just a number field
-    vlan_id = forms.IntegerField(
-        required=True,
-        min_value=1,
-        max_value=4094,
-        label=_("VLAN ID"),
-        help_text=_("Enter VLAN ID (1-4094)"),
-        widget=forms.NumberInput(attrs={
-            'placeholder': 'e.g., 100',
-            'class': 'form-control'
+    # Untagged VLAN - ModelChoiceField for dropdown selection
+    untagged_vlan = forms.ModelChoiceField(
+        queryset=VLAN.objects.none(),  # Will be populated dynamically based on site/location
+        required=False,
+        label=_("Untagged VLAN"),
+        help_text=_("Select untagged VLAN (access VLAN) for the interface. Optional if only deploying tagged VLANs."),
+        widget=forms.Select(attrs={
+            'class': 'form-control',
+            'data-placeholder': 'Select untagged VLAN...'
+        }),
+    )
+
+    # Tagged VLANs - ModelMultipleChoiceField for multi-select dropdown
+    tagged_vlans = forms.ModelMultipleChoiceField(
+        queryset=VLAN.objects.none(),  # Will be populated dynamically based on site/location
+        required=False,
+        label=_("Tagged VLANs"),
+        help_text=_("Select one or more tagged VLANs for the interface. Optional if only deploying untagged VLAN."),
+        widget=forms.SelectMultiple(attrs={
+            'class': 'form-control',
+            'data-placeholder': 'Select tagged VLANs...'
         }),
     )
 
@@ -231,13 +242,24 @@ class VLANDeploymentForm(forms.Form):
 
         # Sync mode validation
         if sync_netbox_to_device:
-            # In sync mode, VLAN ID is not required (read from NetBox)
-            if 'vlan_id' in self.errors:
-                del self.errors['vlan_id']
+            # In sync mode, VLAN fields are not required (read from NetBox)
+            if 'untagged_vlan' in self.errors:
+                del self.errors['untagged_vlan']
+            if 'tagged_vlans' in self.errors:
+                del self.errors['tagged_vlans']
             # Additional interfaces field is not used in sync mode
             if interfaces_manual and interfaces_manual.strip():
                 # Wrap in list to prevent Django from trying to format the string
                 raise forms.ValidationError([_("Additional interfaces field is not available in sync mode. Interfaces are auto-discovered from NetBox.")])
+        
+        # Normal mode validation: At least one VLAN (untagged or tagged) must be selected
+        if not sync_netbox_to_device:
+            untagged_vlan = cleaned_data.get('untagged_vlan')
+            tagged_vlans = cleaned_data.get('tagged_vlans', [])
+            
+            if not untagged_vlan and not tagged_vlans:
+                # Wrap in list to prevent Django from trying to format the string
+                raise forms.ValidationError([_("Please select at least one VLAN (untagged or tagged) for deployment.")])
 
         # Validate based on scope
         if scope == 'single':

@@ -1334,8 +1334,12 @@ class NornirDeviceManager:
                     # Add header to logs showing all interfaces being deployed together
                     combined_logs = []
                     combined_logs.append("=" * 80)
+                    combined_logs.append("DEPLOYMENT EXECUTION (ALL INTERFACES TOGETHER)")
+                    combined_logs.append("=" * 80)
+                    combined_logs.append("")
+                    combined_logs.append("=" * 80)
                     combined_logs.append(f"[BATCHED DEPLOYMENT] Device: {device_name}")
-                    combined_logs.append(f"[BATCHED DEPLOYMENT] Deploying VLAN {vlan_id} to {num_interfaces} interface(s) in SINGLE commit-confirm session")
+                    combined_logs.append(f"[BATCHED DEPLOYMENT] Deploying {num_interfaces} interface(s) in SINGLE commit-confirm session")
                     combined_logs.append("=" * 80)
                     combined_logs.append("")
                     combined_logs.append("Interfaces being configured:")
