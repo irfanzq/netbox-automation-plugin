@@ -902,7 +902,7 @@
             </div>
 
             {# VLAN Configuration Fields - Only shown in normal mode (not sync mode) #}
-            <div id="vlan-config-container" class="mb-3">
+            <div id="vlan-config-container" class="mb-3" style="{% if form.sync_netbox_to_device.value %}display: none !important; visibility: hidden !important; height: 0 !important; overflow: hidden !important;{% endif %}">
               {# Untagged VLAN - Dropdown selection #}
               <div class="mb-3">
                 <label for="{{ form.untagged_vlan.id_for_label }}" class="form-label">{{ form.untagged_vlan.label }}</label>
@@ -1200,10 +1200,7 @@
                 // Hide VLAN configuration container (untagged and tagged VLAN fields)
                 if (vlanConfigContainer) {
                   console.log('Hiding VLAN config container');
-                  vlanConfigContainer.style.display = 'none';
-                  vlanConfigContainer.style.visibility = 'hidden';
-                  vlanConfigContainer.style.height = '0';
-                  vlanConfigContainer.style.overflow = 'hidden';
+                  vlanConfigContainer.setAttribute('style', 'display: none !important; visibility: hidden !important; height: 0 !important; overflow: hidden !important; margin: 0 !important; padding: 0 !important;');
                 } else {
                   console.warn('VLAN config container not found');
                 }
@@ -1213,14 +1210,14 @@
                   untaggedVlanField.disabled = true;
                   const untaggedContainer = untaggedVlanField.closest('.mb-3');
                   if (untaggedContainer) {
-                    untaggedContainer.style.display = 'none';
+                    untaggedContainer.setAttribute('style', 'display: none !important;');
                   }
                 }
                 if (taggedVlansField) {
                   taggedVlansField.disabled = true;
                   const taggedContainer = taggedVlansField.closest('.mb-3');
                   if (taggedContainer) {
-                    taggedContainer.style.display = 'none';
+                    taggedContainer.setAttribute('style', 'display: none !important;');
                   }
                 }
                 
@@ -1285,10 +1282,7 @@
                 // Show VLAN configuration container (normal mode)
                 if (vlanConfigContainer) {
                   console.log('Showing VLAN config container');
-                  vlanConfigContainer.style.display = 'block';
-                  vlanConfigContainer.style.visibility = 'visible';
-                  vlanConfigContainer.style.height = 'auto';
-                  vlanConfigContainer.style.overflow = 'visible';
+                  vlanConfigContainer.setAttribute('style', 'display: block !important; visibility: visible !important; height: auto !important; overflow: visible !important;');
                 }
                 
                 // Show and enable fields
@@ -1296,14 +1290,14 @@
                   untaggedVlanField.disabled = false;
                   const untaggedContainer = untaggedVlanField.closest('.mb-3');
                   if (untaggedContainer) {
-                    untaggedContainer.style.display = 'block';
+                    untaggedContainer.setAttribute('style', 'display: block !important;');
                   }
                 }
                 if (taggedVlansField) {
                   taggedVlansField.disabled = false;
                   const taggedContainer = taggedVlansField.closest('.mb-3');
                   if (taggedContainer) {
-                    taggedContainer.style.display = 'block';
+                    taggedContainer.setAttribute('style', 'display: block !important;');
                   }
                 }
                 
@@ -1888,7 +1882,8 @@
                   }
                 }
               }
-              const selectedDeviceIds = Array.from(devicesSelect.selectedOptions).map(opt => opt.value);
+
+              console.log('Selected device IDs:', selectedDeviceIds);
 
               if (selectedDeviceIds.length === 0) {
                 const p = document.createElement('p');
@@ -2544,6 +2539,48 @@
               console.log('Step 2: Calling updateSyncModeState...');
               updateSyncModeState();
               
+              // Step 2.5: If devices are pre-selected, load interfaces and VLANs
+              const devicesSelect = document.getElementById('id_devices');
+              if (devicesSelect) {
+                let hasSelectedDevices = false;
+                let selectedDeviceIds = [];
+                
+                // Check native select
+                if (devicesSelect.selectedOptions && devicesSelect.selectedOptions.length > 0) {
+                  selectedDeviceIds = Array.from(devicesSelect.selectedOptions).map(opt => opt.value);
+                  hasSelectedDevices = true;
+                }
+                // Check TomSelect
+                if (!hasSelectedDevices && devicesSelect.tomselect) {
+                  const tomSelectValue = devicesSelect.tomselect.getValue();
+                  if (tomSelectValue && (Array.isArray(tomSelectValue) ? tomSelectValue.length > 0 : tomSelectValue)) {
+                    selectedDeviceIds = Array.isArray(tomSelectValue) ? tomSelectValue : [tomSelectValue];
+                    hasSelectedDevices = true;
+                  }
+                }
+                // Check Select2
+                if (!hasSelectedDevices && typeof jQuery !== 'undefined' && jQuery(devicesSelect).data('select2')) {
+                  const select2Value = jQuery(devicesSelect).val();
+                  if (select2Value && (Array.isArray(select2Value) ? select2Value.length > 0 : select2Value)) {
+                    selectedDeviceIds = Array.isArray(select2Value) ? select2Value : [select2Value];
+                    hasSelectedDevices = true;
+                  }
+                }
+                
+                if (hasSelectedDevices && selectedDeviceIds.length > 0) {
+                  console.log('Step 2.5: Devices pre-selected, loading interfaces and VLANs...');
+                  const syncCheckbox = document.getElementById('id_sync_netbox_to_device');
+                  if (syncCheckbox && syncCheckbox.checked) {
+                    setTimeout(() => loadInterfacesForSync(), 100);
+                  } else {
+                    setTimeout(() => {
+                      loadCommonInterfaces();
+                      filterVLANsByDevices(selectedDeviceIds);
+                    }, 100);
+                  }
+                }
+              }
+              
               console.log('Step 3: Calling setupMutuallyExclusiveCheckboxes...');
               setupMutuallyExclusiveCheckboxes();
               
@@ -2610,19 +2647,38 @@
                   setTimeout(function() { clearInterval(checkSelect2); }, 5000);
                 }
 
-                // Check if devices are already selected (native select or Select2)
+                // Check if devices are already selected (native select, TomSelect, or Select2)
                 let hasSelectedDevices = false;
+                let selectedDeviceIds = [];
+                
                 if (devicesSelect.selectedOptions && devicesSelect.selectedOptions.length > 0) {
+                  selectedDeviceIds = Array.from(devicesSelect.selectedOptions).map(opt => opt.value);
                   hasSelectedDevices = true;
+                } else if (devicesSelect.tomselect) {
+                  const tomSelectValue = devicesSelect.tomselect.getValue();
+                  if (tomSelectValue && (Array.isArray(tomSelectValue) ? tomSelectValue.length > 0 : tomSelectValue)) {
+                    selectedDeviceIds = Array.isArray(tomSelectValue) ? tomSelectValue : [tomSelectValue];
+                    hasSelectedDevices = true;
+                  }
                 } else if (typeof jQuery !== 'undefined' && jQuery(devicesSelect).data('select2')) {
                   const select2Value = jQuery(devicesSelect).val();
                   if (select2Value && (Array.isArray(select2Value) ? select2Value.length > 0 : select2Value)) {
+                    selectedDeviceIds = Array.isArray(select2Value) ? select2Value : [select2Value];
                     hasSelectedDevices = true;
                   }
                 }
                 
                 if (hasSelectedDevices) {
-                  loadInterfacesBasedOnSyncMode();
+                  setTimeout(() => {
+                    loadInterfacesBasedOnSyncMode();
+                    // Also load VLANs if not in sync mode
+                    const syncCheckbox = document.getElementById('id_sync_netbox_to_device');
+                    if (!syncCheckbox || !syncCheckbox.checked) {
+                      if (selectedDeviceIds.length > 0) {
+                        filterVLANsByDevices(selectedDeviceIds);
+                      }
+                    }
+                  }, 200);
                 }
               }
 
@@ -2713,8 +2769,24 @@
             }
             
             // Initialize on page load - using proven pattern from vlan_tagging_form.html
+            // Also run updateSyncModeState immediately to hide/show fields based on checkbox state
+            function runImmediateSyncCheck() {
+              try {
+                const syncCheckbox = document.getElementById('id_sync_netbox_to_device');
+                const vlanConfigContainer = document.getElementById('vlan-config-container');
+                if (syncCheckbox && vlanConfigContainer) {
+                  if (syncCheckbox.checked) {
+                    vlanConfigContainer.setAttribute('style', 'display: none !important; visibility: hidden !important; height: 0 !important; overflow: hidden !important; margin: 0 !important; padding: 0 !important;');
+                  }
+                }
+              } catch (e) {
+                console.warn('Immediate sync check failed:', e);
+              }
+            }
+            
             if (document.readyState === 'loading') {
               document.addEventListener('DOMContentLoaded', function() {
+                runImmediateSyncCheck();
                 initVlanDeploymentForm();
                 // Force white text on device names - AGGRESSIVE timing
                 forceWhiteText();
@@ -2748,6 +2820,7 @@
               });
             } else {
               // DOM is already ready
+              runImmediateSyncCheck();
               initVlanDeploymentForm();
               forceWhiteText();
               setTimeout(forceWhiteText, 50);
