@@ -1201,16 +1201,27 @@
                 if (vlanConfigContainer) {
                   console.log('Hiding VLAN config container');
                   vlanConfigContainer.style.display = 'none';
+                  vlanConfigContainer.style.visibility = 'hidden';
+                  vlanConfigContainer.style.height = '0';
+                  vlanConfigContainer.style.overflow = 'hidden';
                 } else {
                   console.warn('VLAN config container not found');
                 }
                 
-                // Disable fields if they exist
+                // Also hide individual fields as backup
                 if (untaggedVlanField) {
                   untaggedVlanField.disabled = true;
+                  const untaggedContainer = untaggedVlanField.closest('.mb-3');
+                  if (untaggedContainer) {
+                    untaggedContainer.style.display = 'none';
+                  }
                 }
                 if (taggedVlansField) {
                   taggedVlansField.disabled = true;
+                  const taggedContainer = taggedVlansField.closest('.mb-3');
+                  if (taggedContainer) {
+                    taggedContainer.style.display = 'none';
+                  }
                 }
                 
                 // Hide additional interfaces field and its container
@@ -1240,7 +1251,7 @@
                 }
                 
                 // Load interfaces for sync if devices are already selected
-                // Check both native select and Select2
+                // Check native select, Select2, and TomSelect
                 let hasSelectedDevices = false;
                 if (devicesSelect) {
                   // Check native select
@@ -1248,9 +1259,16 @@
                     hasSelectedDevices = true;
                   }
                   // Check Select2 (if initialized and jQuery is available)
-                  if (typeof jQuery !== 'undefined' && jQuery(devicesSelect).data('select2')) {
+                  if (!hasSelectedDevices && typeof jQuery !== 'undefined' && jQuery(devicesSelect).data('select2')) {
                     const select2Value = jQuery(devicesSelect).val();
-                    if (select2Value && select2Value.length > 0) {
+                    if (select2Value && (Array.isArray(select2Value) ? select2Value.length > 0 : select2Value)) {
+                      hasSelectedDevices = true;
+                    }
+                  }
+                  // Check TomSelect (NetBox's default)
+                  if (!hasSelectedDevices && devicesSelect.tomselect) {
+                    const tomSelectValue = devicesSelect.tomselect.getValue();
+                    if (tomSelectValue && (Array.isArray(tomSelectValue) ? tomSelectValue.length > 0 : tomSelectValue)) {
                       hasSelectedDevices = true;
                     }
                   }
@@ -1268,19 +1286,25 @@
                 if (vlanConfigContainer) {
                   console.log('Showing VLAN config container');
                   vlanConfigContainer.style.display = 'block';
+                  vlanConfigContainer.style.visibility = 'visible';
+                  vlanConfigContainer.style.height = 'auto';
+                  vlanConfigContainer.style.overflow = 'visible';
                 }
                 
-                // Enable fields
+                // Show and enable fields
                 if (untaggedVlanField) {
                   untaggedVlanField.disabled = false;
+                  const untaggedContainer = untaggedVlanField.closest('.mb-3');
+                  if (untaggedContainer) {
+                    untaggedContainer.style.display = 'block';
+                  }
                 }
                 if (taggedVlansField) {
                   taggedVlansField.disabled = false;
-                }
-                
-                if (vlanIdLabel) {
-                  vlanIdLabel.classList.add('required');
-                  console.log('Added required class to VLAN ID label');
+                  const taggedContainer = taggedVlansField.closest('.mb-3');
+                  if (taggedContainer) {
+                    taggedContainer.style.display = 'block';
+                  }
                 }
                 
                 // Show additional interfaces field and its container
@@ -1313,7 +1337,7 @@
                 }
                 
                 // Load interfaces normally if devices are already selected
-                // Check both native select and Select2
+                // Check native select, Select2, and TomSelect
                 let hasSelectedDevices = false;
                 if (devicesSelect) {
                   // Check native select
@@ -1321,9 +1345,16 @@
                     hasSelectedDevices = true;
                   }
                   // Check Select2 (if initialized and jQuery is available)
-                  if (typeof jQuery !== 'undefined' && jQuery(devicesSelect).data('select2')) {
+                  if (!hasSelectedDevices && typeof jQuery !== 'undefined' && jQuery(devicesSelect).data('select2')) {
                     const select2Value = jQuery(devicesSelect).val();
-                    if (select2Value && select2Value.length > 0) {
+                    if (select2Value && (Array.isArray(select2Value) ? select2Value.length > 0 : select2Value)) {
+                      hasSelectedDevices = true;
+                    }
+                  }
+                  // Check TomSelect (NetBox's default)
+                  if (!hasSelectedDevices && devicesSelect.tomselect) {
+                    const tomSelectValue = devicesSelect.tomselect.getValue();
+                    if (tomSelectValue && (Array.isArray(tomSelectValue) ? tomSelectValue.length > 0 : tomSelectValue)) {
                       hasSelectedDevices = true;
                     }
                   }
@@ -1832,6 +1863,31 @@
               console.log('loadInterfacesForSync called');
               const devicesSelect = document.getElementById('id_devices');
               const interfacesContainer = document.getElementById('interfaces-checkbox-container');
+              
+              // Get selected device IDs - handle both native select, Select2, and TomSelect
+              let selectedDeviceIds = [];
+              if (devicesSelect) {
+                // Try native select first
+                if (devicesSelect.selectedOptions && devicesSelect.selectedOptions.length > 0) {
+                  selectedDeviceIds = Array.from(devicesSelect.selectedOptions).map(opt => opt.value);
+                }
+                // If Select2 is used, get values from Select2
+                if ((selectedDeviceIds.length === 0) && typeof jQuery !== 'undefined' && jQuery(devicesSelect).data('select2')) {
+                  const select2Value = jQuery(devicesSelect).val();
+                  if (select2Value && Array.isArray(select2Value)) {
+                    selectedDeviceIds = select2Value;
+                  } else if (select2Value) {
+                    selectedDeviceIds = [select2Value];
+                  }
+                }
+                // If TomSelect is used (NetBox's default), get values from TomSelect
+                if ((selectedDeviceIds.length === 0) && devicesSelect.tomselect) {
+                  const tomSelectValue = devicesSelect.tomselect.getValue();
+                  if (tomSelectValue) {
+                    selectedDeviceIds = Array.isArray(tomSelectValue) ? tomSelectValue : [tomSelectValue];
+                  }
+                }
+              }
               const selectedDeviceIds = Array.from(devicesSelect.selectedOptions).map(opt => opt.value);
 
               if (selectedDeviceIds.length === 0) {
@@ -1899,7 +1955,31 @@
               console.log('loadCommonInterfaces called');
               const devicesSelect = document.getElementById('id_devices');
               const interfacesContainer = document.getElementById('interfaces-checkbox-container');
-              const selectedDeviceIds = Array.from(devicesSelect.selectedOptions).map(opt => opt.value);
+              
+              // Get selected device IDs - handle both native select, Select2, and TomSelect
+              let selectedDeviceIds = [];
+              if (devicesSelect) {
+                // Try native select first
+                if (devicesSelect.selectedOptions && devicesSelect.selectedOptions.length > 0) {
+                  selectedDeviceIds = Array.from(devicesSelect.selectedOptions).map(opt => opt.value);
+                }
+                // If Select2 is used, get values from Select2
+                if ((selectedDeviceIds.length === 0) && typeof jQuery !== 'undefined' && jQuery(devicesSelect).data('select2')) {
+                  const select2Value = jQuery(devicesSelect).val();
+                  if (select2Value && Array.isArray(select2Value)) {
+                    selectedDeviceIds = select2Value;
+                  } else if (select2Value) {
+                    selectedDeviceIds = [select2Value];
+                  }
+                }
+                // If TomSelect is used (NetBox's default), get values from TomSelect
+                if ((selectedDeviceIds.length === 0) && devicesSelect.tomselect) {
+                  const tomSelectValue = devicesSelect.tomselect.getValue();
+                  if (tomSelectValue) {
+                    selectedDeviceIds = Array.isArray(tomSelectValue) ? tomSelectValue : [tomSelectValue];
+                  }
+                }
+              }
 
               console.log('Selected device IDs:', selectedDeviceIds);
 
@@ -2090,10 +2170,16 @@
 
             // Filter VLANs by site when devices are selected (single mode)
             function filterVLANsByDevices(deviceIds) {
-              console.log('filterVLANsByDevices called with:', deviceIds);
+              console.log('=== filterVLANsByDevices called ===');
+              console.log('Device IDs:', deviceIds);
 
               const untaggedVlanSelect = document.getElementById('id_untagged_vlan');
               const taggedVlansSelect = document.getElementById('id_tagged_vlans');
+              
+              console.log('Elements found:', {
+                untaggedVlanSelect: !!untaggedVlanSelect,
+                taggedVlansSelect: !!taggedVlansSelect
+              });
 
               if (deviceIds.length === 0) {
                 // Reset VLAN dropdowns
@@ -2117,37 +2203,109 @@
               fetch(url)
                 .then(response => {
                   console.log('VLAN response status:', response.status);
+                  if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                  }
                   return response.json();
                 })
                 .then(data => {
                   console.log('VLAN data received:', data);
+                  console.log('Number of VLANs:', data.vlans ? data.vlans.length : 0);
+                  if (data.error) {
+                    console.error('API returned error:', data.error);
+                    return;
+                  }
 
                   // Populate untagged VLAN dropdown
-                  if (untaggedVlanSelect && data.vlans && data.vlans.length > 0) {
-                    untaggedVlanSelect.innerHTML = '<option value="">---------</option>';
-                    data.vlans.forEach(vlan => {
-                      const option = document.createElement('option');
-                      option.value = vlan.id;
-                      option.textContent = vlan.display || `${vlan.vid} - ${vlan.name || ''}`;
-                      untaggedVlanSelect.appendChild(option);
-                    });
-                    console.log(`Populated untagged VLAN dropdown with ${data.vlans.length} VLANs`);
+                  if (untaggedVlanSelect) {
+                    if (data.vlans && data.vlans.length > 0) {
+                      // Check if TomSelect is initialized (NetBox uses TomSelect for dynamic selects)
+                      const isTomSelect = untaggedVlanSelect.classList.contains('tomselected') || 
+                                         (untaggedVlanSelect.tomselect !== undefined);
+                      
+                      if (isTomSelect && untaggedVlanSelect.tomselect) {
+                        // Use TomSelect API to clear and add options
+                        const tomSelect = untaggedVlanSelect.tomselect;
+                        tomSelect.clearOptions();
+                        tomSelect.addOption({value: '', text: '---------'});
+                        data.vlans.forEach(vlan => {
+                          tomSelect.addOption({
+                            value: vlan.id,
+                            text: vlan.display || `${vlan.vid} - ${vlan.name || ''}`
+                          });
+                        });
+                        tomSelect.refreshOptions(false);
+                        console.log(`✓ Populated untagged VLAN dropdown (TomSelect) with ${data.vlans.length} VLANs`);
+                      } else {
+                        // Plain HTML select - use innerHTML
+                        untaggedVlanSelect.innerHTML = '<option value="">---------</option>';
+                        data.vlans.forEach(vlan => {
+                          const option = document.createElement('option');
+                          option.value = vlan.id;
+                          option.textContent = vlan.display || `${vlan.vid} - ${vlan.name || ''}`;
+                          untaggedVlanSelect.appendChild(option);
+                        });
+                        console.log(`✓ Populated untagged VLAN dropdown (HTML) with ${data.vlans.length} VLANs`);
+                      }
+                    } else {
+                      // Clear dropdown
+                      if (untaggedVlanSelect.tomselect) {
+                        untaggedVlanSelect.tomselect.clearOptions();
+                        untaggedVlanSelect.tomselect.addOption({value: '', text: '---------'});
+                        untaggedVlanSelect.tomselect.refreshOptions(false);
+                      } else {
+                        untaggedVlanSelect.innerHTML = '<option value="">---------</option>';
+                      }
+                      console.log('⚠ No VLANs found for this location - untagged dropdown cleared');
+                    }
+                  } else {
+                    console.error('❌ Untagged VLAN select element not found!');
                   }
 
-                  // Populate tagged VLANs dropdown
-                  if (taggedVlansSelect && data.vlans && data.vlans.length > 0) {
-                    taggedVlansSelect.innerHTML = '<option value="">---------</option>';
-                    data.vlans.forEach(vlan => {
-                      const option = document.createElement('option');
-                      option.value = vlan.id;
-                      option.textContent = vlan.display || `${vlan.vid} - ${vlan.name || ''}`;
-                      taggedVlansSelect.appendChild(option);
-                    });
-                    console.log(`Populated tagged VLANs dropdown with ${data.vlans.length} VLANs`);
-                  }
-
-                  if (!data.vlans || data.vlans.length === 0) {
-                    console.log('No VLANs found for this location');
+                  // Populate tagged VLANs dropdown (multi-select)
+                  if (taggedVlansSelect) {
+                    if (data.vlans && data.vlans.length > 0) {
+                      // Check if TomSelect is initialized (NetBox uses TomSelect for dynamic selects)
+                      const isTomSelect = taggedVlansSelect.classList.contains('tomselected') || 
+                                         (taggedVlansSelect.tomselect !== undefined);
+                      
+                      if (isTomSelect && taggedVlansSelect.tomselect) {
+                        // Use TomSelect API to clear and add options
+                        const tomSelect = taggedVlansSelect.tomselect;
+                        tomSelect.clearOptions();
+                        tomSelect.addOption({value: '', text: '---------'});
+                        data.vlans.forEach(vlan => {
+                          tomSelect.addOption({
+                            value: vlan.id,
+                            text: vlan.display || `${vlan.vid} - ${vlan.name || ''}`
+                          });
+                        });
+                        tomSelect.refreshOptions(false);
+                        console.log(`✓ Populated tagged VLANs dropdown (TomSelect) with ${data.vlans.length} VLANs`);
+                      } else {
+                        // Plain HTML select - use innerHTML
+                        taggedVlansSelect.innerHTML = '<option value="">---------</option>';
+                        data.vlans.forEach(vlan => {
+                          const option = document.createElement('option');
+                          option.value = vlan.id;
+                          option.textContent = vlan.display || `${vlan.vid} - ${vlan.name || ''}`;
+                          taggedVlansSelect.appendChild(option);
+                        });
+                        console.log(`✓ Populated tagged VLANs dropdown (HTML) with ${data.vlans.length} VLANs`);
+                      }
+                    } else {
+                      // Clear dropdown
+                      if (taggedVlansSelect.tomselect) {
+                        taggedVlansSelect.tomselect.clearOptions();
+                        taggedVlansSelect.tomselect.addOption({value: '', text: '---------'});
+                        taggedVlansSelect.tomselect.refreshOptions(false);
+                      } else {
+                        taggedVlansSelect.innerHTML = '<option value="">---------</option>';
+                      }
+                      console.log('⚠ No VLANs found for this location - tagged dropdown cleared');
+                    }
+                  } else {
+                    console.error('❌ Tagged VLANs select element not found!');
                   }
                 })
                 .catch(error => {
@@ -2157,11 +2315,20 @@
 
             // Filter VLANs by site when site is selected (group mode)
             function filterVLANsBySite() {
+              console.log('=== filterVLANsBySite called ===');
+              
               const siteSelect = document.getElementById('id_site');
               const siteId = siteSelect ? siteSelect.value : '';
               
+              console.log('Site ID:', siteId);
+              
               const untaggedVlanSelect = document.getElementById('id_untagged_vlan');
               const taggedVlansSelect = document.getElementById('id_tagged_vlans');
+              
+              console.log('Elements found:', {
+                untaggedVlanSelect: !!untaggedVlanSelect,
+                taggedVlansSelect: !!taggedVlansSelect
+              });
 
               if (!siteId) {
                 // Clear dropdowns if no site selected
@@ -2176,34 +2343,110 @@
 
               // Fetch VLANs for this site
               fetch(`/plugins/automation/vlan-deployment/get-vlans/?site_id=${siteId}`)
-                .then(response => response.json())
+                .then(response => {
+                  console.log('VLAN response status:', response.status);
+                  if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                  }
+                  return response.json();
+                })
                 .then(data => {
+                  console.log('VLAN data received:', data);
+                  console.log('Number of VLANs:', data.vlans ? data.vlans.length : 0);
+                  if (data.error) {
+                    console.error('API returned error:', data.error);
+                    return;
+                  }
                   // Populate untagged VLAN dropdown
-                  if (untaggedVlanSelect && data.vlans && data.vlans.length > 0) {
-                    untaggedVlanSelect.innerHTML = '<option value="">---------</option>';
-                    data.vlans.forEach(vlan => {
-                      const option = document.createElement('option');
-                      option.value = vlan.id;
-                      option.textContent = vlan.display || `${vlan.vid} - ${vlan.name || ''}`;
-                      untaggedVlanSelect.appendChild(option);
-                    });
-                    console.log(`Populated untagged VLAN dropdown with ${data.vlans.length} VLANs from site`);
+                  if (untaggedVlanSelect) {
+                    if (data.vlans && data.vlans.length > 0) {
+                      // Check if TomSelect is initialized (NetBox uses TomSelect for dynamic selects)
+                      const isTomSelect = untaggedVlanSelect.classList.contains('tomselected') || 
+                                         (untaggedVlanSelect.tomselect !== undefined);
+                      
+                      if (isTomSelect && untaggedVlanSelect.tomselect) {
+                        // Use TomSelect API to clear and add options
+                        const tomSelect = untaggedVlanSelect.tomselect;
+                        tomSelect.clearOptions();
+                        tomSelect.addOption({value: '', text: '---------'});
+                        data.vlans.forEach(vlan => {
+                          tomSelect.addOption({
+                            value: vlan.id,
+                            text: vlan.display || `${vlan.vid} - ${vlan.name || ''}`
+                          });
+                        });
+                        tomSelect.refreshOptions(false);
+                        console.log(`✓ Populated untagged VLAN dropdown (TomSelect) with ${data.vlans.length} VLANs from site`);
+                      } else {
+                        // Plain HTML select - use innerHTML
+                        untaggedVlanSelect.innerHTML = '<option value="">---------</option>';
+                        data.vlans.forEach(vlan => {
+                          const option = document.createElement('option');
+                          option.value = vlan.id;
+                          option.textContent = vlan.display || `${vlan.vid} - ${vlan.name || ''}`;
+                          untaggedVlanSelect.appendChild(option);
+                        });
+                        console.log(`✓ Populated untagged VLAN dropdown (HTML) with ${data.vlans.length} VLANs from site`);
+                      }
+                    } else {
+                      // Clear dropdown
+                      if (untaggedVlanSelect.tomselect) {
+                        untaggedVlanSelect.tomselect.clearOptions();
+                        untaggedVlanSelect.tomselect.addOption({value: '', text: '---------'});
+                        untaggedVlanSelect.tomselect.refreshOptions(false);
+                      } else {
+                        untaggedVlanSelect.innerHTML = '<option value="">---------</option>';
+                      }
+                      console.log('⚠ No VLANs found for this site - untagged dropdown cleared');
+                    }
+                  } else {
+                    console.error('❌ Untagged VLAN select element not found!');
                   }
 
-                  // Populate tagged VLANs dropdown
-                  if (taggedVlansSelect && data.vlans && data.vlans.length > 0) {
-                    taggedVlansSelect.innerHTML = '<option value="">---------</option>';
-                    data.vlans.forEach(vlan => {
-                      const option = document.createElement('option');
-                      option.value = vlan.id;
-                      option.textContent = vlan.display || `${vlan.vid} - ${vlan.name || ''}`;
-                      taggedVlansSelect.appendChild(option);
-                    });
-                    console.log(`Populated tagged VLANs dropdown with ${data.vlans.length} VLANs from site`);
-                  }
-
-                  if (!data.vlans || data.vlans.length === 0) {
-                    console.log('No VLANs found for this site');
+                  // Populate tagged VLANs dropdown (multi-select)
+                  if (taggedVlansSelect) {
+                    if (data.vlans && data.vlans.length > 0) {
+                      // Check if TomSelect is initialized (NetBox uses TomSelect for dynamic selects)
+                      const isTomSelect = taggedVlansSelect.classList.contains('tomselected') || 
+                                         (taggedVlansSelect.tomselect !== undefined);
+                      
+                      if (isTomSelect && taggedVlansSelect.tomselect) {
+                        // Use TomSelect API to clear and add options
+                        const tomSelect = taggedVlansSelect.tomselect;
+                        tomSelect.clearOptions();
+                        tomSelect.addOption({value: '', text: '---------'});
+                        data.vlans.forEach(vlan => {
+                          tomSelect.addOption({
+                            value: vlan.id,
+                            text: vlan.display || `${vlan.vid} - ${vlan.name || ''}`
+                          });
+                        });
+                        tomSelect.refreshOptions(false);
+                        console.log(`✓ Populated tagged VLANs dropdown (TomSelect) with ${data.vlans.length} VLANs from site`);
+                      } else {
+                        // Plain HTML select - use innerHTML
+                        taggedVlansSelect.innerHTML = '<option value="">---------</option>';
+                        data.vlans.forEach(vlan => {
+                          const option = document.createElement('option');
+                          option.value = vlan.id;
+                          option.textContent = vlan.display || `${vlan.vid} - ${vlan.name || ''}`;
+                          taggedVlansSelect.appendChild(option);
+                        });
+                        console.log(`✓ Populated tagged VLANs dropdown (HTML) with ${data.vlans.length} VLANs from site`);
+                      }
+                    } else {
+                      // Clear dropdown
+                      if (taggedVlansSelect.tomselect) {
+                        taggedVlansSelect.tomselect.clearOptions();
+                        taggedVlansSelect.tomselect.addOption({value: '', text: '---------'});
+                        taggedVlansSelect.tomselect.refreshOptions(false);
+                      } else {
+                        taggedVlansSelect.innerHTML = '<option value="">---------</option>';
+                      }
+                      console.log('⚠ No VLANs found for this site - tagged dropdown cleared');
+                    }
+                  } else {
+                    console.error('❌ Tagged VLANs select element not found!');
                   }
                 })
                 .catch(error => {
@@ -2332,6 +2575,24 @@
 
                 devicesSelect.addEventListener('change', loadInterfacesBasedOnSyncMode);
                 
+                // Listen for TomSelect events (NetBox's default)
+                if (devicesSelect.tomselect) {
+                  devicesSelect.tomselect.on('change', loadInterfacesBasedOnSyncMode);
+                } else {
+                  // Wait for TomSelect to initialize
+                  const checkTomSelect = setInterval(function() {
+                    if (devicesSelect.tomselect) {
+                      devicesSelect.tomselect.on('change', loadInterfacesBasedOnSyncMode);
+                      clearInterval(checkTomSelect);
+                      const currentValue = devicesSelect.tomselect.getValue();
+                      if (currentValue && (Array.isArray(currentValue) ? currentValue.length > 0 : currentValue)) {
+                        loadInterfacesBasedOnSyncMode();
+                      }
+                    }
+                  }, 100);
+                  setTimeout(function() { clearInterval(checkTomSelect); }, 5000);
+                }
+                
                 // Listen for Select2 events (if Select2 is initialized and jQuery is available)
                 if (typeof jQuery !== 'undefined' && jQuery(devicesSelect).data('select2')) {
                   jQuery(devicesSelect).on('select2:select select2:unselect select2:clear', loadInterfacesBasedOnSyncMode);
@@ -2349,7 +2610,18 @@
                   setTimeout(function() { clearInterval(checkSelect2); }, 5000);
                 }
 
+                // Check if devices are already selected (native select or Select2)
+                let hasSelectedDevices = false;
                 if (devicesSelect.selectedOptions && devicesSelect.selectedOptions.length > 0) {
+                  hasSelectedDevices = true;
+                } else if (typeof jQuery !== 'undefined' && jQuery(devicesSelect).data('select2')) {
+                  const select2Value = jQuery(devicesSelect).val();
+                  if (select2Value && (Array.isArray(select2Value) ? select2Value.length > 0 : select2Value)) {
+                    hasSelectedDevices = true;
+                  }
+                }
+                
+                if (hasSelectedDevices) {
                   loadInterfacesBasedOnSyncMode();
                 }
               }
