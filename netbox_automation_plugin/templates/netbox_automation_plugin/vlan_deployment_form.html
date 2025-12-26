@@ -728,6 +728,19 @@
     margin: 0 !important;
     padding: 0 !important;
   }
+  
+  /* Ensure group fields are hidden by default when single mode is active */
+  #single-device-fields[style*="display: block"] ~ #group-device-fields,
+  body:has(input[name="deployment_scope"][value="single"]:checked) #group-device-fields {
+    display: none !important;
+    visibility: hidden !important;
+  }
+  
+  /* Ensure single fields are hidden when group mode is active */
+  body:has(input[name="deployment_scope"][value="group"]:checked) #single-device-fields {
+    display: none !important;
+    visibility: hidden !important;
+  }
 </style>
   <div class="row">
     <div class="col-md-12">
@@ -825,7 +838,7 @@
             </div>
 
             {# Device Group Mode Fields #}
-            <div id="group-device-fields">
+            <div id="group-device-fields" style="display: none;">
               <div class="mb-3">
                 <label for="{{ form.site.id_for_label }}" class="form-label required">{{ form.site.label }}</label>
                 {{ form.site }}
@@ -1123,11 +1136,15 @@
                 const groupFields = document.getElementById('group-device-fields');
                 console.log('Default mode - singleFields:', !!singleFields, 'groupFields:', !!groupFields);
                 if (singleFields) {
-                  singleFields.setAttribute('style', 'display: block !important;');
+                  singleFields.style.display = 'block';
+                  singleFields.style.visibility = 'visible';
+                  singleFields.setAttribute('style', 'display: block !important; visibility: visible !important;');
                   console.log('Set singleFields display to block');
                 }
                 if (groupFields) {
-                  groupFields.setAttribute('style', 'display: none !important;');
+                  groupFields.style.display = 'none';
+                  groupFields.style.visibility = 'hidden';
+                  groupFields.setAttribute('style', 'display: none !important; visibility: hidden !important;');
                   console.log('Set groupFields display to none');
                 }
                 return;
@@ -1153,13 +1170,23 @@
 
               if (scope === 'single') {
                 console.log('>>> Showing single device fields, hiding group fields');
-                singleFields.setAttribute('style', 'display: block !important;');
-                groupFields.setAttribute('style', 'display: none !important;');
+                // Use multiple methods to ensure it works
+                singleFields.style.display = 'block';
+                singleFields.style.visibility = 'visible';
+                singleFields.setAttribute('style', 'display: block !important; visibility: visible !important;');
+                groupFields.style.display = 'none';
+                groupFields.style.visibility = 'hidden';
+                groupFields.setAttribute('style', 'display: none !important; visibility: hidden !important;');
                 console.log('Applied styles - singleFields.display:', singleFields.style.display, 'groupFields.display:', groupFields.style.display);
               } else {
                 console.log('>>> Showing group device fields, hiding single fields');
-                singleFields.setAttribute('style', 'display: none !important;');
-                groupFields.setAttribute('style', 'display: block !important;');
+                // Use multiple methods to ensure it works
+                singleFields.style.display = 'none';
+                singleFields.style.visibility = 'hidden';
+                singleFields.setAttribute('style', 'display: none !important; visibility: hidden !important;');
+                groupFields.style.display = 'block';
+                groupFields.style.visibility = 'visible';
+                groupFields.setAttribute('style', 'display: block !important; visibility: visible !important;');
                 console.log('Applied styles - singleFields.display:', singleFields.style.display, 'groupFields.display:', groupFields.style.display);
               }
               
@@ -2564,14 +2591,34 @@
               
               // Set initial state first (critical - this must run on page load)
               console.log('Step 1: Calling updateFieldVisibility...');
-              // Call immediately and also with delay to ensure it works
-              updateFieldVisibility();
-              setTimeout(() => {
+              // Force immediate execution
+              try {
                 updateFieldVisibility();
+              } catch (e) {
+                console.error('Error in updateFieldVisibility:', e);
+              }
+              // Also call with delays to ensure it works
+              setTimeout(() => {
+                try {
+                  updateFieldVisibility();
+                } catch (e) {
+                  console.error('Error in updateFieldVisibility (50ms):', e);
+                }
               }, 50);
               setTimeout(() => {
-                updateFieldVisibility();
+                try {
+                  updateFieldVisibility();
+                } catch (e) {
+                  console.error('Error in updateFieldVisibility (200ms):', e);
+                }
               }, 200);
+              setTimeout(() => {
+                try {
+                  updateFieldVisibility();
+                } catch (e) {
+                  console.error('Error in updateFieldVisibility (500ms):', e);
+                }
+              }, 500);
               
               console.log('Step 2: Calling updateSyncModeState...');
               updateSyncModeState();
@@ -2626,8 +2673,26 @@
 
               // Listen for scope changes
               document.querySelectorAll('input[name="deployment_scope"]').forEach(radio => {
-                radio.addEventListener('change', updateFieldVisibility);
+                radio.addEventListener('change', function() {
+                  console.log('Deployment scope changed to:', this.value);
+                  updateFieldVisibility();
+                  // Also run multiple times to ensure it takes effect
+                  setTimeout(updateFieldVisibility, 50);
+                  setTimeout(updateFieldVisibility, 200);
+                });
               });
+              
+              // Also add MutationObserver to catch any dynamic changes
+              const observer = new MutationObserver(function(mutations) {
+                const scopeRadio = document.querySelector('input[name="deployment_scope"]:checked');
+                if (scopeRadio) {
+                  updateFieldVisibility();
+                }
+              });
+              const scopeContainer = document.querySelector('input[name="deployment_scope"]')?.closest('.mb-3');
+              if (scopeContainer) {
+                observer.observe(scopeContainer, { attributes: true, childList: true, subtree: true });
+              }
 
               // Listen for sync mode checkbox changes
               const syncCheckbox = document.getElementById('id_sync_netbox_to_device');
@@ -2894,15 +2959,19 @@
                   if (scopeRadio && scopeRadio.value === 'group') {
                     console.log('Setting group mode - hiding single, showing group');
                     singleFields.style.display = 'none';
-                    singleFields.setAttribute('style', 'display: none !important;');
+                    singleFields.style.visibility = 'hidden';
+                    singleFields.setAttribute('style', 'display: none !important; visibility: hidden !important;');
                     groupFields.style.display = 'block';
-                    groupFields.setAttribute('style', 'display: block !important;');
+                    groupFields.style.visibility = 'visible';
+                    groupFields.setAttribute('style', 'display: block !important; visibility: visible !important;');
                   } else {
                     console.log('Setting single mode - showing single, hiding group');
                     singleFields.style.display = 'block';
-                    singleFields.setAttribute('style', 'display: block !important;');
+                    singleFields.style.visibility = 'visible';
+                    singleFields.setAttribute('style', 'display: block !important; visibility: visible !important;');
                     groupFields.style.display = 'none';
-                    groupFields.setAttribute('style', 'display: none !important;');
+                    groupFields.style.visibility = 'hidden';
+                    groupFields.setAttribute('style', 'display: none !important; visibility: hidden !important;');
                   }
                 }
               } catch (e) {
