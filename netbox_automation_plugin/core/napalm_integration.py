@@ -333,6 +333,31 @@ class NAPALMDeviceManager:
         Note: This method loads config but does NOT commit.
               Use deploy_config_safe() for production deployments with failsafe.
         """
+        # CRITICAL: Validate config parameter
+        if config is None:
+            logger.error(f"load_config called with None config for {self.device.name}")
+            self._last_load_error = {
+                'error': 'Config parameter is None',
+                'exception_type': 'ValueError'
+            }
+            return False
+        
+        # Convert to string and strip
+        if not isinstance(config, str):
+            config = str(config) if config else ''
+        
+        config = config.strip()
+        
+        if not config:
+            logger.error(f"load_config called with empty config for {self.device.name}")
+            self._last_load_error = {
+                'error': 'Config parameter is empty',
+                'exception_type': 'ValueError'
+            }
+            return False
+        
+        logger.debug(f"[load_config] Config validated: {len(config)} characters, {len(config.splitlines())} lines")
+        
         if not self.connection:
             if not self.connect():
                 logger.error(f"Failed to connect to {self.device.name} for load_config")
@@ -1216,6 +1241,41 @@ class NAPALMDeviceManager:
                 'logs': list
             }
         """
+        # CRITICAL: Validate config parameter before proceeding
+        if config is None:
+            error_msg = "Config parameter is None - cannot deploy empty configuration"
+            logger.error(f"CRITICAL: {error_msg}")
+            return {
+                'success': False,
+                'committed': False,
+                'rolled_back': False,
+                'message': error_msg,
+                'verification_results': {},
+                'config_deployed': None,
+                'logs': [f"[FAIL] {error_msg}"]
+            }
+        
+        # Convert config to string and strip whitespace
+        if not isinstance(config, str):
+            config = str(config) if config else ''
+        
+        config = config.strip()
+        
+        if not config:
+            error_msg = "Config parameter is empty - cannot deploy empty configuration"
+            logger.error(f"CRITICAL: {error_msg}")
+            return {
+                'success': False,
+                'committed': False,
+                'rolled_back': False,
+                'message': error_msg,
+                'verification_results': {},
+                'config_deployed': '',
+                'logs': [f"[FAIL] {error_msg}"]
+            }
+        
+        logger.debug(f"[VALIDATION] Config parameter validated: {len(config)} characters, {len(config.splitlines())} lines")
+        
         result = {
             'success': False,
             'committed': False,
@@ -1901,6 +1961,141 @@ class NAPALMDeviceManager:
         # Store driver_name for use in baseline collection (needed for bond membership check)
         self._driver_name_for_baseline = driver_name
         
+        # Track pending commits from BEFORE our deployment (to avoid aborting our own)
+        self._pending_revisions_before_deployment = []
+        
+        # PRE-PHASE 1: Check for and abort ANY existing pending commits from ANY user/previous deployment
+        # This ensures we have a clean state before loading our config
+        # IMPORTANT: We check BEFORE load_config() so we know any pending commit is NOT ours
+        # CRITICAL: We check for ALL pending commits from ALL users, not just our own
+        if driver_name == 'cumulus' and not use_eos_session:
+            try:
+                logs.append(f"")
+                logs.append(f"[Pre-Phase 1] Checking for existing pending commits from ALL users...")
+                existing_pending_revisions = []  # Changed to list to track ALL pending commits
+                
+                if hasattr(self.connection, 'device') and hasattr(self.connection.device, 'send_command'):
+                    # Check for pending commits using JSON (most reliable - shows ALL pending commits from ALL users)
+                    try:
+                        revision_json_before = self.connection.device.send_command('nv config revision -o json', read_timeout=10)
+                        if revision_json_before:
+                            import json
+                            rev_data_before = json.loads(revision_json_before)
+                            for rev_id, rev_info in rev_data_before.items():
+                                if isinstance(rev_info, dict) and rev_info.get('state') == 'confirm':
+                                    # Found a pending commit - get user info if available
+                                    rev_user = rev_info.get('user', 'unknown')
+                                    rev_date = rev_info.get('date', 'unknown')
+                                    
+                                    existing_pending_revisions.append({
+                                        'rev_id': str(rev_id),
+                                        'user': rev_user,
+                                        'date': rev_date
+                                    })
+                                    # Track this as a pre-deployment pending commit (NOT ours)
+                                    self._pending_revisions_before_deployment.append(str(rev_id))
+                                    logger.warning(f"[Pre-Phase 1] Found existing pending commit-confirm: revision {rev_id} (user: {rev_user}, date: {rev_date})")
+                                    logs.append(f"  ⚠ Found pending commit-confirm session:")
+                                    logs.append(f"    Revision: {rev_id}")
+                                    logs.append(f"    User: {rev_user}")
+                                    logs.append(f"    Date: {rev_date}")
+                                    logs.append(f"    This is from a PREVIOUS deployment/user (not ours - will abort")
+                    except Exception as json_error:
+                        logger.debug(f"Could not check revision JSON before Phase 1: {json_error}")
+                    
+                    # Fallback: Check history text output (if JSON didn't find any)
+                    if not existing_pending_revisions:
+                        try:
+                            # Get ALL pending commits from history (not just first one)
+                            pending_before = self.connection.device.send_command('nv config history | grep -i "pending\\|confirm\\|\\*"', read_timeout=10)
+                            if pending_before:
+                                import re
+                                # Parse all pending commits from history output
+                                for line in pending_before.split('\n'):
+                                    if line and ('*' in line or 'pending' in line.lower() or 'confirm' in line.lower()):
+                                        # Try to extract revision ID
+                                        rev_match = re.search(r'Currently pending\s*\[rev_id:\s*(\d+)\]', line, re.IGNORECASE)
+                                        if not rev_match:
+                                            rev_match = re.search(r'Revision:\s*(\d+)', line)
+                                        if not rev_match:
+                                            rev_match = re.search(r'^\s*(\d+)\s*\*', line)
+                                        if rev_match:
+                                            rev_id = rev_match.group(1)
+                                            # Only add if not already found via JSON
+                                            if rev_id not in [r['rev_id'] for r in existing_pending_revisions]:
+                                                existing_pending_revisions.append({
+                                                    'rev_id': rev_id,
+                                                    'user': 'unknown',
+                                                    'date': 'unknown',
+                                                    'source': 'history_text'
+                                                })
+                                                # Track this as a pre-deployment pending commit (NOT ours)
+                                                if rev_id not in self._pending_revisions_before_deployment:
+                                                    self._pending_revisions_before_deployment.append(rev_id)
+                                                logger.warning(f"[Pre-Phase 1] Found pending commit in history text: revision {rev_id}")
+                                                logs.append(f"  ⚠ Found pending commit in history:")
+                                                logs.append(f"    Revision: {rev_id}")
+                                                logs.append(f"    This is from a PREVIOUS deployment/user (not ours)")
+                        except Exception as history_error:
+                            logger.debug(f"Could not check history before Phase 1: {history_error}")
+                    
+                    # If we found ANY existing pending commits, abort ALL of them
+                    if existing_pending_revisions:
+                        logs.append(f"")
+                        logs.append(f"  Found {len(existing_pending_revisions)} pending commit(s) from previous deployment(s)/user(s)")
+                        logs.append(f"  Will abort ALL of them to ensure clean state...")
+                        
+                        # Abort all pending commits (nv config abort aborts the current pending commit)
+                        # We may need to call it multiple times if there are multiple pending commits
+                        for pending_rev in existing_pending_revisions:
+                            rev_id = pending_rev['rev_id']
+                            rev_user = pending_rev.get('user', 'unknown')
+                            try:
+                                logger.info(f"[Pre-Phase 1] Aborting pending commit {rev_id} (user: {rev_user})...")
+                                logs.append(f"  Aborting pending commit {rev_id} (user: {rev_user})...")
+                                abort_output = self.connection.device.send_command('nv config abort', read_timeout=30)
+                                logger.info(f"[Pre-Phase 1] Abort output for revision {rev_id}: {abort_output}")
+                                logs.append(f"    Abort output: {abort_output[:200] if abort_output else 'No output'}")
+                                
+                                # Small delay between aborts if multiple
+                                if len(existing_pending_revisions) > 1:
+                                    time.sleep(0.5)
+                            except Exception as abort_error:
+                                logger.error(f"[Pre-Phase 1] Failed to abort pending commit {rev_id}: {abort_error}")
+                                logs.append(f"    ✗ Failed to abort revision {rev_id}: {str(abort_error)}")
+                        
+                        # Wait a moment and verify ALL pending commits are gone
+                        time.sleep(1)
+                        recheck_json = self.connection.device.send_command('nv config revision -o json', read_timeout=10)
+                        if recheck_json:
+                            import json
+                            recheck_data = json.loads(recheck_json)
+                            still_pending_list = []
+                            for rev_id, rev_info in recheck_data.items():
+                                if isinstance(rev_info, dict) and rev_info.get('state') == 'confirm':
+                                    still_pending_list.append(rev_id)
+                            
+                            if not still_pending_list:
+                                logger.info(f"[Pre-Phase 1] Successfully aborted ALL {len(existing_pending_revisions)} pending commit(s) - clean state achieved")
+                                logs.append(f"  ✓ Successfully aborted ALL {len(existing_pending_revisions)} pending commit(s)")
+                                logs.append(f"  ✓ Device is now in clean state - ready for new deployment")
+                            else:
+                                logger.warning(f"[Pre-Phase 1] Abort may have failed - {len(still_pending_list)} pending commit(s) still exist: {still_pending_list}")
+                                logs.append(f"  ⚠ Abort may have failed - {len(still_pending_list)} pending commit(s) still exist:")
+                                for rev_id in still_pending_list:
+                                    logs.append(f"    - Revision {rev_id}")
+                                logs.append(f"  Will proceed anyway - commit may fail with 'Pending commit confirm already in process'")
+                        else:
+                            logger.warning(f"[Pre-Phase 1] Could not verify abort - proceeding anyway")
+                            logs.append(f"  ⚠ Could not verify abort - proceeding anyway")
+                    else:
+                        logger.info(f"[Pre-Phase 1] No existing pending commits found - device is in clean state")
+                        logs.append(f"  ✓ No existing pending commits found - device is in clean state")
+            except Exception as pre_check_error:
+                logger.warning(f"[Pre-Phase 1] Could not check for existing pending commits: {pre_check_error}")
+                logs.append(f"  ⚠ Could not check for existing pending commits: {str(pre_check_error)[:100]}")
+                logs.append(f"  Will proceed anyway - commit may fail if pending commit exists")
+        
         # Phase 1: Load configuration (skip for EOS sessions - handled in Phase 2)
         if not use_eos_session:
             try:
@@ -1935,6 +2130,10 @@ class NAPALMDeviceManager:
                     except Exception as hist_error:
                         logger.debug(f"Could not get history before load: {hist_error}")
 
+                # DEBUG: Log config state before load
+                logger.debug(f"[Phase 1] Config state before load_config: type={type(config)}, len={len(config) if config else 0}, is_empty={not config or not config.strip()}")
+                logs.append(f"  [DEBUG] Config state: {len(config)} characters, {len(config.splitlines())} lines")
+                
                 try:
                     load_result = self.load_config(config, replace=replace)
                     logger.info(f"load_config() returned: {load_result}")
@@ -2064,10 +2263,14 @@ class NAPALMDeviceManager:
                                 logger.warning(f"Could not validate candidate config: {candidate_check_error}")
                                 # Continue - this is not critical, just a validation step
                             
-                            # Check history after load
+                            # Check history after load (for debugging - shows candidate revision, NOT commit-confirm session)
+                            # NOTE: "Currently pending [rev_id: X]" in history after load_config() is just the CANDIDATE revision
+                            # It becomes a commit-confirm session only after commit_config() is called
                             history_after_load = self.connection.device.send_command('nv config history | head -3', read_timeout=10)
-                            logger.debug(f"Config history AFTER load_config:\n{history_after_load}")
+                            logger.debug(f"Config history AFTER load_config (shows candidate revision, not commit-confirm):\n{history_after_load}")
                             logs.append(f"  [DEBUG] History after load (last 3 entries):")
+                            logs.append(f"  [NOTE] 'Currently pending [rev_id: X]' shown here is the CANDIDATE revision (from load_config)")
+                            logs.append(f"  [NOTE] It becomes a commit-confirm session only after commit_config() in Phase 2")
                             for line in history_after_load.split('\n')[:3]:
                                 if line.strip():
                                     logs.append(f"    {line.strip()}")
@@ -2250,10 +2453,12 @@ class NAPALMDeviceManager:
                                 diff_shown = True
                         
                         if not diff_shown:
-                            logs.append(f"    (no changes detected)")
+                            logs.append(f"    (no changes detected - configuration already applied to device)")
+                            logs.append(f"    ℹ Device is already in the desired state - no changes needed")
                     else:
-                        logger.warning(f"No configuration differences detected - config may already be applied")
-                        logs.append(f"  ⚠ No configuration differences detected")
+                        logger.info(f"No configuration differences detected - config already applied")
+                        logs.append(f"  ✓ No configuration differences detected")
+                        logs.append(f"  ℹ Configuration is already applied to device - device is in desired state")
                 except Exception as e:
                     logger.debug(f"Could not get config diff (not supported by all drivers): {e}")
                     logs.append(f"  ⚠ Config diff not available (not supported by driver)")
@@ -2344,7 +2549,8 @@ class NAPALMDeviceManager:
                                     pending_before = self.connection.device.send_command('nv config history | grep -i "pending\\|confirm\\|\\*" | head -1', read_timeout=10)
                                     if pending_before and ('*' in pending_before or 'pending' in pending_before.lower() or 'confirm' in pending_before.lower()):
                                         logger.warning(f"Found existing pending commit in history: {pending_before}")
-                                        logs.append(f"  ⚠ WARNING: Found existing pending commit in history - may conflict")
+                                        logs.append(f"  ⚠ WARNING: Found existing pending commit-confirm session from PREVIOUS deployment")
+                                        logs.append(f"  This pending commit will block new commits - will attempt to abort it first")
                                         # Try to extract revision ID
                                         import re
                                         rev_match = re.search(r'Revision:\s*(\d+)', pending_before)
@@ -2520,9 +2726,12 @@ class NAPALMDeviceManager:
                                             if line.strip():
                                                 logs.append(f"    {line.strip()}")
                                         
-                                        if 'no changes' in diff_check.lower():
-                                            logger.warning(f"No pending changes found - commit may not have created a revision")
-                                            logs.append(f"  ⚠ Warning: No pending changes detected - config may already match")
+                                        if 'no changes' in diff_check.lower() or 'no config diff' in diff_check.lower():
+                                            logger.info(f"No pending changes found - configuration already applied to device")
+                                            logs.append(f"  ℹ No pending changes detected - configuration already applied")
+                                            logs.append(f"  ℹ Device is already in desired state - no commit-confirm session needed")
+                                            # Mark that config is already applied
+                                            result['_config_already_applied'] = True
                                         else:
                                             logger.info(f"Pending changes detected after commit")
                                             logs.append(f"  ✓ Pending changes detected")
@@ -2652,28 +2861,105 @@ class NAPALMDeviceManager:
                                 logger.debug(f"Could not use _get_pending_commits(): {json_error}")
                                 detailed_diagnostics.append(f"Method 1 error: {str(json_error)}")
                             
-                            # METHOD 2: Use nv config revision -o json directly (fallback if driver method fails)
+                            # METHOD 2: Use nv config history -o json to get ALL revisions, then find latest by timestamp
+                            # This is more reliable than nv config revision -o json which may not show latest
+                            # IMPORTANT: History JSON shows historical metadata (like "state_controls: {confirm: 90}")
+                            # which indicates HOW a commit was done, NOT the current state.
+                            # We use history ONLY to find the latest revision by timestamp, then check
+                            # nv config revision -o json for the ACTUAL current state (state == 'confirm' means pending)
                             if not actual_pending_revision:
                                 try:
-                                    revision_json_output = self.connection.device.send_command('nv config revision -o json', read_timeout=10)
-                                    detailed_diagnostics.append(f"Method 2 (nv config revision -o json): {revision_json_output[:200] if revision_json_output else 'No output'}")
-                                    if revision_json_output:
+                                    history_json_output = self.connection.device.send_command('nv config history -o json', read_timeout=10)
+                                    detailed_diagnostics.append(f"Method 2 (nv config history -o json): {history_json_output[:200] if history_json_output else 'No output'}")
+                                    if history_json_output:
                                         import json
-                                        revision_data = json.loads(revision_json_output)
-                                        # Find revisions with state == "confirm"
+                                        from datetime import datetime
+                                        history_data = json.loads(history_json_output)
+                                        
+                                        # Find the latest revision by comparing timestamps
+                                        # NOTE: We ignore "state_controls: {confirm: 90}" in history - that's just metadata
+                                        # about how the commit was done, not the current pending state
+                                        latest_revision = None
+                                        latest_timestamp = None
                                         confirm_revisions = []
-                                        for rev_id, rev_info in revision_data.items():
+                                        
+                                        for rev_id, rev_info in history_data.items():
                                             if isinstance(rev_info, dict):
-                                                state = rev_info.get('state')
-                                                if state == 'confirm':
-                                                    actual_pending_revision = str(rev_id)
-                                                    confirm_revisions.append(rev_id)
-                                                    logger.info(f"Found pending commit via JSON: {actual_pending_revision}")
-                                                    logs.append(f"  [DEBUG] Found pending commit via direct JSON: {actual_pending_revision}")
-                                                    break
+                                                # Get timestamp from revision
+                                                # Format can be: "2025-12-26T14:03:49+00:00" or "2025-09-08 18:53:20"
+                                                # Check both top-level 'date' and nested 'last-apply.date'
+                                                rev_date = rev_info.get('date') or (rev_info.get('last-apply', {}) or {}).get('date')
+                                                if rev_date:
+                                                    try:
+                                                        # Try ISO format first (2025-12-26T14:03:49+00:00)
+                                                        if 'T' in rev_date:
+                                                            rev_timestamp = datetime.fromisoformat(rev_date.replace('+00:00', ''))
+                                                        else:
+                                                            # Try space format (2025-09-08 18:53:20)
+                                                            rev_timestamp = datetime.strptime(rev_date, '%Y-%m-%d %H:%M:%S')
+                                                        
+                                                        # Check if this is the latest revision
+                                                        if latest_timestamp is None or rev_timestamp > latest_timestamp:
+                                                            latest_timestamp = rev_timestamp
+                                                            latest_revision = str(rev_id)
+                                                        
+                                                        # Also check if this revision is in confirm state (from nv config revision)
+                                                        # We'll check this separately
+                                                    except (ValueError, AttributeError) as date_error:
+                                                        logger.debug(f"Could not parse date '{rev_date}' for revision {rev_id}: {date_error}")
+                                                        # If we can't parse date, still track the revision
+                                                        if latest_revision is None:
+                                                            latest_revision = str(rev_id)
+                                        
+                                        # Now check if the latest revision is in confirm state (pending)
+                                        # CRITICAL: We check nv config revision -o json for ACTUAL current state
+                                        # History JSON's "state_controls: {confirm: 90}" is just metadata, not current state
+                                        if latest_revision:
+                                            detailed_diagnostics.append(f"Method 2: Latest revision by timestamp: {latest_revision} (date: {latest_timestamp})")
+                                            
+                                            # Check revision CURRENT state using nv config revision -o json
+                                            # This shows ONLY revisions that are currently pending (state == 'confirm')
+                                            try:
+                                                revision_json_output = self.connection.device.send_command('nv config revision -o json', read_timeout=10)
+                                                if revision_json_output:
+                                                    revision_data = json.loads(revision_json_output)
+                                                    detailed_diagnostics.append(f"Method 2: nv config revision -o json shows {len(revision_data)} revision(s) with current state")
+                                                    
+                                                    # Check if latest revision is in confirm state (currently pending)
+                                                    if latest_revision in revision_data:
+                                                        rev_info = revision_data[latest_revision]
+                                                        rev_state = rev_info.get('state') if isinstance(rev_info, dict) else None
+                                                        detailed_diagnostics.append(f"Method 2: Latest revision {latest_revision} current state: '{rev_state}'")
+                                                        
+                                                        if rev_state == 'confirm':
+                                                            # Latest revision IS currently pending
+                                                            actual_pending_revision = latest_revision
+                                                            confirm_revisions.append(latest_revision)
+                                                            logger.info(f"Found pending commit via history+revision JSON: {actual_pending_revision} (latest by timestamp, state=confirm)")
+                                                            logs.append(f"  [DEBUG] Found pending commit via history+revision JSON: {actual_pending_revision}")
+                                                            detailed_diagnostics.append(f"Method 2: ✓ Latest revision {latest_revision} is in 'confirm' state (CURRENTLY PENDING)")
+                                                        else:
+                                                            detailed_diagnostics.append(f"Method 2: Latest revision {latest_revision} state is '{rev_state}' (NOT pending - already confirmed/aborted)")
+                                                    else:
+                                                        # Latest revision not in revision JSON - means it's NOT pending
+                                                        detailed_diagnostics.append(f"Method 2: Latest revision {latest_revision} not in revision JSON (NOT pending)")
+                                                        
+                                                        # Check all revisions in revision JSON for any with confirm state
+                                                        for rev_id, rev_info in revision_data.items():
+                                                            if isinstance(rev_info, dict) and rev_info.get('state') == 'confirm':
+                                                                confirm_revisions.append(rev_id)
+                                                                if not actual_pending_revision:
+                                                                    actual_pending_revision = str(rev_id)
+                                                                    logger.info(f"Found pending commit via revision JSON: {actual_pending_revision} (not latest, but has state=confirm)")
+                                                                    logs.append(f"  [DEBUG] Found pending commit via revision JSON: {actual_pending_revision}")
+                                                                    detailed_diagnostics.append(f"Method 2: Found pending revision {rev_id} (not latest, but currently pending)")
+                                            except Exception as rev_check_error:
+                                                logger.debug(f"Could not check revision state: {rev_check_error}")
+                                                detailed_diagnostics.append(f"Method 2: Could not check revision state: {str(rev_check_error)}")
+                                        
                                         detailed_diagnostics.append(f"Method 2: Found {len(confirm_revisions)} confirm state revisions: {confirm_revisions}")
                                 except (json.JSONDecodeError, Exception) as json_error:
-                                    logger.debug(f"Could not parse revision JSON: {json_error}")
+                                    logger.debug(f"Could not parse history JSON: {json_error}")
                                     detailed_diagnostics.append(f"Method 2 error: {str(json_error)}")
                             
                             # METHOD 3: Parse nv config history text output (fallback if JSON methods fail)
@@ -2688,11 +2974,15 @@ class NAPALMDeviceManager:
                                     if pending_rev_output:
                                         import re
                                         # Try multiple regex patterns to match different output formats
-                                        # Pattern 1: "Revision: 271 * pending (confirm)"
-                                        # Pattern 2: "271 * pending"
-                                        # Pattern 3: "271 pending"
-                                        # Pattern 4: Just the number at start of line with * marker
+                                        # Pattern 1: "Currently pending [rev_id: 197]" (most common for pending commits)
+                                        # Pattern 2: "Revision: 271 * pending (confirm)"
+                                        # Pattern 3: "271 * pending"
+                                        # Pattern 4: "271 pending"
+                                        # Pattern 5: "271 ... confirm"
+                                        # Pattern 6: Just the number at start of line with * marker
                                         patterns = [
+                                            r'Currently pending\s*\[rev_id:\s*(\d+)\]',  # "Currently pending [rev_id: 197]"
+                                            r'pending\s*\[rev_id:\s*(\d+)\]',  # "pending [rev_id: 197]" (case-insensitive)
                                             r'Revision:\s*(\d+)',  # "Revision: 271"
                                             r'^\s*(\d+)\s*\*',     # "271 *"
                                             r'^\s*(\d+).*pending', # "271 ... pending"
@@ -2702,32 +2992,74 @@ class NAPALMDeviceManager:
                                         lines = pending_rev_output.split('\n')
                                         for line in lines:
                                             # Look for lines with pending/confirm indicators
-                                            if '*' in line or 'pending' in line.lower() or 'confirm' in line.lower():
+                                            if 'pending' in line.lower() or 'confirm' in line.lower() or '*' in line:
                                                 for pattern in patterns:
                                                     rev_match = re.search(pattern, line, re.IGNORECASE)
                                                     if rev_match:
                                                         actual_pending_revision = rev_match.group(1)
-                                                        logger.info(f"Found pending commit via history parsing: {actual_pending_revision}")
+                                                        logger.info(f"Found pending commit via history parsing: {actual_pending_revision} (matched pattern: {pattern})")
                                                         logs.append(f"  [DEBUG] Found pending commit via history text: {actual_pending_revision}")
+                                                        detailed_diagnostics.append(f"Method 3: Found pending revision {actual_pending_revision} in text output: {line.strip()}")
                                                         break
                                                 if actual_pending_revision:
                                                     break
+                                        
+                                        # Also verify the found revision exists in nv config revision -o json
+                                        if actual_pending_revision:
+                                            try:
+                                                revision_json_output = self.connection.device.send_command('nv config revision -o json', read_timeout=10)
+                                                if revision_json_output:
+                                                    revision_data = json.loads(revision_json_output)
+                                                    if actual_pending_revision in revision_data:
+                                                        rev_info = revision_data[actual_pending_revision]
+                                                        rev_state = rev_info.get('state') if isinstance(rev_info, dict) else None
+                                                        if rev_state == 'confirm':
+                                                            detailed_diagnostics.append(f"Method 3: Verified revision {actual_pending_revision} is in 'confirm' state (pending)")
+                                                        else:
+                                                            detailed_diagnostics.append(f"Method 3: WARNING - Revision {actual_pending_revision} found in text but state is '{rev_state}' (not confirm)")
+                                                    else:
+                                                        detailed_diagnostics.append(f"Method 3: WARNING - Revision {actual_pending_revision} found in text but NOT in revision JSON (may be stale)")
+                                            except Exception as verify_error:
+                                                logger.debug(f"Could not verify revision {actual_pending_revision}: {verify_error}")
+                                                detailed_diagnostics.append(f"Method 3: Could not verify revision state: {str(verify_error)}")
                                 except Exception as history_error:
                                     logger.debug(f"Could not parse history output: {history_error}")
                                     detailed_diagnostics.append(f"Method 3 error: {str(history_error)}")
                             
                             # If we found a pending revision, store it
                             if actual_pending_revision:
-                                result['_cumulus_pending_revision_id'] = actual_pending_revision
-                                # Also update NAPALM driver's revision_id for consistency
-                                if hasattr(self.connection, 'revision_id'):
-                                    self.connection.revision_id = actual_pending_revision
-                                logger.info(f"Found pending commit-confirm revision ID: {actual_pending_revision}")
-                                logs.append(f"  ✓ Pending revision ID captured: {actual_pending_revision}")
+                                # CRITICAL: Verify this is OUR revision (created during this deployment), not a previous one
+                                is_our_revision = actual_pending_revision not in self._pending_revisions_before_deployment
+                                
+                                if is_our_revision:
+                                    result['_cumulus_pending_revision_id'] = actual_pending_revision
+                                    # Also update NAPALM driver's revision_id for consistency
+                                    if hasattr(self.connection, 'revision_id'):
+                                        self.connection.revision_id = actual_pending_revision
+                                    logger.info(f"Found OUR pending commit-confirm revision ID: {actual_pending_revision} (created during this deployment)")
+                                    logs.append(f"  ✓ Pending revision ID captured: {actual_pending_revision}")
+                                    logs.append(f"  ℹ This is OUR revision (created during this deployment)")
+                                    detailed_diagnostics.append(f"Revision {actual_pending_revision} is OUR revision (created during this deployment)")
+                                else:
+                                    logger.warning(f"Found pending revision {actual_pending_revision} but it was present BEFORE our deployment - this should not happen!")
+                                    logs.append(f"  ⚠ WARNING: Found pending revision {actual_pending_revision} that existed BEFORE our deployment")
+                                    logs.append(f"  This suggests our Pre-Phase 1 abort may have failed")
+                                    detailed_diagnostics.append(f"WARNING: Revision {actual_pending_revision} was in pre-deployment list - abort may have failed")
+                                    # Still store it, but log the warning
+                                    result['_cumulus_pending_revision_id'] = actual_pending_revision
+                                    if hasattr(self.connection, 'revision_id'):
+                                        self.connection.revision_id = actual_pending_revision
                             else:
-                                # No pending revision found - check if commit actually happened
-                                logger.warning(f"No pending revision found using any method")
-                                logs.append(f"  ⚠ No pending revision found - checking if commit succeeded...")
+                                # No pending revision found - check if config is already applied
+                                if result.get('_config_already_applied', False):
+                                    logger.info(f"No pending revision found - configuration already applied (expected)")
+                                    logs.append(f"  ℹ No pending revision found - configuration already applied")
+                                    logs.append(f"  ℹ Device is already in desired state - no commit-confirm session needed")
+                                    logs.append(f"  ✓ Commit successful (no changes needed)")
+                                else:
+                                    # No pending revision found - check if commit actually happened
+                                    logger.warning(f"No pending revision found using any method")
+                                    logs.append(f"  ⚠ No pending revision found - checking if commit succeeded...")
                                 logs.append(f"")
                                 logs.append(f"  === DIAGNOSTICS: REVISION DETECTION ===")
                                 for diag_line in detailed_diagnostics:
@@ -2738,11 +3070,12 @@ class NAPALMDeviceManager:
                                 diff_check = self.connection.device.send_command('nv config diff', read_timeout=10)
                                 detailed_diagnostics.append(f"nv config diff check: {diff_check[:200] if diff_check else 'No output'}")
                                 
-                                if diff_check and 'no changes' in diff_check.lower():
+                                if diff_check and ('no changes' in diff_check.lower() or 'no config diff' in diff_check.lower()):
                                     # GOOD: Config is idempotent - already applied
                                     logs.append(f"  ✓ Config is idempotent - already applied (no new revision needed)")
                                     logger.info(f"Commit did not create revision because config already matches")
                                     result['_commit_idempotent'] = True
+                                    result['_config_already_applied'] = True
                                 else:
                                     # CRITICAL: No pending revision but changes exist
                                     # This means NAPALM claimed success but didn't actually create commit-confirm session
@@ -2779,31 +3112,47 @@ class NAPALMDeviceManager:
                                         logger.info(f"FALLBACK command output: {fallback_output}")
                                         logs.append(f"  [DEBUG] NVUE output: {fallback_output[:200] if fallback_output else 'No output'}")
                                         
-                                        # Wait for NVUE backend to process
-                                        time.sleep(3)
+                                        # CRITICAL: Check if NVUE says "no config diff" - this means config is already applied
+                                        # In this case, no commit-confirm session is created (expected behavior)
+                                        no_config_diff = False
+                                        if fallback_output and ('no config diff' in fallback_output.lower() or 'no changes' in fallback_output.lower()):
+                                            no_config_diff = True
+                                            logger.info(f"NVUE reports 'no config diff' - configuration already applied to device")
+                                            logs.append(f"  ℹ NVUE reports: Configuration already applied (no changes to commit)")
+                                            logs.append(f"  ℹ This is expected when device is already in desired state")
+                                            logs.append(f"  ℹ No commit-confirm session needed - device is already configured correctly")
+                                            # Mark as success - device is already in desired state
+                                            actual_pending_revision = "N/A (no changes)"  # Special marker
+                                            result['_cumulus_pending_revision_id'] = None  # No revision created
+                                            result['_config_already_applied'] = True
+                                            result['_commit_warning'] = "Config already applied - no commit needed"
                                         
-                                        # Check again for pending revision
-                                        try:
-                                            revision_json_check = self.connection.device.send_command('nv config revision -o json', read_timeout=10)
-                                            if revision_json_check:
-                                                import json
-                                                rev_data_check = json.loads(revision_json_check)
-                                                for rev_id, rev_info in rev_data_check.items():
-                                                    if isinstance(rev_info, dict) and rev_info.get('state') == 'confirm':
-                                                        actual_pending_revision = rev_id
-                                                        result['_cumulus_pending_revision_id'] = actual_pending_revision
-                                                        logger.info(f"FALLBACK SUCCESS: Found pending revision {actual_pending_revision}")
-                                                        logs.append(f"  [OK] Fallback successful - pending revision {actual_pending_revision} created")
-                                                        break
-                                        except Exception as fallback_check_error:
-                                            logger.warning(f"Could not verify fallback commit: {fallback_check_error}")
-                                        
-                                        if not actual_pending_revision:
-                                            # Fallback also failed
-                                            logs.append(f"  [FAIL] Fallback command did not create commit-confirm session")
-                                            logs.append(f"  This indicates a deeper NVUE issue")
-                                            result['_commit_warning'] = "Fallback also failed - no commit-confirm session created"
-                                            result['_detailed_diagnostics'] = detailed_diagnostics
+                                        if not no_config_diff:
+                                            # Wait for NVUE backend to process
+                                            time.sleep(3)
+                                            
+                                            # Check again for pending revision
+                                            try:
+                                                revision_json_check = self.connection.device.send_command('nv config revision -o json', read_timeout=10)
+                                                if revision_json_check:
+                                                    import json
+                                                    rev_data_check = json.loads(revision_json_check)
+                                                    for rev_id, rev_info in rev_data_check.items():
+                                                        if isinstance(rev_info, dict) and rev_info.get('state') == 'confirm':
+                                                            actual_pending_revision = rev_id
+                                                            result['_cumulus_pending_revision_id'] = actual_pending_revision
+                                                            logger.info(f"FALLBACK SUCCESS: Found pending revision {actual_pending_revision}")
+                                                            logs.append(f"  [OK] Fallback successful - pending revision {actual_pending_revision} created")
+                                                            break
+                                            except Exception as fallback_check_error:
+                                                logger.warning(f"Could not verify fallback commit: {fallback_check_error}")
+                                            
+                                            if not actual_pending_revision:
+                                                # Fallback also failed (and it's not a "no config diff" case)
+                                                logs.append(f"  [FAIL] Fallback command did not create commit-confirm session")
+                                                logs.append(f"  This indicates a deeper NVUE issue")
+                                                result['_commit_warning'] = "Fallback also failed - no commit-confirm session created"
+                                                result['_detailed_diagnostics'] = detailed_diagnostics
                                         
                                     except Exception as fallback_error:
                                         logger.error(f"FALLBACK FAILED: {fallback_error}")
@@ -3158,8 +3507,11 @@ class NAPALMDeviceManager:
                                             detailed_diagnostics.append(f"  (empty output)")
                                         
                                         # Check 2: What does nv config history show?
+                                        # NOTE: "Currently pending [rev_id: X]" in history shows the CANDIDATE revision (from load_config)
+                                        # It only becomes a commit-confirm session after commit_config() is called
                                         history_output = self.connection.device.send_command('nv config history | head -10', read_timeout=10)
                                         detailed_diagnostics.append(f"[DEBUG] nv config history output:")
+                                        detailed_diagnostics.append(f"[NOTE] 'Currently pending [rev_id: X]' is the CANDIDATE revision, not commit-confirm session")
                                         if history_output:
                                             detailed_diagnostics.append(f"  {history_output[:500]}")
                                         else:

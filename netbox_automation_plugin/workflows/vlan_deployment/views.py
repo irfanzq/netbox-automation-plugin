@@ -3082,9 +3082,90 @@ class VLANDeploymentView(View):
                 else:
                     combined_logs.append(f"  - {interface.name}")
             combined_logs.append("")
-            combined_logs.append(f"Combined configuration ({len(all_config_lines)} commands):")
-            for line in all_config_lines:
-                combined_logs.append(f"  {line}")
+            
+            # Add Current Device Configuration section (consolidated for all interfaces)
+            combined_logs.append("--- Current Device Configuration ---")
+            combined_logs.append("")
+            # Collect current configs for all interfaces
+            current_configs_collected = []
+            bridge_vlans_collected = set()
+            for item in interfaces_with_configs:
+                interface = item['interface']
+                target_interface = item.get('target_interface', interface.name)
+                try:
+                    device_config_result = self._get_current_device_config(device, interface.name, platform)
+                    current_config = device_config_result.get('current_config', None)
+                    bridge_vlans = device_config_result.get('_bridge_vlans', [])
+                    bond_member_of = device_config_result.get('bond_member_of', None)
+                    
+                    # Collect bridge VLANs
+                    if bridge_vlans:
+                        if isinstance(bridge_vlans, list):
+                            for vlan_item in bridge_vlans:
+                                if isinstance(vlan_item, (int, str)):
+                                    try:
+                                        bridge_vlans_collected.add(int(vlan_item))
+                                    except (ValueError, TypeError):
+                                        pass
+                    
+                    # Show interface config
+                    if target_interface != interface.name:
+                        combined_logs.append(f"Interface: {interface.name} → Bond: {target_interface}")
+                        if bond_member_of:
+                            bond_config = device_config_result.get('bond_interface_config', None)
+                            if bond_config and bond_config.strip() and not "ERROR:" in bond_config:
+                                combined_logs.append(f"  Bond '{target_interface}' Configuration:")
+                                for line in bond_config.split('\n'):
+                                    if line.strip():
+                                        combined_logs.append(f"    {line}")
+                    else:
+                        combined_logs.append(f"Interface: {interface.name}")
+                        if current_config and current_config.strip() and not "ERROR:" in current_config:
+                            for line in current_config.split('\n'):
+                                if line.strip():
+                                    combined_logs.append(f"  {line}")
+                        else:
+                            combined_logs.append("  (no configuration found)")
+                    combined_logs.append("")
+                except Exception as e:
+                    logger.debug(f"Could not get current config for {interface.name}: {e}")
+                    combined_logs.append(f"Interface: {interface.name}")
+                    combined_logs.append("  (unable to retrieve configuration)")
+                    combined_logs.append("")
+            
+            # Show bridge-level configuration (Cumulus only)
+            if platform == 'cumulus' and bridge_vlans_collected:
+                combined_logs.append("Bridge-Level Configuration (br_default):")
+                vlan_list_str = self._format_vlan_list(sorted(bridge_vlans_collected))
+                combined_logs.append(f"  nv set bridge domain br_default vlan {vlan_list_str}")
+                combined_logs.append("")
+            
+            # Add Current NetBox Configuration section (consolidated for all interfaces)
+            combined_logs.append("--- Current NetBox Configuration (Source of Truth) ---")
+            combined_logs.append("")
+            for item in interfaces_with_configs:
+                interface = item['interface']
+                target_interface = item.get('target_interface', interface.name)
+                combined_logs.append(f"Interface: {interface.name}" + (f" → Bond: {target_interface}" if target_interface != interface.name else ""))
+                combined_logs.append(f"  802.1Q Mode: {getattr(interface, 'mode', None) or 'N/A'}")
+                untagged_vid = interface.untagged_vlan.vid if interface.untagged_vlan else None
+                combined_logs.append(f"  Untagged VLAN: {untagged_vid or 'None'}")
+                tagged_vids = list(interface.tagged_vlans.values_list('vid', flat=True))
+                tagged_str = ', '.join(map(str, tagged_vids)) if tagged_vids else 'None'
+                combined_logs.append(f"  Tagged VLANs: [{tagged_str}]")
+                combined_logs.append("")
+            combined_logs.append("")
+            
+            # Add Proposed Device Configuration section
+            combined_logs.append("--- Proposed Device Configuration ---")
+            combined_logs.append("")
+            if all_config_lines:
+                combined_logs.append(f"Commands to be applied ({len(all_config_lines)} total):")
+                combined_logs.append("")
+                for line in all_config_lines:
+                    combined_logs.append(f"  {line}")
+            else:
+                combined_logs.append("  (no configuration commands - all VLANs may already exist)")
             combined_logs.append("")
             
             # Deploy using deploy_config_safe (single commit-confirm session)
@@ -3257,9 +3338,28 @@ class VLANDeploymentView(View):
                 consolidated_logs.append("=" * 80)
                 
                 # Add interface-specific preview logs (running config, proposed config, etc.)
+                # Filter out duplicate headers that will appear multiple times
                 preview_logs = item.get('preview_logs', [])
                 if preview_logs:
-                    consolidated_logs.extend(preview_logs)
+                    # Filter out headers that should only appear once at device level
+                    filtered_preview_logs = []
+                    skip_next_empty = False
+                    for line in preview_logs:
+                        # Skip duplicate headers that are already shown at device level
+                        if "DEPLOYMENT MODE - CONFIGURATION PREVIEW" in line:
+                            # Skip this header and the next separator/empty line
+                            skip_next_empty = True
+                            continue
+                        # Skip separator lines that are exactly "=" * 80 (duplicate device-level separators)
+                        if line.strip() == "=" * 80:
+                            skip_next_empty = True
+                            continue
+                        if skip_next_empty and not line.strip():
+                            skip_next_empty = False
+                            continue
+                        skip_next_empty = False
+                        filtered_preview_logs.append(line)
+                    consolidated_logs.extend(filtered_preview_logs)
                 
                 consolidated_logs.append("")
             
@@ -6476,11 +6576,14 @@ class VLANDeploymentView(View):
                         config_commands.append(f"   switchport mode access")
                         config_commands.append(f"   switchport access vlan {vlan_id}")
                     
+                    # Convert config_commands list to config_command string (required by _batch_deploy_interfaces_per_device)
+                    config_command_str = '\n'.join(config_commands) if config_commands else ''
+                    
                     interfaces_with_configs.append({
                         'interface': interface_obj,
                         'vlan_id': vlan_id,
                         'target_interface': target_interface,
-                        'config_commands': config_commands,
+                        'config_command': config_command_str,  # Use 'config_command' (string), not 'config_commands' (list)
                         'bond_migrated': bool(bond_deletion_commands),
                         'old_bond_name': old_bond_name,
                     })
@@ -6604,32 +6707,39 @@ class VLANDeploymentView(View):
                         else:
                             deployment_logs += f"\n[NetBox] Failed to update interface '{netbox_interface_to_update}': {netbox_result.get('error', 'Unknown error')}"
                     
-                    # Create one result per interface (all share the same deployment status)
-                    for iface_data in interfaces_with_configs:
-                        interface_name = iface_data['interface'].name
-                        
-                        # Determine netbox_updated status from stored results
-                        netbox_updated = "No"
-                        if update_netbox and deployment_success and vlan:
-                            update_result = netbox_update_results.get(interface_name)
-                            if update_result:
-                                netbox_updated = "Yes" if update_result['result'].get('success') else "Failed"
-                        
-                        results.append({
-                            "device": device, 
-                            "interface": interface_name, 
-                            "vlan_id": vlan_id, 
-                            "vlan_name": vlan_name,
-                            "status": "success" if deployment_success else "error",
-                            "config_applied": "Yes" if deployment_success else "Failed",
-                            "netbox_updated": netbox_updated,
-                            "message": batched_result.get('message', 'Deployed'),
-                            "deployment_logs": deployment_logs,
-                            "device_status": "PASS" if deployment_success else "FAIL",
-                            "interface_status": "PASS" if deployment_success else "FAIL",
-                            "overall_status": "PASS" if deployment_success else "FAILED",
-                            "risk_level": "LOW" if deployment_success else "HIGH",
-                        })
+                    # Use the consolidated result from batched deployment (single result, not per-interface)
+                    # This prevents duplicate logs and shows the proper batched deployment structure
+                    interface_names = [iface_data['interface'].name for iface_data in interfaces_with_configs]
+                    
+                    # Determine netbox_updated status (check if any interface was updated)
+                    netbox_updated = "No"
+                    if update_netbox and deployment_success and vlan:
+                        # Check if any interface was successfully updated
+                        any_updated = any(
+                            netbox_update_results.get(iface_data['interface'].name, {}).get('result', {}).get('success', False)
+                            for iface_data in interfaces_with_configs
+                        )
+                        netbox_updated = "Yes" if any_updated else "Failed"
+                    
+                    # Create a single consolidated result for all interfaces (matches batched deployment behavior)
+                    results.append({
+                        "device": device, 
+                        "interface": f"Batched ({len(interfaces_with_configs)} interfaces)", 
+                        "vlan_id": vlan_id, 
+                        "vlan_name": vlan_name,
+                        "status": "success" if deployment_success else "error",
+                        "config_applied": "Yes" if deployment_success else "Failed",
+                        "netbox_updated": netbox_updated,
+                        "message": batched_result.get('message', 'Deployed'),
+                        "deployment_logs": deployment_logs,  # This already contains the consolidated batched logs
+                        "device_status": "PASS" if deployment_success else "FAIL",
+                        "interface_status": "PASS" if deployment_success else "FAIL",
+                        "overall_status": "PASS" if deployment_success else "FAILED",
+                        "risk_level": "LOW" if deployment_success else "HIGH",
+                        "_interface_count": len(interfaces_with_configs),
+                        "_interface_names": interface_names,
+                        "is_batched": True,
+                    })
                     
                     # Add bond sync summary if any bonds were synced
                     if bond_sync_results:
