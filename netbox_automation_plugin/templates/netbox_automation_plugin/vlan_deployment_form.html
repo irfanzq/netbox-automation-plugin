@@ -813,7 +813,7 @@
             </div>
 
             {# Single Device Mode Fields #}
-            <div id="single-device-fields">
+            <div id="single-device-fields" style="display: block;">
               <div class="mb-3">
                 <label for="{{ form.devices.id_for_label }}" class="form-label required">{{ form.devices.label }}</label>
                 {{ form.devices }}
@@ -2047,9 +2047,14 @@
                   renderInterfaceCheckboxes(data.interfaces, interfacesContainer);
                   }
 
-                  // Also filter VLANs by site of selected devices
-                  console.log('About to call filterVLANsByDevices with:', selectedDeviceIds);
-                  filterVLANsByDevices(selectedDeviceIds);
+                  // Also filter VLANs by site of selected devices (only in normal mode, not sync mode)
+                  const syncCheckbox = document.getElementById('id_sync_netbox_to_device');
+                  if (!syncCheckbox || !syncCheckbox.checked) {
+                    console.log('About to call filterVLANsByDevices with:', selectedDeviceIds);
+                    setTimeout(() => {
+                      filterVLANsByDevices(selectedDeviceIds);
+                    }, 100);
+                  }
                 })
                 .catch(error => {
                   console.error('Error loading interfaces:', error);
@@ -2559,10 +2564,14 @@
               
               // Set initial state first (critical - this must run on page load)
               console.log('Step 1: Calling updateFieldVisibility...');
-              // Use setTimeout to ensure DOM is fully ready
+              // Call immediately and also with delay to ensure it works
+              updateFieldVisibility();
               setTimeout(() => {
                 updateFieldVisibility();
               }, 50);
+              setTimeout(() => {
+                updateFieldVisibility();
+              }, 200);
               
               console.log('Step 2: Calling updateSyncModeState...');
               updateSyncModeState();
@@ -2603,7 +2612,7 @@
                   } else {
                     setTimeout(() => {
                       loadCommonInterfaces();
-                      filterVLANsByDevices(selectedDeviceIds);
+                      // VLANs will be loaded by loadCommonInterfaces callback
                     }, 100);
                   }
                 }
@@ -2878,17 +2887,26 @@
                 const singleFields = document.getElementById('single-device-fields');
                 const groupFields = document.getElementById('group-device-fields');
                 
+                console.log('runImmediateFieldVisibility - scopeRadio:', scopeRadio ? scopeRadio.value : 'not found');
+                console.log('runImmediateFieldVisibility - singleFields:', !!singleFields, 'groupFields:', !!groupFields);
+                
                 if (singleFields && groupFields) {
                   if (scopeRadio && scopeRadio.value === 'group') {
+                    console.log('Setting group mode - hiding single, showing group');
+                    singleFields.style.display = 'none';
                     singleFields.setAttribute('style', 'display: none !important;');
+                    groupFields.style.display = 'block';
                     groupFields.setAttribute('style', 'display: block !important;');
                   } else {
+                    console.log('Setting single mode - showing single, hiding group');
+                    singleFields.style.display = 'block';
                     singleFields.setAttribute('style', 'display: block !important;');
+                    groupFields.style.display = 'none';
                     groupFields.setAttribute('style', 'display: none !important;');
                   }
                 }
               } catch (e) {
-                console.warn('Immediate field visibility check failed:', e);
+                console.error('Immediate field visibility check failed:', e);
               }
             }
             
@@ -2904,12 +2922,16 @@
             // Run immediately if DOM is ready
             if (document.readyState !== 'loading') {
               runImmediateFieldVisibility();
+              setTimeout(runImmediateFieldVisibility, 50);
+              setTimeout(runImmediateFieldVisibility, 200);
               runSyncCheckMultipleTimes();
             }
             
             if (document.readyState === 'loading') {
               document.addEventListener('DOMContentLoaded', function() {
                 runImmediateFieldVisibility();
+                setTimeout(runImmediateFieldVisibility, 50);
+                setTimeout(runImmediateFieldVisibility, 200);
                 runSyncCheckMultipleTimes();
                 initVlanDeploymentForm();
                 // Force white text on device names - AGGRESSIVE timing
@@ -2945,6 +2967,8 @@
             } else {
               // DOM is already ready
               runImmediateFieldVisibility();
+              setTimeout(runImmediateFieldVisibility, 50);
+              setTimeout(runImmediateFieldVisibility, 200);
               runSyncCheckMultipleTimes();
               initVlanDeploymentForm();
               forceWhiteText();
