@@ -3011,10 +3011,321 @@ class VLANDeploymentView(View):
         platform = self._get_device_platform(devices[0]) if devices else 'cumulus'
         
         logger.info(f"VLAN Sync: {len(devices)} devices, platform: {platform}, dry_run: {dry_run}, deploy_untagged: {deploy_untagged}")
-        
+
+        # ========================================================================
+        # DRY RUN MODE - Use Nornir batch deployment (ONE log per device)
+        # ========================================================================
+        if dry_run:
+            logger.info(f"[SYNC DRY RUN] Using Nornir batch deployment for {len(devices)} devices")
+
+            # Build interface list in "device:interface" format for all interfaces (tagged + untagged)
+            interface_list = []
+            interface_configs_map = {}  # Map of "device:interface" -> config_info
+
+            # Add tagged interfaces
+            for device in devices:
+                device_interfaces = tagged_interfaces_by_device.get(device.name, [])
+                for interface in device_interfaces:
+                    interface_key = f"{device.name}:{interface.name}"
+                    interface_list.append(interface_key)
+                    # Generate config from NetBox state
+                    config_info = self._generate_config_from_netbox(device, interface, platform)
+                    interface_configs_map[interface_key] = {
+                        'config_info': config_info,
+                        'interface_obj': interface,
+                        'section': 'tagged'
+                    }
+
+            # Add untagged interfaces (if enabled)
+            if deploy_untagged:
+                for device in devices:
+                    device_interfaces = untagged_interfaces_by_device.get(device.name, [])
+                    for interface in device_interfaces:
+                        interface_key = f"{device.name}:{interface.name}"
+                        interface_list.append(interface_key)
+                        # Generate config from NetBox state
+                        config_info = self._generate_config_from_netbox(device, interface, platform)
+                        interface_configs_map[interface_key] = {
+                            'config_info': config_info,
+                            'interface_obj': interface,
+                            'section': 'untagged'
+                        }
+
+            logger.info(f"[SYNC DRY RUN] Total interfaces to preview: {len(interface_list)}")
+
+            # Build bond_info_map for preview callback
+            bond_info_map = {}
+            for device in devices:
+                device_bond_map = {}
+                for interface_key in interface_list:
+                    if ':' in interface_key:
+                        iface_device_name, actual_interface_name = interface_key.split(':', 1)
+                        if iface_device_name != device.name:
+                            continue
+                    else:
+                        actual_interface_name = interface_key
+
+                    # Check bond membership
+                    try:
+                        interface_obj = Interface.objects.get(device=device, name=actual_interface_name)
+                        if hasattr(interface_obj, 'lag') and interface_obj.lag:
+                            device_bond_map[actual_interface_name] = {
+                                'bond_name': interface_obj.lag.name,
+                                'bond_id': str(interface_obj.lag.id)
+                            }
+                    except Interface.DoesNotExist:
+                        pass
+
+                if device_bond_map:
+                    bond_info_map[device.name] = device_bond_map
+
+            # Run tag validation for dry run
+            validation_results = self._validate_tags_for_dry_run(devices, interface_list)
+
+            # Create preview callback for sync mode
+            def sync_preview_callback(device, device_interfaces, platform, vlan_id, bond_info_map_param):
+                """
+                Generate dry run preview for sync mode.
+                Returns dict mapping interface names to preview results.
+                """
+                device_results = {}
+
+                for actual_interface_name in device_interfaces:
+                    interface_key = f"{device.name}:{actual_interface_name}"
+
+                    # Get config info from map
+                    if interface_key not in interface_configs_map:
+                        device_results[actual_interface_name] = {
+                            'interface_name': actual_interface_name,
+                            'error': f'Interface {interface_key} not found in config map',
+                            'overall_status': 'error',
+                            'status_message': 'Configuration not found',
+                        }
+                        continue
+
+                    config_data = interface_configs_map[interface_key]
+                    config_info = config_data['config_info']
+                    interface_obj = config_data['interface_obj']
+                    section = config_data['section']
+
+                    # Get VLAN IDs from config_info
+                    untagged_vlan_id = config_info.get('untagged_vlan')
+                    tagged_vlan_ids = config_info.get('tagged_vlans', [])
+                    primary_vlan_id = untagged_vlan_id if untagged_vlan_id else (tagged_vlan_ids[0] if tagged_vlan_ids else None)
+
+                    # Use the existing preview generation method
+                    try:
+                        preview_result = self._generate_dry_run_preview(
+                            device=device,
+                            interface_list=[actual_interface_name],
+                            platform=platform,
+                            vlan_id=primary_vlan_id,
+                            bond_info_map=bond_info_map_param,
+                            validation_results=validation_results,
+                            sync_netbox_to_device=True,
+                            untagged_vlan_id=untagged_vlan_id,
+                            tagged_vlan_ids=tagged_vlan_ids,
+                            vlan=None,
+                            primary_vlan_id=primary_vlan_id
+                        )
+
+                        # Extract the result for this interface
+                        if actual_interface_name in preview_result:
+                            device_results[actual_interface_name] = preview_result[actual_interface_name]
+                        else:
+                            device_results[actual_interface_name] = {
+                                'interface_name': actual_interface_name,
+                                'error': 'Preview generation returned no data',
+                                'overall_status': 'error',
+                                'status_message': 'Preview failed',
+                            }
+                    except Exception as e:
+                        logger.error(f"[SYNC DRY RUN] Preview generation failed for {device.name}:{actual_interface_name}: {e}")
+                        device_results[actual_interface_name] = {
+                            'interface_name': actual_interface_name,
+                            'error': str(e),
+                            'overall_status': 'error',
+                            'status_message': f'Preview generation failed: {str(e)}',
+                        }
+
+                return device_results
+
+            # Use Nornir for parallel preview generation
+            nornir_manager = NornirDeviceManager(devices=devices)
+            nornir_manager.initialize()
+
+            # Call Nornir with dry_run=True and preview callback
+            # Use a dummy VLAN ID since sync mode uses per-interface VLANs
+            nornir_results = nornir_manager.deploy_vlan(
+                interface_list=interface_list,
+                vlan_id=0,  # Dummy VLAN ID (not used in sync mode)
+                platform=platform,
+                timeout=90,
+                bond_info_map=bond_info_map if bond_info_map else None,
+                dry_run=True,
+                preview_callback=sync_preview_callback
+            )
+
+            # Process Nornir results and build final results list (ONE log per device)
+            results = []
+            for device in devices:
+                device_results_map = nornir_results.get(device.name, {})
+
+                if not device_results_map:
+                    # No results for this device
+                    results.append({
+                        "device": device.name,
+                        "interface": "N/A",
+                        "vlan_id": "N/A",
+                        "vlan_name": "N/A",
+                        "status": "ERROR",
+                        "netbox_updated": "Preview",
+                        "message": "No preview data generated",
+                        "deployment_logs": "Error: No preview data",
+                        "validation_status": "",
+                        "device_config_diff": "",
+                        "netbox_diff": "",
+                        "config_source": "error",
+                        "risk_assessment": "",
+                        "rollback_info": "",
+                        "device_status": "ERROR",
+                        "interface_status": "ERROR",
+                        "overall_status": "ERROR",
+                        "risk_level": "HIGH",
+                    })
+                    continue
+
+                # Build ONE comprehensive log for this device covering ALL interfaces
+                device_logs = []
+                device_logs.append("=" * 80)
+                device_logs.append(f"SYNC MODE DRY RUN - DEVICE: {device.name}")
+                device_logs.append("=" * 80)
+                device_logs.append("")
+                device_logs.append(f"Total Interfaces: {len(device_results_map)}")
+                device_logs.append("")
+
+                # Collect summary info
+                total_interfaces = len(device_results_map)
+                blocked_count = 0
+                warning_count = 0
+                pass_count = 0
+                error_count = 0
+
+                # Process each interface and add to device log
+                for idx, (interface_name, interface_preview) in enumerate(sorted(device_results_map.items()), 1):
+                    device_logs.append("=" * 80)
+                    device_logs.append(f"INTERFACE {idx}/{total_interfaces}: {interface_name}")
+                    device_logs.append("=" * 80)
+                    device_logs.append("")
+
+                    # Check for errors
+                    if 'error' in interface_preview:
+                        error_count += 1
+                        device_logs.append(f"[ERROR] {interface_preview.get('error', 'Unknown error')}")
+                        device_logs.append("")
+                        continue
+
+                    # Extract preview data
+                    overall_status_text = interface_preview.get('overall_status_text', 'UNKNOWN')
+                    if overall_status_text == 'BLOCKED':
+                        blocked_count += 1
+                    elif overall_status_text == 'WARN':
+                        warning_count += 1
+                    elif overall_status_text == 'PASS':
+                        pass_count += 1
+                    else:
+                        error_count += 1
+
+                    # Add interface details to device log
+                    vlan_id = interface_preview.get('vlan_id', 'N/A')
+                    vlan_name = interface_preview.get('vlan_name', 'N/A')
+                    target_interface = interface_preview.get('target_interface', interface_name)
+                    bond_member_of = interface_preview.get('bond_member_of')
+
+                    device_logs.append(f"VLAN: {vlan_id} ({vlan_name})")
+                    device_logs.append(f"Target Interface: {target_interface}")
+                    if bond_member_of:
+                        device_logs.append(f"Bond Member Of: {bond_member_of}")
+                    device_logs.append(f"Status: {overall_status_text}")
+                    device_logs.append("")
+
+                    # Add validation table
+                    validation_table = interface_preview.get('validation_table', '')
+                    if validation_table:
+                        device_logs.append("--- Validation Results ---")
+                        device_logs.append(validation_table)
+                        device_logs.append("")
+
+                    # Add config diff
+                    config_diff = interface_preview.get('config_diff', '')
+                    if config_diff:
+                        device_logs.append("--- Configuration Changes ---")
+                        device_logs.append(config_diff)
+                        device_logs.append("")
+
+                    # Add NetBox diff
+                    netbox_diff = interface_preview.get('netbox_diff', '')
+                    if netbox_diff:
+                        device_logs.append("--- NetBox Changes ---")
+                        device_logs.append(netbox_diff)
+                        device_logs.append("")
+
+                    device_logs.append("")
+
+                # Add summary at the end
+                device_logs.append("=" * 80)
+                device_logs.append("DEVICE SUMMARY")
+                device_logs.append("=" * 80)
+                device_logs.append(f"Total Interfaces: {total_interfaces}")
+                device_logs.append(f"  PASS: {pass_count}")
+                device_logs.append(f"  WARN: {warning_count}")
+                device_logs.append(f"  BLOCKED: {blocked_count}")
+                device_logs.append(f"  ERROR: {error_count}")
+                device_logs.append("")
+
+                # Determine overall device status
+                if blocked_count > 0 or error_count > 0:
+                    overall_device_status = "ERROR"
+                    overall_device_status_text = "BLOCKED" if blocked_count > 0 else "ERROR"
+                elif warning_count > 0:
+                    overall_device_status = "WARNING"
+                    overall_device_status_text = "WARN"
+                else:
+                    overall_device_status = "SUCCESS"
+                    overall_device_status_text = "PASS"
+
+                # Create ONE result entry for this device
+                results.append({
+                    "device": device.name,
+                    "interface": f"{total_interfaces} interfaces",
+                    "vlan_id": "Multiple VLANs",
+                    "vlan_name": "Sync Mode",
+                    "status": overall_device_status,
+                    "netbox_updated": "Preview",
+                    "message": f"{pass_count} PASS, {warning_count} WARN, {blocked_count} BLOCKED, {error_count} ERROR",
+                    "deployment_logs": '\n'.join(device_logs),
+                    "validation_status": "",
+                    "device_config_diff": "",
+                    "netbox_diff": "",
+                    "config_source": "batch",
+                    "risk_assessment": "",
+                    "rollback_info": "",
+                    "device_status": overall_device_status_text,
+                    "interface_status": overall_device_status_text,
+                    "overall_status": overall_device_status_text,
+                    "risk_level": "HIGH" if blocked_count > 0 else ("MEDIUM" if warning_count > 0 else "LOW"),
+                })
+
+            logger.info(f"[SYNC DRY RUN] Generated {len(results)} device-level results")
+            return results
+
+        # ========================================================================
+        # DEPLOYMENT MODE - Continue with existing per-interface code
+        # ========================================================================
+
         # Track which interfaces need auto-tagging (Section 2 only)
         interfaces_to_auto_tag = []
-        
+
         # Process Section 1: Tagged interfaces (always deploy)
         # REFACTORED: Batch all interfaces per device instead of deploying one by one
         for device in devices:
