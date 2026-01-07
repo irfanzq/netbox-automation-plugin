@@ -390,7 +390,7 @@ def napalm_get_with_proxy(task: Task, getters: List[str] = None, retrieve: str =
     log_msg += f"About to call device.open()...\n"
 
     # ALWAYS print to stdout/stderr so it appears in Docker logs
-    print(f"🔍 NAPALM CONNECTION DEBUG: {log_msg}", file=sys.stderr, flush=True)
+    print(f"DEBUG: NAPALM CONNECTION DEBUG: {log_msg}", file=sys.stderr, flush=True)
 
     # Try multiple log locations
     for log_path in ['/opt/netbox/netbox/media/napalm_debug.txt', '/tmp/napalm_connection_attempt.log']:
@@ -398,7 +398,7 @@ def napalm_get_with_proxy(task: Task, getters: List[str] = None, retrieve: str =
             with open(log_path, 'a') as f:
                 f.write(log_msg)
                 f.flush()
-            print(f"✓ Wrote debug log to {log_path}", file=sys.stderr, flush=True)
+            print(f"SUCCESS: Wrote debug log to {log_path}", file=sys.stderr, flush=True)
             break  # Success, stop trying
         except Exception as e:
             print(f"✗ Failed to write to {log_path}: {e}", file=sys.stderr, flush=True)
@@ -427,12 +427,12 @@ def napalm_get_with_proxy(task: Task, getters: List[str] = None, retrieve: str =
                 for log_path in ['/opt/netbox/netbox/media/napalm_debug.txt', '/tmp/napalm_connection_attempt.log']:
                     try:
                         with open(log_path, 'a') as f:
-                            f.write(f"✓ SUCCESS: Connected to {hostname} (attempt {attempt + 1})\n")
+                            f.write(f"SUCCESS: SUCCESS: Connected to {hostname} (attempt {attempt + 1})\n")
                             f.flush()
                         break
                     except:
                         continue
-                debug_log(f"✓ Connected to {hostname} on attempt {attempt + 1}")
+                debug_log(f"SUCCESS: Connected to {hostname} on attempt {attempt + 1}")
                 break  # Success, exit retry loop
                 
             except Exception as e:
@@ -642,7 +642,7 @@ class NetBoxORMInventory:
                 platform_creds = self.platform_credentials[driver]
                 device_username = platform_creds.get('username', self.username)
                 device_password = platform_creds.get('password', self.password)
-                logger.error(f"✓ Using platform-specific credentials for {device.name} (platform: {driver})")
+                logger.error(f"SUCCESS: Using platform-specific credentials for {device.name} (platform: {driver})")
                 logger.error(f"  Username: {device_username}")
                 logger.error(f"  Password: {'*' * len(device_password) if device_password else 'None'}")
             else:
@@ -1336,7 +1336,7 @@ class NornirDeviceManager:
                         device_bond_map = bond_info_map[device_name]
                         if actual_interface_name in device_bond_map:
                             target_interface = device_bond_map[actual_interface_name]
-                            logger.info(f"[DEBUG] ✓ BOND REDIRECT: Device {device_name}: Interface {actual_interface_name} → Bond {target_interface}")
+                            logger.info(f"[DEBUG] SUCCESS: BOND REDIRECT: Device {device_name}: Interface {actual_interface_name} → Bond {target_interface}")
                         else:
                             logger.debug(f"[DEBUG] Device {device_name}: Interface {actual_interface_name} not in bond map - using directly")
                     else:
@@ -1638,12 +1638,12 @@ def deploy_vlan_config(task, interface_name: str, vlan_id: int, platform: str, t
             
             # Debug logging
             if interface_name != netbox_interface_name:
-                logger.info(f"[DEBUG] ✓ CONFIG GENERATION: Device {device_name}: Using BOND interface '{interface_name}' (member: '{netbox_interface_name}')")
+                logger.info(f"[DEBUG] SUCCESS: CONFIG GENERATION: Device {device_name}: Using BOND interface '{interface_name}' (member: '{netbox_interface_name}')")
                 logger.info(f"[DEBUG]   Generated commands:")
                 logger.info(f"[DEBUG]     1. {bridge_vlan_cmd}")
                 logger.info(f"[DEBUG]     2. {interface_access_cmd}")
             else:
-                logger.info(f"[DEBUG] ✓ CONFIG GENERATION: Device {device_name}: Using interface '{interface_name}' directly (not a bond member)")
+                logger.info(f"[DEBUG] SUCCESS: CONFIG GENERATION: Device {device_name}: Using interface '{interface_name}' directly (not a bond member)")
                 logger.info(f"[DEBUG]   Generated commands:")
                 logger.info(f"[DEBUG]     1. {bridge_vlan_cmd}")
                 logger.info(f"[DEBUG]     2. {interface_access_cmd}")

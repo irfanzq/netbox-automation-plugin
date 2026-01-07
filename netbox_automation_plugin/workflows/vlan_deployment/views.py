@@ -4567,7 +4567,7 @@ class VLANDeploymentView(View):
                         bond_member_of = device_config_result.get('bond_member_of', None)
                         if bond_member_of:
                             device_bond_map[actual_interface_name] = bond_member_of
-                            logger.info(f"[DEBUG] ✓ BOND DETECTED: Device {device.name}: Interface {actual_interface_name} is member of bond {bond_member_of}")
+                            logger.info(f"[DEBUG] SUCCESS: BOND DETECTED: Device {device.name}: Interface {actual_interface_name} is member of bond {bond_member_of}")
                             logger.info(f"[DEBUG]   Will use bond interface '{bond_member_of}' for device config (instead of '{actual_interface_name}')")
                         else:
                             logger.debug(f"[DEBUG] No bond detected for {device.name}:{actual_interface_name} - will use interface directly")

@@ -698,7 +698,7 @@ class NAPALMDeviceManager:
         checks['connectivity'] = connectivity_result
         if not connectivity_result['success']:
             all_passed = False
-            messages.append(f"❌ Connectivity: {connectivity_result['message']}")
+            messages.append(f"ERROR: Connectivity: {connectivity_result['message']}")
             # If device is unreachable, stop here
             return {
                 'success': False,
@@ -706,7 +706,7 @@ class NAPALMDeviceManager:
                 'checks': checks
             }
         else:
-            messages.append(f"✅ Connectivity: Device responsive")
+            messages.append(f"SUCCESS: Connectivity: Device responsive")
         
         # Check 2: Interface Status (with baseline comparison)
         logger.info(f"VLAN Verification Check 2/5: Interface status...")
@@ -727,14 +727,14 @@ class NAPALMDeviceManager:
                         # Interface was UP, now it's DOWN - PROBLEM!
                         checks['interface_status'] = {
                             'success': False,
-                            'message': f"❌ Interface went DOWN! (was UP={iface_up_before}, now UP={iface_up_after})",
+                            'message': f"ERROR: Interface went DOWN! (was UP={iface_up_before}, now UP={iface_up_after})",
                             'data': {
                                 'before': {'is_up': iface_up_before, 'is_enabled': iface_enabled_before},
                                 'after': {'is_up': iface_up_after, 'is_enabled': iface_enabled_after}
                             }
                         }
                         all_passed = False
-                        messages.append(f"❌ Interface: Went DOWN (was UP)")
+                        messages.append(f"ERROR: Interface: Went DOWN (was UP)")
                         logger.error(f"CRITICAL: Interface {interface_name} went DOWN after config change!")
                     
                     # ACCEPTABLE: Interface was DOWN, still DOWN (no cable)
@@ -744,16 +744,16 @@ class NAPALMDeviceManager:
                             'message': f"Interface DOWN (was DOWN before, acceptable)",
                             'data': {'is_up': iface_up_after, 'is_enabled': iface_enabled_after}
                         }
-                        messages.append(f"✅ Interface: DOWN (no cable, expected)")
+                        messages.append(f"SUCCESS: Interface: DOWN (no cable, expected)")
                     
                     # GOOD: Interface was DOWN, now UP (cable was just plugged in)
                     elif not iface_up_before and iface_up_after:
                         checks['interface_status'] = {
                             'success': True,
-                            'message': f"✅ Interface came UP! (was DOWN, now UP - excellent!)",
+                            'message': f"SUCCESS: Interface came UP! (was DOWN, now UP - excellent!)",
                             'data': {'is_up': iface_up_after, 'is_enabled': iface_enabled_after}
                         }
-                        messages.append(f"✅ Interface: Came UP (was DOWN)")
+                        messages.append(f"SUCCESS: Interface: Came UP (was DOWN)")
                         logger.info(f"BONUS: Interface {interface_name} came UP after config change!")
                     
                     # GOOD: Interface was UP, still UP
@@ -763,7 +763,7 @@ class NAPALMDeviceManager:
                             'message': f"Interface UP (stable)",
                             'data': {'is_up': iface_up_after, 'is_enabled': iface_enabled_after}
                         }
-                        messages.append(f"✅ Interface: UP (stable)")
+                        messages.append(f"SUCCESS: Interface: UP (stable)")
                 else:
                     # No baseline, just report current status
                     checks['interface_status'] = {
@@ -771,18 +771,18 @@ class NAPALMDeviceManager:
                         'message': f"Interface exists: UP={iface_up_after}, Enabled={iface_enabled_after}",
                         'data': {'is_up': iface_up_after, 'is_enabled': iface_enabled_after}
                     }
-                    messages.append(f"✅ Interface: Exists (UP={iface_up_after})")
+                    messages.append(f"SUCCESS: Interface: Exists (UP={iface_up_after})")
             else:
                 # Interface not found
                 if baseline and baseline.get('interface'):
                     # Interface existed before, now missing - PROBLEM!
                     checks['interface_status'] = {
                         'success': False,
-                        'message': f"❌ Interface disappeared! (existed before config change)",
+                        'message': f"ERROR: Interface disappeared! (existed before config change)",
                         'data': None
                     }
                     all_passed = False
-                    messages.append(f"❌ Interface: Disappeared")
+                    messages.append(f"ERROR: Interface: Disappeared")
                     logger.error(f"CRITICAL: Interface {interface_name} disappeared after config change!")
                 else:
                     # Interface didn't exist before, still doesn't - acceptable if creating
@@ -800,7 +800,7 @@ class NAPALMDeviceManager:
             }
             logger.warning(f"Could not verify interface status: {e}")
             all_passed = False
-            messages.append(f"❌ Interface: Could not verify")
+            messages.append(f"ERROR: Interface: Could not verify")
         
         # Check 3: VLAN Configuration Applied
         logger.info(f"VLAN Verification Check 3/4: VLAN configuration...")
@@ -817,7 +817,7 @@ class NAPALMDeviceManager:
                     'data': None
                 }
                 vlan_check_passed = True
-                messages.append(f"✅ VLAN Config: Committed")
+                messages.append(f"SUCCESS: VLAN Config: Committed")
                 
             elif driver_name == 'cumulus':
                 # For Cumulus, we could check bridge membership
@@ -828,7 +828,7 @@ class NAPALMDeviceManager:
                     'data': None
                 }
                 vlan_check_passed = True
-                messages.append(f"✅ VLAN Config: Applied")
+                messages.append(f"SUCCESS: VLAN Config: Applied")
             else:
                 checks['vlan_config'] = {
                     'success': True,
@@ -836,7 +836,7 @@ class NAPALMDeviceManager:
                     'data': None
                 }
                 vlan_check_passed = True
-                messages.append(f"✅ VLAN Config: Committed")
+                messages.append(f"SUCCESS: VLAN Config: Committed")
         except Exception as e:
             checks['vlan_config'] = {
                 'success': False,
@@ -882,11 +882,11 @@ class NAPALMDeviceManager:
                 if lost_neighbors:
                     checks['lldp_neighbors'] = {
                         'success': False,
-                        'message': f"❌ Lost LLDP neighbors on other interfaces: {', '.join(lost_neighbors)}",
+                        'message': f"ERROR: Lost LLDP neighbors on other interfaces: {', '.join(lost_neighbors)}",
                         'data': {'lost_on': lost_neighbors}
                     }
                     all_passed = False
-                    messages.append(f"❌ LLDP: Lost neighbors on {len(lost_neighbors)} interface(s)")
+                    messages.append(f"ERROR: LLDP: Lost neighbors on {len(lost_neighbors)} interface(s)")
                     logger.error(f"CRITICAL: VLAN deployment broke LLDP on other interfaces: {lost_neighbors}")
 
                 # GOOD: No neighbors lost on other interfaces
@@ -908,7 +908,7 @@ class NAPALMDeviceManager:
                         'message': f"Device-level LLDP stable (total: {total_before}→{total_after}, {iface_status})",
                         'data': {'total_before': total_before, 'total_after': total_after, 'interface_status': iface_status}
                     }
-                    messages.append(f"✅ LLDP: Device-level stable ({total_after} total)")
+                    messages.append(f"SUCCESS: LLDP: Device-level stable ({total_after} total)")
                     logger.info(f"LLDP check passed: Device has {total_after} total neighbors (was {total_before})")
 
             except Exception as e:
@@ -943,11 +943,11 @@ class NAPALMDeviceManager:
                     if uptime_before > 0 and uptime_after > 0 and uptime_after < (uptime_before - 10):
                         checks['system_health'] = {
                             'success': False,
-                            'message': f"❌ Device may have rebooted! (uptime: {uptime_before}s → {uptime_after}s)",
+                            'message': f"ERROR: Device may have rebooted! (uptime: {uptime_before}s → {uptime_after}s)",
                             'data': {'uptime_before': uptime_before, 'uptime_after': uptime_after}
                         }
                         all_passed = False
-                        messages.append(f"❌ System: Possible reboot")
+                        messages.append(f"ERROR: System: Possible reboot")
                         logger.error(f"CRITICAL: Device may have rebooted - uptime decreased!")
                     else:
                         checks['system_health'] = {
@@ -955,7 +955,7 @@ class NAPALMDeviceManager:
                             'message': f"System healthy, uptime stable: {uptime_after}s",
                             'data': {'uptime': uptime_after}
                         }
-                        messages.append(f"✅ System: Healthy")
+                        messages.append(f"SUCCESS: System: Healthy")
                 else:
                     # No baseline
                     checks['system_health'] = {
@@ -963,7 +963,7 @@ class NAPALMDeviceManager:
                         'message': f"System healthy, uptime: {uptime_after}",
                         'data': {'uptime': uptime_after}
                     }
-                    messages.append(f"✅ System: Healthy")
+                    messages.append(f"SUCCESS: System: Healthy")
             else:
                 checks['system_health'] = {
                     'success': False,
@@ -971,7 +971,7 @@ class NAPALMDeviceManager:
                     'data': None
                 }
                 all_passed = False
-                messages.append(f"❌ System: Could not verify")
+                messages.append(f"ERROR: System: Could not verify")
         except Exception as e:
             checks['system_health'] = {
                 'success': False,
@@ -980,7 +980,7 @@ class NAPALMDeviceManager:
             }
             logger.warning(f"System health check failed: {e}")
             all_passed = False
-            messages.append(f"❌ System: Could not verify")
+            messages.append(f"ERROR: System: Could not verify")
         
         # Summary
         summary_message = ' | '.join(messages)
@@ -1315,10 +1315,10 @@ class NAPALMDeviceManager:
                 result['logs'] = logs
                 return result
             logger.info(f"Phase 0: Connection established successfully")
-            logs.append(f"  ✓ Connection established successfully")
+            logs.append(f"  SUCCESS: Connection established successfully")
         else:
             logger.info(f"Phase 0: Using existing connection to {self.device.name}")
-            logs.append(f"  ✓ Using existing connection")
+            logs.append(f"  SUCCESS: Using existing connection")
 
         # Log the username being used for the connection
         try:
@@ -1392,7 +1392,7 @@ class NAPALMDeviceManager:
                     
                     if snapshot_filename in verify_output:
                         logger.info(f"Snapshot file created successfully: {snapshot_filename}")
-                        logs.append(f"  ✓ Snapshot file: {snapshot_filename}")
+                        logs.append(f"  SUCCESS: Snapshot file: {snapshot_filename}")
                         # Store snapshot filename in result for later use
                         result['_pre_deployment_snapshot'] = snapshot_filename
                         result['_pre_deployment_revision'] = latest_revision
@@ -1430,7 +1430,7 @@ class NAPALMDeviceManager:
                         result['logs'] = logs
                         return result
                     logger.info(f"Connection reinitialized successfully - device object is now available")
-                    logs.append(f"  ✓ Connection reinitialized - device object available")
+                    logs.append(f"  SUCCESS: Connection reinitialized - device object available")
                 except Exception as reconnect_error:
                     error_msg = f"Failed to reinitialize connection: {reconnect_error}"
                     logger.error(f"CRITICAL: {error_msg}")
@@ -1609,7 +1609,7 @@ class NAPALMDeviceManager:
                                                     'out_errors': out_errors,
                                                 }
                                                 logger.info(f"  Baseline: {test_interface} is_up={is_up}, is_enabled={is_enabled}, in_pkts={in_pkts}, out_pkts={out_pkts}")
-                                                logs.append(f"  ✓ Interface {test_interface}: UP={is_up}, Enabled={is_enabled}, In-Pkts={in_pkts}, Out-Pkts={out_pkts}")
+                                                logs.append(f"  SUCCESS: Interface {test_interface}: UP={is_up}, Enabled={is_enabled}, In-Pkts={in_pkts}, Out-Pkts={out_pkts}")
                                                 
                                                 if test_interface != interface_name:
                                                     logs.append(f"  Note: Collected baseline for {test_interface} (interface_name was {interface_name})")
@@ -1848,7 +1848,7 @@ class NAPALMDeviceManager:
                         'description': interfaces_before[baseline_interface_name].get('description', ''),
                     }
                     logger.info(f"  Baseline: {baseline_interface_name} is_up={baseline['interface']['is_up']}, is_enabled={baseline['interface']['is_enabled']}")
-                    logs.append(f"  ✓ Interface {baseline_interface_name}: UP={baseline['interface']['is_up']}, Enabled={baseline['interface']['is_enabled']}")
+                    logs.append(f"  SUCCESS: Interface {baseline_interface_name}: UP={baseline['interface']['is_up']}, Enabled={baseline['interface']['is_enabled']}")
                     # Note if we used bond instead of member
                     if baseline_interface_name != interface_name:
                         logs.append(f"  Note: Using bond interface {baseline_interface_name} for baseline (member {interface_name})")
@@ -1895,9 +1895,9 @@ class NAPALMDeviceManager:
                             logger.info(f"  Baseline: {interface_name} has no LLDP neighbors")
 
                     logger.info(f"  Baseline: Device has {total_neighbors} total LLDP neighbors across {len(baseline['lldp_all_interfaces'])} interfaces")
-                    logs.append(f"  ✓ LLDP neighbors: {total_neighbors} total across {len(baseline['lldp_all_interfaces'])} interfaces")
+                    logs.append(f"  SUCCESS: LLDP neighbors: {total_neighbors} total across {len(baseline['lldp_all_interfaces'])} interfaces")
                     if interface_name:
-                        logs.append(f"  ✓ Interface {interface_name}: {baseline.get('lldp_neighbors', 0)} neighbors")
+                        logs.append(f"  SUCCESS: Interface {interface_name}: {baseline.get('lldp_neighbors', 0)} neighbors")
 
                 except Exception as e:
                     logger.debug(f"Could not get LLDP baseline: {e}")
@@ -1913,7 +1913,7 @@ class NAPALMDeviceManager:
                     baseline['uptime'] = facts_before.get('uptime', -1)
                     baseline['hostname'] = facts_before.get('hostname', 'unknown')
                     logger.info(f"  Baseline: Device uptime={baseline['uptime']}, hostname={baseline['hostname']}")
-                    logs.append(f"  ✓ System uptime: {baseline['uptime']}s, hostname: {baseline['hostname']}")
+                    logs.append(f"  SUCCESS: System uptime: {baseline['uptime']}s, hostname: {baseline['hostname']}")
                 else:
                     baseline['uptime'] = None
                     baseline['hostname'] = None
@@ -1936,7 +1936,7 @@ class NAPALMDeviceManager:
             # Store baseline for comparison later
             result['baseline'] = baseline
             logger.info(f"Phase 0.5: Baseline collection completed")
-            logs.append(f"  ✓ Baseline collection completed")
+            logs.append(f"  SUCCESS: Baseline collection completed")
 
         except Exception as e:
             # Baseline collection is now MANDATORY - fail deployment if it fails
@@ -2079,8 +2079,8 @@ class NAPALMDeviceManager:
                             
                             if not still_pending_list:
                                 logger.info(f"[Pre-Phase 1] Successfully aborted ALL {len(existing_pending_revisions)} pending commit(s) - clean state achieved")
-                                logs.append(f"  ✓ Successfully aborted ALL {len(existing_pending_revisions)} pending commit(s)")
-                                logs.append(f"  ✓ Device is now in clean state - ready for new deployment")
+                                logs.append(f"  SUCCESS: Successfully aborted ALL {len(existing_pending_revisions)} pending commit(s)")
+                                logs.append(f"  SUCCESS: Device is now in clean state - ready for new deployment")
                             else:
                                 logger.warning(f"[Pre-Phase 1] Abort may have failed - {len(still_pending_list)} pending commit(s) still exist: {still_pending_list}")
                                 logs.append(f"  ⚠ Abort may have failed - {len(still_pending_list)} pending commit(s) still exist:")
@@ -2092,7 +2092,7 @@ class NAPALMDeviceManager:
                             logs.append(f"  ⚠ Could not verify abort - proceeding anyway")
                     else:
                         logger.info(f"[Pre-Phase 1] No existing pending commits found - device is in clean state")
-                        logs.append(f"  ✓ No existing pending commits found - device is in clean state")
+                        logs.append(f"  SUCCESS: No existing pending commits found - device is in clean state")
             except Exception as pre_check_error:
                 logger.warning(f"[Pre-Phase 1] Could not check for existing pending commits: {pre_check_error}")
                 logs.append(f"  ⚠ Could not check for existing pending commits: {str(pre_check_error)[:100]}")
@@ -2233,7 +2233,7 @@ class NAPALMDeviceManager:
                     return result
 
                 logger.info(f"Phase 1: Configuration loaded successfully")
-                logs.append(f"  ✓ Configuration loaded to candidate config")
+                logs.append(f"  SUCCESS: Configuration loaded to candidate config")
                 
                 # CRITICAL: For Cumulus, validate that commands were actually accepted (no syntax errors)
                 # If commands had syntax errors (like "vlan add" instead of "vlan"), they might fail silently
@@ -2326,7 +2326,7 @@ class NAPALMDeviceManager:
                                     logger.warning(f"WARNING: Candidate config appears to match running config - commit may not create revision")
                                     logs.append(f"  ⚠ WARNING: Candidate config matches running config - no changes to commit")
                                 else:
-                                    logs.append(f"  ✓ Candidate config has differences from running config")
+                                    logs.append(f"  SUCCESS: Candidate config has differences from running config")
                             else:
                                 logger.warning(f"compare_config() returned empty - no diff available")
                                 logs.append(f"  ⚠ compare_config() returned empty/None")
@@ -2391,7 +2391,7 @@ class NAPALMDeviceManager:
                     if diff:
                         logger.info(f"Configuration diff preview:")
                         logger.info(diff)  # Log full diff
-                        logs.append(f"  ✓ Configuration diff:")
+                        logs.append(f"  SUCCESS: Configuration diff:")
                         logs.append(f"    Note: '-' lines show what's being removed from running config")
                         logs.append(f"          '+' lines show what's being added in candidate config")
                         
@@ -2461,7 +2461,7 @@ class NAPALMDeviceManager:
                             logs.append(f"    ℹ Device is already in the desired state - no changes needed")
                     else:
                         logger.info(f"No configuration differences detected - config already applied")
-                        logs.append(f"  ✓ No configuration differences detected")
+                        logs.append(f"  SUCCESS: No configuration differences detected")
                         logs.append(f"  ℹ Configuration is already applied to device - device is in desired state")
                 except Exception as e:
                     logger.debug(f"Could not get config diff (not supported by all drivers): {e}")
@@ -2683,8 +2683,8 @@ class NAPALMDeviceManager:
                                         logs.append(f"    Candidate revision {self._candidate_revision_id} state AFTER commit: {candidate_state_after}")
                                         
                                         if candidate_state_after == 'confirm':
-                                            logger.info(f"[DEBUG] ✓ Candidate revision WAS converted to 'confirm' state - NAPALM worked!")
-                                            logs.append(f"    ✓ Candidate revision WAS converted to 'confirm' state - NAPALM worked!")
+                                            logger.info(f"[DEBUG] SUCCESS: Candidate revision WAS converted to 'confirm' state - NAPALM worked!")
+                                            logs.append(f"    SUCCESS: Candidate revision WAS converted to 'confirm' state - NAPALM worked!")
                                             logs.append(f"    [INFO] has_pending_commit() may be giving false negative - session WAS created")
                                         elif candidate_state_after == candidate_state_before:
                                             logger.warning(f"[DEBUG] ⚠ Candidate revision state unchanged: {candidate_state_after}")
@@ -2776,8 +2776,8 @@ class NAPALMDeviceManager:
                                             napalm_failed = True
                                     else:
                                         # has_pending_commit() = True means it worked - session was created
-                                        logger.info(f"✓ NAPALM commit-confirm session created successfully (has_pending_commit=True)")
-                                        logs.append(f"  ✓ NAPALM commit-confirm session created successfully")
+                                        logger.info(f"SUCCESS: NAPALM commit-confirm session created successfully (has_pending_commit=True)")
+                                        logs.append(f"  SUCCESS: NAPALM commit-confirm session created successfully")
                                         # Note: commit_result being None is expected (NAPALM returns None on success)
                                         if commit_result is None:
                                             logger.info(f"Note: commit_config returned None (this is expected - NAPALM returns None on success)")
@@ -2822,7 +2822,7 @@ class NAPALMDeviceManager:
                                         logs.append(f"  ℹ Device is already in desired state - no commit-confirm session needed")
                                         result['_config_already_applied'] = True
                                         # This is actually success (idempotent deployment)
-                                        logs.append(f"  ✓ Configuration already applied (idempotent deployment)")
+                                        logs.append(f"  SUCCESS: Configuration already applied (idempotent deployment)")
                                     else:
                                         # Wait a moment and verify fallback created a commit-confirm session
                                         time.sleep(2)
@@ -2832,7 +2832,7 @@ class NAPALMDeviceManager:
                                                 logger.info(f"has_pending_commit() after fallback: {has_pending_after_fallback}")
                                                 logs.append(f"  [DEBUG] has_pending_commit() after fallback: {has_pending_after_fallback}")
                                                 if has_pending_after_fallback:
-                                                    logs.append(f"  ✓ Fallback commit-confirm session created successfully")
+                                                    logs.append(f"  SUCCESS: Fallback commit-confirm session created successfully")
                                                 else:
                                                     # Fallback didn't create a session - check why
                                                     logs.append(f"  ⚠ Fallback executed but no commit-confirm session created")
@@ -2856,11 +2856,11 @@ class NAPALMDeviceManager:
                                             except Exception as check_error:
                                                 logger.debug(f"Could not check has_pending_commit after fallback: {check_error}")
                                         else:
-                                            logs.append(f"  ✓ Fallback commit executed (cannot verify session - no has_pending_commit method)")
+                                            logs.append(f"  SUCCESS: Fallback commit executed (cannot verify session - no has_pending_commit method)")
                                 else:
                                     raise Exception("Cannot access Netmiko connection from NAPALM driver")
                             else:
-                                logs.append(f"  ✓ NAPALM commit_config executed successfully")
+                                logs.append(f"  SUCCESS: NAPALM commit_config executed successfully")
                         else:
                             # For other platforms (Juniper, EOS), use NAPALM's commit_config
                             commit_result = self.connection.commit_config(revert_in=timeout)
@@ -2893,7 +2893,7 @@ class NAPALMDeviceManager:
                                             result['_config_already_applied'] = True
                                         else:
                                             logger.info(f"Pending changes detected after commit")
-                                            logs.append(f"  ✓ Pending changes detected")
+                                            logs.append(f"  SUCCESS: Pending changes detected")
                                     else:
                                         logger.warning(f"diff_check returned empty/None")
                                         logs.append(f"  ⚠ Config diff returned empty")
@@ -2985,9 +2985,9 @@ class NAPALMDeviceManager:
                     raise Exception(error_msg)
                 
                 logger.info(f"Phase 2: Config committed (will auto-rollback in {timeout}s if not confirmed)")
-                logs.append(f"  ✓ Configuration committed with {timeout}s rollback timer")
+                logs.append(f"  SUCCESS: Configuration committed with {timeout}s rollback timer")
                 if attempt > 0:
-                    logs.append(f"  ✓ Succeeded after {attempt + 1} attempt(s) (concurrent workflow resolved)")
+                    logs.append(f"  SUCCESS: Succeeded after {attempt + 1} attempt(s) (concurrent workflow resolved)")
                 logs.append(f"  ⚠ Will auto-rollback if not confirmed within {timeout}s")
                 
                 # CRITICAL FIX: For Cumulus, get the actual pending revision ID after commit
@@ -3096,7 +3096,7 @@ class NAPALMDeviceManager:
                                                             confirm_revisions.append(latest_revision)
                                                             logger.info(f"Found pending commit via history+revision JSON: {actual_pending_revision} (latest by timestamp, state=confirm)")
                                                             logs.append(f"  [DEBUG] Found pending commit via history+revision JSON: {actual_pending_revision}")
-                                                            detailed_diagnostics.append(f"Method 2: ✓ Latest revision {latest_revision} is in 'confirm' state (CURRENTLY PENDING)")
+                                                            detailed_diagnostics.append(f"Method 2: SUCCESS: Latest revision {latest_revision} is in 'confirm' state (CURRENTLY PENDING)")
                                                         else:
                                                             detailed_diagnostics.append(f"Method 2: Latest revision {latest_revision} state is '{rev_state}' (NOT pending - already confirmed/aborted)")
                                                     else:
@@ -3196,7 +3196,7 @@ class NAPALMDeviceManager:
                                     if hasattr(self.connection, 'revision_id'):
                                         self.connection.revision_id = actual_pending_revision
                                     logger.info(f"Found OUR pending commit-confirm revision ID: {actual_pending_revision} (created during this deployment)")
-                                    logs.append(f"  ✓ Pending revision ID captured: {actual_pending_revision}")
+                                    logs.append(f"  SUCCESS: Pending revision ID captured: {actual_pending_revision}")
                                     logs.append(f"  ℹ This is OUR revision (created during this deployment)")
                                     detailed_diagnostics.append(f"Revision {actual_pending_revision} is OUR revision (created during this deployment)")
                                 else:
@@ -3214,7 +3214,7 @@ class NAPALMDeviceManager:
                                     logger.info(f"No pending revision found - configuration already applied (expected)")
                                     logs.append(f"  ℹ No pending revision found - configuration already applied")
                                     logs.append(f"  ℹ Device is already in desired state - no commit-confirm session needed")
-                                    logs.append(f"  ✓ Commit successful (no changes needed)")
+                                    logs.append(f"  SUCCESS: Commit successful (no changes needed)")
                                 else:
                                     # No pending revision found - check if commit actually happened
                                     logger.warning(f"No pending revision found using any method")
@@ -3231,7 +3231,7 @@ class NAPALMDeviceManager:
                                 
                                 if diff_check and ('no changes' in diff_check.lower() or 'no config diff' in diff_check.lower()):
                                     # GOOD: Config is idempotent - already applied
-                                    logs.append(f"  ✓ Config is idempotent - already applied (no new revision needed)")
+                                    logs.append(f"  SUCCESS: Config is idempotent - already applied (no new revision needed)")
                                     logger.info(f"Commit did not create revision because config already matches")
                                     result['_commit_idempotent'] = True
                                     result['_config_already_applied'] = True
@@ -3420,7 +3420,7 @@ class NAPALMDeviceManager:
                     if 'failed' in output.lower() or 'error' in output.lower():
                         raise Exception(f"Commit timer failed: {output}")
                     
-                    logs.append(f"  ✓ Configuration committed with {timer_minutes} minute rollback timer")
+                    logs.append(f"  SUCCESS: Configuration committed with {timer_minutes} minute rollback timer")
                     logs.append(f"  ⚠ Will auto-rollback if not confirmed within {timer_minutes} minutes")
 
                     # Store session info for confirmation later
@@ -3443,7 +3443,7 @@ class NAPALMDeviceManager:
                         if hasattr(self, '_eos_netmiko_conn') and not hasattr(self, '_eos_session_timer'):
                             # Session created but not committed yet - abort is valid
                             self._eos_netmiko_conn.send_command("abort")
-                            logs.append(f"  ✓ Session aborted (before commit timer)")
+                            logs.append(f"  SUCCESS: Session aborted (before commit timer)")
                     except Exception as abort_err:
                         logger.debug(f"Could not abort session: {abort_err}")
                         # If timer was already started, it will auto-rollback anyway
@@ -3456,7 +3456,7 @@ class NAPALMDeviceManager:
                 logs.append(f"  Method: Direct commit (no rollback timer)")
                 self.connection.commit_config()
                 logger.info(f"Phase 2: Config committed successfully")
-                logs.append(f"  ✓ Configuration committed")
+                logs.append(f"  SUCCESS: Configuration committed")
 
         except Exception as e:
             result['message'] = f"Failed to commit config: {str(e)}"
@@ -3465,7 +3465,7 @@ class NAPALMDeviceManager:
             logs.append(f"  Discarding configuration...")
             try:
                 self.connection.discard_config()
-                logs.append(f"  ✓ Configuration discarded")
+                logs.append(f"  SUCCESS: Configuration discarded")
             except:
                 logs.append(f"  ⚠ Could not discard configuration")
             
@@ -3509,7 +3509,7 @@ class NAPALMDeviceManager:
                 logger.info(f"  Settling... {i+1}/{settle_time}s elapsed")
             time.sleep(1)
         
-        logs.append(f"  ✓ Wait complete ({settle_time}s)")
+        logs.append(f"  SUCCESS: Wait complete ({settle_time}s)")
 
         # Phase 4: Run verification checks
         logger.info(f"Phase 4: Running verification checks...")
@@ -3531,15 +3531,15 @@ class NAPALMDeviceManager:
             # Log each verification check result
             for check_name, check_data in vlan_check['checks'].items():
                 if check_data.get('success'):
-                    logs.append(f"  ✓ {check_name}: {check_data.get('message', 'OK')}")
+                    logs.append(f"  SUCCESS: {check_name}: {check_data.get('message', 'OK')}")
                 else:
                     logs.append(f"  ✗ {check_name}: {check_data.get('message', 'FAILED')}")
 
             if all_checks_passed:
-                logger.info(f"✅ VLAN verification passed: {vlan_check['message']}")
-                logs.append(f"  ✓ All verification checks PASSED")
+                logger.info(f"SUCCESS: VLAN verification passed: {vlan_check['message']}")
+                logs.append(f"  SUCCESS: All verification checks PASSED")
             else:
-                logger.error(f"❌ VLAN verification failed: {vlan_check['message']}")
+                logger.error(f"ERROR: VLAN verification failed: {vlan_check['message']}")
                 logs.append(f"  ✗ Verification FAILED")
         else:
             # Standard verification checks
@@ -3552,7 +3552,7 @@ class NAPALMDeviceManager:
                     all_checks_passed = False
                     logs.append(f"  ✗ Connectivity: {check_result.get('message', 'FAILED')}")
                 else:
-                    logs.append(f"  ✓ Connectivity: {check_result.get('message', 'OK')}")
+                    logs.append(f"  SUCCESS: Connectivity: {check_result.get('message', 'OK')}")
 
             if 'interfaces' in checks and all_checks_passed:
                 logs.append(f"  Checking interfaces...")
@@ -3562,7 +3562,7 @@ class NAPALMDeviceManager:
                     all_checks_passed = False
                     logs.append(f"  ✗ Interfaces: {check_result.get('message', 'FAILED')}")
                 else:
-                    logs.append(f"  ✓ Interfaces: {check_result.get('message', 'OK')}")
+                    logs.append(f"  SUCCESS: Interfaces: {check_result.get('message', 'OK')}")
 
             if 'lldp' in checks and all_checks_passed:
                 logs.append(f"  Checking LLDP neighbors...")
@@ -3572,7 +3572,7 @@ class NAPALMDeviceManager:
                     all_checks_passed = False
                     logs.append(f"  ✗ LLDP: {check_result.get('message', 'FAILED')}")
                 else:
-                    logs.append(f"  ✓ LLDP: {check_result.get('message', 'OK')}")
+                    logs.append(f"  SUCCESS: LLDP: {check_result.get('message', 'OK')}")
         
         # Phase 5: Confirm or let rollback
         logs.append(f"")
@@ -3729,7 +3729,7 @@ class NAPALMDeviceManager:
                                 
                                 if is_idempotent:
                                     # GOOD: Config already matches - no commit needed (idempotent)
-                                    logs.append(f"  ✓ Config is idempotent - already applied on device")
+                                    logs.append(f"  SUCCESS: Config is idempotent - already applied on device")
                                     logs.append(f"  This is NORMAL and SAFE - no changes were needed")
                                     logger.info(f"No changes to apply - config already matches (idempotent)")
                                     result['success'] = True
@@ -3849,7 +3849,7 @@ class NAPALMDeviceManager:
                     logger.info(f"{'='*60}")
                     logger.info(f"SUCCESS: Configuration is now PERMANENT")
                     logger.info(f"{'='*60}")
-                    logs.append(f"  ✓ Commit CONFIRMED - changes are now PERMANENT")
+                    logs.append(f"  SUCCESS: Commit CONFIRMED - changes are now PERMANENT")
                     logs.append(f"")
                     
                     # POST-DEPLOYMENT VERIFICATION: Ensure no pending commit remains
@@ -3943,8 +3943,8 @@ class NAPALMDeviceManager:
                     if rollback_status is True:
                         result['message'] += f" - Auto-rollback completed"
                         logger.info(f"Auto-rollback completed: {rollback_message}")
-                        logs.append(f"  ✓ Auto-rollback completed - changes reverted")
-                        logs.append(f"  ✓ Verification: {rollback_message}")
+                        logs.append(f"  SUCCESS: Auto-rollback completed - changes reverted")
+                        logs.append(f"  SUCCESS: Verification: {rollback_message}")
                     elif rollback_status is False:
                         result['message'] += f" - Auto-rollback may have failed"
                         logger.warning(f"Auto-rollback verification failed: {rollback_message}")
@@ -3953,7 +3953,7 @@ class NAPALMDeviceManager:
                     else:
                         result['message'] += f" - Auto-rollback completed (could not verify)"
                         logger.info(f"Auto-rollback completed: {rollback_message}")
-                        logs.append(f"  ✓ Auto-rollback completed - changes reverted")
+                        logs.append(f"  SUCCESS: Auto-rollback completed - changes reverted")
                         logs.append(f"  ⚠ Note: {rollback_message}")
                     
                     logs.append(f"")
@@ -4024,7 +4024,7 @@ class NAPALMDeviceManager:
                     logger.info(f"{'='*60}")
                     logger.info(f"SUCCESS: EOS session confirmed - configuration is now PERMANENT")
                     logger.info(f"{'='*60}")
-                    logs.append(f"  ✓ EOS session CONFIRMED - changes are now PERMANENT")
+                    logs.append(f"  SUCCESS: EOS session CONFIRMED - changes are now PERMANENT")
                     logs.append(f"")
                     logs.append(f"=== DEPLOYMENT SUCCESSFUL ===")
                     result['logs'] = logs
@@ -4085,7 +4085,7 @@ class NAPALMDeviceManager:
 
                 logger.info(f"{'='*60}")
                 logger.info(f"SUCCESS: Configuration committed")
-                logs.append(f"  ✓ Configuration committed (direct commit, no rollback support)")
+                logs.append(f"  SUCCESS: Configuration committed (direct commit, no rollback support)")
                 logs.append(f"")
                 logs.append(f"=== DEPLOYMENT SUCCESSFUL ===")
                 logger.info(f"{'='*60}")
@@ -4146,8 +4146,8 @@ class NAPALMDeviceManager:
                     logger.info(f"AUTO-ROLLBACK: Device returned to previous state")
                     logger.info(f"Verification: {rollback_message}")
                     logger.info(f"{'='*60}")
-                    logs.append(f"  ✓ Auto-rollback completed - device returned to previous state")
-                    logs.append(f"  ✓ Verification: {rollback_message}")
+                    logs.append(f"  SUCCESS: Auto-rollback completed - device returned to previous state")
+                    logs.append(f"  SUCCESS: Verification: {rollback_message}")
                 elif rollback_status is False:
                     result['message'] += f" - Auto-rollback may have failed"
                     logger.warning(f"{'='*60}")
@@ -4236,7 +4236,7 @@ class NAPALMDeviceManager:
                                             logger.warning(f"Rollback command failed: {cmd} - {cmd_error}")
                                             logs.append(f"    ⚠ {cmd} - {str(cmd_error)[:50]}")
                                     
-                                    logs.append(f"  ✓ Rollback commands executed")
+                                    logs.append(f"  SUCCESS: Rollback commands executed")
                                     logs.append(f"")
                                     
                                     # Step 5: Check config diff
@@ -4245,7 +4245,7 @@ class NAPALMDeviceManager:
                                     
                                     if diff_output and diff_output.strip() and 'no changes' not in diff_output.lower():
                                         # Changes detected - need to apply
-                                        logs.append(f"  ✓ Pending changes detected:")
+                                        logs.append(f"  SUCCESS: Pending changes detected:")
                                         for line in diff_output.split('\n')[:15]:
                                             if line.strip():
                                                 logs.append(f"    {line}")
@@ -4254,15 +4254,15 @@ class NAPALMDeviceManager:
                                         # Step 6: Apply the rollback
                                         logs.append(f"  Applying rollback configuration...")
                                         apply_output = self.connection.device.send_command('nv config apply', read_timeout=30)
-                                        logs.append(f"  ✓ Rollback configuration applied")
+                                        logs.append(f"  SUCCESS: Rollback configuration applied")
                                         
                                         # Step 7: Verify rollback succeeded
                                         time.sleep(2)
                                         verify_diff = self.connection.device.send_command('nv config diff', read_timeout=10)
                                         
                                         if not verify_diff or not verify_diff.strip() or 'no changes' in verify_diff.lower():
-                                            logs.append(f"  ✓ Rollback verification: No pending changes")
-                                            logs.append(f"  ✓ Configuration successfully reverted to pre-deployment state")
+                                            logs.append(f"  SUCCESS: Rollback verification: No pending changes")
+                                            logs.append(f"  SUCCESS: Configuration successfully reverted to pre-deployment state")
                                             result['rolled_back'] = True
                                             result['message'] = f"Verification failed but surgical rollback succeeded"
                                         else:
@@ -4290,7 +4290,7 @@ class NAPALMDeviceManager:
                     logger.info(f"AUTO-ROLLBACK: Device returned to previous state")
                     logger.info(f"Note: {rollback_message}")
                     logger.info(f"{'='*60}")
-                    logs.append(f"  ✓ Auto-rollback completed - device returned to previous state")
+                    logs.append(f"  SUCCESS: Auto-rollback completed - device returned to previous state")
                     logs.append(f"  ⚠ Note: {rollback_message}")
                 
                 logs.append(f"")
@@ -4366,8 +4366,8 @@ class NAPALMDeviceManager:
                     logger.info(f"AUTO-ROLLBACK: EOS timer expired, device returned to previous state")
                     logger.info(f"Verification: {rollback_message}")
                     logger.info(f"{'='*60}")
-                    logs.append(f"  ✓ Timer expired - device automatically rolled back to previous state")
-                    logs.append(f"  ✓ Verification: {rollback_message}")
+                    logs.append(f"  SUCCESS: Timer expired - device automatically rolled back to previous state")
+                    logs.append(f"  SUCCESS: Verification: {rollback_message}")
                 elif rollback_status is False:
                     result['message'] += f" - Auto-rollback may have failed (timer expired)"
                     logger.warning(f"{'='*60}")
@@ -4382,7 +4382,7 @@ class NAPALMDeviceManager:
                     logger.info(f"AUTO-ROLLBACK: EOS timer expired, device returned to previous state")
                     logger.info(f"Note: {rollback_message}")
                     logger.info(f"{'='*60}")
-                    logs.append(f"  ✓ Timer expired - device automatically rolled back to previous state")
+                    logs.append(f"  SUCCESS: Timer expired - device automatically rolled back to previous state")
                     logs.append(f"  ⚠ Note: {rollback_message}")
                 
                 logs.append(f"")
