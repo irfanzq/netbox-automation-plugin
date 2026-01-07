@@ -4281,6 +4281,37 @@ class VLANDeploymentView(View):
             # ========================================================================
             logger.info(f"[DEPLOYMENT] Starting deployment for {len(devices)} devices")
 
+            # Try to get VLAN object and name from NetBox (best effort - may have multiple VLANs with same ID)
+            vlan = None
+            vlan_name = f"VLAN {primary_vlan_id}" if primary_vlan_id else "VLANs"
+            try:
+                # Try to find VLAN by filtering by first device's location/site
+                first_device = devices[0] if devices else None
+                if first_device and primary_vlan_id:
+                    # Try location first
+                    if first_device.location:
+                        vlans = VLAN.objects.filter(
+                            vid=primary_vlan_id,
+                            group__name__icontains=first_device.location.name
+                        )
+                        if vlans.exists():
+                            vlan = vlans.first()
+
+                    # Try site if not found by location
+                    if not vlan and first_device.site:
+                        vlans = VLAN.objects.filter(vid=primary_vlan_id, site=first_device.site)
+                        if vlans.exists():
+                            vlan = vlans.first()
+
+                    # Just get any VLAN with this ID if still not found
+                    if not vlan:
+                        vlan = VLAN.objects.filter(vid=primary_vlan_id).first()
+
+                    if vlan:
+                        vlan_name = vlan.name
+            except Exception as e:
+                logger.warning(f"Could not look up VLAN name for ID {primary_vlan_id}: {e}")
+
             # Build bond_info_map first: {device_name: {interface_name: bond_name}}
             bond_info_map = {}
             logger.info(f"[DEPLOYMENT] Building bond_info_map for {len(devices)} devices")
