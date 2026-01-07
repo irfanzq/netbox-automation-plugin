@@ -2584,47 +2584,9 @@
               console.log('Step 2: Calling updateSyncModeState...');
               updateSyncModeState();
               
-              // Step 2.5: If devices are pre-selected, load interfaces and VLANs
+              // Step 2.5: Device selection and interface loading will be handled by TomSelect listener below
+              // No need to load interfaces here - the listener will handle it when TomSelect initializes
               const devicesSelect = document.getElementById('id_devices');
-              if (devicesSelect) {
-                let hasSelectedDevices = false;
-                let selectedDeviceIds = [];
-                
-                // Check native select
-                if (devicesSelect.selectedOptions && devicesSelect.selectedOptions.length > 0) {
-                  selectedDeviceIds = Array.from(devicesSelect.selectedOptions).map(opt => opt.value);
-                  hasSelectedDevices = true;
-                }
-                // Check TomSelect
-                if (!hasSelectedDevices && devicesSelect.tomselect) {
-                  const tomSelectValue = devicesSelect.tomselect.getValue();
-                  if (tomSelectValue && (Array.isArray(tomSelectValue) ? tomSelectValue.length > 0 : tomSelectValue)) {
-                    selectedDeviceIds = Array.isArray(tomSelectValue) ? tomSelectValue : [tomSelectValue];
-                    hasSelectedDevices = true;
-                  }
-                }
-                // Check Select2
-                if (!hasSelectedDevices && typeof jQuery !== 'undefined' && jQuery(devicesSelect).data('select2')) {
-                  const select2Value = jQuery(devicesSelect).val();
-                  if (select2Value && (Array.isArray(select2Value) ? select2Value.length > 0 : select2Value)) {
-                    selectedDeviceIds = Array.isArray(select2Value) ? select2Value : [select2Value];
-                    hasSelectedDevices = true;
-                  }
-                }
-                
-                if (hasSelectedDevices && selectedDeviceIds.length > 0) {
-                  console.log('Step 2.5: Devices pre-selected, loading interfaces and VLANs...');
-                  const syncCheckbox = document.getElementById('id_sync_netbox_to_device');
-                  if (syncCheckbox && syncCheckbox.checked) {
-                    setTimeout(() => loadInterfacesForSync(), 100);
-                  } else {
-                    setTimeout(() => {
-                      loadCommonInterfaces();
-                      // VLANs will be loaded by loadCommonInterfaces callback
-                    }, 100);
-                  }
-                }
-              }
               
               console.log('Step 3: Calling setupMutuallyExclusiveCheckboxes...');
               setupMutuallyExclusiveCheckboxes();
@@ -2753,39 +2715,8 @@
                   setTimeout(function() { clearInterval(checkTomSelect); }, 5000);
                 }
 
-                // Check if devices are already selected (native select, TomSelect, or Select2)
-                let hasSelectedDevices = false;
-                let selectedDeviceIds = [];
-                
-                if (devicesSelect.selectedOptions && devicesSelect.selectedOptions.length > 0) {
-                  selectedDeviceIds = Array.from(devicesSelect.selectedOptions).map(opt => opt.value);
-                  hasSelectedDevices = true;
-                } else if (devicesSelect.tomselect) {
-                  const tomSelectValue = devicesSelect.tomselect.getValue();
-                  if (tomSelectValue && (Array.isArray(tomSelectValue) ? tomSelectValue.length > 0 : tomSelectValue)) {
-                    selectedDeviceIds = Array.isArray(tomSelectValue) ? tomSelectValue : [tomSelectValue];
-                    hasSelectedDevices = true;
-                  }
-                } else if (typeof jQuery !== 'undefined' && jQuery(devicesSelect).data('select2')) {
-                  const select2Value = jQuery(devicesSelect).val();
-                  if (select2Value && (Array.isArray(select2Value) ? select2Value.length > 0 : select2Value)) {
-                    selectedDeviceIds = Array.isArray(select2Value) ? select2Value : [select2Value];
-                    hasSelectedDevices = true;
-                  }
-                }
-                
-                if (hasSelectedDevices) {
-                  setTimeout(() => {
-                    loadInterfacesBasedOnSyncMode();
-                    // Also load VLANs if not in sync mode
-                    const syncCheckbox = document.getElementById('id_sync_netbox_to_device');
-                    if (!syncCheckbox || !syncCheckbox.checked) {
-                      if (selectedDeviceIds.length > 0) {
-                        filterVLANsByDevices(selectedDeviceIds);
-                      }
-                    }
-                  }, 200);
-                }
+                // Note: Interface loading for pre-selected devices is handled by the TomSelect listener above
+                // at line 2749 when TomSelect initializes and detects existing selection
               }
 
               // Listen for group filter changes (group mode)
