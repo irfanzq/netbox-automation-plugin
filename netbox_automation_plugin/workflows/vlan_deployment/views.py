@@ -5730,11 +5730,34 @@ class VLANDeploymentView(View):
 
                     # Start with pre-deployment logs for this interface (preview section - per interface)
                     logs = pre_deployment_logs.get(device.name, {}).get(actual_interface_name, [])
-                    
+
                     # Append consolidated deployment execution logs (same for all interfaces)
                     # This replaces any per-interface execution headers
                     logs.extend(consolidated_device_logs)
-                    
+
+                    # Get VLAN info for this interface (for results table display)
+                    # In normal mode, use form VLANs; in sync mode, get from NetBox
+                    vlan_id = None
+                    vlan_name = "N/A"
+                    if not sync_netbox_to_device:
+                        # Normal mode: use form VLANs (primary_vlan_id is defined at top of function)
+                        vlan_id = primary_vlan_id
+                        vlan_name = vlan.name if vlan else f"VLAN {primary_vlan_id}" if primary_vlan_id else "VLANs"
+                    else:
+                        # Sync mode: get VLAN from NetBox interface
+                        try:
+                            interface_obj = Interface.objects.get(device=device, name=actual_interface_name)
+                            if interface_obj.untagged_vlan:
+                                vlan_id = interface_obj.untagged_vlan.vid
+                                vlan_name = interface_obj.untagged_vlan.name or f"VLAN {vlan_id}"
+                            elif interface_obj.tagged_vlans.exists():
+                                first_tagged = interface_obj.tagged_vlans.first()
+                                vlan_id = first_tagged.vid
+                                vlan_name = first_tagged.name or f"VLAN {vlan_id}"
+                        except Interface.DoesNotExist:
+                            vlan_id = None
+                            vlan_name = "N/A"
+
                     if interface_result.get('success'):
                         status = "success"
                         config_applied = "Yes"
