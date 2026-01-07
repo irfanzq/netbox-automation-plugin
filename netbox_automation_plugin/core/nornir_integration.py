@@ -1282,21 +1282,33 @@ class NornirDeviceManager:
                 # Build combined config for all interfaces
                 all_config_lines = []
                 interface_mapping = {}  # {original_interface: target_interface} for NetBox updates
-                
+
                 for interface_name in interface_list:
-                    # Get bond interface name if available
-                    target_interface = interface_name
+                    # In sync mode, interface_name might be in "device:interface" format
+                    # Parse it and skip if it doesn't belong to this device
+                    actual_interface_name = interface_name
+                    if ':' in interface_name:
+                        # Extract device name and interface name from "device:interface" format
+                        iface_device_name, actual_interface_name = interface_name.split(':', 1)
+                        # Skip if this interface doesn't belong to current device
+                        if iface_device_name != device_name:
+                            logger.debug(f"[DEBUG] Device {device_name}: Skipping interface {interface_name} (belongs to {iface_device_name})")
+                            continue
+                        logger.debug(f"[DEBUG] Device {device_name}: Parsed {interface_name} → {actual_interface_name}")
+
+                    # Get bond interface name if available (use actual_interface_name for bond lookup)
+                    target_interface = actual_interface_name
                     if bond_info_map and device_name in bond_info_map:
                         device_bond_map = bond_info_map[device_name]
-                        if interface_name in device_bond_map:
-                            target_interface = device_bond_map[interface_name]
-                            logger.info(f"[DEBUG] ✓ BOND REDIRECT: Device {device_name}: Interface {interface_name} → Bond {target_interface}")
+                        if actual_interface_name in device_bond_map:
+                            target_interface = device_bond_map[actual_interface_name]
+                            logger.info(f"[DEBUG] ✓ BOND REDIRECT: Device {device_name}: Interface {actual_interface_name} → Bond {target_interface}")
                         else:
-                            logger.debug(f"[DEBUG] Device {device_name}: Interface {interface_name} not in bond map - using directly")
+                            logger.debug(f"[DEBUG] Device {device_name}: Interface {actual_interface_name} not in bond map - using directly")
                     else:
-                        logger.debug(f"[DEBUG] Device {device_name}: No bond map available - using interface {interface_name} directly")
-                    
-                    interface_mapping[interface_name] = target_interface
+                        logger.debug(f"[DEBUG] Device {device_name}: No bond map available - using interface {actual_interface_name} directly")
+
+                    interface_mapping[actual_interface_name] = target_interface
                     
                     # Generate config for this interface
                     if platform == 'cumulus':
@@ -1318,9 +1330,17 @@ class NornirDeviceManager:
                 if not napalm_mgr.connect():
                     error_msg = f"Failed to connect to {device_name}"
                     logger.error(error_msg)
-                    # Mark all interfaces as failed
+                    # Mark all interfaces as failed (only those belonging to this device)
                     for interface_name in interface_list:
-                        device_results[interface_name] = {
+                        # Parse interface name if in "device:interface" format
+                        actual_interface_name = interface_name
+                        if ':' in interface_name:
+                            iface_device_name, actual_interface_name = interface_name.split(':', 1)
+                            # Skip if this interface doesn't belong to current device
+                            if iface_device_name != device_name:
+                                continue
+
+                        device_results[actual_interface_name] = {
                             'success': False,
                             'committed': False,
                             'rolled_back': False,
@@ -1370,12 +1390,21 @@ class NornirDeviceManager:
                     
                     # Create result for each interface (all share same deployment result)
                     for interface_name in interface_list:
-                        target_interface = interface_mapping[interface_name]
+                        # Parse interface name if in "device:interface" format
+                        actual_interface_name = interface_name
+                        if ':' in interface_name:
+                            iface_device_name, actual_interface_name = interface_name.split(':', 1)
+                            # Skip if this interface doesn't belong to current device
+                            if iface_device_name != device_name:
+                                continue
+
+                        # Look up target interface using actual_interface_name
+                        target_interface = interface_mapping.get(actual_interface_name, actual_interface_name)
                         interface_result = deploy_result.copy()
-                        interface_result['original_interface_name'] = interface_name
+                        interface_result['original_interface_name'] = actual_interface_name
                         interface_result['target_interface'] = target_interface
                         interface_result['logs'] = deploy_result.get('logs', []).copy()  # Copy to avoid modifying shared list
-                        
+
                         # Add interface-specific note about batched deployment BEFORE the completion message
                         # Find where "=== Deployment Completed ===" appears and insert note before it
                         if interface_result['logs']:
@@ -1384,34 +1413,35 @@ class NornirDeviceManager:
                                 if "=== Deployment Completed ===" in log_line:
                                     completion_idx = i
                                     break
-                            
+
                             # Prepare note lines
                             note_lines = []
                             note_lines.append("")
                             note_lines.append("--- Batched Deployment Information ---")
-                            if target_interface != interface_name:
+                            if target_interface != actual_interface_name:
                                 # Bond detected - show both interfaces clearly
-                                note_lines.append(f"Interface '{interface_name}' (member) → '{target_interface}' (bond) was deployed as part of a batched session")
+                                note_lines.append(f"Interface '{actual_interface_name}' (member) → '{target_interface}' (bond) was deployed as part of a batched session")
                                 note_lines.append(f"with {num_interfaces} interface(s) on device {device_name} in a single commit-confirm session.")
-                                note_lines.append(f"Configuration was applied to bond interface '{target_interface}' (not member interface '{interface_name}').")
+                                note_lines.append(f"Configuration was applied to bond interface '{target_interface}' (not member interface '{actual_interface_name}').")
                             else:
                                 # No bond - just show the interface
-                                note_lines.append(f"Interface '{interface_name}' was deployed as part of a batched session")
+                                note_lines.append(f"Interface '{actual_interface_name}' was deployed as part of a batched session")
                                 note_lines.append(f"with {num_interfaces} interface(s) on device {device_name} in a single commit-confirm session.")
                             note_lines.append("")
-                            
+
                             # Insert note before completion message, or at the end if not found
                             if completion_idx is not None:
                                 interface_result['logs'] = (
-                                    interface_result['logs'][:completion_idx] + 
-                                    note_lines + 
+                                    interface_result['logs'][:completion_idx] +
+                                    note_lines +
                                     interface_result['logs'][completion_idx:]
                                 )
                             else:
                                 # If no completion message found, append at the end
                                 interface_result['logs'].extend(note_lines)
-                        
-                        device_results[interface_name] = interface_result
+
+                        # Store result using actual_interface_name as key
+                        device_results[actual_interface_name] = interface_result
                     
                     if deploy_result.get('success'):
                         logger.info(f"Device {device_name}: Successfully deployed VLAN {vlan_id} to {num_interfaces} interfaces in single session")
@@ -1430,17 +1460,27 @@ class NornirDeviceManager:
                 
             except Exception as e:
                 logger.error(f"Device {device_name}: Critical error during deployment: {e}")
-                # Mark all interfaces as failed for this device
-                with results_lock:
-                    all_results[device_name] = {
-                        iface: {
-                            'success': False,
-                            'committed': False,
-                            'rolled_back': False,
-                            'error': str(e),
-                            'message': f'Device deployment failed: {str(e)}'
-                        } for iface in interface_list
+                # Mark all interfaces as failed for this device (only those belonging to this device)
+                device_interfaces = {}
+                for iface in interface_list:
+                    # Parse interface name if in "device:interface" format
+                    actual_iface = iface
+                    if ':' in iface:
+                        iface_device_name, actual_iface = iface.split(':', 1)
+                        # Skip if this interface doesn't belong to current device
+                        if iface_device_name != device_name:
+                            continue
+
+                    device_interfaces[actual_iface] = {
+                        'success': False,
+                        'committed': False,
+                        'rolled_back': False,
+                        'error': str(e),
+                        'message': f'Device deployment failed: {str(e)}'
                     }
+
+                with results_lock:
+                    all_results[device_name] = device_interfaces
                 return device_name
         
         # Execute device deployments in parallel (limited by num_workers)
