@@ -1,10 +1,13 @@
 from django import forms
 from django.utils.translation import gettext_lazy as _
 from django.core.validators import MinValueValidator, MaxValueValidator
+import logging
 
 from dcim.models import Device, Site, Location, DeviceRole, Interface, Manufacturer
 from ipam.models import VLAN
 from extras.models import Tag
+
+logger = logging.getLogger(__name__)
 
 
 class VLANDeploymentForm(forms.Form):

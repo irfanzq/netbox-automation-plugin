@@ -2675,41 +2675,82 @@
               // Listen for device selection changes (single mode)
               // devicesSelect already declared above, reuse it
               if (devicesSelect) {
+                // Debounce mechanism to prevent multiple rapid calls
+                let interfaceLoadTimeout = null;
+                let lastDeviceSelection = null;
+
                 function loadInterfacesBasedOnSyncMode() {
-                  console.log('loadInterfacesBasedOnSyncMode called');
-                  const syncCheckbox = document.getElementById('id_sync_netbox_to_device');
-                  if (syncCheckbox && syncCheckbox.checked) {
-                    console.log('Sync mode active, loading interfaces for sync');
-                    loadInterfacesForSync();
-                  } else {
-                    console.log('Normal mode, loading common interfaces');
-                    loadCommonInterfaces();
+                  // Get current device selection
+                  let currentSelection = null;
+                  if (devicesSelect.tomselect) {
+                    currentSelection = devicesSelect.tomselect.getValue();
+                  } else if (devicesSelect.selectedOptions) {
+                    currentSelection = Array.from(devicesSelect.selectedOptions).map(opt => opt.value);
                   }
+
+                  // Convert to string for comparison
+                  const currentSelectionStr = JSON.stringify(currentSelection);
+
+                  // If selection hasn't changed, skip
+                  if (currentSelectionStr === lastDeviceSelection) {
+                    console.log('Device selection unchanged, skipping interface reload');
+                    return;
+                  }
+
+                  // Update last selection
+                  lastDeviceSelection = currentSelectionStr;
+
+                  // Clear any pending timeout
+                  if (interfaceLoadTimeout) {
+                    clearTimeout(interfaceLoadTimeout);
+                  }
+
+                  // Debounce: wait 300ms before loading interfaces
+                  interfaceLoadTimeout = setTimeout(function() {
+                    console.log('loadInterfacesBasedOnSyncMode executing (debounced)');
+                    const syncCheckbox = document.getElementById('id_sync_netbox_to_device');
+                    if (syncCheckbox && syncCheckbox.checked) {
+                      console.log('Sync mode active, loading interfaces for sync');
+                      loadInterfacesForSync();
+                    } else {
+                      console.log('Normal mode, loading common interfaces');
+                      loadCommonInterfaces();
+                    }
+                  }, 300);
                 }
 
-                // Add native change event listener
-                devicesSelect.addEventListener('change', function() {
-                  console.log('Device selection changed (native event)');
-                  loadInterfacesBasedOnSyncMode();
-                });
-                
-                // Listen for TomSelect events (NetBox's default)
-                if (devicesSelect.tomselect) {
+                // Track if event listeners have been added
+                let eventListenersAdded = false;
+
+                // Add native change event listener (only once)
+                if (!eventListenersAdded) {
+                  devicesSelect.addEventListener('change', function() {
+                    console.log('Device selection changed (native event)');
+                    loadInterfacesBasedOnSyncMode();
+                  });
+                  eventListenersAdded = true;
+                }
+
+                // Listen for TomSelect events (NetBox's default) - only if not already added
+                let tomSelectListenerAdded = false;
+                if (devicesSelect.tomselect && !tomSelectListenerAdded) {
                   console.log('TomSelect found, adding change listener');
                   devicesSelect.tomselect.on('change', function() {
                     console.log('Device selection changed (TomSelect event)');
                     loadInterfacesBasedOnSyncMode();
                   });
-                } else {
-                  // Wait for TomSelect to initialize
+                  tomSelectListenerAdded = true;
+                } else if (!tomSelectListenerAdded) {
+                  // Wait for TomSelect to initialize (only once)
                   console.log('Waiting for TomSelect to initialize...');
                   const checkTomSelect = setInterval(function() {
-                    if (devicesSelect.tomselect) {
+                    if (devicesSelect.tomselect && !tomSelectListenerAdded) {
                       console.log('TomSelect initialized, adding change listener');
                       devicesSelect.tomselect.on('change', function() {
                         console.log('Device selection changed (TomSelect event - delayed)');
                         loadInterfacesBasedOnSyncMode();
                       });
+                      tomSelectListenerAdded = true;
                       clearInterval(checkTomSelect);
                       const currentValue = devicesSelect.tomselect.getValue();
                       if (currentValue && (Array.isArray(currentValue) ? currentValue.length > 0 : currentValue)) {
@@ -2719,23 +2760,6 @@
                     }
                   }, 100);
                   setTimeout(function() { clearInterval(checkTomSelect); }, 5000);
-                }
-                
-                // Listen for Select2 events (if Select2 is initialized and jQuery is available)
-                if (typeof jQuery !== 'undefined' && jQuery(devicesSelect).data('select2')) {
-                  jQuery(devicesSelect).on('select2:select select2:unselect select2:clear', loadInterfacesBasedOnSyncMode);
-                } else if (typeof jQuery !== 'undefined') {
-                  // Wait for Select2 to initialize
-                  const checkSelect2 = setInterval(function() {
-                    if (typeof jQuery !== 'undefined' && jQuery(devicesSelect).data('select2')) {
-                      jQuery(devicesSelect).on('select2:select select2:unselect select2:clear', loadInterfacesBasedOnSyncMode);
-                      clearInterval(checkSelect2);
-                      if (typeof jQuery !== 'undefined' && jQuery(devicesSelect).val() && jQuery(devicesSelect).val().length > 0) {
-                        loadInterfacesBasedOnSyncMode();
-                      }
-                    }
-                  }, 100);
-                  setTimeout(function() { clearInterval(checkSelect2); }, 5000);
                 }
 
                 // Check if devices are already selected (native select, TomSelect, or Select2)
