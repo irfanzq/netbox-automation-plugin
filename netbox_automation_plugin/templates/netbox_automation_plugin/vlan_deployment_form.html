@@ -2489,103 +2489,52 @@
             function initVlanDeploymentForm() {
               console.log('=== initVlanDeploymentForm called ===');
               console.log('Document ready state:', document.readyState);
-              
+
               // Set initial state first (critical - this must run on page load)
               console.log('Step 1: Calling updateFieldVisibility...');
-              // Force immediate execution
+              // Call once immediately
               try {
                 updateFieldVisibility();
               } catch (e) {
                 console.error('Error in updateFieldVisibility:', e);
               }
-              // Also call with delays to ensure it works
+              // Call once more after a short delay to ensure DOM is fully ready
               setTimeout(() => {
                 try {
                   updateFieldVisibility();
                 } catch (e) {
-                  console.error('Error in updateFieldVisibility (50ms):', e);
+                  console.error('Error in updateFieldVisibility (delayed):', e);
                 }
-              }, 50);
-              setTimeout(() => {
-                try {
-                  updateFieldVisibility();
-                } catch (e) {
-                  console.error('Error in updateFieldVisibility (200ms):', e);
-                }
-              }, 200);
-              setTimeout(() => {
-                try {
-                  updateFieldVisibility();
-                } catch (e) {
-                  console.error('Error in updateFieldVisibility (500ms):', e);
-                }
-              }, 500);
-              setTimeout(() => {
-                try {
-                  updateFieldVisibility();
-                } catch (e) {
-                  console.error('Error in updateFieldVisibility (1000ms):', e);
-                }
-              }, 1000);
-              setTimeout(() => {
-                try {
-                  updateFieldVisibility();
-                } catch (e) {
-                  console.error('Error in updateFieldVisibility (2000ms):', e);
-                }
-              }, 2000);
-
-              // Also set up periodic check every 2 seconds for the first 10 seconds
-              let periodicCheckCount = 0;
-              const periodicCheck = setInterval(() => {
-                periodicCheckCount++;
-                try {
-                  updateFieldVisibility();
-                  // console.log('Periodic field visibility check #' + periodicCheckCount);
-                } catch (e) {
-                  console.error('Error in periodic updateFieldVisibility:', e);
-                }
-                if (periodicCheckCount >= 5) {
-                  clearInterval(periodicCheck);
-                  // console.log('Stopped periodic field visibility checks');
-                }
-              }, 2000);
+              }, 100);
 
               console.log('Step 2: Calling updateSyncModeState...');
               updateSyncModeState();
-              
+
               // Step 2.5: Device selection and interface loading will be handled by TomSelect listener below
               // No need to load interfaces here - the listener will handle it when TomSelect initializes
               const devicesSelect = document.getElementById('id_devices');
-              
+
               console.log('Step 3: Calling setupMutuallyExclusiveCheckboxes...');
               setupMutuallyExclusiveCheckboxes();
-              
+
               console.log('Step 4: Calling updateDeployButtonState...');
               updateDeployButtonState();
 
-              // Listen for scope changes
+              // Listen for scope changes (with debounce)
+              let scopeChangeTimeout = null;
               document.querySelectorAll('input[name="deployment_scope"]').forEach(radio => {
                 radio.addEventListener('change', function() {
                   console.log('Deployment scope changed to:', this.value);
-                  updateFieldVisibility();
-                  // Also run multiple times to ensure it takes effect
-                  setTimeout(updateFieldVisibility, 50);
-                  setTimeout(updateFieldVisibility, 200);
+                  // Clear any pending timeout
+                  if (scopeChangeTimeout) {
+                    clearTimeout(scopeChangeTimeout);
+                  }
+                  // Debounce: wait 100ms before updating
+                  scopeChangeTimeout = setTimeout(() => {
+                    updateFieldVisibility();
+                  }, 100);
                 });
               });
-              
-              // Also add MutationObserver to catch any dynamic changes
-              const observer = new MutationObserver(function(mutations) {
-                const scopeRadio = document.querySelector('input[name="deployment_scope"]:checked');
-                if (scopeRadio) {
-                  updateFieldVisibility();
-                }
-              });
-              const scopeContainer = document.querySelector('input[name="deployment_scope"]')?.closest('.mb-3');
-              if (scopeContainer) {
-                observer.observe(scopeContainer, { attributes: true, childList: true, subtree: true });
-              }
 
               // Listen for sync mode checkbox changes
               const syncCheckbox = document.getElementById('id_sync_netbox_to_device');
@@ -2886,22 +2835,20 @@
 
             // Initialize once when DOM is ready
             function initializeOnce() {
+              // Run field visibility check once immediately
               runImmediateFieldVisibility();
-              setTimeout(runImmediateFieldVisibility, 50);
-              setTimeout(runImmediateFieldVisibility, 200);
-              runSyncCheckMultipleTimes();
+              // Run sync check once
+              runImmediateSyncCheck();
+              // Initialize form (this will call updateFieldVisibility internally)
               initVlanDeploymentForm();
 
-              // Force white text on device names - AGGRESSIVE timing
+              // Force white text on device names - reduced timing
               forceWhiteText();
-              setTimeout(forceWhiteText, 50);
               setTimeout(forceWhiteText, 100);
-              setTimeout(forceWhiteText, 300);
               setTimeout(forceWhiteText, 500);
-              setTimeout(forceWhiteText, 1000);
 
-              // More aggressive periodic check - every 1 second
-              setInterval(forceWhiteText, 1000);
+              // Periodic check - every 2 seconds (less aggressive)
+              setInterval(forceWhiteText, 2000);
 
               // MutationObserver to catch any dynamically added elements
               const observer = new MutationObserver(function(mutations) {
@@ -2916,9 +2863,7 @@
 
               // Listen for theme changes
               window.addEventListener('netbox.colorModeChanged', function() {
-                setTimeout(forceWhiteText, 50);
                 setTimeout(forceWhiteText, 100);
-                setTimeout(forceWhiteText, 300);
               });
             }
 
