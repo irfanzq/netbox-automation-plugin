@@ -2199,31 +2199,48 @@ class VLANDeploymentView(View):
         if bond_name and interface_name:
             # Check if bond exists in NetBox
             bond_exists_in_netbox = False
+            device_has_bond = False
             if bond_info:
                 bond_exists_in_netbox = bond_info.get('netbox_bond_name') is not None
+                device_has_bond = bond_info.get('device_bond_name') is not None
 
             # Show appropriate message based on bond status
-            if not bond_exists_in_netbox:
-                diff_lines.append(f"[BOND] Bond '{bond_name}' will be CREATED in NetBox")
-                diff_lines.append(f"  Member: {interface_name}")
+            diff_lines.append("=" * 60)
+            diff_lines.append("BOND DETECTED - VLAN MIGRATION")
+            diff_lines.append("=" * 60)
+            diff_lines.append("")
+
+            if not bond_exists_in_netbox and device_has_bond:
+                diff_lines.append(f"[BOND CREATION] Bond '{bond_name}' will be CREATED in NetBox")
+                diff_lines.append(f"  Source: Device has bond, NetBox doesn't")
+                diff_lines.append(f"  Member interface: {interface_name}")
+                diff_lines.append("")
+            elif bond_exists_in_netbox and not device_has_bond:
+                diff_lines.append(f"[BOND EXISTS] Bond '{bond_name}' already exists in NetBox")
+                diff_lines.append(f"  Device will create bond from NetBox configuration")
+                diff_lines.append("")
+            elif bond_exists_in_netbox and device_has_bond:
+                diff_lines.append(f"[BOND EXISTS] Bond '{bond_name}' exists in both NetBox and device")
                 diff_lines.append("")
 
             # Show VLAN migration message
-            diff_lines.append(f"[INFO] BOND DETECTED: VLANs will be moved from interface '{interface_name}' to bond '{bond_name}'")
+            diff_lines.append(f"[VLAN MIGRATION] Moving VLANs from interface to bond:")
             diff_lines.append("")
-            diff_lines.append(f"Interface '{interface_name}' (VLANs will be removed):")
+            diff_lines.append(f"Member Interface '{interface_name}' (VLANs will be REMOVED):")
             old_untagged = current_state['current']['untagged_vlan'] or 'None'
             old_tagged = ', '.join(map(str, sorted(current_state['current']['tagged_vlans']))) or 'None'
-            diff_lines.append(f"  Untagged VLAN: {old_untagged} → None (moved to bond '{bond_name}')")
-            diff_lines.append(f"  Tagged VLANs: [{old_tagged}] → [] (moved to bond '{bond_name}')")
+            diff_lines.append(f"  Untagged VLAN: {old_untagged} → None")
+            diff_lines.append(f"  Tagged VLANs: [{old_tagged}] → []")
             diff_lines.append("")
-            diff_lines.append(f"Bond '{bond_name}' (VLANs will be added):")
+            diff_lines.append(f"Bond Interface '{bond_name}' (VLANs will be ADDED):")
             new_untagged = proposed_state['untagged_vlan'] or 'None'
             new_tagged = ', '.join(map(str, sorted(proposed_state['tagged_vlans']))) or 'None'
             if old_untagged != 'None':
-                diff_lines.append(f"  Untagged VLAN: None → {old_untagged} (from interface '{interface_name}')")
+                diff_lines.append(f"  Untagged VLAN: None → {old_untagged}")
             if old_tagged != 'None':
-                diff_lines.append(f"  Tagged VLANs: [] → [{old_tagged}] (from interface '{interface_name}')")
+                diff_lines.append(f"  Tagged VLANs: [] → [{old_tagged}]")
+            diff_lines.append("")
+            diff_lines.append("=" * 60)
             diff_lines.append("")
             return '\n'.join(diff_lines)
         
@@ -4640,19 +4657,25 @@ class VLANDeploymentView(View):
                                 if bond_name not in bonds_to_sync:
                                     bonds_to_sync[bond_name] = all_members
 
-                    # Sync bonds to NetBox (create bond + migrate VLANs)
+                    # Sync bonds to NetBox (create bond + migrate VLANs from member interfaces)
                     for bond_name, members in bonds_to_sync.items():
-                        device_logs.append(f"[BOND] Creating bond {bond_name} in NetBox...")
+                        device_logs.append(f"[BOND] Creating bond {bond_name} in NetBox and migrating VLANs...")
                         sync_result = self._sync_bond_to_netbox(
                             device=device,
                             bond_name=bond_name,
                             member_interfaces=members,
                             platform=platform,
-                            migrate_vlans=False  # Normal mode: don't migrate VLANs, just create bond structure
+                            migrate_vlans=True  # Migrate all VLANs from member interfaces to bond
                         )
                         if sync_result.get('success'):
                             device_logs.append(f"[OK] Bond {bond_name} created in NetBox")
                             device_logs.append(f"     Members added: {len(members)} ({', '.join(members)})")
+                            vlans_migrated = sync_result.get('vlans_migrated', 0)
+                            members_cleared = sync_result.get('members_cleared', 0)
+                            if vlans_migrated > 0:
+                                device_logs.append(f"     VLANs migrated to bond: {vlans_migrated}")
+                            if members_cleared > 0:
+                                device_logs.append(f"     Member interfaces cleared: {members_cleared}")
                             netbox_updated = "Yes"
                         else:
                             device_logs.append(f"[ERROR] Failed to create bond {bond_name}: {sync_result.get('error')}")
@@ -5141,7 +5164,12 @@ class VLANDeploymentView(View):
                     # Use NetBox members if available, otherwise use current interface
                     members_to_add = netbox_members if netbox_members else [interface_name]
 
+                    commands.append("#" + "=" * 60)
+                    commands.append("# BOND CREATION - NetBox has bond, device doesn't")
+                    commands.append("#" + "=" * 60)
                     commands.append(f"# Creating bond {netbox_bond_name} on device (from NetBox)")
+                    commands.append(f"# Member interface: {interface_name}")
+                    commands.append("")
                     commands.append(f"nv set interface {netbox_bond_name} type bond")
 
                     # Add all members
@@ -5156,17 +5184,35 @@ class VLANDeploymentView(View):
                     commands.append(f"nv set interface {netbox_bond_name} bridge domain br_default")
                     commands.append("")
 
+                    # Remove VLANs from member interfaces (VLANs will be on bond instead)
+                    commands.append(f"# VLAN MIGRATION: Removing VLANs from member interface {interface_name}")
+                    commands.append(f"nv unset interface {interface_name} bridge domain br_default access")
+                    commands.append("")
+
                 # Scenario 2: Device has bond but NetBox doesn't - will be synced to NetBox later
                 # (handled in deployment/dry run by calling _sync_bond_to_netbox)
                 elif device_bond_name and not netbox_bond_name:
                     # NetBox will be updated, but device already has bond - no device commands needed
-                    # Just add a comment for clarity
-                    commands.append(f"# Bond {device_bond_name} exists on device, will be synced to NetBox")
+                    # Just add a comment for clarity and remove VLANs from member interface
+                    commands.append("#" + "=" * 60)
+                    commands.append("# BOND SYNC - Device has bond, NetBox doesn't")
+                    commands.append("#" + "=" * 60)
+                    commands.append(f"# Bond {device_bond_name} exists on device")
+                    commands.append(f"# Bond will be created in NetBox during deployment")
+                    commands.append(f"# Member interface: {interface_name}")
+                    commands.append("")
+                    commands.append(f"# VLAN MIGRATION: Removing VLANs from member interface {interface_name}")
+                    commands.append(f"nv unset interface {interface_name} bridge domain br_default access")
                     commands.append("")
 
                 # Scenario 3: Both have bond but different names - MIGRATE TO NETBOX BOND NAME
                 elif needs_migration and netbox_bond_name != device_bond_name:
-                    commands.append(f"# Migrating from device bond {device_bond_name} to NetBox bond {netbox_bond_name}")
+                    commands.append("#" + "=" * 60)
+                    commands.append("# BOND MIGRATION - Different bond names")
+                    commands.append("#" + "=" * 60)
+                    commands.append(f"# Migrating from device bond '{device_bond_name}' to NetBox bond '{netbox_bond_name}'")
+                    commands.append(f"# All members will be moved to new bond")
+                    commands.append("")
                     commands.append(f"nv set interface {netbox_bond_name} type bond")
 
                     # Add all members to the new bond
@@ -5181,7 +5227,23 @@ class VLANDeploymentView(View):
                     commands.append(f"nv set interface {netbox_bond_name} bridge domain br_default")
                     commands.append("")
 
+                    # Remove VLANs from old device bond (VLANs will be on new NetBox bond)
+                    commands.append(f"# VLAN MIGRATION: Removing VLANs from old bond {device_bond_name}")
+                    commands.append(f"nv unset interface {device_bond_name} bridge domain br_default access")
+                    commands.append("")
+
                 # Scenario 4: Both have same bond - no bond creation needed, just VLAN config
+                # But still need to remove VLANs from member interface
+                elif netbox_bond_name and device_bond_name and netbox_bond_name == device_bond_name:
+                    commands.append("#" + "=" * 60)
+                    commands.append("# BOND EXISTS - Same bond in NetBox and device")
+                    commands.append("#" + "=" * 60)
+                    commands.append(f"# Bond {bond_name} exists in both NetBox and device")
+                    commands.append(f"# No bond creation needed, only VLAN configuration")
+                    commands.append("")
+                    commands.append(f"# VLAN MIGRATION: Removing VLANs from member interface {interface_name}")
+                    commands.append(f"nv unset interface {interface_name} bridge domain br_default access")
+                    commands.append("")
                 # (falls through to VLAN config below)
             
             # ISSUE 1 FIX: Add VLANs to bridge first (additive - safe, won't remove existing VLANs)
