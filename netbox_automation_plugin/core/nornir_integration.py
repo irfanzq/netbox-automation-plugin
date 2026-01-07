@@ -1125,19 +1125,19 @@ class NornirDeviceManager:
         
         return results
 
-    def deploy_vlan(self, interface_list: List[str], vlan_id: int, platform: str, timeout: int = 90, bond_info_map: Optional[Dict[str, Dict[str, str]]] = None) -> Dict[str, Any]:
+    def deploy_vlan(self, interface_list: List[str], vlan_id: int, platform: str, timeout: int = 90, bond_info_map: Optional[Dict[str, Dict[str, str]]] = None, dry_run: bool = False, preview_callback: Optional[Callable] = None) -> Dict[str, Any]:
         """
         Deploy VLAN configuration to multiple interfaces across all devices in parallel.
-        
+
         CRITICAL: Interfaces on the same device are processed SEQUENTIALLY to avoid:
         - Multiple commit-confirm sessions conflicting
         - Conflicting revision IDs
         - One commit overwriting another
         - Inconsistent device state
-        
+
         Devices are processed in PARALLEL (up to num_workers, default 20).
         Interfaces per device are processed SEQUENTIALLY.
-        
+
         Args:
             interface_list: List of interface names (e.g., ['swp7', 'swp8'])
             vlan_id: VLAN ID to configure (1-4094)
@@ -1145,7 +1145,10 @@ class NornirDeviceManager:
             timeout: Rollback timeout in seconds (default: 90)
             bond_info_map: Optional dict mapping device_name -> {interface_name: bond_name}
                           If provided, uses bond_name instead of interface_name for config generation
-        
+            dry_run: If True, preview changes without deploying (default: False)
+            preview_callback: Optional callback function for dry run preview generation
+                            Signature: callback(device, interface_list_for_device, platform, vlan_id) -> dict
+
         Returns:
             Dictionary mapping device names to deployment results per interface
             {
@@ -1158,15 +1161,16 @@ class NornirDeviceManager:
         """
         if not self.nr:
             self.nr = self.initialize()
-        
+
         num_devices = len(self.nr.inventory.hosts)
         num_interfaces = len(interface_list)
         total_tasks = num_devices * num_interfaces
-        
-        logger.info(f"Starting VLAN {vlan_id} deployment to {num_devices} devices, "
+
+        mode_str = "DRY RUN preview" if dry_run else "deployment"
+        logger.info(f"Starting VLAN {vlan_id} {mode_str} to {num_devices} devices, "
                    f"{num_interfaces} interfaces per device ({total_tasks} total tasks), "
                    f"platform: {platform}, max {self.num_workers} parallel workers")
-        logger.info(f"Strategy: Devices in PARALLEL (up to {self.num_workers}), interfaces per device SEQUENTIALLY")
+        logger.info(f"Strategy: Devices in PARALLEL (up to {self.num_workers}), interfaces per device BATCHED")
         
         # Group by device: process interfaces sequentially per device, devices in parallel
         from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -1179,17 +1183,47 @@ class NornirDeviceManager:
             """
             Deploy VLAN to all interfaces on a single device in ONE commit-confirm session.
             Batches all interface configs together for efficiency.
+
+            In dry run mode, uses preview_callback to generate preview data.
             """
             device_results = {}
-            
+
             try:
-                logger.info(f"Device {device_name}: Starting batched deployment of {num_interfaces} interfaces in single session...")
-                
+                mode_str = "preview" if dry_run else "deployment"
+                logger.info(f"Device {device_name}: Starting batched {mode_str} of {num_interfaces} interfaces in single session...")
+
                 # Build config for all interfaces on this device
                 from netbox_automation_plugin.core.napalm_integration import NAPALMDeviceManager
                 from dcim.models import Device
-                
+
                 device = Device.objects.get(name=device_name)
+
+                # If dry run mode and callback provided, use callback for preview
+                if dry_run and preview_callback:
+                    # Build list of interfaces for this device
+                    device_interfaces = []
+                    for interface_name in interface_list:
+                        # Parse "device:interface" format if present
+                        if ':' in interface_name:
+                            iface_device_name, actual_interface_name = interface_name.split(':', 1)
+                            if iface_device_name != device_name:
+                                continue
+                            device_interfaces.append(actual_interface_name)
+                        else:
+                            device_interfaces.append(interface_name)
+
+                    # Call preview callback to generate preview data
+                    logger.info(f"Device {device_name}: Calling preview callback for {len(device_interfaces)} interfaces...")
+                    preview_result = preview_callback(device, device_interfaces, platform, vlan_id, bond_info_map)
+
+                    # Store preview results
+                    with results_lock:
+                        all_results[device_name] = preview_result
+
+                    logger.info(f"Device {device_name}: Preview completed for {len(device_interfaces)} interfaces")
+                    return device_name
+
+                # Normal deployment mode - continue with existing logic
                 napalm_mgr = NAPALMDeviceManager(device)
                 
                 # Check if bridge VLAN already exists (for Cumulus only)

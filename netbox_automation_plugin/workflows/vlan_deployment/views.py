@@ -34,6 +34,217 @@ class VLANDeploymentView(View):
         # Form uses untagged_vlan (IntegerField), not a ModelChoiceField, so no queryset to set
         return render(request, self.template_name_form, {"form": form})
 
+    def _generate_dry_run_preview(self, device, interface_list, platform, vlan_id, bond_info_map, validation_results, sync_netbox_to_device=False, untagged_vlan_id=None, tagged_vlan_ids=None, vlan=None, primary_vlan_id=None):
+        """
+        Generate dry run preview for all interfaces on a single device.
+        Called by Nornir in parallel for each device.
+
+        Args:
+            device: Device object
+            interface_list: List of interface names for this device (already filtered)
+            platform: Platform type ('cumulus' or 'eos')
+            vlan_id: VLAN ID to deploy
+            bond_info_map: Bond information map
+            validation_results: Validation results from _validate_tags_for_dry_run
+            sync_netbox_to_device: Whether in sync mode
+            untagged_vlan_id: Untagged VLAN ID (normal mode)
+            tagged_vlan_ids: Tagged VLAN IDs (normal mode)
+            vlan: VLAN object (normal mode)
+            primary_vlan_id: Primary VLAN ID for display
+
+        Returns:
+            Dictionary mapping interface names to preview results
+        """
+        import logging
+        logger = logging.getLogger('netbox_automation_plugin')
+
+        device_results = {}
+        device_validation = validation_results['device_validation'].get(device.name, {})
+
+        # Get device info once for all interfaces
+        device_ip = str(device.primary_ip4.address).split('/')[0] if device.primary_ip4 else (str(device.primary_ip6.address).split('/')[0] if device.primary_ip6 else 'N/A')
+        device_site = device.site.name if device.site else 'N/A'
+        device_location = device.location.name if device.location else 'N/A'
+        device_role = device.role.name if device.role else 'N/A'
+
+        logger.info(f"[DRY RUN PREVIEW] Device {device.name}: Generating preview for {len(interface_list)} interfaces...")
+
+        for actual_interface_name in interface_list:
+            try:
+                interface_key = f"{device.name}:{actual_interface_name}"
+                interface_validation = validation_results['interface_validation'].get(interface_key, {})
+
+                # Get interface details
+                interface_details = self._get_interface_details(device, actual_interface_name)
+
+                # Get current device config (needed for bond detection and diff generation)
+                device_config_result = self._get_current_device_config(device, actual_interface_name, platform)
+                current_device_config = device_config_result.get('current_config', 'Unable to fetch')
+                config_source = device_config_result.get('source', 'error')
+                config_timestamp = device_config_result.get('timestamp', 'N/A')
+                device_uptime = device_config_result.get('device_uptime', None)
+                bridge_vlans = device_config_result.get('_bridge_vlans', [])
+                bond_member_of = device_config_result.get('bond_member_of', None)
+
+                # Determine target interface (bond if member, otherwise original)
+                target_interface_for_config = bond_member_of if bond_member_of else actual_interface_name
+
+                # Get proposed config
+                if not sync_netbox_to_device:
+                    # Normal mode: use form VLAN
+                    proposed_config = self._generate_vlan_config(
+                        target_interface_for_config,
+                        vlan_id=untagged_vlan_id,
+                        platform=platform,
+                        device=device,
+                        bridge_vlans=bridge_vlans
+                    )
+                else:
+                    # Sync mode: use NetBox VLANs
+                    from dcim.models import Interface
+                    interface_obj = Interface.objects.filter(device=device, name=actual_interface_name).first()
+                    if interface_obj:
+                        config_info = self._generate_config_from_netbox(device, interface_obj, platform)
+                        proposed_config = '\n'.join(config_info.get('commands', []))
+                    else:
+                        proposed_config = ""
+
+                # Generate config diff
+                config_diff = self._generate_config_diff(current_device_config, proposed_config, platform, device=device, interface_name=target_interface_for_config, bridge_vlans=bridge_vlans)
+
+                # Get NetBox current and proposed state
+                netbox_state = self._get_netbox_current_state(device, actual_interface_name, primary_vlan_id)
+
+                # Get bond information for NetBox diff
+                bond_info_for_netbox = None
+                bond_name_for_netbox = None
+                if bond_member_of:
+                    bond_info_for_netbox = self._get_bond_interface_for_member(device, actual_interface_name, platform=platform)
+                    bond_name_for_netbox = bond_member_of
+
+                netbox_diff = self._generate_netbox_diff(
+                    netbox_state,
+                    netbox_state['proposed'],
+                    bond_info=bond_info_for_netbox,
+                    interface_name=actual_interface_name,
+                    bond_name=bond_name_for_netbox
+                )
+
+                # Generate validation table
+                validation_table = self._generate_validation_table(device_validation, interface_validation)
+
+                # Generate risk assessment
+                current_vlan = netbox_state['current']['untagged_vlan']
+                risk_assessment = self._generate_risk_assessment(device_validation, interface_validation, current_vlan, primary_vlan_id)
+
+                # Generate rollback info
+                rollback_info = self._generate_rollback_info(device, actual_interface_name, primary_vlan_id, platform, timeout=90, current_config=current_device_config)
+
+                # Determine overall status
+                is_blocked = (device_validation.get('status') == 'block' or interface_validation.get('status') == 'block')
+                if is_blocked:
+                    overall_status = "error"
+                    status_message = "Would BLOCK deployment"
+                    overall_status_text = "BLOCKED"
+                elif device_validation.get('status') == 'warn' or interface_validation.get('status') == 'warn':
+                    overall_status = "success"
+                    status_message = "Would WARN but allow deployment"
+                    overall_status_text = "WARN"
+                else:
+                    overall_status = "success"
+                    status_message = "Would PASS validation"
+                    overall_status_text = "PASS"
+
+                # Extract status text for table display
+                device_status_text = "PASS" if device_validation.get('status') == 'pass' else "BLOCK"
+                interface_status_text = interface_validation.get('status', 'pass').upper()
+                if interface_status_text not in ['PASS', 'WARN', 'BLOCK']:
+                    interface_status_text = "PASS"
+
+                # Extract risk level
+                risk_level = "LOW"
+                if "HIGH" in risk_assessment or "HIGH Risk" in risk_assessment:
+                    risk_level = "HIGH"
+                elif "MEDIUM" in risk_assessment or "MEDIUM Risk" in risk_assessment:
+                    risk_level = "MEDIUM"
+
+                # Get VLAN info for display
+                vlan_name = "N/A"
+                if not sync_netbox_to_device:
+                    # Normal mode
+                    vlan_name = vlan.name if vlan else f"VLAN {primary_vlan_id}" if primary_vlan_id else "VLANs"
+                else:
+                    # Sync mode
+                    from dcim.models import Interface
+                    try:
+                        interface_obj = Interface.objects.get(device=device, name=actual_interface_name)
+                        if interface_obj.untagged_vlan:
+                            vlan_name = interface_obj.untagged_vlan.name or f"VLAN {interface_obj.untagged_vlan.vid}"
+                        elif interface_obj.tagged_vlans.exists():
+                            first_tagged = interface_obj.tagged_vlans.first()
+                            vlan_name = first_tagged.name or f"VLAN {first_tagged.vid}"
+                    except Interface.DoesNotExist:
+                        vlan_name = "N/A"
+
+                # Get bond interface config if bond member
+                bond_interface_config = None
+                if bond_member_of:
+                    bond_config_result = self._get_current_device_config(device, bond_member_of, platform)
+                    bond_interface_config = bond_config_result.get('current_config', '')
+
+                # Store result for this interface
+                device_results[actual_interface_name] = {
+                    'interface_name': actual_interface_name,
+                    'target_interface': target_interface_for_config,
+                    'bond_member_of': bond_member_of,
+                    'bond_interface_config': bond_interface_config,
+                    'current_config': current_device_config,
+                    'proposed_config': proposed_config,
+                    'config_diff': config_diff,
+                    'netbox_state': netbox_state,
+                    'netbox_diff': netbox_diff,
+                    'validation_table': validation_table,
+                    'risk_assessment': risk_assessment,
+                    'rollback_info': rollback_info,
+                    'overall_status': overall_status,
+                    'status_message': status_message,
+                    'overall_status_text': overall_status_text,
+                    'device_status_text': device_status_text,
+                    'interface_status_text': interface_status_text,
+                    'risk_level': risk_level,
+                    'vlan_id': primary_vlan_id,
+                    'vlan_name': vlan_name,
+                    'config_source': config_source,
+                    'config_timestamp': config_timestamp,
+                    'device_uptime': device_uptime,
+                    'device_ip': device_ip,
+                    'device_site': device_site,
+                    'device_location': device_location,
+                    'device_role': device_role,
+                    'interface_details': interface_details,
+                    'bridge_vlans': bridge_vlans,
+                    'device_connected': device_config_result.get('device_connected', False),
+                    'error_details': device_config_result.get('error', None),
+                }
+
+                logger.debug(f"[DRY RUN PREVIEW] Device {device.name}, Interface {actual_interface_name}: Preview generated successfully")
+
+            except Exception as e:
+                logger.error(f"[DRY RUN PREVIEW] Device {device.name}, Interface {actual_interface_name}: Error generating preview: {e}")
+                import traceback
+                logger.error(traceback.format_exc())
+
+                # Store error result
+                device_results[actual_interface_name] = {
+                    'interface_name': actual_interface_name,
+                    'error': str(e),
+                    'overall_status': 'error',
+                    'status_message': f'Preview generation failed: {str(e)}',
+                }
+
+        logger.info(f"[DRY RUN PREVIEW] Device {device.name}: Preview completed for {len(device_results)} interfaces")
+        return device_results
+
     def post(self, request):
         import traceback
         import logging
@@ -4666,45 +4877,94 @@ class VLANDeploymentView(View):
         logger.info(f"VLAN Deployment: {len(devices)} devices, {len(interface_list)} interfaces, platform: {platform}, sync_mode: {sync_netbox_to_device}")
 
         if dry_run:
-            # Dry run mode - generate comprehensive preview with validation and diffs
+            # Dry run mode - use Nornir for parallel preview generation
             # First, run tag validation
             validation_results = self._validate_tags_for_dry_run(devices, interface_list)
-            
-            # Calculate summary statistics
+
+            # Build bond_info_map for preview callback
+            bond_info_map = {}
+            logger.info(f"[DRY RUN] Building bond_info_map for {len(devices)} devices, {len(interface_list)} interfaces")
+            for device in devices:
+                device_bond_map = {}
+                for interface_name in interface_list:
+                    # Parse "device:interface" format if in sync mode
+                    if sync_netbox_to_device and ':' in interface_name:
+                        iface_device_name, actual_interface_name = interface_name.split(':', 1)
+                        if iface_device_name != device.name:
+                            continue
+                    else:
+                        actual_interface_name = interface_name
+
+                    # Check bond membership
+                    try:
+                        device_config_result = self._get_current_device_config(device, actual_interface_name, platform)
+                        bond_member_of = device_config_result.get('bond_member_of', None)
+                        if bond_member_of:
+                            device_bond_map[actual_interface_name] = bond_member_of
+                            logger.info(f"[DRY RUN] Bond detected: {device.name}:{actual_interface_name} → {bond_member_of}")
+                    except Exception as e:
+                        logger.warning(f"[DRY RUN] Could not check bond for {device.name}:{actual_interface_name}: {e}")
+
+                if device_bond_map:
+                    bond_info_map[device.name] = device_bond_map
+
+            # Create preview callback that captures context
+            def preview_callback(device, device_interfaces, platform, vlan_id, bond_info_map_param):
+                return self._generate_dry_run_preview(
+                    device=device,
+                    interface_list=device_interfaces,
+                    platform=platform,
+                    vlan_id=vlan_id,
+                    bond_info_map=bond_info_map_param,
+                    validation_results=validation_results,
+                    sync_netbox_to_device=sync_netbox_to_device,
+                    untagged_vlan_id=untagged_vlan_id,
+                    tagged_vlan_ids=tagged_vlan_ids,
+                    vlan=vlan,
+                    primary_vlan_id=primary_vlan_id
+                )
+
+            # Use Nornir for parallel preview generation
+            logger.info(f"[DRY RUN] Starting Nornir parallel preview for {len(devices)} devices...")
+            nornir_manager = NornirDeviceManager(devices=devices)
+            nornir_manager.initialize()
+
+            nornir_results = nornir_manager.deploy_vlan(
+                interface_list=interface_list,
+                vlan_id=primary_vlan_id,
+                platform=platform,
+                timeout=90,
+                bond_info_map=bond_info_map if bond_info_map else None,
+                dry_run=True,
+                preview_callback=preview_callback
+            )
+
+            logger.info(f"[DRY RUN] Nornir preview completed for {len(nornir_results)} devices")
+
+            # Calculate summary statistics from Nornir results
             total_devices = len(devices)
-            total_interfaces = len(devices) * len(interface_list)
+            total_interfaces = 0
             would_pass = 0
             would_warn = 0
             would_block = 0
-            
-            for device in devices:
-                device_validation = validation_results['device_validation'].get(device.name, {})
 
-                for interface_name in interface_list:
-                    # In sync mode, interface_name is in "device:interface" format
-                    # Parse it to get the actual interface name for validation key
-                    if sync_netbox_to_device and ':' in interface_name:
-                        # Extract device name and interface name from "device:interface" format
-                        iface_device_name, actual_interface_name = interface_name.split(':', 1)
-                        # Skip if this interface doesn't belong to current device
-                        if iface_device_name != device.name:
-                            continue
-                        interface_key = f"{device.name}:{actual_interface_name}"
-                    else:
-                        interface_key = f"{device.name}:{interface_name}"
-
-                    interface_validation = validation_results['interface_validation'].get(interface_key, {})
-
-                    # Count status
-                    if device_validation.get('status') == 'block' or interface_validation.get('status') == 'block':
+            for device_name, device_results in nornir_results.items():
+                for interface_name, interface_result in device_results.items():
+                    total_interfaces += 1
+                    status_text = interface_result.get('overall_status_text', 'PASS')
+                    if status_text == 'BLOCKED':
                         would_block += 1
-                    elif device_validation.get('status') == 'warn' or interface_validation.get('status') == 'warn':
+                    elif status_text == 'WARN':
                         would_warn += 1
                     else:
                         would_pass += 1
-            
+
+            # Process Nornir results and build final results list
+            logger.info(f"[DRY RUN] Processing Nornir results for {len(nornir_results)} devices...")
+
             for device in devices:
                 device_validation = validation_results['device_validation'].get(device.name, {})
+                device_results = nornir_results.get(device.name, {})
 
                 # Get device info
                 device_ip = str(device.primary_ip4.address).split('/')[0] if device.primary_ip4 else (str(device.primary_ip6.address).split('/')[0] if device.primary_ip6 else 'N/A')
@@ -4724,113 +4984,66 @@ class VLANDeploymentView(View):
                     else:
                         actual_interface_name = interface_name
 
+                    # Get preview data from Nornir results
+                    interface_preview = device_results.get(actual_interface_name, {})
+
+                    # Check if preview generation failed
+                    if 'error' in interface_preview:
+                        logger.error(f"[DRY RUN] Preview failed for {device.name}:{actual_interface_name}: {interface_preview['error']}")
+                        results.append({
+                            "device": device,
+                            "interface": actual_interface_name,
+                            "vlan_id": primary_vlan_id,
+                            "vlan_name": "N/A",
+                            "status": "error",
+                            "config_applied": "Dry Run",
+                            "netbox_updated": "Preview",
+                            "message": f"Preview generation failed: {interface_preview['error']}",
+                            "deployment_logs": f"Error: {interface_preview['error']}",
+                            "validation_status": "",
+                            "device_config_diff": "",
+                            "netbox_diff": "",
+                            "config_source": "error",
+                            "risk_assessment": "",
+                            "rollback_info": "",
+                            "device_status": "ERROR",
+                            "interface_status": "ERROR",
+                            "overall_status": "ERROR",
+                            "risk_level": "HIGH",
+                        })
+                        continue
+
+                    # Extract data from preview result
+                    target_interface_for_config = interface_preview.get('target_interface', actual_interface_name)
+                    bond_member_of = interface_preview.get('bond_member_of', None)
+                    current_device_config = interface_preview.get('current_config', 'Unable to fetch')
+                    proposed_config = interface_preview.get('proposed_config', '')
+                    config_diff = interface_preview.get('config_diff', '')
+                    netbox_state = interface_preview.get('netbox_state', {})
+                    netbox_diff = interface_preview.get('netbox_diff', '')
+                    validation_table = interface_preview.get('validation_table', '')
+                    risk_assessment = interface_preview.get('risk_assessment', '')
+                    rollback_info = interface_preview.get('rollback_info', '')
+                    overall_status = interface_preview.get('overall_status', 'success')
+                    status_message = interface_preview.get('status_message', 'Would PASS validation')
+                    overall_status_text = interface_preview.get('overall_status_text', 'PASS')
+                    device_status_text = interface_preview.get('device_status_text', 'PASS')
+                    interface_status_text = interface_preview.get('interface_status_text', 'PASS')
+                    risk_level = interface_preview.get('risk_level', 'LOW')
+                    vlan_name = interface_preview.get('vlan_name', 'N/A')
+                    config_source = interface_preview.get('config_source', 'device')
+                    config_timestamp = interface_preview.get('config_timestamp', 'N/A')
+                    device_uptime = interface_preview.get('device_uptime', None)
+                    interface_details = interface_preview.get('interface_details', {})
+                    bridge_vlans = interface_preview.get('bridge_vlans', [])
+                    bond_interface_config = interface_preview.get('bond_interface_config', None)
+                    device_connected = interface_preview.get('device_connected', False)
+                    error_details = interface_preview.get('error_details', None)
+
                     interface_key = f"{device.name}:{actual_interface_name}"
                     interface_validation = validation_results['interface_validation'].get(interface_key, {})
 
-                    # Get interface details using the actual interface name (not "device:interface")
-                    interface_details = self._get_interface_details(device, actual_interface_name)
-
-                    # Get current device config FIRST (needed for bond detection and for diff generation)
-                    device_config_result = self._get_current_device_config(device, actual_interface_name, platform)
-                    current_device_config = device_config_result.get('current_config', 'Unable to fetch')
-                    config_source = device_config_result.get('source', 'error')
-                    config_timestamp = device_config_result.get('timestamp', 'N/A')
-                    device_uptime = device_config_result.get('device_uptime', None)
-                    bridge_vlans = device_config_result.get('_bridge_vlans', [])  # Get bridge VLANs if available
-                    bond_member_of = device_config_result.get('bond_member_of', None)  # Get bond info for proposed config generation
-
-                    # Determine target interface (bond if member, otherwise original)
-                    target_interface_for_config = bond_member_of if bond_member_of else actual_interface_name
-
-                    # Get proposed config (use target_interface which may be bond, pass device and bridge_vlans for checks)
-                    # In normal mode, use form VLANs; in sync mode, use NetBox VLANs (handled elsewhere)
-                    if not sync_netbox_to_device:
-                        # Normal mode: use form VLAN (integer ID) - pass as vlan_id for backward compatibility
-                        proposed_config = self._generate_vlan_config(
-                            target_interface_for_config,
-                            vlan_id=untagged_vlan_id,
-                            platform=platform,
-                            device=device,
-                            bridge_vlans=bridge_vlans
-                        )
-                    else:
-                        # Sync mode: use NetBox VLANs (will be handled by _generate_config_from_netbox)
-                        # This should not be reached in dry_run for sync mode, but keep for safety
-                        interface_obj = Interface.objects.filter(device=device, name=actual_interface_name).first()
-                        if interface_obj:
-                            config_info = self._generate_config_from_netbox(device, interface_obj, platform)
-                            proposed_config = '\n'.join(config_info.get('commands', []))
-                        else:
-                            proposed_config = ""
-
-                    # Generate config diff (pass bridge VLANs to check if VLAN already exists)
-                    # Use target_interface_for_config for interface_name parameter to ensure diff shows correct interface
-                    config_diff = self._generate_config_diff(current_device_config, proposed_config, platform, device=device, interface_name=target_interface_for_config, bridge_vlans=bridge_vlans)
-
-                    # Get NetBox current and proposed state
-                    # Use primary_vlan_id for display purposes (untagged if available, otherwise first tagged)
-                    netbox_state = self._get_netbox_current_state(device, actual_interface_name, primary_vlan_id)
-
-                    # Get bond information for NetBox diff (if bond detected)
-                    bond_info_for_netbox = None
-                    bond_name_for_netbox = None
-                    if bond_member_of:
-                        bond_info_for_netbox = self._get_bond_interface_for_member(device, actual_interface_name, platform=platform)
-                        bond_name_for_netbox = bond_member_of
-
-                    netbox_diff = self._generate_netbox_diff(
-                        netbox_state,
-                        netbox_state['proposed'],
-                        bond_info=bond_info_for_netbox,
-                        interface_name=actual_interface_name,
-                        bond_name=bond_name_for_netbox
-                    )
-
-                    # Generate validation table
-                    validation_table = self._generate_validation_table(device_validation, interface_validation)
-
-                    # Generate risk assessment
-                    current_vlan = netbox_state['current']['untagged_vlan']
-                    risk_assessment = self._generate_risk_assessment(device_validation, interface_validation, current_vlan, primary_vlan_id)
-
-                    # Generate rollback info (include current config for manual rollback)
-                    rollback_info = self._generate_rollback_info(device, actual_interface_name, primary_vlan_id, platform, timeout=90, current_config=current_device_config)
-                    
-                    # Determine overall status
-                    is_blocked = (device_validation.get('status') == 'block' or interface_validation.get('status') == 'block')
-                    if is_blocked:
-                        overall_status = "error"
-                        status_message = "Would BLOCK deployment"
-                        overall_status_text = "BLOCKED"
-                    elif device_validation.get('status') == 'warn' or interface_validation.get('status') == 'warn':
-                        overall_status = "success"
-                        status_message = "Would WARN but allow deployment"
-                        overall_status_text = "WARN"
-                    else:
-                        overall_status = "success"
-                        status_message = "Would PASS validation"
-                        overall_status_text = "PASS"
-                    
-                    # Extract status text for table display
-                    device_status_text = "PASS" if device_validation.get('status') == 'pass' else "BLOCK"
-                    interface_status_text = interface_validation.get('status', 'pass').upper()
-                    if interface_status_text == 'PASS':
-                        interface_status_text = "PASS"
-                    elif interface_status_text == 'WARN':
-                        interface_status_text = "WARN"
-                    elif interface_status_text == 'BLOCK':
-                        interface_status_text = "BLOCK"
-                    else:
-                        interface_status_text = "PASS"
-                    
-                    # Extract risk level from risk assessment
-                    risk_level = "LOW"
-                    if "HIGH" in risk_assessment or "HIGH Risk" in risk_assessment:
-                        risk_level = "HIGH"
-                    elif "MEDIUM" in risk_assessment or "MEDIUM Risk" in risk_assessment:
-                        risk_level = "MEDIUM"
-                    
-                    # Build comprehensive deployment logs
+                    # Build comprehensive deployment logs from preview data
                     logs = []
                     logs.append("=" * 80)
                     logs.append("DRY RUN MODE - PREVIEW ONLY")
@@ -4878,8 +5091,7 @@ class VLANDeploymentView(View):
                         logs.append(f"Note: Actual device config may differ from NetBox state")
                     else:
                         # config_source == 'error'
-                        device_was_connected = device_config_result.get('device_connected', False)
-                        if device_was_connected:
+                        if device_connected:
                             # Device was connected but config retrieval failed (parsing error, etc.)
                             logs.append(f"[FAIL] Device connected but config retrieval failed")
                             if 'ERROR:' in current_device_config:
@@ -4887,8 +5099,7 @@ class VLANDeploymentView(View):
                                 error_msg = current_device_config.replace('ERROR: Could not retrieve config from device: ', '')
                                 logs.append(f"Error: {error_msg}")
                             else:
-                                error_details = device_config_result.get('error', 'Unknown error')
-                                logs.append(f"Error: {error_details}")
+                                logs.append(f"Error: {error_details or 'Unknown error'}")
                         else:
                             # Device was not connected and NetBox inference also failed
                             logs.append(f"[FAIL] Device unreachable and NetBox inference failed")
@@ -4896,7 +5107,6 @@ class VLANDeploymentView(View):
                                 error_msg = current_device_config.replace('ERROR: Could not retrieve config from device: ', '')
                                 logs.append(f"Error details: {error_msg}")
                             else:
-                                error_details = device_config_result.get('error', 'Unknown error')
                                 if error_details:
                                     logs.append(f"Error: {error_details}")
                     logs.append("")
@@ -4904,11 +5114,8 @@ class VLANDeploymentView(View):
                     # Current Device Configuration (Always shown - collected from device)
                     logs.append("--- Current Device Configuration (Real from Device) ---")
                     logs.append("")
-                    
-                    # Check if interface is a bond member
-                    bond_member_of = device_config_result.get('bond_member_of')
-                    bond_interface_config = device_config_result.get('bond_interface_config')
-                    
+
+                    # Bond member info already extracted from preview data
                     if bond_member_of:
                         logs.append(f"Bond Membership: Interface '{interface_name}' is a member of bond '{bond_member_of}'")
                         logs.append(f"Note: VLAN configuration will be applied to bond '{bond_member_of}', not to '{interface_name}' directly.")
