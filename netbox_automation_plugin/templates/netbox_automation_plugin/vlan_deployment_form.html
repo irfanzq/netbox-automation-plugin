@@ -927,20 +927,50 @@
 
             {# VLAN Configuration Fields - Only shown in normal mode (not sync mode) #}
             <div id="vlan-config-container" class="mb-3 vlan-config-fields">
-              {# Untagged VLAN - Dropdown selection #}
+              {# Untagged VLAN - Text input with autocomplete dropdown #}
               <div class="mb-3">
-                <label for="{{ form.untagged_vlan.id_for_label }}" class="form-label">{{ form.untagged_vlan.label }}</label>
-                {{ form.untagged_vlan }}
+                <label for="id_untagged_vlan" class="form-label">{{ form.untagged_vlan.label }}</label>
+                <div style="position: relative; max-width: 500px;">
+                  <input
+                    type="number"
+                    id="id_untagged_vlan"
+                    name="untagged_vlan"
+                    class="form-control"
+                    list="untagged_vlan_datalist"
+                    placeholder="Type VLAN ID (e.g., 100) or click to see dropdown"
+                    min="1"
+                    max="4094"
+                    value="{{ form.untagged_vlan.value|default:'' }}"
+                    autocomplete="off"
+                  />
+                  <datalist id="untagged_vlan_datalist">
+                    <!-- Will be populated dynamically with VLANs from device's location -->
+                  </datalist>
+                </div>
                 <div class="form-text" style="color: var(--nbx-color-fg-default) !important;">{{ form.untagged_vlan.help_text }}</div>
                 {% if form.untagged_vlan.errors %}
                   <div class="invalid-feedback d-block">{{ form.untagged_vlan.errors }}</div>
                 {% endif %}
               </div>
 
-              {# Tagged VLANs - Multi-select dropdown #}
+              {# Tagged VLANs - Text input with autocomplete dropdown #}
               <div class="mb-3">
-                <label for="{{ form.tagged_vlans.id_for_label }}" class="form-label">{{ form.tagged_vlans.label }}</label>
-                {{ form.tagged_vlans }}
+                <label for="id_tagged_vlans" class="form-label">{{ form.tagged_vlans.label }}</label>
+                <div style="position: relative; max-width: 500px;">
+                  <input
+                    type="text"
+                    id="id_tagged_vlans"
+                    name="tagged_vlans"
+                    class="form-control"
+                    list="tagged_vlans_datalist"
+                    placeholder="Type VLAN IDs separated by commas (e.g., 100,200,300) or click to see dropdown"
+                    value="{{ form.tagged_vlans.value|default:'' }}"
+                    autocomplete="off"
+                  />
+                  <datalist id="tagged_vlans_datalist">
+                    <!-- Will be populated dynamically with VLANs from device's location -->
+                  </datalist>
+                </div>
                 <div class="form-text" style="color: var(--nbx-color-fg-default) !important;">{{ form.tagged_vlans.help_text }}</div>
                 {% if form.tagged_vlans.errors %}
                   <div class="invalid-feedback d-block">{{ form.tagged_vlans.errors }}</div>
@@ -2229,21 +2259,21 @@
               console.log('=== filterVLANsByDevices called ===');
               console.log('Device IDs:', deviceIds);
 
-              const untaggedVlanSelect = document.getElementById('id_untagged_vlan');
-              const taggedVlansSelect = document.getElementById('id_tagged_vlans');
+              const untaggedVlanDatalist = document.getElementById('untagged_vlan_datalist');
+              const taggedVlansDatalist = document.getElementById('tagged_vlans_datalist');
               
               console.log('Elements found:', {
-                untaggedVlanSelect: !!untaggedVlanSelect,
-                taggedVlansSelect: !!taggedVlansSelect
+                untaggedVlanDatalist: !!untaggedVlanDatalist,
+                taggedVlansDatalist: !!taggedVlansDatalist
               });
 
               if (deviceIds.length === 0) {
-                // Reset VLAN dropdowns
-                if (untaggedVlanSelect) {
-                  untaggedVlanSelect.innerHTML = '<option value="">---------</option>';
+                // Clear datalists
+                if (untaggedVlanDatalist) {
+                  untaggedVlanDatalist.innerHTML = '';
                 }
-                if (taggedVlansSelect) {
-                  taggedVlansSelect.innerHTML = '<option value="">---------</option>';
+                if (taggedVlansDatalist) {
+                  taggedVlansDatalist.innerHTML = '';
                 }
                 return;
               }
@@ -2272,96 +2302,48 @@
                     return;
                   }
 
-                  // Populate untagged VLAN dropdown
-                  if (untaggedVlanSelect) {
+                  // Populate untagged VLAN datalist
+                  if (untaggedVlanDatalist) {
                     if (data.vlans && data.vlans.length > 0) {
-                      // Check if TomSelect is initialized (NetBox uses TomSelect for dynamic selects)
-                      const isTomSelect = untaggedVlanSelect.classList.contains('tomselected') || 
-                                         (untaggedVlanSelect.tomselect !== undefined);
-                      
-                      if (isTomSelect && untaggedVlanSelect.tomselect) {
-                        // Use TomSelect API to clear and add options
-                        const tomSelect = untaggedVlanSelect.tomselect;
-                        tomSelect.clearOptions();
-                        tomSelect.addOption({value: '', text: '---------'});
-                        data.vlans.forEach(vlan => {
-                          tomSelect.addOption({
-                            value: vlan.id,
-                            text: vlan.display || `${vlan.vid} - ${vlan.name || ''}`
-                          });
-                        });
-                        tomSelect.refreshOptions(false);
-                        console.log(`✓ Populated untagged VLAN dropdown (TomSelect) with ${data.vlans.length} VLANs`);
-                      } else {
-                        // Plain HTML select - use innerHTML
-                        untaggedVlanSelect.innerHTML = '<option value="">---------</option>';
-                        data.vlans.forEach(vlan => {
-                          const option = document.createElement('option');
-                          option.value = vlan.id;
-                          option.textContent = vlan.display || `${vlan.vid} - ${vlan.name || ''}`;
-                          untaggedVlanSelect.appendChild(option);
-                        });
-                        console.log(`✓ Populated untagged VLAN dropdown (HTML) with ${data.vlans.length} VLANs`);
-                      }
+                      // Clear existing options
+                      untaggedVlanDatalist.innerHTML = '';
+                      // Add VLAN options to datalist
+                      data.vlans.forEach(vlan => {
+                        const option = document.createElement('option');
+                        option.value = vlan.vid; // Use VID for datalist (user types VID, not ID)
+                        option.textContent = vlan.display || `${vlan.vid} - ${vlan.name || ''}`;
+                        untaggedVlanDatalist.appendChild(option);
+                      });
+                      console.log(`✓ Populated untagged VLAN datalist with ${data.vlans.length} VLANs`);
                     } else {
-                      // Clear dropdown
-                      if (untaggedVlanSelect.tomselect) {
-                        untaggedVlanSelect.tomselect.clearOptions();
-                        untaggedVlanSelect.tomselect.addOption({value: '', text: '---------'});
-                        untaggedVlanSelect.tomselect.refreshOptions(false);
-                      } else {
-                        untaggedVlanSelect.innerHTML = '<option value="">---------</option>';
-                      }
-                      console.log('⚠ No VLANs found for this location - untagged dropdown cleared');
+                      // Clear datalist
+                      untaggedVlanDatalist.innerHTML = '';
+                      console.log('⚠ No VLANs found for this location - untagged datalist cleared');
                     }
                   } else {
-                    console.error('❌ Untagged VLAN select element not found!');
+                    console.error('❌ Untagged VLAN datalist element not found!');
                   }
 
-                  // Populate tagged VLANs dropdown (multi-select)
-                  if (taggedVlansSelect) {
+                  // Populate tagged VLANs datalist
+                  if (taggedVlansDatalist) {
                     if (data.vlans && data.vlans.length > 0) {
-                      // Check if TomSelect is initialized (NetBox uses TomSelect for dynamic selects)
-                      const isTomSelect = taggedVlansSelect.classList.contains('tomselected') || 
-                                         (taggedVlansSelect.tomselect !== undefined);
-                      
-                      if (isTomSelect && taggedVlansSelect.tomselect) {
-                        // Use TomSelect API to clear and add options
-                        const tomSelect = taggedVlansSelect.tomselect;
-                        tomSelect.clearOptions();
-                        tomSelect.addOption({value: '', text: '---------'});
-                        data.vlans.forEach(vlan => {
-                          tomSelect.addOption({
-                            value: vlan.id,
-                            text: vlan.display || `${vlan.vid} - ${vlan.name || ''}`
-                          });
-                        });
-                        tomSelect.refreshOptions(false);
-                        console.log(`✓ Populated tagged VLANs dropdown (TomSelect) with ${data.vlans.length} VLANs`);
-                      } else {
-                        // Plain HTML select - use innerHTML
-                        taggedVlansSelect.innerHTML = '<option value="">---------</option>';
-                        data.vlans.forEach(vlan => {
-                          const option = document.createElement('option');
-                          option.value = vlan.id;
-                          option.textContent = vlan.display || `${vlan.vid} - ${vlan.name || ''}`;
-                          taggedVlansSelect.appendChild(option);
-                        });
-                        console.log(`✓ Populated tagged VLANs dropdown (HTML) with ${data.vlans.length} VLANs`);
-                      }
+                      // Clear existing options
+                      taggedVlansDatalist.innerHTML = '';
+                      // Add VLAN options to datalist
+                      data.vlans.forEach(vlan => {
+                        const option = document.createElement('option');
+                        option.value = vlan.vid; // Use VID for datalist (user types VID, not ID)
+                        option.textContent = vlan.display || `${vlan.vid} - ${vlan.name || ''}`;
+                        taggedVlansDatalist.appendChild(option);
+                      });
+                      console.log(`✓ Populated tagged VLANs datalist with ${data.vlans.length} VLANs`);
                     } else {
-                      // Clear dropdown
-                      if (taggedVlansSelect.tomselect) {
-                        taggedVlansSelect.tomselect.clearOptions();
-                        taggedVlansSelect.tomselect.addOption({value: '', text: '---------'});
-                        taggedVlansSelect.tomselect.refreshOptions(false);
-                      } else {
-                        taggedVlansSelect.innerHTML = '<option value="">---------</option>';
-                      }
-                      console.log('⚠ No VLANs found for this location - tagged dropdown cleared');
+                      // Clear datalist
+                      taggedVlansDatalist.innerHTML = '';
+                      console.log('⚠ No VLANs found for this location - tagged datalist cleared');
                     }
                   } else {
-                    console.error('❌ Tagged VLANs select element not found!');
+                    console.error('❌ Tagged VLANs datalist element not found!');
                   }
                 })
                 .catch(error => {
@@ -2378,21 +2360,21 @@
               
               console.log('Site ID:', siteId);
               
-              const untaggedVlanSelect = document.getElementById('id_untagged_vlan');
-              const taggedVlansSelect = document.getElementById('id_tagged_vlans');
+              const untaggedVlanDatalist = document.getElementById('untagged_vlan_datalist');
+              const taggedVlansDatalist = document.getElementById('tagged_vlans_datalist');
               
               console.log('Elements found:', {
-                untaggedVlanSelect: !!untaggedVlanSelect,
-                taggedVlansSelect: !!taggedVlansSelect
+                untaggedVlanDatalist: !!untaggedVlanDatalist,
+                taggedVlansDatalist: !!taggedVlansDatalist
               });
 
               if (!siteId) {
-                // Clear dropdowns if no site selected
-                if (untaggedVlanSelect) {
-                  untaggedVlanSelect.innerHTML = '<option value="">---------</option>';
+                // Clear datalists if no site selected
+                if (untaggedVlanDatalist) {
+                  untaggedVlanDatalist.innerHTML = '';
                 }
-                if (taggedVlansSelect) {
-                  taggedVlansSelect.innerHTML = '<option value="">---------</option>';
+                if (taggedVlansDatalist) {
+                  taggedVlansDatalist.innerHTML = '';
                 }
                 return;
               }
@@ -2413,96 +2395,48 @@
                     console.error('API returned error:', data.error);
                     return;
                   }
-                  // Populate untagged VLAN dropdown
-                  if (untaggedVlanSelect) {
+                  // Populate untagged VLAN datalist
+                  if (untaggedVlanDatalist) {
                     if (data.vlans && data.vlans.length > 0) {
-                      // Check if TomSelect is initialized (NetBox uses TomSelect for dynamic selects)
-                      const isTomSelect = untaggedVlanSelect.classList.contains('tomselected') || 
-                                         (untaggedVlanSelect.tomselect !== undefined);
-                      
-                      if (isTomSelect && untaggedVlanSelect.tomselect) {
-                        // Use TomSelect API to clear and add options
-                        const tomSelect = untaggedVlanSelect.tomselect;
-                        tomSelect.clearOptions();
-                        tomSelect.addOption({value: '', text: '---------'});
-                        data.vlans.forEach(vlan => {
-                          tomSelect.addOption({
-                            value: vlan.id,
-                            text: vlan.display || `${vlan.vid} - ${vlan.name || ''}`
-                          });
-                        });
-                        tomSelect.refreshOptions(false);
-                        console.log(`✓ Populated untagged VLAN dropdown (TomSelect) with ${data.vlans.length} VLANs from site`);
-                      } else {
-                        // Plain HTML select - use innerHTML
-                        untaggedVlanSelect.innerHTML = '<option value="">---------</option>';
-                        data.vlans.forEach(vlan => {
-                          const option = document.createElement('option');
-                          option.value = vlan.id;
-                          option.textContent = vlan.display || `${vlan.vid} - ${vlan.name || ''}`;
-                          untaggedVlanSelect.appendChild(option);
-                        });
-                        console.log(`✓ Populated untagged VLAN dropdown (HTML) with ${data.vlans.length} VLANs from site`);
-                      }
+                      // Clear existing options
+                      untaggedVlanDatalist.innerHTML = '';
+                      // Add VLAN options to datalist
+                      data.vlans.forEach(vlan => {
+                        const option = document.createElement('option');
+                        option.value = vlan.vid; // Use VID for datalist (user types VID, not ID)
+                        option.textContent = vlan.display || `${vlan.vid} - ${vlan.name || ''}`;
+                        untaggedVlanDatalist.appendChild(option);
+                      });
+                      console.log(`✓ Populated untagged VLAN datalist with ${data.vlans.length} VLANs from site`);
                     } else {
-                      // Clear dropdown
-                      if (untaggedVlanSelect.tomselect) {
-                        untaggedVlanSelect.tomselect.clearOptions();
-                        untaggedVlanSelect.tomselect.addOption({value: '', text: '---------'});
-                        untaggedVlanSelect.tomselect.refreshOptions(false);
-                      } else {
-                        untaggedVlanSelect.innerHTML = '<option value="">---------</option>';
-                      }
-                      console.log('⚠ No VLANs found for this site - untagged dropdown cleared');
+                      // Clear datalist
+                      untaggedVlanDatalist.innerHTML = '';
+                      console.log('⚠ No VLANs found for this site - untagged datalist cleared');
                     }
                   } else {
-                    console.error('❌ Untagged VLAN select element not found!');
+                    console.error('❌ Untagged VLAN datalist element not found!');
                   }
 
-                  // Populate tagged VLANs dropdown (multi-select)
-                  if (taggedVlansSelect) {
+                  // Populate tagged VLANs datalist
+                  if (taggedVlansDatalist) {
                     if (data.vlans && data.vlans.length > 0) {
-                      // Check if TomSelect is initialized (NetBox uses TomSelect for dynamic selects)
-                      const isTomSelect = taggedVlansSelect.classList.contains('tomselected') || 
-                                         (taggedVlansSelect.tomselect !== undefined);
-                      
-                      if (isTomSelect && taggedVlansSelect.tomselect) {
-                        // Use TomSelect API to clear and add options
-                        const tomSelect = taggedVlansSelect.tomselect;
-                        tomSelect.clearOptions();
-                        tomSelect.addOption({value: '', text: '---------'});
-                        data.vlans.forEach(vlan => {
-                          tomSelect.addOption({
-                            value: vlan.id,
-                            text: vlan.display || `${vlan.vid} - ${vlan.name || ''}`
-                          });
-                        });
-                        tomSelect.refreshOptions(false);
-                        console.log(`✓ Populated tagged VLANs dropdown (TomSelect) with ${data.vlans.length} VLANs from site`);
-                      } else {
-                        // Plain HTML select - use innerHTML
-                        taggedVlansSelect.innerHTML = '<option value="">---------</option>';
-                        data.vlans.forEach(vlan => {
-                          const option = document.createElement('option');
-                          option.value = vlan.id;
-                          option.textContent = vlan.display || `${vlan.vid} - ${vlan.name || ''}`;
-                          taggedVlansSelect.appendChild(option);
-                        });
-                        console.log(`✓ Populated tagged VLANs dropdown (HTML) with ${data.vlans.length} VLANs from site`);
-                      }
+                      // Clear existing options
+                      taggedVlansDatalist.innerHTML = '';
+                      // Add VLAN options to datalist
+                      data.vlans.forEach(vlan => {
+                        const option = document.createElement('option');
+                        option.value = vlan.vid; // Use VID for datalist (user types VID, not ID)
+                        option.textContent = vlan.display || `${vlan.vid} - ${vlan.name || ''}`;
+                        taggedVlansDatalist.appendChild(option);
+                      });
+                      console.log(`✓ Populated tagged VLANs datalist with ${data.vlans.length} VLANs from site`);
                     } else {
-                      // Clear dropdown
-                      if (taggedVlansSelect.tomselect) {
-                        taggedVlansSelect.tomselect.clearOptions();
-                        taggedVlansSelect.tomselect.addOption({value: '', text: '---------'});
-                        taggedVlansSelect.tomselect.refreshOptions(false);
-                      } else {
-                        taggedVlansSelect.innerHTML = '<option value="">---------</option>';
-                      }
-                      console.log('⚠ No VLANs found for this site - tagged dropdown cleared');
+                      // Clear datalist
+                      taggedVlansDatalist.innerHTML = '';
+                      console.log('⚠ No VLANs found for this site - tagged datalist cleared');
                     }
                   } else {
-                    console.error('❌ Tagged VLANs select element not found!');
+                    console.error('❌ Tagged VLANs datalist element not found!');
                   }
                 })
                 .catch(error => {

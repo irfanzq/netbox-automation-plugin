@@ -31,8 +31,7 @@ class VLANDeploymentView(View):
 
     def get(self, request):
         form = VLANDeploymentForm()
-        # Form uses untagged_vlan and tagged_vlans (ModelChoiceField/ModelMultipleChoiceField)
-        # Querysets are populated dynamically via JavaScript based on selected devices/site
+        # Form uses untagged_vlan (IntegerField), not a ModelChoiceField, so no queryset to set
         return render(request, self.template_name_form, {"form": form})
 
     def post(self, request):
@@ -4607,13 +4606,18 @@ class VLANDeploymentView(View):
         Environment-agnostic - uses NornirDeviceManager from core.
         Supports both Cumulus and EOS platforms.
         """
-        # Get VLAN configuration from form (normal mode)
-        untagged_vlan_obj = cleaned_data.get('untagged_vlan')
-        tagged_vlan_objs = cleaned_data.get('tagged_vlans', [])
+        # Get VLAN IDs from form (normal mode)
+        untagged_vlan_id = cleaned_data.get('untagged_vlan')
+        tagged_vlans_str = cleaned_data.get('tagged_vlans', '').strip()
         
-        # Extract VLAN IDs for backward compatibility and logging
-        untagged_vlan_id = untagged_vlan_obj.vid if untagged_vlan_obj else None
-        tagged_vlan_ids = [v.vid for v in tagged_vlan_objs] if tagged_vlan_objs else []
+        # Parse tagged VLANs from comma-separated string
+        tagged_vlan_ids = []
+        if tagged_vlans_str:
+            try:
+                tagged_vlan_ids = [int(x.strip()) for x in tagged_vlans_str.split(',') if x.strip()]
+            except ValueError:
+                logger.warning(f"Could not parse tagged VLANs: {tagged_vlans_str}")
+                tagged_vlan_ids = []
         
         # For logging/display purposes, use untagged VLAN ID if available, otherwise first tagged VLAN
         primary_vlan_id = untagged_vlan_id if untagged_vlan_id else (tagged_vlan_ids[0] if tagged_vlan_ids else None)
@@ -4726,11 +4730,10 @@ class VLANDeploymentView(View):
                     # Get proposed config (use target_interface which may be bond, pass device and bridge_vlans for checks)
                     # In normal mode, use form VLANs; in sync mode, use NetBox VLANs (handled elsewhere)
                     if not sync_netbox_to_device:
-                        # Normal mode: use form VLANs
+                        # Normal mode: use form VLAN (integer ID) - pass as vlan_id for backward compatibility
                         proposed_config = self._generate_vlan_config(
                             target_interface_for_config, 
-                            untagged_vlan=untagged_vlan_obj,
-                            tagged_vlans=tagged_vlan_objs,
+                            vlan_id=untagged_vlan_id,
                             platform=platform, 
                             device=device, 
                             bridge_vlans=bridge_vlans
@@ -5795,7 +5798,36 @@ class VLANDeploymentView(View):
                             
                             # Now update VLAN configuration on the target interface (bond if created, member otherwise)
                             logs.append(f"[INFO] Updating NetBox interface '{target_interface_for_netbox}' with VLAN {primary_vlan_id}...")
-                            netbox_result = self._update_netbox_interface(device, target_interface_for_netbox, untagged_vlan_obj, tagged_vlan_objs)
+                            # Find VLAN object from NetBox
+                            vlan_obj = None
+                            try:
+                                if first_device and untagged_vlan_id:
+                                    # Try location first
+                                    if first_device.location:
+                                        vlans = VLAN.objects.filter(
+                                            vid=untagged_vlan_id,
+                                            group__name__icontains=first_device.location.name
+                                        )
+                                        if vlans.exists():
+                                            vlan_obj = vlans.first()
+                                    # Try site if not found by location
+                                    if not vlan_obj and first_device.site:
+                                        vlans = VLAN.objects.filter(vid=untagged_vlan_id, site=first_device.site)
+                                        if vlans.exists():
+                                            vlan_obj = vlans.first()
+                                    # Just get any VLAN with this ID if still not found
+                                    if not vlan_obj:
+                                        vlan_obj = VLAN.objects.filter(vid=untagged_vlan_id).first()
+                            except Exception as e:
+                                logger.warning(f"Could not find VLAN object for ID {untagged_vlan_id}: {e}")
+                            
+                            if not vlan_obj:
+                                return {
+                                    "success": False,
+                                    "error": f"VLAN {untagged_vlan_id} not found in NetBox"
+                                }
+                            
+                            netbox_result = self._update_netbox_interface(device, target_interface_for_netbox, vlan_obj)
                             if netbox_result['success']:
                                 netbox_updated = "Yes"
                                 message += " | NetBox updated"

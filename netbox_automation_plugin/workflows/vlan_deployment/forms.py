@@ -93,27 +93,30 @@ class VLANDeploymentForm(forms.Form):
         help_text=_("Select device role for group deployment (e.g., Network Leaf)."),
     )
 
-    # Untagged VLAN - ModelChoiceField for dropdown selection
-    untagged_vlan = forms.ModelChoiceField(
-        queryset=VLAN.objects.none(),  # Will be populated dynamically based on site/location
+    # Untagged VLAN - IntegerField (simple VLAN ID input)
+    untagged_vlan = forms.IntegerField(
         required=False,
-        label=_("Untagged VLAN"),
-        help_text=_("Select untagged VLAN (access VLAN) for the interface. Optional if only deploying tagged VLANs."),
-        widget=forms.Select(attrs={
+        min_value=1,
+        max_value=4094,
+        label=_("Untagged VLAN ID"),
+        help_text=_("Enter untagged VLAN ID (1-4094). Optional if only deploying tagged VLANs."),
+        widget=forms.NumberInput(attrs={
+            'placeholder': 'e.g., 100',
             'class': 'form-control',
-            'data-placeholder': 'Select untagged VLAN...'
+            'id': 'id_untagged_vlan'
         }),
     )
 
-    # Tagged VLANs - ModelMultipleChoiceField for multi-select dropdown
-    tagged_vlans = forms.ModelMultipleChoiceField(
-        queryset=VLAN.objects.none(),  # Will be populated dynamically based on site/location
+    # Tagged VLANs - CharField for comma-separated VLAN IDs
+    tagged_vlans = forms.CharField(
         required=False,
-        label=_("Tagged VLANs"),
-        help_text=_("Select one or more tagged VLANs for the interface. Optional if only deploying untagged VLAN."),
-        widget=forms.SelectMultiple(attrs={
+        label=_("Tagged VLAN IDs"),
+        help_text=_("Enter tagged VLAN IDs separated by commas (e.g., 100,200,300). Optional if only deploying untagged VLAN."),
+        widget=forms.TextInput(attrs={
+            'placeholder': 'e.g., 100,200,300',
             'class': 'form-control',
-            'data-placeholder': 'Select tagged VLANs...'
+            'id': 'id_tagged_vlans',
+            'list': 'tagged_vlans_datalist'
         }),
     )
 
@@ -252,14 +255,25 @@ class VLANDeploymentForm(forms.Form):
                 # Wrap in list to prevent Django from trying to format the string
                 raise forms.ValidationError([_("Additional interfaces field is not available in sync mode. Interfaces are auto-discovered from NetBox.")])
         
-        # Normal mode validation: At least one VLAN (untagged or tagged) must be selected
+        # Normal mode validation: At least one VLAN (untagged or tagged) must be provided
         if not sync_netbox_to_device:
             untagged_vlan = cleaned_data.get('untagged_vlan')
-            tagged_vlans = cleaned_data.get('tagged_vlans', [])
+            tagged_vlans_str = cleaned_data.get('tagged_vlans', '').strip()
             
-            if not untagged_vlan and not tagged_vlans:
+            if not untagged_vlan and not tagged_vlans_str:
                 # Wrap in list to prevent Django from trying to format the string
-                raise forms.ValidationError([_("Please select at least one VLAN (untagged or tagged) for deployment.")])
+                raise forms.ValidationError([_("Please provide at least one VLAN (untagged or tagged) for deployment.")])
+            
+            # Validate tagged_vlans format (comma-separated integers)
+            if tagged_vlans_str:
+                try:
+                    tagged_list = [int(x.strip()) for x in tagged_vlans_str.split(',') if x.strip()]
+                    for vlan_id in tagged_list:
+                        if vlan_id < 1 or vlan_id > 4094:
+                            raise forms.ValidationError([_("Tagged VLAN IDs must be between 1 and 4094.")])
+                    cleaned_data['tagged_vlans_parsed'] = tagged_list
+                except ValueError:
+                    raise forms.ValidationError([_("Tagged VLANs must be comma-separated integers (e.g., 100,200,300).")])
 
         # Validate based on scope
         if scope == 'single':
