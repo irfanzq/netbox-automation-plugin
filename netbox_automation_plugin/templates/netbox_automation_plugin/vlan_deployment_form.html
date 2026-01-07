@@ -2982,68 +2982,27 @@
               setTimeout(runImmediateSyncCheck, 200);
               setTimeout(runImmediateSyncCheck, 500);
             }
-            
-            // Run immediately if DOM is ready
-            if (document.readyState !== 'loading') {
-              runImmediateFieldVisibility();
-              setTimeout(runImmediateFieldVisibility, 50);
-              setTimeout(runImmediateFieldVisibility, 200);
-              runSyncCheckMultipleTimes();
-            }
-            
-            if (document.readyState === 'loading') {
-              document.addEventListener('DOMContentLoaded', function() {
-                runImmediateFieldVisibility();
-                setTimeout(runImmediateFieldVisibility, 50);
-                setTimeout(runImmediateFieldVisibility, 200);
-                runSyncCheckMultipleTimes();
-                initVlanDeploymentForm();
-                // Force white text on device names - AGGRESSIVE timing
-                forceWhiteText();
-                setTimeout(forceWhiteText, 50);
-                setTimeout(forceWhiteText, 100);
-                setTimeout(forceWhiteText, 300);
-                setTimeout(forceWhiteText, 500);
-                setTimeout(forceWhiteText, 1000);
-                setTimeout(forceWhiteText, 2000);
-                
-                // More aggressive periodic check - every 1 second
-                setInterval(forceWhiteText, 1000);
-                
-                // MutationObserver to catch any dynamically added elements
-                const observer = new MutationObserver(function(mutations) {
-                  forceWhiteText();
-                });
-                observer.observe(document.body, {
-                  childList: true,
-                  subtree: true,
-                  attributes: true,
-                  attributeFilter: ['style', 'class', 'data-theme', 'data-bs-theme']
-                });
-                
-                // Listen for theme changes
-                window.addEventListener('netbox.colorModeChanged', function() {
-                  setTimeout(forceWhiteText, 50);
-                  setTimeout(forceWhiteText, 100);
-                  setTimeout(forceWhiteText, 300);
-                });
-              });
-            } else {
-              // DOM is already ready
+
+            // Initialize once when DOM is ready
+            function initializeOnce() {
               runImmediateFieldVisibility();
               setTimeout(runImmediateFieldVisibility, 50);
               setTimeout(runImmediateFieldVisibility, 200);
               runSyncCheckMultipleTimes();
               initVlanDeploymentForm();
+
+              // Force white text on device names - AGGRESSIVE timing
               forceWhiteText();
               setTimeout(forceWhiteText, 50);
               setTimeout(forceWhiteText, 100);
               setTimeout(forceWhiteText, 300);
               setTimeout(forceWhiteText, 500);
               setTimeout(forceWhiteText, 1000);
+
+              // More aggressive periodic check - every 1 second
               setInterval(forceWhiteText, 1000);
-              
-              // MutationObserver
+
+              // MutationObserver to catch any dynamically added elements
               const observer = new MutationObserver(function(mutations) {
                 forceWhiteText();
               });
@@ -3053,6 +3012,21 @@
                 attributes: true,
                 attributeFilter: ['style', 'class', 'data-theme', 'data-bs-theme']
               });
+
+              // Listen for theme changes
+              window.addEventListener('netbox.colorModeChanged', function() {
+                setTimeout(forceWhiteText, 50);
+                setTimeout(forceWhiteText, 100);
+                setTimeout(forceWhiteText, 300);
+              });
+            }
+
+            // Run once when DOM is ready
+            if (document.readyState === 'loading') {
+              document.addEventListener('DOMContentLoaded', initializeOnce);
+            } else {
+              // DOM is already ready
+              initializeOnce();
             }
 
             // Form submission handler
