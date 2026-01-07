@@ -38,21 +38,9 @@ class VLANDeploymentForm(forms.Form):
         label=_("Sync NetBox to Device"),
         help_text=_(
             "When enabled, automatically sync all interface VLAN configurations from NetBox to devices. "
-            "VLAN ID and interface selection fields will be auto-populated from NetBox."
+            "All interfaces with VLAN configurations in NetBox will be deployed and auto-tagged."
         ),
         widget=forms.CheckboxInput(attrs={'class': 'form-check-input', 'id': 'id_sync_netbox_to_device'}),
-    )
-
-    # Deploy on untagged interfaces checkbox (only used in sync mode)
-    deploy_untagged_interfaces = forms.BooleanField(
-        required=False,
-        initial=False,
-        label=_("Deploy VLAN configs on untagged interfaces"),
-        help_text=_(
-            "When enabled, deploy VLAN configurations to interfaces that have no tags. "
-            "These interfaces will be automatically tagged after successful deployment."
-        ),
-        widget=forms.CheckboxInput(attrs={'class': 'form-check-input', 'id': 'id_deploy_untagged_interfaces'}),
     )
 
     # Single device mode: Multi-select devices (same as LLDP form)

@@ -2991,26 +2991,24 @@ class VLANDeploymentView(View):
             else:
                 selected_interface_names = [s.strip() for s in str(selected_interfaces_str).split(',') if s.strip()]
         
-        # Get deploy_untagged_interfaces checkbox value
-        deploy_untagged = cleaned_data.get('deploy_untagged_interfaces', False)
-        
         # Get interfaces for each device from NetBox (filtered by user selection)
         # Returns dict with 'tagged' and 'untagged' sections
+        # Always include all interfaces with VLAN configs (both tagged and untagged)
         interfaces_dict = self._get_interfaces_for_sync(
-            devices, 
-            selected_interface_names, 
-            include_untagged=deploy_untagged
+            devices,
+            selected_interface_names,
+            include_untagged=True  # Always deploy to all interfaces with VLAN configs
         )
-        
+
         tagged_interfaces_by_device = interfaces_dict['tagged']
-        untagged_interfaces_by_device = interfaces_dict['untagged'] if deploy_untagged else {}
+        untagged_interfaces_by_device = interfaces_dict['untagged']
         
         results = []
         
         # Detect platform - all devices should be same platform
         platform = self._get_device_platform(devices[0]) if devices else 'cumulus'
-        
-        logger.info(f"VLAN Sync: {len(devices)} devices, platform: {platform}, dry_run: {dry_run}, deploy_untagged: {deploy_untagged}")
+
+        logger.info(f"VLAN Sync: {len(devices)} devices, platform: {platform}, dry_run: {dry_run}")
 
         # ========================================================================
         # DRY RUN MODE - Use Nornir batch deployment (ONE log per device)
@@ -3036,20 +3034,19 @@ class VLANDeploymentView(View):
                         'section': 'tagged'
                     }
 
-            # Add untagged interfaces (if enabled)
-            if deploy_untagged:
-                for device in devices:
-                    device_interfaces = untagged_interfaces_by_device.get(device.name, [])
-                    for interface in device_interfaces:
-                        interface_key = f"{device.name}:{interface.name}"
-                        interface_list.append(interface_key)
-                        # Generate config from NetBox state
-                        config_info = self._generate_config_from_netbox(device, interface, platform)
-                        interface_configs_map[interface_key] = {
-                            'config_info': config_info,
-                            'interface_obj': interface,
-                            'section': 'untagged'
-                        }
+            # Add untagged interfaces
+            for device in devices:
+                device_interfaces = untagged_interfaces_by_device.get(device.name, [])
+                for interface in device_interfaces:
+                    interface_key = f"{device.name}:{interface.name}"
+                    interface_list.append(interface_key)
+                    # Generate config from NetBox state
+                    config_info = self._generate_config_from_netbox(device, interface, platform)
+                    interface_configs_map[interface_key] = {
+                        'config_info': config_info,
+                        'interface_obj': interface,
+                        'section': 'untagged'
+                    }
 
             logger.info(f"[SYNC DRY RUN] Total interfaces to preview: {len(interface_list)}")
 
@@ -3174,7 +3171,7 @@ class VLANDeploymentView(View):
                 if not device_results_map:
                     # No results for this device
                     results.append({
-                        "device": device.name,
+                        "device": device,  # Pass Device object for linkify to work
                         "interface": "N/A",
                         "vlan_id": "N/A",
                         "vlan_name": "N/A",
@@ -3296,7 +3293,7 @@ class VLANDeploymentView(View):
 
                 # Create ONE result entry for this device
                 results.append({
-                    "device": device.name,
+                    "device": device,  # Pass Device object for linkify to work
                     "interface": f"{total_interfaces} interfaces",
                     "vlan_id": "Multiple VLANs",
                     "vlan_name": "Sync Mode",
@@ -3339,17 +3336,16 @@ class VLANDeploymentView(View):
                 config_info = self._generate_config_from_netbox(device, interface, platform)
                 device_configs[device.name][interface.name] = config_info
 
-        # Process untagged interfaces (if enabled)
-        if deploy_untagged:
-            for device in devices:
-                device_interfaces = untagged_interfaces_by_device.get(device.name, [])
-                if device.name not in device_configs:
-                    device_configs[device.name] = {}
+        # Process untagged interfaces
+        for device in devices:
+            device_interfaces = untagged_interfaces_by_device.get(device.name, [])
+            if device.name not in device_configs:
+                device_configs[device.name] = {}
 
-                for interface in device_interfaces:
-                    # Generate config from NetBox state
-                    config_info = self._generate_config_from_netbox(device, interface, platform)
-                    device_configs[device.name][interface.name] = config_info
+            for interface in device_interfaces:
+                # Generate config from NetBox state
+                config_info = self._generate_config_from_netbox(device, interface, platform)
+                device_configs[device.name][interface.name] = config_info
 
         logger.info(f"[SYNC DEPLOYMENT] Generated configs for {sum(len(ifaces) for ifaces in device_configs.values())} interfaces")
 
@@ -3451,7 +3447,7 @@ class VLANDeploymentView(View):
             if not device_results:
                 # No results for this device - add error entry
                 results.append({
-                    "device": device.name,
+                    "device": device,  # Pass Device object for linkify to work
                     "interface": "N/A",
                     "vlan_id": "N/A",
                     "vlan_name": "N/A",
@@ -3473,7 +3469,7 @@ class VLANDeploymentView(View):
                 if not interface_result:
                     # No result for this interface
                     results.append({
-                        "device": device.name,
+                        "device": device,  # Pass Device object for linkify to work
                         "interface": actual_interface_name,
                         "vlan_id": "N/A",
                         "vlan_name": "N/A",
@@ -3529,7 +3525,7 @@ class VLANDeploymentView(View):
 
                 # Add to results
                 results.append({
-                    "device": device.name,
+                    "device": device,  # Pass Device object for linkify to work
                     "interface": actual_interface_name,
                     "vlan_id": vlan_id,
                     "vlan_name": vlan_name,
@@ -3544,7 +3540,7 @@ class VLANDeploymentView(View):
 
                 # Track interfaces for auto-tagging (if deployment was successful and in Section 2)
                 # Check if this interface is in untagged_interfaces_by_device
-                if committed and deploy_untagged:
+                if committed:
                     device_untagged = untagged_interfaces_by_device.get(device.name, [])
                     for iface in device_untagged:
                         if iface.name == actual_interface_name:

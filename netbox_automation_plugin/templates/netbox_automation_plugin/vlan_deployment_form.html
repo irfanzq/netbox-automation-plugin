@@ -790,21 +790,7 @@
               {% if form.sync_netbox_to_device.errors %}
                 <div class="invalid-feedback d-block">{{ form.sync_netbox_to_device.errors }}</div>
               {% endif %}
-              
-              {# Deploy on Untagged Interfaces Checkbox (only shown in sync mode) #}
-              <div id="deploy-untagged-container" class="form-check mt-3" style="display: none;">
-                {{ form.deploy_untagged_interfaces }}
-                <label for="{{ form.deploy_untagged_interfaces.id_for_label }}" class="form-check-label">
-                  {{ form.deploy_untagged_interfaces.label }}
-                </label>
-                <div class="form-text" style="color: var(--nbx-color-fg-default) !important;">
-                  {{ form.deploy_untagged_interfaces.help_text }}
-                </div>
-                {% if form.deploy_untagged_interfaces.errors %}
-                  <div class="invalid-feedback d-block">{{ form.deploy_untagged_interfaces.errors }}</div>
-                {% endif %}
-              </div>
-              
+
               <div id="sync-mode-info" class="alert alert-info" style="display: none; margin-top: 10px;">
                 <strong>Sync Mode Active:</strong> Interfaces with VLAN configuration from NetBox will be synced to devices. 
                 All interfaces are pre-selected - uncheck any you don't want to sync.
@@ -1227,7 +1213,6 @@
               const syncModeInfo = document.getElementById('sync-mode-info');
               const devicesSelect = document.getElementById('id_devices');
               const interfacesContainer = document.getElementById('interfaces-checkbox-container');
-              const deployUntaggedContainer = document.getElementById('deploy-untagged-container');
               
               console.log('Elements found:', {
                 syncCheckbox: !!syncCheckbox,
@@ -1309,11 +1294,6 @@
                   syncModeInfo.style.display = 'block';
                 }
 
-                // Hide deploy untagged interfaces checkbox in sync mode
-                if (deployUntaggedContainer) {
-                  deployUntaggedContainer.style.display = 'none';
-                }
-
                 // Load interfaces for sync if devices are already selected
                 // Check native select, Select2, and TomSelect
                 let hasSelectedDevices = false;
@@ -1390,17 +1370,14 @@
                   combinedSelectionMsg.style.display = 'block';
                   console.log('Showing combined selection message');
                 }
-                
+
                 if (interfacesManualField) {
                   interfacesManualField.disabled = false;
                 }
-                
-                // Hide sync mode info and show deploy untagged checkbox in normal mode
+
+                // Hide sync mode info in normal mode
                 if (syncModeInfo) {
                   syncModeInfo.style.display = 'none';
-                }
-                if (deployUntaggedContainer) {
-                  deployUntaggedContainer.style.display = 'block';
                 }
                 
                 // Load interfaces normally if devices are already selected
@@ -1870,13 +1847,7 @@
                   ${totalConflicting > 0 ? `<span class="badge bg-danger ms-2">${totalConflicting} with conflicting tags</span>` : ''}
                 `;
                 section2Div.appendChild(section2Header);
-                
-                // Add checkbox for deploying on untagged interfaces
-                const deployUntaggedCheckbox = document.getElementById('id_deploy_untagged_interfaces');
-                if (deployUntaggedCheckbox) {
-                  deployUntaggedCheckbox.checked = true; // Pre-check by default
-                }
-                
+
                 renderInterfacesAccordion(untaggedInterfaces, section2Div, true, 'Untagged interfaces grouped by device');
                 container.appendChild(section2Div);
               }
