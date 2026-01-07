@@ -2671,7 +2671,7 @@
               }
 
               // Listen for device selection changes (single mode)
-              const devicesSelect = document.getElementById('id_devices');
+              // devicesSelect already declared above, reuse it
               if (devicesSelect) {
                 function loadInterfacesBasedOnSyncMode() {
                   console.log('loadInterfacesBasedOnSyncMode called');
