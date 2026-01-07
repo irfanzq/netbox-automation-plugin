@@ -3273,16 +3273,6 @@ class VLANDeploymentView(View):
                         device_logs.append(f"   Error: {error_details}")
                 device_logs.append("")
 
-                # 2. Bridge Configuration (Cumulus only)
-                if platform == 'cumulus':
-                    device_logs.append("2. Bridge Configuration (br_default):")
-                    if bridge_vlans and len(bridge_vlans) > 0:
-                        vlan_list_str = self._format_vlan_list(bridge_vlans)
-                        device_logs.append(f"   Current VLANs: {vlan_list_str}")
-                    else:
-                        device_logs.append("   (no VLANs configured or unable to retrieve)")
-                    device_logs.append("")
-
                 device_logs.append("=" * 80)
                 device_logs.append("INTERFACE DETAILS")
                 device_logs.append("=" * 80)
@@ -3376,6 +3366,20 @@ class VLANDeploymentView(View):
                 if all_current_configs and all_proposed_configs:
                     device_logs.append("Current Device Configuration:")
                     device_logs.append("-" * 80)
+
+                    # Add bridge configuration at the top (Cumulus only)
+                    if platform == 'cumulus' and bridge_vlans and len(bridge_vlans) > 0:
+                        vlan_list_str = self._format_vlan_list(bridge_vlans)
+                        device_logs.append(f"# Bridge Domain br_default - Current VLANs: {vlan_list_str}")
+                        # Show actual NVUE commands for bridge VLANs
+                        for vlan in bridge_vlans:
+                            if isinstance(vlan, str) and '-' in vlan:
+                                # Range format like "3019-3099"
+                                device_logs.append(f"nv set bridge domain br_default vlan {vlan}")
+                            else:
+                                device_logs.append(f"nv set bridge domain br_default vlan {vlan}")
+                        device_logs.append("")
+
                     for line in all_current_configs:
                         device_logs.append(line)
                     device_logs.append("")
@@ -4057,16 +4061,6 @@ class VLANDeploymentView(View):
                         device_logs.append(f"   Error: {error_details}")
                 device_logs.append("")
 
-                # 2. Bridge Configuration (Cumulus only)
-                if platform == 'cumulus':
-                    device_logs.append("2. Bridge Configuration (br_default):")
-                    if bridge_vlans and len(bridge_vlans) > 0:
-                        vlan_list_str = self._format_vlan_list(bridge_vlans)
-                        device_logs.append(f"   Current VLANs: {vlan_list_str}")
-                    else:
-                        device_logs.append("   (no VLANs configured or unable to retrieve)")
-                    device_logs.append("")
-
                 device_logs.append("=" * 80)
                 device_logs.append("INTERFACE DETAILS")
                 device_logs.append("=" * 80)
@@ -4168,6 +4162,20 @@ class VLANDeploymentView(View):
                 if all_current_configs and all_proposed_configs:
                     device_logs.append("Current Device Configuration:")
                     device_logs.append("-" * 80)
+
+                    # Add bridge configuration at the top (Cumulus only)
+                    if platform == 'cumulus' and bridge_vlans and len(bridge_vlans) > 0:
+                        vlan_list_str = self._format_vlan_list(bridge_vlans)
+                        device_logs.append(f"# Bridge Domain br_default - Current VLANs: {vlan_list_str}")
+                        # Show actual NVUE commands for bridge VLANs
+                        for vlan in bridge_vlans:
+                            if isinstance(vlan, str) and '-' in vlan:
+                                # Range format like "3019-3099"
+                                device_logs.append(f"nv set bridge domain br_default vlan {vlan}")
+                            else:
+                                device_logs.append(f"nv set bridge domain br_default vlan {vlan}")
+                        device_logs.append("")
+
                     for line in all_current_configs:
                         device_logs.append(line)
                     device_logs.append("")
