@@ -79,7 +79,6 @@ class VLANDeploymentView(View):
 
                 # Get current device config (needed for bond detection and diff generation)
                 device_config_result = self._get_current_device_config(device, actual_interface_name, platform)
-                current_device_config = device_config_result.get('current_config', 'Unable to fetch')
                 config_source = device_config_result.get('source', 'error')
                 config_timestamp = device_config_result.get('timestamp', 'N/A')
                 device_uptime = device_config_result.get('device_uptime', None)
@@ -88,6 +87,13 @@ class VLANDeploymentView(View):
 
                 # Determine target interface (bond if member, otherwise original)
                 target_interface_for_config = bond_member_of if bond_member_of else actual_interface_name
+
+                # CRITICAL FIX: If bond detected, fetch bond's current config (not member's config)
+                if bond_member_of:
+                    bond_config_result = self._get_current_device_config(device, bond_member_of, platform)
+                    current_device_config = bond_config_result.get('current_config', 'Unable to fetch')
+                else:
+                    current_device_config = device_config_result.get('current_config', 'Unable to fetch')
 
                 # Get proposed config
                 if not sync_netbox_to_device:
