@@ -4701,85 +4701,96 @@ class VLANDeploymentView(View):
             
             for device in devices:
                 device_validation = validation_results['device_validation'].get(device.name, {})
-                
+
                 # Get device info
                 device_ip = str(device.primary_ip4.address).split('/')[0] if device.primary_ip4 else (str(device.primary_ip6.address).split('/')[0] if device.primary_ip6 else 'N/A')
                 device_site = device.site.name if device.site else 'N/A'
                 device_location = device.location.name if device.location else 'N/A'
                 device_role = device.role.name if device.role else 'N/A'
-                
+
                 for interface_name in interface_list:
-                    interface_key = f"{device.name}:{interface_name}"
+                    # In sync mode, interface_name is in "device:interface" format
+                    # Parse it to get the actual interface name
+                    if sync_netbox_to_device and ':' in interface_name:
+                        # Extract device name and interface name from "device:interface" format
+                        iface_device_name, actual_interface_name = interface_name.split(':', 1)
+                        # Skip if this interface doesn't belong to current device
+                        if iface_device_name != device.name:
+                            continue
+                    else:
+                        actual_interface_name = interface_name
+
+                    interface_key = f"{device.name}:{actual_interface_name}"
                     interface_validation = validation_results['interface_validation'].get(interface_key, {})
-                    
-                    # Get interface details
-                    interface_details = self._get_interface_details(device, interface_name)
-                    
+
+                    # Get interface details using the actual interface name (not "device:interface")
+                    interface_details = self._get_interface_details(device, actual_interface_name)
+
                     # Get current device config FIRST (needed for bond detection and for diff generation)
-                    device_config_result = self._get_current_device_config(device, interface_name, platform)
+                    device_config_result = self._get_current_device_config(device, actual_interface_name, platform)
                     current_device_config = device_config_result.get('current_config', 'Unable to fetch')
                     config_source = device_config_result.get('source', 'error')
                     config_timestamp = device_config_result.get('timestamp', 'N/A')
                     device_uptime = device_config_result.get('device_uptime', None)
                     bridge_vlans = device_config_result.get('_bridge_vlans', [])  # Get bridge VLANs if available
                     bond_member_of = device_config_result.get('bond_member_of', None)  # Get bond info for proposed config generation
-                    
+
                     # Determine target interface (bond if member, otherwise original)
-                    target_interface_for_config = bond_member_of if bond_member_of else interface_name
-                    
+                    target_interface_for_config = bond_member_of if bond_member_of else actual_interface_name
+
                     # Get proposed config (use target_interface which may be bond, pass device and bridge_vlans for checks)
                     # In normal mode, use form VLANs; in sync mode, use NetBox VLANs (handled elsewhere)
                     if not sync_netbox_to_device:
                         # Normal mode: use form VLAN (integer ID) - pass as vlan_id for backward compatibility
                         proposed_config = self._generate_vlan_config(
-                            target_interface_for_config, 
+                            target_interface_for_config,
                             vlan_id=untagged_vlan_id,
-                            platform=platform, 
-                            device=device, 
+                            platform=platform,
+                            device=device,
                             bridge_vlans=bridge_vlans
                         )
                     else:
                         # Sync mode: use NetBox VLANs (will be handled by _generate_config_from_netbox)
                         # This should not be reached in dry_run for sync mode, but keep for safety
-                        interface_obj = Interface.objects.filter(device=device, name=interface_name).first()
+                        interface_obj = Interface.objects.filter(device=device, name=actual_interface_name).first()
                         if interface_obj:
                             config_info = self._generate_config_from_netbox(device, interface_obj, platform)
                             proposed_config = '\n'.join(config_info.get('commands', []))
                         else:
                             proposed_config = ""
-                    
+
                     # Generate config diff (pass bridge VLANs to check if VLAN already exists)
                     # Use target_interface_for_config for interface_name parameter to ensure diff shows correct interface
                     config_diff = self._generate_config_diff(current_device_config, proposed_config, platform, device=device, interface_name=target_interface_for_config, bridge_vlans=bridge_vlans)
-                    
+
                     # Get NetBox current and proposed state
                     # Use primary_vlan_id for display purposes (untagged if available, otherwise first tagged)
-                    netbox_state = self._get_netbox_current_state(device, interface_name, primary_vlan_id)
-                    
+                    netbox_state = self._get_netbox_current_state(device, actual_interface_name, primary_vlan_id)
+
                     # Get bond information for NetBox diff (if bond detected)
                     bond_info_for_netbox = None
                     bond_name_for_netbox = None
                     if bond_member_of:
-                        bond_info_for_netbox = self._get_bond_interface_for_member(device, interface_name, platform=platform)
+                        bond_info_for_netbox = self._get_bond_interface_for_member(device, actual_interface_name, platform=platform)
                         bond_name_for_netbox = bond_member_of
-                    
+
                     netbox_diff = self._generate_netbox_diff(
-                        netbox_state, 
+                        netbox_state,
                         netbox_state['proposed'],
                         bond_info=bond_info_for_netbox,
-                        interface_name=interface_name,
+                        interface_name=actual_interface_name,
                         bond_name=bond_name_for_netbox
                     )
-                    
+
                     # Generate validation table
                     validation_table = self._generate_validation_table(device_validation, interface_validation)
-                    
+
                     # Generate risk assessment
                     current_vlan = netbox_state['current']['untagged_vlan']
                     risk_assessment = self._generate_risk_assessment(device_validation, interface_validation, current_vlan, primary_vlan_id)
-                    
+
                     # Generate rollback info (include current config for manual rollback)
-                    rollback_info = self._generate_rollback_info(device, interface_name, primary_vlan_id, platform, timeout=90, current_config=current_device_config)
+                    rollback_info = self._generate_rollback_info(device, actual_interface_name, primary_vlan_id, platform, timeout=90, current_config=current_device_config)
                     
                     # Determine overall status
                     is_blocked = (device_validation.get('status') == 'block' or interface_validation.get('status') == 'block')
@@ -4832,7 +4843,7 @@ class VLANDeploymentView(View):
                     
                     # Interface Details (Always shown)
                     logs.append("--- Interface Details ---")
-                    logs.append(f"Interface: {interface_name}")
+                    logs.append(f"Interface: {actual_interface_name}")
                     logs.append(f"Type: {interface_details.get('type', 'Unknown')}")
                     logs.append(f"Description: {interface_details.get('description', 'No description')}")
                     logs.append(f"Cable Status: {'[OK] Cabled' if interface_details.get('cabled') else '[FAIL] Not cabled'}")
@@ -5008,7 +5019,7 @@ class VLANDeploymentView(View):
                         # ISSUE 1 FIX: Generate config from NetBox's ACTUAL configuration, not from proposed_config
                         # proposed_config contains the VLAN from form input, but we need to show what NetBox actually has
                         # Determine target interface (bond if member, otherwise original)
-                        target_interface_for_netbox = target_interface_for_config if 'target_interface_for_config' in locals() else interface_name
+                        target_interface_for_netbox = target_interface_for_config if 'target_interface_for_config' in locals() else actual_interface_name
                         if bond_info:
                             target_interface_for_netbox = bond_info['bond_name']
                         
@@ -5114,7 +5125,7 @@ class VLANDeploymentView(View):
                     # Check for active traffic on interface (Cumulus only)
                     if platform == 'cumulus':
                         logs.append("--- Traffic Statistics Check ---")
-                        traffic_stats = self._check_interface_traffic_stats(device, interface_name, platform, bond_interface=bond_interface_for_stats)
+                        traffic_stats = self._check_interface_traffic_stats(device, actual_interface_name, platform, bond_interface=bond_interface_for_stats)
                         if traffic_stats.get('has_traffic'):
                             in_pkts = traffic_stats.get('in_pkts_total', 0)
                             out_pkts = traffic_stats.get('out_pkts_total', 0)
@@ -5237,7 +5248,7 @@ class VLANDeploymentView(View):
                     
                     results.append({
                         "device": device,
-                        "interface": interface_name,
+                        "interface": actual_interface_name,
                         "vlan_id": primary_vlan_id,
                         "vlan_name": vlan_name,
                         "status": overall_status,
@@ -5265,15 +5276,26 @@ class VLANDeploymentView(View):
             for device in devices:
                 pre_deployment_logs[device.name] = {}
                 for interface_name in interface_list:
+                    # In sync mode, interface_name is in "device:interface" format
+                    # Parse it to get the actual interface name
+                    if sync_netbox_to_device and ':' in interface_name:
+                        # Extract device name and interface name from "device:interface" format
+                        iface_device_name, actual_interface_name = interface_name.split(':', 1)
+                        # Skip if this interface doesn't belong to current device
+                        if iface_device_name != device.name:
+                            continue
+                    else:
+                        actual_interface_name = interface_name
+
                     # Build the same comprehensive logs as dry run (before actual deployment)
                     logs = []
-                    
+
                     # Get current config before deployment (same logic as dry run)
                     current_config_before = None
                     bridge_vlans_before = []
                     bond_member_of = None
                     try:
-                        device_config_result = self._get_current_device_config(device, interface_name, platform)
+                        device_config_result = self._get_current_device_config(device, actual_interface_name, platform)
                         current_config_before = device_config_result.get('current_config', None)
                         bridge_vlans_before = device_config_result.get('_bridge_vlans', [])
                         bond_member_of = device_config_result.get('bond_member_of', None)  # Get bond info for proposed config generation
@@ -5291,41 +5313,41 @@ class VLANDeploymentView(View):
                     
                     # Get NetBox current state and generate diffs (same as dry run)
                     # Use primary_vlan_id for display purposes (untagged if available, otherwise first tagged)
-                    netbox_state = self._get_netbox_current_state(device, interface_name, primary_vlan_id)
-                    
+                    netbox_state = self._get_netbox_current_state(device, actual_interface_name, primary_vlan_id)
+
                     # Get bond information for NetBox diff (if bond detected)
                     bond_info_for_netbox = None
                     bond_name_for_netbox = None
                     if bond_member_of:
-                        bond_info_for_netbox = self._get_bond_interface_for_member(device, interface_name, platform=platform)
+                        bond_info_for_netbox = self._get_bond_interface_for_member(device, actual_interface_name, platform=platform)
                         bond_name_for_netbox = bond_member_of
-                    
+
                     netbox_diff = self._generate_netbox_diff(
-                        netbox_state, 
+                        netbox_state,
                         netbox_state['proposed'],
                         bond_info=bond_info_for_netbox,
-                        interface_name=interface_name,
+                        interface_name=actual_interface_name,
                         bond_name=bond_name_for_netbox
                     )
-                    
+
                     # Determine target interface for proposed config (bond if member, otherwise original)
-                    target_interface_for_config = bond_member_of if bond_member_of else interface_name
-                    
+                    target_interface_for_config = bond_member_of if bond_member_of else actual_interface_name
+
                     # Generate proposed config and config diff (same as dry run) (use target_interface which may be bond)
                     # In normal mode, use form VLANs; in sync mode, use NetBox VLANs (handled elsewhere)
                     if not sync_netbox_to_device:
                         # Normal mode: use form VLANs
                         proposed_config = self._generate_vlan_config(
-                            target_interface_for_config, 
+                            target_interface_for_config,
                             untagged_vlan=untagged_vlan_obj,
                             tagged_vlans=tagged_vlan_objs,
-                            platform=platform, 
-                            device=device, 
+                            platform=platform,
+                            device=device,
                             bridge_vlans=bridge_vlans_before
                         )
                     else:
                         # Sync mode: use NetBox VLANs (will be handled by _generate_config_from_netbox)
-                        interface_obj = Interface.objects.filter(device=device, name=interface_name).first()
+                        interface_obj = Interface.objects.filter(device=device, name=actual_interface_name).first()
                         if interface_obj:
                             config_info = self._generate_config_from_netbox(device, interface_obj, platform)
                             proposed_config = '\n'.join(config_info.get('commands', []))
@@ -5345,10 +5367,10 @@ class VLANDeploymentView(View):
                     
                     # Check if interface is a bond member
                     if bond_member_of:
-                        logs.append(f"Bond Membership: Interface '{interface_name}' is a member of bond '{bond_member_of}'")
-                        logs.append(f"Note: VLAN configuration will be applied to bond '{bond_member_of}', not to '{interface_name}' directly.")
+                        logs.append(f"Bond Membership: Interface '{actual_interface_name}' is a member of bond '{bond_member_of}'")
+                        logs.append(f"Note: VLAN configuration will be applied to bond '{bond_member_of}', not to '{actual_interface_name}' directly.")
                         logs.append("")
-                        logs.append(f"Interface-Level Configuration (for '{interface_name}'):")
+                        logs.append(f"Interface-Level Configuration (for '{actual_interface_name}'):")
                         if current_config_before and current_config_before.strip() and not "(no configuration" in current_config_before and not "ERROR:" in current_config_before:
                             for line in current_config_before.split('\n'):
                                 if line.strip():
@@ -5358,7 +5380,7 @@ class VLANDeploymentView(View):
                         logs.append("")
                         # Show bond interface config if available
                         try:
-                            device_config_result = self._get_current_device_config(device, interface_name, platform)
+                            device_config_result = self._get_current_device_config(device, actual_interface_name, platform)
                             bond_interface_config = device_config_result.get('bond_interface_config')
                             if bond_interface_config and bond_interface_config.strip():
                                 logs.append(f"Bond Interface '{bond_member_of}' Configuration:")
@@ -5551,14 +5573,14 @@ class VLANDeploymentView(View):
                             logs.append(f"[OK] No active traffic detected on interface '{target_interface_for_stats}'")
                         logs.append("")
                         # Store for post-deployment comparison
-                        pre_deployment_logs[device.name][f"{interface_name}_pre_traffic"] = pre_traffic_stats
-                    
+                        pre_deployment_logs[device.name][f"{actual_interface_name}_pre_traffic"] = pre_traffic_stats
+
                     logs.append("=" * 80)
                     logs.append("STARTING DEPLOYMENT")
                     logs.append("=" * 80)
                     logs.append("")
-                    
-                    pre_deployment_logs[device.name][interface_name] = logs
+
+                    pre_deployment_logs[device.name][actual_interface_name] = logs
             
             # Now deploy using Nornir
             # First, build bond_info_map: {device_name: {interface_name: bond_name}}
@@ -5567,19 +5589,30 @@ class VLANDeploymentView(View):
             for device in devices:
                 device_bond_map = {}
                 for interface_name in interface_list:
+                    # In sync mode, interface_name is in "device:interface" format
+                    # Parse it to get the actual interface name
+                    if sync_netbox_to_device and ':' in interface_name:
+                        # Extract device name and interface name from "device:interface" format
+                        iface_device_name, actual_interface_name = interface_name.split(':', 1)
+                        # Skip if this interface doesn't belong to current device
+                        if iface_device_name != device.name:
+                            continue
+                    else:
+                        actual_interface_name = interface_name
+
                     # Check if interface is a bond member
                     try:
-                        logger.debug(f"[DEBUG] Checking bond membership for {device.name}:{interface_name}")
-                        device_config_result = self._get_current_device_config(device, interface_name, platform)
+                        logger.debug(f"[DEBUG] Checking bond membership for {device.name}:{actual_interface_name}")
+                        device_config_result = self._get_current_device_config(device, actual_interface_name, platform)
                         bond_member_of = device_config_result.get('bond_member_of', None)
                         if bond_member_of:
-                            device_bond_map[interface_name] = bond_member_of
-                            logger.info(f"[DEBUG] ✓ BOND DETECTED: Device {device.name}: Interface {interface_name} is member of bond {bond_member_of}")
-                            logger.info(f"[DEBUG]   Will use bond interface '{bond_member_of}' for device config (instead of '{interface_name}')")
+                            device_bond_map[actual_interface_name] = bond_member_of
+                            logger.info(f"[DEBUG] ✓ BOND DETECTED: Device {device.name}: Interface {actual_interface_name} is member of bond {bond_member_of}")
+                            logger.info(f"[DEBUG]   Will use bond interface '{bond_member_of}' for device config (instead of '{actual_interface_name}')")
                         else:
-                            logger.debug(f"[DEBUG] No bond detected for {device.name}:{interface_name} - will use interface directly")
+                            logger.debug(f"[DEBUG] No bond detected for {device.name}:{actual_interface_name} - will use interface directly")
                     except Exception as e:
-                        logger.warning(f"[DEBUG] Could not check bond membership for {device.name}:{interface_name}: {e}")
+                        logger.warning(f"[DEBUG] Could not check bond membership for {device.name}:{actual_interface_name}: {e}")
                 
                 if device_bond_map:
                     bond_info_map[device.name] = device_bond_map
