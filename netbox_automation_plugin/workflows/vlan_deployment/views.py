@@ -3330,7 +3330,7 @@ class VLANDeploymentView(View):
                             device_bond = bond_info.get('device_bond_name', 'N/A')
                             all_members = bond_info.get('all_members', [])
                             members_str = ', '.join(all_members) if all_members else 'unknown'
-                            warnings.append(f"NETBOX MISSING BOND: Device has bond '{device_bond}' with members [{members_str}], but NetBox does not have this bond defined. In deployment mode, bond will be created in NetBox after successful config deployment. For now, please create bond '{device_bond}' in NetBox and add interfaces [{members_str}] to it, then re-run dry run.")
+                            warnings.append(f"NETBOX MISSING BOND: Device has bond '{device_bond}' with members [{members_str}], but NetBox does not have this bond defined. In deployment mode, bond will be created in NetBox after successful config deployment.")
                             has_conflicts = True
                     
                     if platform == 'cumulus':
@@ -4064,7 +4064,7 @@ class VLANDeploymentView(View):
                                 device_bond = bond_info_section2.get('device_bond_name', 'N/A')
                                 all_members = bond_info_section2.get('all_members', [])
                                 members_str = ', '.join(all_members) if all_members else 'unknown'
-                                warnings.append(f"NETBOX MISSING BOND: Device has bond '{device_bond}' with members [{members_str}], but NetBox does not have this bond defined. In deployment mode, bond will be created in NetBox after successful config deployment. For now, please create bond '{device_bond}' in NetBox and add interfaces [{members_str}] to it, then re-run dry run.")
+                                warnings.append(f"NETBOX MISSING BOND: Device has bond '{device_bond}' with members [{members_str}], but NetBox does not have this bond defined. In deployment mode, bond will be created in NetBox after successful config deployment.")
                                 has_conflicts = True
                         elif hasattr(interface, 'lag') and interface.lag:
                             # NetBox has bond but device config check didn't find it (fallback to NetBox only)
@@ -5129,7 +5129,8 @@ class VLANDeploymentView(View):
                     # Check for active traffic on interface (Cumulus only)
                     if platform == 'cumulus':
                         logs.append("--- Traffic Statistics Check ---")
-                        traffic_stats = self._check_interface_traffic_stats(device, actual_interface_name, platform, bond_interface=bond_interface_for_stats)
+                        # Use target_interface_for_stats (bond if detected, otherwise member interface)
+                        traffic_stats = self._check_interface_traffic_stats(device, target_interface_for_stats, platform, bond_interface=None)
                         if traffic_stats.get('has_traffic'):
                             in_pkts = traffic_stats.get('in_pkts_total', 0)
                             out_pkts = traffic_stats.get('out_pkts_total', 0)
@@ -5563,7 +5564,8 @@ class VLANDeploymentView(View):
                     
                     if platform == 'cumulus':
                         logs.append("--- Pre-Deployment Traffic Check ---")
-                        pre_traffic_stats = self._check_interface_traffic_stats(device, interface_name, platform, bond_interface=bond_interface_for_stats)
+                        # Use target_interface_for_stats (bond if detected, otherwise member interface)
+                        pre_traffic_stats = self._check_interface_traffic_stats(device, target_interface_for_stats, platform, bond_interface=None)
                         if pre_traffic_stats.get('has_traffic'):
                             in_pkts = pre_traffic_stats.get('in_pkts_total', 0)
                             out_pkts = pre_traffic_stats.get('out_pkts_total', 0)
