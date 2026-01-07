@@ -2194,12 +2194,22 @@ class VLANDeploymentView(View):
         diff_lines.append("+++ Proposed NetBox State")
         diff_lines.append("")
         
-        # ISSUE 5 FIX: If bond detected in sync mode, show VLAN migration
+        # BOND DETECTION: Show bond creation/migration messages
         # Check for bond_name and interface_name (bond_info can be None if NetBox doesn't have bond yet)
         if bond_name and interface_name:
-            # Show migration message
+            # Check if bond exists in NetBox
+            bond_exists_in_netbox = False
+            if bond_info:
+                bond_exists_in_netbox = bond_info.get('netbox_bond_name') is not None
+
+            # Show appropriate message based on bond status
+            if not bond_exists_in_netbox:
+                diff_lines.append(f"[BOND] Bond '{bond_name}' will be CREATED in NetBox")
+                diff_lines.append(f"  Member: {interface_name}")
+                diff_lines.append("")
+
+            # Show VLAN migration message
             diff_lines.append(f"[INFO] BOND DETECTED: VLANs will be moved from interface '{interface_name}' to bond '{bond_name}'")
-            diff_lines.append(f"  Bond '{bond_name}' will be created in NetBox (if missing)")
             diff_lines.append("")
             diff_lines.append(f"Interface '{interface_name}' (VLANs will be removed):")
             old_untagged = current_state['current']['untagged_vlan'] or 'None'
@@ -4617,18 +4627,59 @@ class VLANDeploymentView(View):
                     device_logs.append("=" * 80)
                     device_logs.append("")
 
+                    # BOND CREATION: Check if any interface has bond that needs to be synced to NetBox
+                    bonds_to_sync = {}  # {bond_name: [member_interfaces]}
+                    for actual_interface_name in device_interfaces:
+                        interface_result = device_results.get(actual_interface_name, {})
+                        if interface_result.get('success') and interface_result.get('committed'):
+                            # Check if device has bond but NetBox doesn't
+                            bond_info = self._get_bond_interface_for_member(device, actual_interface_name, platform=platform)
+                            if bond_info and bond_info.get('netbox_missing_bond'):
+                                bond_name = bond_info['bond_name']
+                                all_members = bond_info.get('all_members', [actual_interface_name])
+                                if bond_name not in bonds_to_sync:
+                                    bonds_to_sync[bond_name] = all_members
+
+                    # Sync bonds to NetBox (create bond + migrate VLANs)
+                    for bond_name, members in bonds_to_sync.items():
+                        device_logs.append(f"[BOND] Creating bond {bond_name} in NetBox...")
+                        sync_result = self._sync_bond_to_netbox(
+                            device=device,
+                            bond_name=bond_name,
+                            member_interfaces=members,
+                            platform=platform,
+                            migrate_vlans=False  # Normal mode: don't migrate VLANs, just create bond structure
+                        )
+                        if sync_result.get('success'):
+                            device_logs.append(f"[OK] Bond {bond_name} created in NetBox")
+                            device_logs.append(f"     Members added: {len(members)} ({', '.join(members)})")
+                            netbox_updated = "Yes"
+                        else:
+                            device_logs.append(f"[ERROR] Failed to create bond {bond_name}: {sync_result.get('error')}")
+                        device_logs.append("")
+
                     for actual_interface_name in device_interfaces:
                         interface_result = device_results.get(actual_interface_name, {})
                         if interface_result.get('success') and interface_result.get('committed'):
                             try:
-                                interface_obj = Interface.objects.get(device=device, name=actual_interface_name)
+                                # Check if this interface is a bond member
+                                bond_member_of = bond_info_map.get(device.name, {}).get(actual_interface_name, None)
+
+                                # If interface is bond member, update bond instead of member interface
+                                if bond_member_of:
+                                    target_interface_name = bond_member_of
+                                    device_logs.append(f"[INFO] {actual_interface_name} is member of {bond_member_of}, updating bond instead")
+                                else:
+                                    target_interface_name = actual_interface_name
+
+                                interface_obj = Interface.objects.get(device=device, name=target_interface_name)
 
                                 # Update untagged VLAN
                                 if untagged_vlan_id and vlan:
                                     interface_obj.untagged_vlan = vlan
                                     interface_obj.mode = 'access'
                                     interface_obj.save()
-                                    device_logs.append(f"[OK] Updated {actual_interface_name}: untagged VLAN {untagged_vlan_id}")
+                                    device_logs.append(f"[OK] Updated {target_interface_name}: untagged VLAN {untagged_vlan_id}")
                                     netbox_updated = "Yes"
 
                                 # Update tagged VLANs if any
@@ -4640,12 +4691,12 @@ class VLANDeploymentView(View):
                                             interface_obj.tagged_vlans.add(tagged_vlan_obj)
                                     interface_obj.mode = 'tagged-all' if not untagged_vlan_id else 'tagged'
                                     interface_obj.save()
-                                    device_logs.append(f"[OK] Updated {actual_interface_name}: tagged VLANs {tagged_vlan_ids}")
+                                    device_logs.append(f"[OK] Updated {target_interface_name}: tagged VLANs {tagged_vlan_ids}")
                                     netbox_updated = "Yes"
                             except Interface.DoesNotExist:
-                                device_logs.append(f"[WARN] Interface {actual_interface_name} not found in NetBox")
+                                device_logs.append(f"[WARN] Interface {target_interface_name} not found in NetBox")
                             except Exception as e:
-                                device_logs.append(f"[ERROR] Failed to update {actual_interface_name}: {e}")
+                                device_logs.append(f"[ERROR] Failed to update {target_interface_name}: {e}")
 
                     device_logs.append("")
 
@@ -5074,22 +5125,64 @@ class VLANDeploymentView(View):
         
         if platform == 'cumulus':
             commands = []
-            
-            # If bond migration is needed, create new bond and migrate all members
-            if bond_info and bond_info.get('needs_migration'):
-                netbox_bond = bond_info['bond_name']  # e.g., 'bond_swp3'
-                device_bond = bond_info['device_bond_name']  # e.g., 'bond3'
+
+            # BOND CREATION LOGIC - Handle all scenarios
+            if bond_info:
+                bond_name = bond_info['bond_name']
+                netbox_bond_name = bond_info.get('netbox_bond_name')
+                device_bond_name = bond_info.get('device_bond_name')
+                netbox_missing_bond = bond_info.get('netbox_missing_bond', False)
+                needs_migration = bond_info.get('needs_migration', False)
                 all_members = bond_info.get('all_members', [])
-                
-                # Create new bond interface
-                commands.append(f"nv set interface {netbox_bond} type bond")
-                
-                # Add all members to the new bond
-                for member in all_members:
-                    commands.append(f"nv set interface {netbox_bond} bond member {member}")
-                
-                # Add bond to bridge domain
-                commands.append(f"nv set interface {netbox_bond} bridge domain br_default")
+                netbox_members = bond_info.get('netbox_members', [])
+
+                # Scenario 1: NetBox has bond but device doesn't - CREATE BOND ON DEVICE
+                if netbox_bond_name and not device_bond_name:
+                    # Use NetBox members if available, otherwise use current interface
+                    members_to_add = netbox_members if netbox_members else [interface_name]
+
+                    commands.append(f"# Creating bond {netbox_bond_name} on device (from NetBox)")
+                    commands.append(f"nv set interface {netbox_bond_name} type bond")
+
+                    # Add all members
+                    for member in members_to_add:
+                        commands.append(f"nv set interface {netbox_bond_name} bond member {member}")
+
+                    # LACP settings
+                    commands.append(f"nv set interface {netbox_bond_name} bond lacp-rate fast")
+                    commands.append(f"nv set interface {netbox_bond_name} bond lacp-bypass on")
+
+                    # Add bond to bridge domain
+                    commands.append(f"nv set interface {netbox_bond_name} bridge domain br_default")
+                    commands.append("")
+
+                # Scenario 2: Device has bond but NetBox doesn't - will be synced to NetBox later
+                # (handled in deployment/dry run by calling _sync_bond_to_netbox)
+                elif device_bond_name and not netbox_bond_name:
+                    # NetBox will be updated, but device already has bond - no device commands needed
+                    # Just add a comment for clarity
+                    commands.append(f"# Bond {device_bond_name} exists on device, will be synced to NetBox")
+                    commands.append("")
+
+                # Scenario 3: Both have bond but different names - MIGRATE TO NETBOX BOND NAME
+                elif needs_migration and netbox_bond_name != device_bond_name:
+                    commands.append(f"# Migrating from device bond {device_bond_name} to NetBox bond {netbox_bond_name}")
+                    commands.append(f"nv set interface {netbox_bond_name} type bond")
+
+                    # Add all members to the new bond
+                    for member in all_members:
+                        commands.append(f"nv set interface {netbox_bond_name} bond member {member}")
+
+                    # LACP settings
+                    commands.append(f"nv set interface {netbox_bond_name} bond lacp-rate fast")
+                    commands.append(f"nv set interface {netbox_bond_name} bond lacp-bypass on")
+
+                    # Add bond to bridge domain
+                    commands.append(f"nv set interface {netbox_bond_name} bridge domain br_default")
+                    commands.append("")
+
+                # Scenario 4: Both have same bond - no bond creation needed, just VLAN config
+                # (falls through to VLAN config below)
             
             # ISSUE 1 FIX: Add VLANs to bridge first (additive - safe, won't remove existing VLANs)
             # But only if they don't already exist in bridge VLANs
