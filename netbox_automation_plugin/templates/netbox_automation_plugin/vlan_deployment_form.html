@@ -718,28 +718,14 @@
     color: #ffffff !important;
   }
   
-  /* Hide VLAN config container when sync mode is active - MULTIPLE SELECTORS */
-  #vlan-config-container.hidden-by-sync,
-  body:has(#id_sync_netbox_to_device:checked) #vlan-config-container {
+  /* Hide VLAN config container when sync mode is active */
+  #vlan-config-container.hidden-by-sync {
     display: none !important;
     visibility: hidden !important;
     height: 0 !important;
     overflow: hidden !important;
     margin: 0 !important;
     padding: 0 !important;
-  }
-  
-  /* Ensure group fields are hidden by default when single mode is active */
-  #single-device-fields[style*="display: block"] ~ #group-device-fields,
-  body:has(input[name="deployment_scope"][value="single"]:checked) #group-device-fields {
-    display: none !important;
-    visibility: hidden !important;
-  }
-  
-  /* Ensure single fields are hidden when group mode is active */
-  body:has(input[name="deployment_scope"][value="group"]:checked) #single-device-fields {
-    display: none !important;
-    visibility: hidden !important;
   }
 </style>
   <div class="row">
@@ -2562,7 +2548,37 @@
                   console.error('Error in updateFieldVisibility (500ms):', e);
                 }
               }, 500);
-              
+              setTimeout(() => {
+                try {
+                  updateFieldVisibility();
+                } catch (e) {
+                  console.error('Error in updateFieldVisibility (1000ms):', e);
+                }
+              }, 1000);
+              setTimeout(() => {
+                try {
+                  updateFieldVisibility();
+                } catch (e) {
+                  console.error('Error in updateFieldVisibility (2000ms):', e);
+                }
+              }, 2000);
+
+              // Also set up periodic check every 2 seconds for the first 10 seconds
+              let periodicCheckCount = 0;
+              const periodicCheck = setInterval(() => {
+                periodicCheckCount++;
+                try {
+                  updateFieldVisibility();
+                  console.log('Periodic field visibility check #' + periodicCheckCount);
+                } catch (e) {
+                  console.error('Error in periodic updateFieldVisibility:', e);
+                }
+                if (periodicCheckCount >= 5) {
+                  clearInterval(periodicCheck);
+                  console.log('Stopped periodic field visibility checks');
+                }
+              }, 2000);
+
               console.log('Step 2: Calling updateSyncModeState...');
               updateSyncModeState();
               
