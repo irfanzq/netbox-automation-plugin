@@ -2571,13 +2571,13 @@
                 periodicCheckCount++;
                 try {
                   updateFieldVisibility();
-                  console.log('Periodic field visibility check #' + periodicCheckCount);
+                  // console.log('Periodic field visibility check #' + periodicCheckCount);
                 } catch (e) {
                   console.error('Error in periodic updateFieldVisibility:', e);
                 }
                 if (periodicCheckCount >= 5) {
                   clearInterval(periodicCheck);
-                  console.log('Stopped periodic field visibility checks');
+                  // console.log('Stopped periodic field visibility checks');
                 }
               }, 2000);
 
