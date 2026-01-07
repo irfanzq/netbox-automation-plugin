@@ -3876,46 +3876,69 @@ class VLANDeploymentView(View):
                         device_logs.append(risk_assessment)
                         device_logs.append("")
 
-                    # Add config source info with device uptime
-                    device_logs.append("--- Device Config Source ---")
-                    if config_source == 'device':
-                        device_logs.append(f"[OK] Connected to device successfully")
-                        if device_uptime:
-                            device_logs.append(f"Device uptime: {device_uptime}")
-                        if config_timestamp != 'N/A':
-                            device_logs.append(f"Config fetched at: {config_timestamp}")
-                    elif config_source == 'netbox':
-                        device_logs.append(f"[WARN] Device unreachable - using NetBox inference")
-                        device_logs.append(f"Note: Actual device config may differ from NetBox state")
-                    else:
-                        device_logs.append(f"[FAIL] Config retrieval failed")
-                        if error_details:
-                            device_logs.append(f"Error: {error_details}")
+                    # Pre-Deployment Checks Section
+                    device_logs.append("--- Pre-Deployment Checks ---")
                     device_logs.append("")
 
-                    # Bond member info
+                    # 1. Device Connection & Uptime
+                    device_logs.append("Device Connection:")
+                    if config_source == 'device':
+                        device_logs.append(f"  [OK] Connected successfully")
+                        if device_uptime:
+                            device_logs.append(f"  Uptime: {device_uptime}")
+                        if config_timestamp != 'N/A':
+                            device_logs.append(f"  Config fetched: {config_timestamp}")
+                    elif config_source == 'netbox':
+                        device_logs.append(f"  [WARN] Device unreachable - using NetBox inference")
+                        device_logs.append(f"  Note: Actual device config may differ from NetBox state")
+                    else:
+                        device_logs.append(f"  [FAIL] Config retrieval failed")
+                        if error_details:
+                            device_logs.append(f"  Error: {error_details}")
+                    device_logs.append("")
+
+                    # 2. Bond Detection
                     if bond_member_of:
-                        device_logs.append(f"Bond Membership: Interface '{actual_interface_name}' is a member of bond '{bond_member_of}'")
-                        device_logs.append(f"Note: VLAN configuration will be applied to bond '{bond_member_of}', not to '{actual_interface_name}' directly.")
+                        device_logs.append("Bond Detection:")
+                        device_logs.append(f"  [INFO] Interface '{actual_interface_name}' is member of bond '{bond_member_of}'")
+                        device_logs.append(f"  Target: VLAN config will be applied to '{bond_member_of}'")
                         device_logs.append("")
 
-                    # Bridge-Level Configuration (for Cumulus)
-                    if platform == 'cumulus' and bridge_vlans and len(bridge_vlans) > 0:
-                        vlan_list_str = self._format_vlan_list(bridge_vlans)
-                        device_logs.append(f"Bridge VLANs (br_default): {vlan_list_str}")
-                        device_logs.append("")
-
-                    # Traffic Statistics Check (Cumulus only)
+                    # 3. Bridge Configuration (Cumulus)
                     if platform == 'cumulus':
-                        device_logs.append(f"Traffic Check on: {target_interface_for_stats}")
+                        device_logs.append("Bridge Configuration (br_default):")
+                        if bridge_vlans and len(bridge_vlans) > 0:
+                            vlan_list_str = self._format_vlan_list(bridge_vlans)
+                            device_logs.append(f"  Current VLANs: {vlan_list_str}")
+                        else:
+                            device_logs.append("  (no VLANs configured or unable to retrieve)")
+                        device_logs.append("")
+
+                    # 4. Cable & LLDP Status (from NetBox)
+                    device_logs.append("Physical Connectivity:")
+                    if interface_details.get('cabled'):
+                        device_logs.append(f"  [OK] Cable connected")
+                        if interface_details.get('connected_device'):
+                            device_logs.append(f"  Connected to: {interface_details.get('connected_device')} ({interface_details.get('connected_role', 'Unknown')})")
+                    else:
+                        device_logs.append(f"  [WARN] No cable detected in NetBox")
+                    device_logs.append("")
+
+                    # 5. Traffic Statistics (Cumulus only)
+                    if platform == 'cumulus':
+                        device_logs.append(f"Traffic Statistics (on {target_interface_for_stats}):")
                         traffic_stats = interface_preview.get('traffic_stats', {})
                         if traffic_stats:
-                            device_logs.append(f"  RX: {traffic_stats.get('rx_packets', 'N/A')} packets ({traffic_stats.get('rx_bytes', 'N/A')} bytes)")
-                            device_logs.append(f"  TX: {traffic_stats.get('tx_packets', 'N/A')} packets ({traffic_stats.get('tx_bytes', 'N/A')} bytes)")
+                            rx_pkts = traffic_stats.get('rx_packets', 0)
+                            tx_pkts = traffic_stats.get('tx_packets', 0)
+                            rx_bytes = traffic_stats.get('rx_bytes', 0)
+                            tx_bytes = traffic_stats.get('tx_bytes', 0)
+                            device_logs.append(f"  RX: {rx_pkts:,} packets ({rx_bytes:,} bytes)")
+                            device_logs.append(f"  TX: {tx_pkts:,} packets ({tx_bytes:,} bytes)")
                             if traffic_stats.get('has_traffic'):
-                                device_logs.append(f"  [WARN] Active traffic detected")
+                                device_logs.append(f"  [WARN] Active traffic detected - deployment will disrupt traffic!")
                             else:
-                                device_logs.append(f"  [OK] No active traffic")
+                                device_logs.append(f"  [OK] No active traffic detected")
                         else:
                             device_logs.append("  (traffic statistics not available)")
                         device_logs.append("")
@@ -4081,18 +4104,96 @@ class VLANDeploymentView(View):
                     logs.append("=" * 80)
                     logs.append("")
 
-                    # Bond member info
+                    # Pre-Deployment Checks Section
+                    logs.append("--- Pre-Deployment Checks ---")
+                    logs.append("")
+
+                    # 1. Device Connection & Uptime
+                    logs.append("Device Connection:")
+                    try:
+                        # Try to get device uptime
+                        napalm_mgr_temp = NAPALMDeviceManager(device)
+                        connection_temp = napalm_mgr_temp.connect()
+                        device_uptime_deploy = None
+                        if hasattr(connection_temp, 'cli'):
+                            try:
+                                uptime_output = connection_temp.cli(['uptime'])
+                                if uptime_output:
+                                    if isinstance(uptime_output, dict):
+                                        device_uptime_deploy = list(uptime_output.values())[0] if uptime_output else None
+                                    else:
+                                        device_uptime_deploy = str(uptime_output).strip() if uptime_output else None
+                            except Exception:
+                                pass
+                        napalm_mgr_temp.disconnect()
+                        logs.append(f"  [OK] Connected successfully")
+                        if device_uptime_deploy:
+                            logs.append(f"  Uptime: {device_uptime_deploy}")
+                    except Exception as e_conn:
+                        logs.append(f"  [WARN] Connection check failed: {e_conn}")
+                    logs.append("")
+
+                    # 2. Bond Detection
                     if bond_member_of:
-                        logs.append(f"Bond Membership: Interface '{actual_interface_name}' is a member of bond '{bond_member_of}'")
-                        logs.append(f"Note: VLAN configuration will be applied to bond '{bond_member_of}', not to '{actual_interface_name}' directly.")
+                        logs.append("Bond Detection:")
+                        logs.append(f"  [INFO] Interface '{actual_interface_name}' is member of bond '{bond_member_of}'")
+                        logs.append(f"  Target: VLAN config will be applied to '{bond_member_of}'")
                         logs.append("")
 
-
-                    # Bridge-Level Configuration (for Cumulus)
-                    if platform == 'cumulus' and bridge_vlans_before and len(bridge_vlans_before) > 0:
-                        vlan_list_str = self._format_vlan_list(bridge_vlans_before)
-                        logs.append(f"Bridge VLANs (br_default): {vlan_list_str}")
+                    # 3. Bridge Configuration (Cumulus)
+                    if platform == 'cumulus':
+                        logs.append("Bridge Configuration (br_default):")
+                        if bridge_vlans_before and len(bridge_vlans_before) > 0:
+                            vlan_list_str = self._format_vlan_list(bridge_vlans_before)
+                            logs.append(f"  Current VLANs: {vlan_list_str}")
+                        else:
+                            logs.append("  (no VLANs configured or unable to retrieve)")
                         logs.append("")
+
+                    # 4. Cable & Physical Connectivity (from NetBox)
+                    logs.append("Physical Connectivity:")
+                    try:
+                        interface_obj_check = Interface.objects.filter(device=device, name=actual_interface_name).first()
+                        if interface_obj_check:
+                            if interface_obj_check.cable:
+                                logs.append(f"  [OK] Cable connected")
+                                if interface_obj_check.link_peers:
+                                    peer_info = []
+                                    for peer in interface_obj_check.link_peers:
+                                        if hasattr(peer, 'device'):
+                                            peer_info.append(f"{peer.device.name}")
+                                    if peer_info:
+                                        logs.append(f"  Connected to: {', '.join(peer_info)}")
+                            else:
+                                logs.append(f"  [WARN] No cable detected in NetBox")
+                        else:
+                            logs.append(f"  [WARN] Interface not found in NetBox")
+                    except Exception:
+                        logs.append(f"  (unable to check cable status)")
+                    logs.append("")
+
+                    # 5. Traffic Statistics (Cumulus only)
+                    target_interface_for_stats = bond_member_of if bond_member_of else actual_interface_name
+                    if platform == 'cumulus':
+                        logs.append(f"Traffic Statistics (on {target_interface_for_stats}):")
+                        pre_traffic_stats = self._check_interface_traffic_stats(device, target_interface_for_stats, platform, bond_interface=None)
+                        if pre_traffic_stats.get('has_traffic'):
+                            in_pkts = pre_traffic_stats.get('in_pkts_total', 0)
+                            out_pkts = pre_traffic_stats.get('out_pkts_total', 0)
+                            in_bytes = pre_traffic_stats.get('in_bytes_total', 0)
+                            out_bytes = pre_traffic_stats.get('out_bytes_total', 0)
+                            logs.append(f"  RX: {in_pkts:,} packets ({in_bytes:,} bytes)")
+                            logs.append(f"  TX: {out_pkts:,} packets ({out_bytes:,} bytes)")
+                            logs.append(f"  [WARN] Active traffic detected - deployment will disrupt traffic!")
+                        elif pre_traffic_stats.get('error'):
+                            logs.append(f"  (traffic statistics not available: {pre_traffic_stats.get('error')})")
+                        else:
+                            logs.append(f"  [OK] No active traffic detected")
+                        logs.append("")
+                        # Store for post-deployment comparison
+                        pre_deployment_logs[device.name][f"{actual_interface_name}_pre_traffic"] = pre_traffic_stats
+
+                    logs.append("")
 
                     # Unified Device Configuration Diff
                     logs.append("--- Device Configuration Changes ---")
@@ -4155,28 +4256,6 @@ class VLANDeploymentView(View):
                             logs.append(f"  Conflicts: {', '.join(conflict_reasons)}")
                         logs.append("  Note: NetBox is the source of truth. Differences will be reconciled during deployment.")
                         logs.append("")
-
-                    # Pre-deployment traffic check (Cumulus only)
-                    target_interface_for_stats = bond_member_of if bond_member_of else actual_interface_name
-
-                    if platform == 'cumulus':
-                        logs.append(f"Traffic Check on: {target_interface_for_stats}")
-                        pre_traffic_stats = self._check_interface_traffic_stats(device, target_interface_for_stats, platform, bond_interface=None)
-                        if pre_traffic_stats.get('has_traffic'):
-                            in_pkts = pre_traffic_stats.get('in_pkts_total', 0)
-                            out_pkts = pre_traffic_stats.get('out_pkts_total', 0)
-                            in_bytes = pre_traffic_stats.get('in_bytes_total', 0)
-                            out_bytes = pre_traffic_stats.get('out_bytes_total', 0)
-                            logs.append(f"  RX: {in_pkts:,} packets ({in_bytes:,} bytes)")
-                            logs.append(f"  TX: {out_pkts:,} packets ({out_bytes:,} bytes)")
-                            logs.append(f"  [WARN] Active traffic detected - deployment will disrupt traffic!")
-                        elif pre_traffic_stats.get('error'):
-                            logs.append(f"  (traffic statistics not available: {pre_traffic_stats.get('error')})")
-                        else:
-                            logs.append(f"  [OK] No active traffic")
-                        logs.append("")
-                        # Store for post-deployment comparison
-                        pre_deployment_logs[device.name][f"{actual_interface_name}_pre_traffic"] = pre_traffic_stats
 
                     logs.append("=" * 80)
                     logs.append("STARTING DEPLOYMENT")
