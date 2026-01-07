@@ -5043,6 +5043,9 @@ class VLANDeploymentView(View):
                     interface_key = f"{device.name}:{actual_interface_name}"
                     interface_validation = validation_results['interface_validation'].get(interface_key, {})
 
+                    # Calculate is_blocked from overall_status_text
+                    is_blocked = (overall_status_text == 'BLOCKED')
+
                     # Build comprehensive deployment logs from preview data
                     logs = []
                     logs.append("=" * 80)
