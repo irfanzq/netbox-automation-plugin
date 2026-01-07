@@ -112,8 +112,9 @@ class VLANDeploymentView(View):
                 # Generate config diff
                 config_diff = self._generate_config_diff(current_device_config, proposed_config, platform, device=device, interface_name=target_interface_for_config, bridge_vlans=bridge_vlans)
 
-                # Get NetBox current and proposed state
-                netbox_state = self._get_netbox_current_state(device, actual_interface_name, primary_vlan_id)
+                # Get NetBox current and proposed state (pass mode to preserve tagged VLANs in sync mode)
+                mode = 'sync' if sync_netbox_to_device else 'normal'
+                netbox_state = self._get_netbox_current_state(device, actual_interface_name, primary_vlan_id, mode=mode)
 
                 # Get bond information for NetBox diff
                 bond_info_for_netbox = None
@@ -1879,10 +1880,16 @@ class VLANDeploymentView(View):
                 'error': 'Interface not found'
             }
     
-    def _get_netbox_current_state(self, device, interface_name, vlan_id):
+    def _get_netbox_current_state(self, device, interface_name, vlan_id, mode='normal'):
         """
         Get current NetBox interface state (comprehensive - VLAN-relevant only).
-        
+
+        Args:
+            device: NetBox Device object
+            interface_name: Interface name
+            vlan_id: VLAN ID to deploy (for normal mode) or None (for sync mode)
+            mode: 'normal' or 'sync' - determines how tagged VLANs are handled
+
         Returns:
             dict: {
                 'current': {
@@ -1913,13 +1920,13 @@ class VLANDeploymentView(View):
         try:
             interface = Interface.objects.get(device=device, name=interface_name)
             interface.refresh_from_db()
-            
+
             # Current state
             current_mode = interface.mode if hasattr(interface, 'mode') else None
             current_untagged = interface.untagged_vlan.vid if interface.untagged_vlan else None
             current_tagged = list(interface.tagged_vlans.values_list('vid', flat=True))
             current_ip_addresses = [str(ip.address) for ip in interface.ip_addresses.all()]
-            
+
             # Get VRF - try multiple ways to access it
             current_vrf = None
             if hasattr(interface, 'vrf'):
@@ -1949,11 +1956,18 @@ class VLANDeploymentView(View):
                             current_connected_to = f"{term_a.device.name} ({term_a.name})"
             current_enabled = interface.enabled if hasattr(interface, 'enabled') else True
             current_port_channel_member = bool(interface.lag) if hasattr(interface, 'lag') else False
-            
-            # Proposed state - VLAN deployment will replace existing config
+
+            # Proposed state - depends on mode
             proposed_mode = 'tagged'  # Always set to tagged
-            proposed_untagged = vlan_id
-            proposed_tagged = []  # Clear tagged VLANs for access mode deployment
+            proposed_untagged = vlan_id if vlan_id else current_untagged
+
+            # CRITICAL FIX: In sync mode, preserve tagged VLANs from NetBox
+            # In normal mode, clear tagged VLANs (access mode deployment)
+            if mode == 'sync':
+                proposed_tagged = current_tagged  # Preserve existing tagged VLANs in sync mode
+            else:
+                proposed_tagged = []  # Clear tagged VLANs for normal mode (access mode deployment)
+
             proposed_ip_addresses = []  # Remove IP addresses (routed → bridged)
             proposed_vrf = None  # Remove VRF (routed → bridged)
             proposed_cable_status = current_cable_status  # Keep cable status
@@ -4508,9 +4522,9 @@ class VLANDeploymentView(View):
                 for actual_interface_name in device_interfaces:
                     bond_member_of = bond_info_map.get(device.name, {}).get(actual_interface_name, None)
 
-                    # Get NetBox state and diff
+                    # Get NetBox state and diff (normal mode - will clear tagged VLANs)
                     try:
-                        netbox_state = self._get_netbox_current_state(device, actual_interface_name, primary_vlan_id)
+                        netbox_state = self._get_netbox_current_state(device, actual_interface_name, primary_vlan_id, mode='normal')
 
                         bond_info_for_netbox = None
                         bond_name_for_netbox = None
