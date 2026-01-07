@@ -1322,7 +1322,12 @@
                 if (syncModeInfo) {
                   syncModeInfo.style.display = 'block';
                 }
-                
+
+                // Hide deploy untagged interfaces checkbox in sync mode
+                if (deployUntaggedContainer) {
+                  deployUntaggedContainer.style.display = 'none';
+                }
+
                 // Load interfaces for sync if devices are already selected
                 // Check native select, Select2, and TomSelect
                 let hasSelectedDevices = false;
