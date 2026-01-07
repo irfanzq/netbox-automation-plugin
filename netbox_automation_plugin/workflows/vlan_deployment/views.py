@@ -3201,19 +3201,70 @@ class VLANDeploymentView(View):
                 device_logs.append(f"Total Interfaces: {len(device_results_map)}")
                 device_logs.append("")
 
-                # Collect summary info
+                # Collect summary info and device-level data
                 total_interfaces = len(device_results_map)
                 blocked_count = 0
                 warning_count = 0
                 pass_count = 0
                 error_count = 0
 
+                # Collect device-level info from first interface (all interfaces share same device connection)
+                first_interface_preview = next(iter(device_results_map.values()), {})
+                config_source = first_interface_preview.get('config_source', 'device')
+                config_timestamp = first_interface_preview.get('config_timestamp', 'N/A')
+                device_uptime = first_interface_preview.get('device_uptime', None)
+                bridge_vlans = first_interface_preview.get('bridge_vlans', [])
+                device_connected = first_interface_preview.get('device_connected', False)
+                error_details = first_interface_preview.get('error_details', None)
+
+                # Show device-level pre-deployment checks ONCE at the top
+                device_logs.append("=" * 80)
+                device_logs.append("PRE-DEPLOYMENT CHECKS")
+                device_logs.append("=" * 80)
+                device_logs.append("")
+
+                # 1. Device Connection & Uptime
+                device_logs.append("1. Device Connection & Uptime:")
+                if config_source == 'device':
+                    device_logs.append(f"   [OK] Connected successfully")
+                    if device_uptime:
+                        device_logs.append(f"   Uptime: {device_uptime}")
+                    if config_timestamp != 'N/A':
+                        device_logs.append(f"   Config fetched: {config_timestamp}")
+                elif config_source == 'netbox':
+                    device_logs.append(f"   [WARN] Device unreachable - using NetBox inference")
+                    device_logs.append(f"   Note: Actual device config may differ from NetBox state")
+                else:
+                    device_logs.append(f"   [FAIL] Config retrieval failed")
+                    if error_details:
+                        device_logs.append(f"   Error: {error_details}")
+                device_logs.append("")
+
+                # 2. Bridge Configuration (Cumulus only)
+                if platform == 'cumulus':
+                    device_logs.append("2. Bridge Configuration (br_default):")
+                    if bridge_vlans and len(bridge_vlans) > 0:
+                        vlan_list_str = self._format_vlan_list(bridge_vlans)
+                        device_logs.append(f"   Current VLANs: {vlan_list_str}")
+                    else:
+                        device_logs.append("   (no VLANs configured or unable to retrieve)")
+                    device_logs.append("")
+
+                device_logs.append("=" * 80)
+                device_logs.append("INTERFACE DETAILS")
+                device_logs.append("=" * 80)
+                device_logs.append("")
+
+                # Collect all device configs and NetBox diffs for consolidation
+                all_current_configs = []
+                all_proposed_configs = []
+                all_netbox_diffs = []
+
                 # Process each interface and add to device log
                 for idx, (interface_name, interface_preview) in enumerate(sorted(device_results_map.items()), 1):
-                    device_logs.append("=" * 80)
-                    device_logs.append(f"INTERFACE {idx}/{total_interfaces}: {interface_name}")
-                    device_logs.append("=" * 80)
-                    device_logs.append("")
+                    device_logs.append("-" * 80)
+                    device_logs.append(f"Interface {idx}/{total_interfaces}: {interface_name}")
+                    device_logs.append("-" * 80)
 
                     # Check for errors
                     if 'error' in interface_preview:
@@ -3233,40 +3284,89 @@ class VLANDeploymentView(View):
                     else:
                         error_count += 1
 
-                    # Add interface details to device log
+                    # Extract data
                     vlan_id = interface_preview.get('vlan_id', 'N/A')
                     vlan_name = interface_preview.get('vlan_name', 'N/A')
                     target_interface = interface_preview.get('target_interface', interface_name)
                     bond_member_of = interface_preview.get('bond_member_of')
+                    current_device_config = interface_preview.get('current_config', 'Unable to fetch')
+                    proposed_config = interface_preview.get('proposed_config', '')
+                    netbox_diff = interface_preview.get('netbox_diff', '')
+                    validation_table = interface_preview.get('validation_table', '')
+                    interface_details = interface_preview.get('interface_details', {})
 
+                    # Collect configs for consolidation
+                    if current_device_config and current_device_config != 'Unable to fetch':
+                        all_current_configs.append(f"# Interface: {interface_name}")
+                        all_current_configs.append(current_device_config)
+                    if proposed_config:
+                        all_proposed_configs.append(f"# Interface: {target_interface}")
+                        all_proposed_configs.append(proposed_config)
+                    if netbox_diff:
+                        all_netbox_diffs.append(f"# Interface: {interface_name}")
+                        all_netbox_diffs.append(netbox_diff)
+
+                    # Add interface details to device log
                     device_logs.append(f"VLAN: {vlan_id} ({vlan_name})")
-                    device_logs.append(f"Target Interface: {target_interface}")
+                    device_logs.append(f"Target: {target_interface}")
                     if bond_member_of:
-                        device_logs.append(f"Bond Member Of: {bond_member_of}")
+                        device_logs.append(f"Bond Member: {bond_member_of}")
+                    device_logs.append(f"Type: {interface_details.get('type', 'Unknown')}")
+                    device_logs.append(f"Cable: {'[OK] Connected' if interface_details.get('cabled') else '[WARN] Not cabled'}")
+
+                    # Traffic stats (if available)
+                    if platform == 'cumulus':
+                        traffic_stats = interface_preview.get('traffic_stats', {})
+                        if traffic_stats:
+                            rx_pkts = traffic_stats.get('rx_packets', 0)
+                            tx_pkts = traffic_stats.get('tx_packets', 0)
+                            if rx_pkts > 0 or tx_pkts > 0:
+                                device_logs.append(f"Traffic: RX {rx_pkts:,} pkts, TX {tx_pkts:,} pkts")
+                                if traffic_stats.get('has_traffic'):
+                                    device_logs.append(f"  [WARN] Active traffic detected!")
+
                     device_logs.append(f"Status: {overall_status_text}")
                     device_logs.append("")
 
                     # Add validation table
-                    validation_table = interface_preview.get('validation_table', '')
                     if validation_table:
-                        device_logs.append("--- Validation Results ---")
+                        device_logs.append("Validation:")
                         device_logs.append(validation_table)
                         device_logs.append("")
 
-                    # Add config diff
-                    config_diff = interface_preview.get('config_diff', '')
-                    if config_diff:
-                        device_logs.append("--- Configuration Changes ---")
-                        device_logs.append(config_diff)
-                        device_logs.append("")
+                # After processing all interfaces, show consolidated device config changes
+                device_logs.append("=" * 80)
+                device_logs.append("DEVICE CONFIGURATION CHANGES")
+                device_logs.append("=" * 80)
+                device_logs.append("")
 
-                    # Add NetBox diff
-                    netbox_diff = interface_preview.get('netbox_diff', '')
-                    if netbox_diff:
-                        device_logs.append("--- NetBox Changes ---")
-                        device_logs.append(netbox_diff)
-                        device_logs.append("")
+                if all_current_configs and all_proposed_configs:
+                    device_logs.append("Current Device Configuration:")
+                    device_logs.append("-" * 80)
+                    for line in all_current_configs:
+                        device_logs.append(line)
+                    device_logs.append("")
+                    device_logs.append("Proposed Device Configuration:")
+                    device_logs.append("-" * 80)
+                    for line in all_proposed_configs:
+                        device_logs.append(line)
+                    device_logs.append("")
+                else:
+                    device_logs.append("(no device configuration changes)")
+                    device_logs.append("")
 
+                # Show consolidated NetBox changes
+                device_logs.append("=" * 80)
+                device_logs.append("NETBOX CONFIGURATION CHANGES")
+                device_logs.append("=" * 80)
+                device_logs.append("")
+
+                if all_netbox_diffs:
+                    for line in all_netbox_diffs:
+                        device_logs.append(line)
+                    device_logs.append("")
+                else:
+                    device_logs.append("(no NetBox changes)")
                     device_logs.append("")
 
                 # Add summary at the end
@@ -3794,19 +3894,70 @@ class VLANDeploymentView(View):
                 device_logs.append(f"VLAN: {primary_vlan_id} ({vlan.name if vlan else 'N/A'})")
                 device_logs.append("")
 
-                # Collect summary info
+                # Collect summary info and device-level data
                 total_interfaces = len(device_results)
                 blocked_count = 0
                 warning_count = 0
                 pass_count = 0
                 error_count = 0
 
+                # Collect device-level info from first interface (all interfaces share same device connection)
+                first_interface_preview = next(iter(device_results.values()), {})
+                config_source = first_interface_preview.get('config_source', 'device')
+                config_timestamp = first_interface_preview.get('config_timestamp', 'N/A')
+                device_uptime = first_interface_preview.get('device_uptime', None)
+                bridge_vlans = first_interface_preview.get('bridge_vlans', [])
+                device_connected = first_interface_preview.get('device_connected', False)
+                error_details = first_interface_preview.get('error_details', None)
+
+                # Show device-level pre-deployment checks ONCE at the top
+                device_logs.append("=" * 80)
+                device_logs.append("PRE-DEPLOYMENT CHECKS")
+                device_logs.append("=" * 80)
+                device_logs.append("")
+
+                # 1. Device Connection & Uptime
+                device_logs.append("1. Device Connection & Uptime:")
+                if config_source == 'device':
+                    device_logs.append(f"   [OK] Connected successfully")
+                    if device_uptime:
+                        device_logs.append(f"   Uptime: {device_uptime}")
+                    if config_timestamp != 'N/A':
+                        device_logs.append(f"   Config fetched: {config_timestamp}")
+                elif config_source == 'netbox':
+                    device_logs.append(f"   [WARN] Device unreachable - using NetBox inference")
+                    device_logs.append(f"   Note: Actual device config may differ from NetBox state")
+                else:
+                    device_logs.append(f"   [FAIL] Config retrieval failed")
+                    if error_details:
+                        device_logs.append(f"   Error: {error_details}")
+                device_logs.append("")
+
+                # 2. Bridge Configuration (Cumulus only)
+                if platform == 'cumulus':
+                    device_logs.append("2. Bridge Configuration (br_default):")
+                    if bridge_vlans and len(bridge_vlans) > 0:
+                        vlan_list_str = self._format_vlan_list(bridge_vlans)
+                        device_logs.append(f"   Current VLANs: {vlan_list_str}")
+                    else:
+                        device_logs.append("   (no VLANs configured or unable to retrieve)")
+                    device_logs.append("")
+
+                device_logs.append("=" * 80)
+                device_logs.append("INTERFACE DETAILS")
+                device_logs.append("=" * 80)
+                device_logs.append("")
+
+                # Collect all device configs and NetBox diffs for consolidation
+                all_current_configs = []
+                all_proposed_configs = []
+                all_netbox_diffs = []
+
                 # Process each interface and add to device log
                 for idx, (actual_interface_name, interface_preview) in enumerate(sorted(device_results.items()), 1):
-                    device_logs.append("=" * 80)
-                    device_logs.append(f"INTERFACE {idx}/{total_interfaces}: {actual_interface_name}")
-                    device_logs.append("=" * 80)
-                    device_logs.append("")
+                    device_logs.append("-" * 80)
+                    device_logs.append(f"Interface {idx}/{total_interfaces}: {actual_interface_name}")
+                    device_logs.append("-" * 80)
 
                     # Check for errors
                     if 'error' in interface_preview:
@@ -3836,38 +3987,46 @@ class VLANDeploymentView(View):
                     netbox_diff = interface_preview.get('netbox_diff', '')
                     validation_table = interface_preview.get('validation_table', '')
                     risk_assessment = interface_preview.get('risk_assessment', '')
-                    rollback_info = interface_preview.get('rollback_info', '')
-                    overall_status = interface_preview.get('overall_status', 'success')
-                    status_message = interface_preview.get('status_message', 'Would PASS validation')
-                    device_status_text = interface_preview.get('device_status_text', 'PASS')
-                    interface_status_text = interface_preview.get('interface_status_text', 'PASS')
-                    risk_level = interface_preview.get('risk_level', 'LOW')
-                    vlan_name = interface_preview.get('vlan_name', 'N/A')
-                    config_source = interface_preview.get('config_source', 'device')
-                    config_timestamp = interface_preview.get('config_timestamp', 'N/A')
-                    device_uptime = interface_preview.get('device_uptime', None)
                     interface_details = interface_preview.get('interface_details', {})
-                    bridge_vlans = interface_preview.get('bridge_vlans', [])
-                    bond_interface_config = interface_preview.get('bond_interface_config', None)
-                    device_connected = interface_preview.get('device_connected', False)
-                    error_details = interface_preview.get('error_details', None)
                     target_interface_for_stats = interface_preview.get('target_interface_for_stats', actual_interface_name)
 
+                    # Collect configs for consolidation
+                    if current_device_config and current_device_config != 'Unable to fetch':
+                        all_current_configs.append(f"# Interface: {actual_interface_name}")
+                        all_current_configs.append(current_device_config)
+                    if proposed_config:
+                        all_proposed_configs.append(f"# Interface: {target_interface_for_config}")
+                        all_proposed_configs.append(proposed_config)
+                    if netbox_diff:
+                        all_netbox_diffs.append(f"# Interface: {actual_interface_name}")
+                        all_netbox_diffs.append(netbox_diff)
+
                     # Build interface section in device log
-                    device_logs.append(f"Interface: {actual_interface_name}")
                     device_logs.append(f"Type: {interface_details.get('type', 'Unknown')}")
                     device_logs.append(f"Description: {interface_details.get('description', 'No description')}")
-                    device_logs.append(f"Cable Status: {'[OK] Cabled' if interface_details.get('cabled') else '[FAIL] Not cabled'}")
+                    device_logs.append(f"Cable: {'[OK] Connected' if interface_details.get('cabled') else '[WARN] Not cabled'}")
                     if interface_details.get('connected_device'):
                         device_logs.append(f"Connected To: {interface_details.get('connected_device')} ({interface_details.get('connected_role', 'Unknown')})")
                     if bond_member_of:
-                        device_logs.append(f"Bond Member Of: {bond_member_of}")
+                        device_logs.append(f"Bond Member: {bond_member_of} (VLAN will be configured on bond)")
+
+                    # Traffic stats (if available)
+                    if platform == 'cumulus':
+                        traffic_stats = interface_preview.get('traffic_stats', {})
+                        if traffic_stats:
+                            rx_pkts = traffic_stats.get('rx_packets', 0)
+                            tx_pkts = traffic_stats.get('tx_packets', 0)
+                            if rx_pkts > 0 or tx_pkts > 0:
+                                device_logs.append(f"Traffic: RX {rx_pkts:,} pkts, TX {tx_pkts:,} pkts")
+                                if traffic_stats.get('has_traffic'):
+                                    device_logs.append(f"  [WARN] Active traffic detected!")
+
                     device_logs.append(f"Status: {overall_status_text}")
                     device_logs.append("")
 
                     # Add validation table
                     if validation_table:
-                        device_logs.append("Validation Results:")
+                        device_logs.append("Validation:")
                         device_logs.append(validation_table)
                         device_logs.append("")
 
@@ -3876,93 +4035,39 @@ class VLANDeploymentView(View):
                         device_logs.append(risk_assessment)
                         device_logs.append("")
 
-                    # Pre-Deployment Checks Section
-                    device_logs.append("--- Pre-Deployment Checks ---")
+                # After processing all interfaces, show consolidated device config changes
+                device_logs.append("=" * 80)
+                device_logs.append("DEVICE CONFIGURATION CHANGES")
+                device_logs.append("=" * 80)
+                device_logs.append("")
+
+                if all_current_configs and all_proposed_configs:
+                    device_logs.append("Current Device Configuration:")
+                    device_logs.append("-" * 80)
+                    for line in all_current_configs:
+                        device_logs.append(line)
+                    device_logs.append("")
+                    device_logs.append("Proposed Device Configuration:")
+                    device_logs.append("-" * 80)
+                    for line in all_proposed_configs:
+                        device_logs.append(line)
+                    device_logs.append("")
+                else:
+                    device_logs.append("(no device configuration changes)")
                     device_logs.append("")
 
-                    # 1. Device Connection & Uptime
-                    device_logs.append("Device Connection:")
-                    if config_source == 'device':
-                        device_logs.append(f"  [OK] Connected successfully")
-                        if device_uptime:
-                            device_logs.append(f"  Uptime: {device_uptime}")
-                        if config_timestamp != 'N/A':
-                            device_logs.append(f"  Config fetched: {config_timestamp}")
-                    elif config_source == 'netbox':
-                        device_logs.append(f"  [WARN] Device unreachable - using NetBox inference")
-                        device_logs.append(f"  Note: Actual device config may differ from NetBox state")
-                    else:
-                        device_logs.append(f"  [FAIL] Config retrieval failed")
-                        if error_details:
-                            device_logs.append(f"  Error: {error_details}")
+                # Show consolidated NetBox changes
+                device_logs.append("=" * 80)
+                device_logs.append("NETBOX CONFIGURATION CHANGES")
+                device_logs.append("=" * 80)
+                device_logs.append("")
+
+                if all_netbox_diffs:
+                    for line in all_netbox_diffs:
+                        device_logs.append(line)
                     device_logs.append("")
-
-                    # 2. Bond Detection
-                    if bond_member_of:
-                        device_logs.append("Bond Detection:")
-                        device_logs.append(f"  [INFO] Interface '{actual_interface_name}' is member of bond '{bond_member_of}'")
-                        device_logs.append(f"  Target: VLAN config will be applied to '{bond_member_of}'")
-                        device_logs.append("")
-
-                    # 3. Bridge Configuration (Cumulus)
-                    if platform == 'cumulus':
-                        device_logs.append("Bridge Configuration (br_default):")
-                        if bridge_vlans and len(bridge_vlans) > 0:
-                            vlan_list_str = self._format_vlan_list(bridge_vlans)
-                            device_logs.append(f"  Current VLANs: {vlan_list_str}")
-                        else:
-                            device_logs.append("  (no VLANs configured or unable to retrieve)")
-                        device_logs.append("")
-
-                    # 4. Cable & LLDP Status (from NetBox)
-                    device_logs.append("Physical Connectivity:")
-                    if interface_details.get('cabled'):
-                        device_logs.append(f"  [OK] Cable connected")
-                        if interface_details.get('connected_device'):
-                            device_logs.append(f"  Connected to: {interface_details.get('connected_device')} ({interface_details.get('connected_role', 'Unknown')})")
-                    else:
-                        device_logs.append(f"  [WARN] No cable detected in NetBox")
-                    device_logs.append("")
-
-                    # 5. Traffic Statistics (Cumulus only)
-                    if platform == 'cumulus':
-                        device_logs.append(f"Traffic Statistics (on {target_interface_for_stats}):")
-                        traffic_stats = interface_preview.get('traffic_stats', {})
-                        if traffic_stats:
-                            rx_pkts = traffic_stats.get('rx_packets', 0)
-                            tx_pkts = traffic_stats.get('tx_packets', 0)
-                            rx_bytes = traffic_stats.get('rx_bytes', 0)
-                            tx_bytes = traffic_stats.get('tx_bytes', 0)
-                            device_logs.append(f"  RX: {rx_pkts:,} packets ({rx_bytes:,} bytes)")
-                            device_logs.append(f"  TX: {tx_pkts:,} packets ({tx_bytes:,} bytes)")
-                            if traffic_stats.get('has_traffic'):
-                                device_logs.append(f"  [WARN] Active traffic detected - deployment will disrupt traffic!")
-                            else:
-                                device_logs.append(f"  [OK] No active traffic detected")
-                        else:
-                            device_logs.append("  (traffic statistics not available)")
-                        device_logs.append("")
-
-                    # Unified Device Configuration Diff
-                    device_logs.append("--- Device Configuration Changes ---")
-                    if config_diff:
-                        for line in config_diff.split('\n'):
-                            if line.strip():
-                                device_logs.append(line)
-                    else:
-                        device_logs.append("(no configuration changes)")
-                    device_logs.append("")
-
-                    # Unified NetBox Configuration Diff
-                    device_logs.append("--- NetBox Configuration Changes ---")
-                    if netbox_diff:
-                        for line in netbox_diff.split('\n'):
-                            if line.strip():
-                                device_logs.append(line)
-                    else:
-                        device_logs.append("(no NetBox changes)")
-                    device_logs.append("")
-
+                else:
+                    device_logs.append("(no NetBox changes)")
                     device_logs.append("")
 
                 # Add summary at the end
