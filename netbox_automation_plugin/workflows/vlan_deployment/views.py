@@ -2635,20 +2635,13 @@ class VLANDeploymentView(View):
             bridge_vlans = sorted(all_vlans)
             
             # 2. Set interface VLAN configuration - use target_interface (bond if member)
-            if untagged_vlan and not tagged_vlans:
-                # Access mode: single untagged VLAN
+            # IMPORTANT: In Cumulus NVUE, interfaces ONLY use 'access' mode
+            # Tagged VLANs are ONLY configured on the bridge domain (done above)
+            # There is NO 'tagged' or 'untagged' command for interfaces
+            if untagged_vlan:
+                # Set interface to access mode with untagged VLAN
                 access_cmd = f"nv set interface {target_interface} bridge domain br_default access {untagged_vlan}"
                 commands.append(access_cmd)
-            elif untagged_vlan or tagged_vlans:
-                # Tagged mode: untagged VLAN (if any) + tagged VLANs
-                if untagged_vlan:
-                    untagged_cmd = f"nv set interface {target_interface} bridge domain br_default untagged {untagged_vlan}"
-                    commands.append(untagged_cmd)
-                if tagged_vlans:
-                    # For multiple tagged VLANs, use comma-separated list
-                    tagged_vlans_str = ','.join(map(str, sorted(tagged_vlans)))
-                    tagged_cmd = f"nv set interface {target_interface} bridge domain br_default tagged {tagged_vlans_str}"
-                    commands.append(tagged_cmd)
             
             # Note: "nv config apply" is handled by the deployment method, don't include here
         
@@ -5347,11 +5340,11 @@ class VLANDeploymentView(View):
                     # Generate proposed config and config diff (same as dry run) (use target_interface which may be bond)
                     # In normal mode, use form VLANs; in sync mode, use NetBox VLANs (handled elsewhere)
                     if not sync_netbox_to_device:
-                        # Normal mode: use form VLANs
+                        # Normal mode: use form VLANs (IDs, not objects)
                         proposed_config = self._generate_vlan_config(
                             target_interface_for_config,
-                            untagged_vlan=untagged_vlan_obj,
-                            tagged_vlans=tagged_vlan_objs,
+                            untagged_vlan=untagged_vlan_id,
+                            tagged_vlans=tagged_vlan_ids,
                             platform=platform,
                             device=device,
                             bridge_vlans=bridge_vlans_before
@@ -6473,17 +6466,12 @@ class VLANDeploymentView(View):
                         logger.debug(f"VLAN {vlan} already exists in bridge (range or individual) - skipping bridge VLAN command")
             
             # Set interface VLAN configuration - use target_interface (bond if member, NetBox bond name if migration)
-            if untagged_vlan and not tagged_vlans:
-                # Access mode: single untagged VLAN
+            # IMPORTANT: In Cumulus NVUE, interfaces ONLY use 'access' mode
+            # Tagged VLANs are ONLY configured on the bridge domain (done above)
+            # There is NO 'tagged' or 'untagged' command for interfaces
+            if untagged_vlan:
+                # Set interface to access mode with untagged VLAN
                 commands.append(f"nv set interface {target_interface} bridge domain br_default access {untagged_vlan}")
-            elif untagged_vlan or tagged_vlans:
-                # Tagged mode: untagged VLAN (if any) + tagged VLANs
-                if untagged_vlan:
-                    commands.append(f"nv set interface {target_interface} bridge domain br_default untagged {untagged_vlan}")
-                if tagged_vlans:
-                    # For multiple tagged VLANs, use comma-separated list
-                    tagged_vlans_str = ','.join(map(str, tagged_vlans))
-                    commands.append(f"nv set interface {target_interface} bridge domain br_default tagged {tagged_vlans_str}")
             
             # Return as newline-separated string for compatibility
             return "\n".join(commands)
