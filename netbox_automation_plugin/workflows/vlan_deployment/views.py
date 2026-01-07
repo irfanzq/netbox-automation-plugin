@@ -3349,6 +3349,12 @@ class VLANDeploymentView(View):
                     if current_device_config and current_device_config != 'Unable to fetch':
                         all_current_configs.append(f"# Interface: {interface_name}")
                         all_current_configs.append(current_device_config)
+                        # If bond member, also add bond config
+                        if bond_member_of:
+                            bond_interface_config = interface_preview.get('bond_interface_config')
+                            if bond_interface_config:
+                                all_current_configs.append(f"# Bond Interface: {bond_member_of} (parent of {interface_name})")
+                                all_current_configs.append(bond_interface_config)
                     if proposed_config:
                         all_proposed_configs.append(f"# Interface: {target_interface}")
                         all_proposed_configs.append(proposed_config)
@@ -4134,6 +4140,12 @@ class VLANDeploymentView(View):
                     if current_device_config and current_device_config != 'Unable to fetch':
                         all_current_configs.append(f"# Interface: {actual_interface_name}")
                         all_current_configs.append(current_device_config)
+                        # If bond member, also add bond config
+                        if bond_member_of:
+                            bond_interface_config = interface_preview.get('bond_interface_config')
+                            if bond_interface_config:
+                                all_current_configs.append(f"# Bond Interface: {bond_member_of} (parent of {actual_interface_name})")
+                                all_current_configs.append(bond_interface_config)
                     if proposed_config:
                         all_proposed_configs.append(f"# Interface: {target_interface_for_config}")
                         all_proposed_configs.append(proposed_config)
