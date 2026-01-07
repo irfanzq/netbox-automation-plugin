@@ -1482,24 +1482,28 @@
                 </div>
               `;
               accordion.appendChild(buttonDiv);
-              
+
+              // Detect dark mode once before the loop
+              const isDarkMode = document.documentElement.getAttribute('data-theme') === 'dark' || document.body.classList.contains('dark-mode');
+              const textColor = isDarkMode ? 'var(--nbx-color-fg-default, #ffffff)' : 'var(--nbx-color-fg-default)';
+
               // Add accordion items for each device
               let deviceIndex = 0;
               for (const [deviceName, interfaces] of Object.entries(interfacesByDevice)) {
                 if (!interfaces || interfaces.length === 0) continue;
-                
+
                 const isFirst = deviceIndex === 0;
                 const collapseId = `collapse_${deviceIndex}_${accordionId}`;
                 const headingId = `heading_${deviceIndex}_${accordionId}`;
-                
+
                 const accordionItem = document.createElement('div');
                 accordionItem.className = 'accordion-item';
-                
+
                 // Header
                 const header = document.createElement('h2');
                 header.className = 'accordion-header';
                 header.id = headingId;
-                
+
                 const button = document.createElement('button');
                 button.className = `accordion-button ${isFirst ? '' : 'collapsed'}`;
                 button.type = 'button';
@@ -1508,8 +1512,6 @@
                 button.setAttribute('aria-expanded', isFirst ? 'true' : 'false');
                 button.setAttribute('aria-controls', collapseId);
                 // Set button style - device name will have vibrant color, rest of button uses default
-                const isDarkMode = document.documentElement.getAttribute('data-theme') === 'dark' || document.body.classList.contains('dark-mode');
-                const textColor = isDarkMode ? 'var(--nbx-color-fg-default, #ffffff)' : 'var(--nbx-color-fg-default)';
                 
                 // Apply default text color to button (device name will override with vibrant color)
                 button.style.setProperty('color', textColor, 'important');
