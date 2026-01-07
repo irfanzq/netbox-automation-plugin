@@ -1409,12 +1409,12 @@
                   interfacesManualField.disabled = false;
                 }
                 
-                // Hide sync mode info and deploy untagged checkbox
+                // Hide sync mode info and show deploy untagged checkbox in normal mode
                 if (syncModeInfo) {
                   syncModeInfo.style.display = 'none';
                 }
                 if (deployUntaggedContainer) {
-                  deployUntaggedContainer.style.display = 'none';
+                  deployUntaggedContainer.style.display = 'block';
                 }
                 
                 // Load interfaces normally if devices are already selected
