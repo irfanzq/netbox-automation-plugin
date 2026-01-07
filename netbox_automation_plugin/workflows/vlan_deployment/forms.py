@@ -180,6 +180,8 @@ class VLANDeploymentForm(forms.Form):
         """
         # Get the raw submitted values (list of interface names from checkboxes)
         interfaces = self.data.getlist('interfaces_select')
+        logger.info(f"[FORM DEBUG] clean_interfaces_select: Got {len(interfaces)} interfaces from form data")
+        logger.info(f"[FORM DEBUG] Interfaces: {interfaces}")
         # Return as list (not string)
         return interfaces if interfaces else []
 
@@ -290,6 +292,8 @@ class VLANDeploymentForm(forms.Form):
 
         # Combine checkbox selections and manual entries
         combined_interfaces = list(interfaces_select) if interfaces_select else []
+        logger.info(f"[FORM DEBUG] After combining checkbox selections: {len(combined_interfaces)} interfaces")
+        logger.info(f"[FORM DEBUG] Combined interfaces: {combined_interfaces}")
 
         # Parse manual interfaces (handles ranges like swp1-48) - only if provided and not in sync mode
         if not sync_netbox_to_device and interfaces_manual and interfaces_manual.strip():
@@ -299,9 +303,12 @@ class VLANDeploymentForm(forms.Form):
 
         # Remove duplicates while preserving order
         combined_interfaces = list(dict.fromkeys(combined_interfaces))
+        logger.info(f"[FORM DEBUG] Final combined_interfaces: {len(combined_interfaces)} interfaces")
+        logger.info(f"[FORM DEBUG] Final list: {combined_interfaces}")
 
         # Validate that at least one interface is specified
         if not combined_interfaces:
+            logger.warning(f"[FORM DEBUG] No interfaces found! sync_mode={sync_netbox_to_device}, interfaces_select={interfaces_select}, interfaces_manual={interfaces_manual}")
             if sync_netbox_to_device:
                 # Wrap in list to prevent Django from trying to format the string
                 raise forms.ValidationError([_("In sync mode, at least one interface must be selected for sync.")])
