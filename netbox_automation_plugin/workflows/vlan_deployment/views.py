@@ -97,10 +97,11 @@ class VLANDeploymentView(View):
 
                 # Get proposed config
                 if not sync_netbox_to_device:
-                    # Normal mode: use form VLAN
+                    # Normal mode: use form VLAN (both untagged and tagged)
                     proposed_config = self._generate_vlan_config(
                         target_interface_for_config,
-                        vlan_id=untagged_vlan_id,
+                        untagged_vlan=untagged_vlan_id,
+                        tagged_vlans=tagged_vlan_ids,
                         platform=platform,
                         device=device,
                         bridge_vlans=bridge_vlans
@@ -118,9 +119,15 @@ class VLANDeploymentView(View):
                 # Generate config diff
                 config_diff = self._generate_config_diff(current_device_config, proposed_config, platform, device=device, interface_name=target_interface_for_config, bridge_vlans=bridge_vlans)
 
-                # Get NetBox current and proposed state (pass mode to preserve tagged VLANs in sync mode)
+                # Get NetBox current and proposed state (pass mode and tagged VLANs)
                 mode = 'sync' if sync_netbox_to_device else 'normal'
-                netbox_state = self._get_netbox_current_state(device, actual_interface_name, primary_vlan_id, mode=mode)
+                netbox_state = self._get_netbox_current_state(
+                    device,
+                    actual_interface_name,
+                    primary_vlan_id,
+                    mode=mode,
+                    tagged_vlan_ids=tagged_vlan_ids
+                )
 
                 # Get bond information for NetBox diff
                 bond_info_for_netbox = None
@@ -1886,7 +1893,7 @@ class VLANDeploymentView(View):
                 'error': 'Interface not found'
             }
     
-    def _get_netbox_current_state(self, device, interface_name, vlan_id, mode='normal'):
+    def _get_netbox_current_state(self, device, interface_name, vlan_id, mode='normal', tagged_vlan_ids=None):
         """
         Get current NetBox interface state (comprehensive - VLAN-relevant only).
 
@@ -1895,6 +1902,7 @@ class VLANDeploymentView(View):
             interface_name: Interface name
             vlan_id: VLAN ID to deploy (for normal mode) or None (for sync mode)
             mode: 'normal' or 'sync' - determines how tagged VLANs are handled
+            tagged_vlan_ids: List of tagged VLAN IDs to set (for normal mode) or None
 
         Returns:
             dict: {
@@ -1967,12 +1975,17 @@ class VLANDeploymentView(View):
             proposed_mode = 'tagged'  # Always set to tagged
             proposed_untagged = vlan_id if vlan_id else current_untagged
 
-            # CRITICAL FIX: In sync mode, preserve tagged VLANs from NetBox
-            # In normal mode, clear tagged VLANs (access mode deployment)
+            # CRITICAL FIX: Handle tagged VLANs based on mode
+            # In sync mode: preserve existing tagged VLANs from NetBox
+            # In normal mode: set tagged VLANs from form input (tagged_vlan_ids)
             if mode == 'sync':
                 proposed_tagged = current_tagged  # Preserve existing tagged VLANs in sync mode
             else:
-                proposed_tagged = []  # Clear tagged VLANs for normal mode (access mode deployment)
+                # Normal mode: use tagged VLANs from form input
+                if tagged_vlan_ids:
+                    proposed_tagged = list(tagged_vlan_ids) if isinstance(tagged_vlan_ids, (list, tuple)) else [tagged_vlan_ids]
+                else:
+                    proposed_tagged = []  # No tagged VLANs specified in form
 
             proposed_ip_addresses = []  # Remove IP addresses (routed → bridged)
             proposed_vrf = None  # Remove VRF (routed → bridged)
