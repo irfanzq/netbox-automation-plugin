@@ -96,6 +96,8 @@ class VLANDeploymentView(View):
                 # Get proposed config and extract VLAN info for sync mode
                 sync_mode_untagged_vlan = None
                 sync_mode_tagged_vlans = []
+                vlans_already_in_bridge = []
+                vlans_to_add_to_bridge = []
 
                 if not sync_netbox_to_device:
                     # Normal mode: use form VLAN (both untagged and tagged)
@@ -120,6 +122,9 @@ class VLANDeploymentView(View):
                         sync_mode_tagged_vlans = config_info.get('tagged_vlans', [])
                         # Use target_interface from config_info (bond if member, original otherwise)
                         target_interface_for_config = config_info.get('target_interface', actual_interface_name)
+                        # Extract bridge VLAN info for display
+                        vlans_already_in_bridge = config_info.get('vlans_already_in_bridge', [])
+                        vlans_to_add_to_bridge = config_info.get('vlans_to_add_to_bridge', [])
                         logger.debug(f"[SYNC MODE] Interface {actual_interface_name} → target: {target_interface_for_config}")
                     else:
                         proposed_config = ""
@@ -249,6 +254,8 @@ class VLANDeploymentView(View):
                     'device_role': device_role,
                     'interface_details': interface_details,
                     'bridge_vlans': bridge_vlans,
+                    'vlans_already_in_bridge': vlans_already_in_bridge,
+                    'vlans_to_add_to_bridge': vlans_to_add_to_bridge,
                     'device_connected': device_config_result.get('device_connected', False),
                     'error_details': device_config_result.get('error', None),
                 }
@@ -3406,6 +3413,11 @@ class VLANDeploymentView(View):
                                 all_current_configs.append(bond_interface_config)
                     if proposed_config and proposed_config.strip():  # Only add if not empty
                         all_proposed_configs.append(f"# Interface: {target_interface}")
+                        # Add bridge VLAN comment if available (Cumulus only)
+                        vlans_already = interface_preview.get('vlans_already_in_bridge', [])
+                        if platform == 'cumulus' and vlans_already:
+                            vlan_list_str = ', '.join(map(str, sorted(vlans_already)))
+                            all_proposed_configs.append(f"# Bridge VLANs already present: {vlan_list_str}")
                         all_proposed_configs.append(proposed_config)
                     elif not proposed_config or not proposed_config.strip():
                         # No proposed config - interface already matches NetBox or has no VLAN config
@@ -4780,6 +4792,11 @@ class VLANDeploymentView(View):
                                 all_current_configs.append(bond_interface_config)
                     if proposed_config:
                         all_proposed_configs.append(f"# Interface: {target_interface_for_config}")
+                        # Add bridge VLAN comment if available (Cumulus only)
+                        vlans_already = interface_preview.get('vlans_already_in_bridge', [])
+                        if platform == 'cumulus' and vlans_already:
+                            vlan_list_str = ', '.join(map(str, sorted(vlans_already)))
+                            all_proposed_configs.append(f"# Bridge VLANs already present: {vlan_list_str}")
                         all_proposed_configs.append(proposed_config)
                     if netbox_diff:
                         all_netbox_diffs.append(f"# Interface: {actual_interface_name}")
