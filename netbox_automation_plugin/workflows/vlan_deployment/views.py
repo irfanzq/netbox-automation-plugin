@@ -3027,6 +3027,9 @@ class VLANDeploymentView(View):
                 # Set interface to access mode with untagged VLAN
                 access_cmd = f"nv set interface {target_interface} bridge domain br_default access {untagged_vlan}"
                 commands.append(access_cmd)
+                logger.info(f"[NETBOX CONFIG] Generated access command for {target_interface}: {access_cmd}")
+            else:
+                logger.warning(f"[NETBOX CONFIG] No untagged VLAN for {interface.name} (target: {target_interface}) - skipping access command")
             
             # Note: "nv config apply" is handled by the deployment method, don't include here
         
