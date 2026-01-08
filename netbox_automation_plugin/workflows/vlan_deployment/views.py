@@ -3825,16 +3825,33 @@ class VLANDeploymentView(View):
             return results
 
         # ========================================================================
-        # DEPLOYMENT MODE - Generate configs from NetBox and deploy in batches
+        # DEPLOYMENT MODE - Use Nornir batch deployment (parallel)
         # ========================================================================
 
-        logger.info(f"[SYNC DEPLOYMENT] Generating configs from NetBox for {len(devices)} devices")
+        logger.info(f"[SYNC DEPLOYMENT] Starting Nornir batch deployment for {len(devices)} devices")
 
-        # Build bond_info_map FIRST (before generating configs)
+        # Build interface list in "device:interface" format for Nornir
+        interface_list = []
+        for device in devices:
+            tagged_ifaces = tagged_interfaces_by_device.get(device.name, [])
+            untagged_ifaces = untagged_interfaces_by_device.get(device.name, [])
+            all_ifaces = list(tagged_ifaces) + list(untagged_ifaces)
+
+            for interface in all_ifaces:
+                interface_list.append(f"{device.name}:{interface.name}")
+
+        logger.info(f"[SYNC DEPLOYMENT] Built interface list: {len(interface_list)} interfaces across {len(devices)} devices")
+
+        # Build bond_info_map FIRST (before deployment) - same as dry run
+        # This map will contain bonds from BOTH NetBox AND device config
         bond_info_map = {}
+        bonds_to_create_in_netbox = {}  # Track bonds that exist on device but not in NetBox
+
         for device in devices:
             device_bond_map = {}
-            # Check all interfaces for this device
+            device_bonds_to_create = {}
+
+            # Step 1: Check all interfaces for bond membership from NetBox
             all_device_interfaces = list(tagged_interfaces_by_device.get(device.name, [])) + list(untagged_interfaces_by_device.get(device.name, []))
             for interface in all_device_interfaces:
                 # Check bond membership from NetBox
@@ -3842,134 +3859,106 @@ class VLANDeploymentView(View):
                     if hasattr(interface, 'lag') and interface.lag:
                         device_bond_map[interface.name] = {
                             'bond_name': interface.lag.name,
-                            'bond_id': str(interface.lag.id)
+                            'bond_id': str(interface.lag.id),
+                            'source': 'netbox'
                         }
                 except Exception as e:
                     logger.debug(f"Error checking bond membership for {interface.name}: {e}")
 
-            if device_bond_map:
-                bond_info_map[device.name] = device_bond_map
+            # Step 2: Check device config for bonds that might not be in NetBox
+            # For each interface, check if it's a bond member on the device
+            for interface in all_device_interfaces:
+                # Skip if already found in NetBox
+                if interface.name in device_bond_map:
+                    continue
 
-        logger.info(f"[SYNC DEPLOYMENT] Built bond_info_map: {bond_info_map}")
-
-        # Build config map: {device_name: {interface_name: config_commands}}
-        device_configs = {}
-
-        # Process tagged interfaces
-        for device in devices:
-            device_interfaces = tagged_interfaces_by_device.get(device.name, [])
-            if device.name not in device_configs:
-                device_configs[device.name] = {}
-
-            for interface in device_interfaces:
-                # Generate config from NetBox state - pass bond_info_map
-                config_info = self._generate_config_from_netbox(device, interface, platform, bond_info_map=bond_info_map)
-                device_configs[device.name][interface.name] = config_info
-
-        # Process untagged interfaces
-        for device in devices:
-            device_interfaces = untagged_interfaces_by_device.get(device.name, [])
-            if device.name not in device_configs:
-                device_configs[device.name] = {}
-
-            for interface in device_interfaces:
-                # Generate config from NetBox state - pass bond_info_map
-                config_info = self._generate_config_from_netbox(device, interface, platform, bond_info_map=bond_info_map)
-                device_configs[device.name][interface.name] = config_info
-
-        logger.info(f"[SYNC DEPLOYMENT] Generated configs for {sum(len(ifaces) for ifaces in device_configs.values())} interfaces")
-
-        # Deploy configs to devices using NAPALM (one device at a time, all interfaces batched)
-        deployment_results = {}
-
-        for device in devices:
-            device_name = device.name
-            interfaces_config = device_configs.get(device_name, {})
-
-            if not interfaces_config:
-                logger.warning(f"[SYNC DEPLOYMENT] No interfaces to deploy for device {device_name}")
-                deployment_results[device_name] = {}
-                continue
-
-            logger.info(f"[SYNC DEPLOYMENT] Deploying {len(interfaces_config)} interfaces to {device_name}")
-
-            # Build combined config for all interfaces on this device
-            all_config_lines = []
-            bridge_vlans_added = set()  # Track which bridge VLANs we've already added
-
-            for interface_name, config_info in interfaces_config.items():
-                commands = config_info['commands']
-
-                # For Cumulus, filter out duplicate bridge VLAN commands
-                if platform == 'cumulus':
-                    for cmd in commands:
-                        if 'nv set bridge domain br_default vlan' in cmd:
-                            # Extract VLAN ID from command
-                            vlan_match = cmd.split('vlan ')[-1].strip()
-                            if vlan_match not in bridge_vlans_added:
-                                all_config_lines.append(cmd)
-                                bridge_vlans_added.add(vlan_match)
-                        else:
-                            all_config_lines.append(cmd)
-                else:
-                    # For EOS, just add all commands
-                    all_config_lines.extend(commands)
-
-            combined_config = '\n'.join(all_config_lines)
-            logger.info(f"[SYNC DEPLOYMENT] Device {device_name}: Combined config has {len(all_config_lines)} commands")
-
-            # Deploy using NAPALM
-            napalm_mgr = NAPALMDeviceManager(device)
-
-            if not napalm_mgr.connect():
-                error_msg = f"Failed to connect to {device_name}"
-                logger.error(f"[SYNC DEPLOYMENT] {error_msg}")
-                deployment_results[device_name] = {
-                    iface: {'success': False, 'committed': False, 'error': error_msg, 'logs': [error_msg]}
-                    for iface in interfaces_config.keys()
-                }
-                continue
-
-            try:
-                # Deploy combined config with commit-confirm
-                deploy_result = napalm_mgr.deploy_config_safe(
-                    config=combined_config,
-                    timeout=90,
-                    replace=False,
-                    interface_name=None,  # Multiple interfaces
-                    vlan_id=None  # Multiple VLANs
-                )
-
-                # Process result for each interface
-                device_results = {}
-                for interface_name in interfaces_config.keys():
-                    device_results[interface_name] = {
-                        'success': deploy_result.get('success', False),
-                        'committed': deploy_result.get('committed', False),
-                        'error': deploy_result.get('error'),
-                        'logs': deploy_result.get('logs', []),
-                        'message': deploy_result.get('message', '')
+                # Check device config for bond membership
+                bond_info = self._get_bond_interface_for_member(device, interface.name, platform=platform)
+                if bond_info:
+                    bond_name = bond_info['bond_name']
+                    device_bond_map[interface.name] = {
+                        'bond_name': bond_name,
+                        'bond_id': None,  # No NetBox ID yet
+                        'source': 'device'
                     }
 
-                deployment_results[device_name] = device_results
-                logger.info(f"[SYNC DEPLOYMENT] Device {device_name}: Deployment {'succeeded' if deploy_result.get('success') else 'failed'}")
+                    # Track this bond for creation in NetBox
+                    if bond_name not in device_bonds_to_create:
+                        device_bonds_to_create[bond_name] = {
+                            'members': [],
+                            'vlans_to_migrate': {}  # Map of member_name -> {untagged, tagged}
+                        }
+                    device_bonds_to_create[bond_name]['members'].append(interface.name)
 
-            except Exception as e:
-                error_msg = f"Deployment exception: {str(e)}"
-                logger.error(f"[SYNC DEPLOYMENT] Device {device_name}: {error_msg}")
-                deployment_results[device_name] = {
-                    iface: {'success': False, 'committed': False, 'error': error_msg, 'logs': [error_msg]}
-                    for iface in interfaces_config.keys()
-                }
-            finally:
-                napalm_mgr.disconnect()
+                    # Collect VLANs from this member interface for migration
+                    vlans_info = {
+                        'untagged': interface.untagged_vlan.vid if interface.untagged_vlan else None,
+                        'tagged': list(interface.tagged_vlans.values_list('vid', flat=True))
+                    }
+                    device_bonds_to_create[bond_name]['vlans_to_migrate'][interface.name] = vlans_info
 
-        logger.info(f"[SYNC DEPLOYMENT] Deployment completed for {len(devices)} devices")
-        nornir_results = deployment_results  # Rename for compatibility with result processing code
+                    logger.info(f"[SYNC DEPLOYMENT] Detected bond {bond_name} on device {device.name} (not in NetBox) - member: {interface.name}, VLANs: {vlans_info}")
+
+            if device_bond_map:
+                bond_info_map[device.name] = device_bond_map
+            if device_bonds_to_create:
+                bonds_to_create_in_netbox[device.name] = device_bonds_to_create
+
+        logger.info(f"[SYNC DEPLOYMENT] Built bond_info_map: {bond_info_map}")
+        logger.info(f"[SYNC DEPLOYMENT] Bonds to create in NetBox: {bonds_to_create_in_netbox}")
+
+        # Initialize Nornir and deploy using batch deployment
+        nornir_manager = NornirDeviceManager(devices=devices)
+        nornir_manager.initialize()
+
+        logger.info(f"[SYNC DEPLOYMENT] Deploying to {len(interface_list)} interfaces across {len(devices)} devices in parallel")
+        nornir_results = nornir_manager.deploy_vlan(
+            interface_list=interface_list,
+            vlan_id=0,  # Dummy VLAN ID (sync mode uses per-interface VLANs from NetBox)
+            platform=platform,
+            timeout=90,
+            bond_info_map=bond_info_map if bond_info_map else None,
+            dry_run=False,
+            sync_netbox_to_device=True  # Tell Nornir this is sync mode
+        )
+
+        logger.info(f"[SYNC DEPLOYMENT] Nornir deployment completed for {len(nornir_results)} devices")
+
+        # Build device_configs map for result processing (needed by the result processing code below)
+        device_configs = {}
+        for device in devices:
+            device_interfaces = list(tagged_interfaces_by_device.get(device.name, [])) + list(untagged_interfaces_by_device.get(device.name, []))
+            if device.name not in device_configs:
+                device_configs[device.name] = {}
+
+            for interface in device_interfaces:
+                # Generate config info from NetBox state
+                config_info = self._generate_config_from_netbox(device, interface, platform, bond_info_map=bond_info_map)
+                device_configs[device.name][interface.name] = config_info
+
+        logger.info(f"[SYNC DEPLOYMENT] Built device_configs map for {sum(len(ifaces) for ifaces in device_configs.values())} interfaces")
 
         # Process deployment results and build consolidated device-level logs (matching dry run format)
         results = []
         interfaces_to_auto_tag = []  # Track interfaces that need auto-tagging
+
+        # Create bonds in NetBox if needed (before processing results)
+        for device in devices:
+            if device.name in bonds_to_create_in_netbox:
+                device_bonds = bonds_to_create_in_netbox[device.name]
+                for bond_name, bond_data in device_bonds.items():
+                    logger.info(f"[SYNC DEPLOYMENT] Creating bond {bond_name} in NetBox for device {device.name}")
+                    sync_result = self._sync_bond_to_netbox(
+                        device=device,
+                        bond_name=bond_name,
+                        member_interfaces=bond_data['members'],
+                        platform=platform,
+                        migrate_vlans=True  # Migrate all VLANs from member interfaces to bond
+                    )
+                    if sync_result.get('success'):
+                        logger.info(f"[SYNC DEPLOYMENT] Bond {bond_name} created in NetBox successfully")
+                    else:
+                        logger.error(f"[SYNC DEPLOYMENT] Failed to create bond {bond_name} in NetBox: {sync_result.get('error')}")
 
         for device in devices:
             device_results = nornir_results.get(device.name, {})
