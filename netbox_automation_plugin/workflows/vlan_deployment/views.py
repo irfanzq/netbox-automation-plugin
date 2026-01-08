@@ -3049,7 +3049,7 @@ class VLANDeploymentView(View):
                 if untagged_vlan:
                     commands.append(f"   switchport trunk native vlan {untagged_vlan}")
         
-        return {
+        result = {
             'commands': commands,
             'mode': mode or 'access',
             'untagged_vlan': untagged_vlan,
@@ -3060,6 +3060,11 @@ class VLANDeploymentView(View):
             'vlans_to_add_to_bridge': vlans_to_add if platform == 'cumulus' else [],
             'vlans_already_in_bridge': vlans_already_in_bridge if platform == 'cumulus' else [],
         }
+
+        # DEBUG: Log the final result
+        logger.info(f"[NETBOX CONFIG] {device.name}:{interface.name} → Returning {len(commands)} commands: {commands}")
+
+        return result
 
     def _auto_tag_interface_after_deployment(self, interface, replace_conflicting_tags=False):
         """
