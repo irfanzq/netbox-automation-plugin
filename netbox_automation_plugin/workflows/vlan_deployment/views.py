@@ -573,7 +573,7 @@ class VLANDeploymentView(View):
                             'status': 'warn',
                             'message': f"Interface marked as 'vlan-mode:needs-review' - would warn but allow"
                         }
-                    # REQUIRED: Interface must be tagged as 'access' or 'tagged' to allow deployment
+                    # REQUIRED: Interface must be tagged as 'access' or 'tagged' to allow deployment (SKIP in sync mode)
                     elif interface_tags.get('access') and interface_tags['access'].name in interface_tag_names_list:
                         results['interface_validation'][key] = {
                             'status': 'pass',
@@ -584,8 +584,14 @@ class VLANDeploymentView(View):
                             'status': 'pass',
                             'message': f"Interface tagged as 'vlan-mode:tagged' - would pass"
                         }
+                    elif sync_mode:
+                        # Sync mode: Allow deployment even without vlan-mode tags
+                        results['interface_validation'][key] = {
+                            'status': 'pass',
+                            'message': f"Sync mode - interface validation passed (tags not required)"
+                        }
                     else:
-                        # BLOCK: Interface must be tagged as 'access' or 'tagged' for VLAN deployment
+                        # BLOCK: Interface must be tagged as 'access' or 'tagged' for VLAN deployment (normal mode only)
                         results['interface_validation'][key] = {
                             'status': 'block',
                             'message': f"Interface not tagged as 'vlan-mode:access' or 'vlan-mode:tagged' - would block deployment"
