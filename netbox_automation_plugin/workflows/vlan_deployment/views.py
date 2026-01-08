@@ -3679,6 +3679,15 @@ class VLANDeploymentView(View):
                 has_netbox_changes = False
                 netbox_groups = {}  # Key: (bond_name or 'standalone', change_type), Value: list of changes
 
+                # DEBUG: Show bond detection info
+                device_logs.append("# DEBUG: Bond Detection Info")
+                device_logs.append(f"# Device {device.name} in bonds_to_create_in_netbox: {device.name in bonds_to_create_in_netbox}")
+                if device.name in bond_info_map:
+                    device_logs.append(f"# bond_info_map for {device.name}: {bond_info_map[device.name]}")
+                if device.name in bonds_to_create_in_netbox:
+                    device_logs.append(f"# bonds_to_create_in_netbox for {device.name}: {bonds_to_create_in_netbox[device.name]}")
+                device_logs.append("")
+
                 # Check if this device has bonds to create in NetBox
                 if device.name in bonds_to_create_in_netbox:
                     device_bonds = bonds_to_create_in_netbox[device.name]
