@@ -3138,10 +3138,15 @@ class VLANDeploymentView(View):
             interface_configs_map = {}  # Map of "device:interface" -> config_info
 
             # Build bond_info_map FIRST (before generating configs)
+            # This map will contain bonds from BOTH NetBox AND device config
             bond_info_map = {}
+            bonds_to_create_in_netbox = {}  # Track bonds that exist on device but not in NetBox
+
             for device in devices:
                 device_bond_map = {}
-                # Check all interfaces for this device
+                device_bonds_to_create = {}
+
+                # Step 1: Check all interfaces for bond membership from NetBox
                 all_device_interfaces = list(tagged_interfaces_by_device.get(device.name, [])) + list(untagged_interfaces_by_device.get(device.name, []))
                 for interface in all_device_interfaces:
                     # Check bond membership from NetBox
@@ -3149,15 +3154,53 @@ class VLANDeploymentView(View):
                         if hasattr(interface, 'lag') and interface.lag:
                             device_bond_map[interface.name] = {
                                 'bond_name': interface.lag.name,
-                                'bond_id': str(interface.lag.id)
+                                'bond_id': str(interface.lag.id),
+                                'source': 'netbox'
                             }
                     except Exception as e:
                         logger.debug(f"Error checking bond membership for {interface.name}: {e}")
 
+                # Step 2: Check device config for bonds that might not be in NetBox
+                # For each interface, check if it's a bond member on the device
+                for interface in all_device_interfaces:
+                    # Skip if already found in NetBox
+                    if interface.name in device_bond_map:
+                        continue
+
+                    # Check device config for bond membership
+                    bond_info = self._get_bond_interface_for_member(device, interface.name, platform=platform)
+                    if bond_info:
+                        bond_name = bond_info['bond_name']
+                        device_bond_map[interface.name] = {
+                            'bond_name': bond_name,
+                            'bond_id': None,  # No NetBox ID yet
+                            'source': 'device'
+                        }
+
+                        # Track this bond for creation in NetBox
+                        if bond_name not in device_bonds_to_create:
+                            device_bonds_to_create[bond_name] = {
+                                'members': [],
+                                'vlans_to_migrate': {}  # Map of member_name -> {untagged, tagged}
+                            }
+                        device_bonds_to_create[bond_name]['members'].append(interface.name)
+
+                        # Collect VLANs from this member interface for migration
+                        vlans_info = {
+                            'untagged': interface.untagged_vlan.vid if interface.untagged_vlan else None,
+                            'tagged': list(interface.tagged_vlans.values_list('vid', flat=True))
+                        }
+                        device_bonds_to_create[bond_name]['vlans_to_migrate'][interface.name] = vlans_info
+
+                        logger.info(f"[SYNC DRY RUN] Detected bond {bond_name} on device {device.name} (not in NetBox) - member: {interface.name}, VLANs: {vlans_info}")
+
                 if device_bond_map:
                     bond_info_map[device.name] = device_bond_map
+                if device_bonds_to_create:
+                    bonds_to_create_in_netbox[device.name] = device_bonds_to_create
 
             logger.info(f"[SYNC DRY RUN] Built bond_info_map: {bond_info_map}")
+            logger.info(f"[SYNC DRY RUN] Bonds to create in NetBox: {bonds_to_create_in_netbox}")
 
             # Add tagged interfaces
             for device in devices:
@@ -3543,11 +3586,33 @@ class VLANDeploymentView(View):
                 device_logs.append("=" * 80)
                 device_logs.append("")
 
+                # Check if this device has bonds to create in NetBox
+                has_netbox_changes = False
+                if device.name in bonds_to_create_in_netbox:
+                    device_bonds = bonds_to_create_in_netbox[device.name]
+                    for bond_name, bond_data in device_bonds.items():
+                        has_netbox_changes = True
+                        device_logs.append(f"# Bond: {bond_name}")
+                        device_logs.append(f"  [ACTION] Create bond interface in NetBox")
+                        device_logs.append(f"  Members: {', '.join(bond_data['members'])}")
+
+                        # Show VLAN migration details
+                        for member_name, vlans_info in bond_data['vlans_to_migrate'].items():
+                            if vlans_info['untagged']:
+                                device_logs.append(f"  [MIGRATE] Move untagged VLAN {vlans_info['untagged']} from {member_name} to {bond_name}")
+                            if vlans_info['tagged']:
+                                tagged_str = ', '.join(map(str, vlans_info['tagged']))
+                                device_logs.append(f"  [MIGRATE] Move tagged VLANs {tagged_str} from {member_name} to {bond_name}")
+                            device_logs.append(f"  [CLEAR] Clear all VLANs from {member_name}")
+                        device_logs.append("")
+
                 if all_netbox_diffs:
+                    has_netbox_changes = True
                     for line in all_netbox_diffs:
                         device_logs.append(line)
                     device_logs.append("")
-                else:
+
+                if not has_netbox_changes:
                     device_logs.append("(no NetBox changes)")
                     device_logs.append("")
 
