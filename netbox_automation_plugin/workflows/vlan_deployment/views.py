@@ -3869,17 +3869,6 @@ class VLANDeploymentView(View):
                     device_logs.append("   No traffic data available")
                 device_logs.append("")
 
-                # 4. Current VLAN Configuration (from device - on target interface)
-                device_logs.append("4. Current VLAN Configuration:")
-                for target_interface, (physical_interface, bond_name) in sorted(interfaces_to_check.items()):
-                    interface_preview = device_results_map.get(physical_interface, {})
-                    vlan_id = interface_preview.get('vlan_id', 'N/A')
-                    vlan_name = interface_preview.get('vlan_name', 'N/A')
-
-                    target_display = f"{physical_interface} ({bond_name})" if bond_name else physical_interface
-                    device_logs.append(f"   {target_display}: VLAN {vlan_id} ({vlan_name})")
-                device_logs.append("")
-
                 # Add summary at the end
                 device_logs.append("=" * 80)
                 device_logs.append("DEVICE SUMMARY")
@@ -4281,18 +4270,7 @@ class VLANDeploymentView(View):
                     logger.debug(f"Could not get pre-deployment data for {actual_interface_name}: {e}")
 
             # Display pre-deployment checks
-            device_logs.append("1. Current VLAN Configuration:")
-            for target_iface, pre_data in sorted(pre_deployment_data_sync.items()):
-                current_vlan = pre_data.get('current_vlan')
-                if current_vlan and not isinstance(current_vlan, str):
-                    device_logs.append(f"   {target_iface}: VLAN {current_vlan}")
-                elif isinstance(current_vlan, str) and current_vlan.startswith("ERROR"):
-                    device_logs.append(f"   {target_iface}: {current_vlan}")
-                else:
-                    device_logs.append(f"   {target_iface}: No VLAN configured")
-            device_logs.append("")
-
-            device_logs.append("2. Interface State:")
+            device_logs.append("1. Interface State:")
             for target_iface, pre_data in sorted(pre_deployment_data_sync.items()):
                 iface_state = pre_data.get('interface_state', {})
                 if iface_state.get('error'):
@@ -4304,7 +4282,7 @@ class VLANDeploymentView(View):
             device_logs.append("")
 
             if platform == 'cumulus':
-                device_logs.append("3. Traffic Analysis:")
+                device_logs.append("2. Traffic Analysis:")
                 for target_iface, pre_data in sorted(pre_deployment_data_sync.items()):
                     traffic_stats = pre_data.get('traffic_stats', {})
                     if traffic_stats.get('error'):
@@ -4542,7 +4520,7 @@ class VLANDeploymentView(View):
                 device_logs.append("")
 
                 if platform == 'cumulus':
-                    device_logs.append("3. Traffic Analysis:")
+                    device_logs.append("2. Traffic Analysis:")
                     for target_iface, post_data in sorted(post_deployment_data_sync.items()):
                         traffic_stats = post_data.get('traffic_stats', {})
                         if traffic_stats.get('error'):
@@ -5329,30 +5307,6 @@ class VLANDeploymentView(View):
                     device_logs.append("   No traffic data available")
                 device_logs.append("")
 
-                # 4. Current VLAN Configuration
-                device_logs.append("4. Current VLAN Configuration:")
-                for actual_interface_name, interface_preview in sorted(device_results.items()):
-                    if 'error' in interface_preview:
-                        continue
-                    bond_member_of = interface_preview.get('bond_member_of')
-                    netbox_state = interface_preview.get('netbox_state', {})
-                    current_state = netbox_state.get('current', {})
-                    current_untagged = current_state.get('untagged_vlan')
-                    current_tagged = current_state.get('tagged_vlans', [])
-
-                    vlan_info = []
-                    if current_untagged:
-                        vlan_info.append(f"VLAN {current_untagged} (untagged)")
-                    if current_tagged:
-                        vlan_info.append(f"VLANs {','.join(map(str, sorted(current_tagged)))} (tagged)")
-
-                    if vlan_info:
-                        target_display = f"{actual_interface_name} ({bond_member_of})" if bond_member_of else actual_interface_name
-                        device_logs.append(f"   {target_display}: {', '.join(vlan_info)}")
-                    else:
-                        device_logs.append(f"   {actual_interface_name}: No VLAN configured")
-                device_logs.append("")
-
                 # Add summary at the end
                 device_logs.append("=" * 80)
                 device_logs.append("DEVICE SUMMARY")
@@ -5643,18 +5597,7 @@ class VLANDeploymentView(View):
                     pre_deployment_data[target_interface_for_checks] = pre_data
 
                 # Display pre-deployment checks
-                device_logs.append("1. Current VLAN Configuration:")
-                for target_iface, pre_data in sorted(pre_deployment_data.items()):
-                    current_vlan = pre_data.get('current_vlan')
-                    if current_vlan and current_vlan != "ERROR":
-                        device_logs.append(f"   {target_iface}: VLAN {current_vlan}")
-                    elif isinstance(current_vlan, str) and current_vlan.startswith("ERROR"):
-                        device_logs.append(f"   {target_iface}: {current_vlan}")
-                    else:
-                        device_logs.append(f"   {target_iface}: No VLAN configured")
-                device_logs.append("")
-
-                device_logs.append("2. Interface State:")
+                device_logs.append("1. Interface State:")
                 for target_iface, pre_data in sorted(pre_deployment_data.items()):
                     iface_state = pre_data.get('interface_state', {})
                     if iface_state.get('error'):
@@ -5666,7 +5609,7 @@ class VLANDeploymentView(View):
                 device_logs.append("")
 
                 if platform == 'cumulus':
-                    device_logs.append("3. Traffic Analysis:")
+                    device_logs.append("2. Traffic Analysis:")
                     for target_iface, pre_data in sorted(pre_deployment_data.items()):
                         traffic_stats = pre_data.get('traffic_stats', {})
                         if traffic_stats.get('error'):
