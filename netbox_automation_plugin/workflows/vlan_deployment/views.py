@@ -3636,39 +3636,80 @@ class VLANDeploymentView(View):
                     device_logs.append("(no NetBox configuration)")
                     device_logs.append("")
 
-                # Show consolidated NetBox changes
+                # Show consolidated NetBox changes (GROUPED)
                 device_logs.append("=" * 80)
                 device_logs.append("NETBOX CONFIGURATION CHANGES")
                 device_logs.append("=" * 80)
                 device_logs.append("")
 
-                # Check if this device has bonds to create in NetBox
+                # Group NetBox changes by bond status and change type
                 has_netbox_changes = False
+                netbox_groups = {}  # Key: (bond_name or 'standalone', change_type), Value: list of changes
+
+                # Check if this device has bonds to create in NetBox
                 if device.name in bonds_to_create_in_netbox:
                     device_bonds = bonds_to_create_in_netbox[device.name]
                     for bond_name, bond_data in device_bonds.items():
                         has_netbox_changes = True
-                        device_logs.append(f"# Bond: {bond_name}")
-                        device_logs.append(f"  [ACTION] Create bond interface in NetBox")
-                        device_logs.append(f"  Members: {', '.join(bond_data['members'])}")
 
-                        # Show VLAN migration details
-                        for member_name, vlans_info in bond_data['vlans_to_migrate'].items():
-                            if vlans_info['untagged']:
-                                device_logs.append(f"  [MIGRATE] Move untagged VLAN {vlans_info['untagged']} from {member_name} to {bond_name}")
-                            if vlans_info['tagged']:
-                                tagged_str = ', '.join(map(str, vlans_info['tagged']))
-                                device_logs.append(f"  [MIGRATE] Move tagged VLANs {tagged_str} from {member_name} to {bond_name}")
-                            device_logs.append(f"  [CLEAR] Clear all VLANs from {member_name}")
-                        device_logs.append("")
+                        # Group bond creation
+                        group_key = (bond_name, 'bond_create')
+                        if group_key not in netbox_groups:
+                            netbox_groups[group_key] = {
+                                'action': 'create',
+                                'members': bond_data['members'],
+                                'vlans_to_migrate': bond_data['vlans_to_migrate']
+                            }
 
+                # Parse all_netbox_diffs to extract interface changes
                 if all_netbox_diffs:
                     has_netbox_changes = True
+                    current_interface = None
                     for line in all_netbox_diffs:
-                        device_logs.append(line)
-                    device_logs.append("")
+                        if line.startswith("# Interface:"):
+                            current_interface = line.replace("# Interface:", "").strip()
+                        # We'll just keep the old format for sync mode since it's more complex
+                        # with bond creation and migration
 
-                if not has_netbox_changes:
+                # Display grouped NetBox changes
+                if has_netbox_changes:
+                    # Show bond creation first
+                    bond_create_groups = {k: v for k, v in netbox_groups.items() if k[1] == 'bond_create'}
+                    if bond_create_groups:
+                        device_logs.append("Bond Interfaces (will be CREATED in NetBox):")
+                        device_logs.append("")
+                        for (bond_name, change_type), bond_data in sorted(bond_create_groups.items()):
+                            device_logs.append(f"  {bond_name}:")
+                            device_logs.append(f"    Members: {', '.join(bond_data['members'])}")
+                            device_logs.append("")
+
+                            # Show VLAN migration details grouped
+                            device_logs.append("    VLAN Migration:")
+                            for member_name, vlans_info in bond_data['vlans_to_migrate'].items():
+                                changes = []
+                                if vlans_info['untagged']:
+                                    changes.append(f"Untagged VLAN {vlans_info['untagged']}")
+                                if vlans_info['tagged']:
+                                    tagged_str = ', '.join(map(str, vlans_info['tagged']))
+                                    changes.append(f"Tagged VLANs [{tagged_str}]")
+
+                                if changes:
+                                    device_logs.append(f"      {member_name} → {bond_name}: {', '.join(changes)}")
+                                device_logs.append(f"      {member_name}: Clear all VLANs")
+                            device_logs.append("")
+
+                    # Show other NetBox changes (from all_netbox_diffs)
+                    if all_netbox_diffs:
+                        # For sync mode, we'll keep the detailed diff format since it's more complex
+                        # Just add a header to separate it
+                        if bond_create_groups:
+                            device_logs.append("Interface VLAN Updates:")
+                            device_logs.append("")
+
+                        for line in all_netbox_diffs:
+                            device_logs.append(line)
+                        device_logs.append("")
+                else:
                     device_logs.append("(no NetBox changes)")
                     device_logs.append("")
 
@@ -5043,16 +5084,160 @@ class VLANDeploymentView(View):
                     device_logs.append("(no device configuration changes)")
                     device_logs.append("")
 
-                # Show consolidated NetBox changes
+                # Show consolidated NetBox changes (GROUPED)
                 device_logs.append("=" * 80)
                 device_logs.append("NETBOX CONFIGURATION CHANGES")
                 device_logs.append("=" * 80)
                 device_logs.append("")
 
                 if all_netbox_diffs:
-                    for line in all_netbox_diffs:
-                        device_logs.append(line)
-                    device_logs.append("")
+                    # Group NetBox changes by bond status and change type
+                    netbox_groups = {}  # Key: (bond_name or 'standalone', change_type), Value: list of (interface_name, changes)
+
+                    for actual_interface_name, interface_preview in sorted(device_results.items()):
+                        if 'error' in interface_preview:
+                            continue
+
+                        netbox_diff = interface_preview.get('netbox_diff', '')
+                        if not netbox_diff or netbox_diff == "No changes (NetBox already has this configuration)":
+                            continue
+
+                        bond_member_of = interface_preview.get('bond_member_of', None)
+
+                        # Get NetBox state to extract current/proposed VLANs
+                        try:
+                            netbox_state = self._get_netbox_current_state(device, actual_interface_name, primary_vlan_id, mode='normal')
+                            current = netbox_state.get('current', {})
+                            proposed = netbox_state.get('proposed', {})
+
+                            # Extract VLAN changes
+                            current_untagged = current.get('untagged_vlan')
+                            proposed_untagged = proposed.get('untagged_vlan')
+                            current_tagged = current.get('tagged_vlans', [])
+                            proposed_tagged = proposed.get('tagged_vlans', [])
+
+                            # Group by bond status
+                            if bond_member_of:
+                                # Member interface - VLANs will be removed
+                                group_key = (bond_member_of, 'member_clear')
+                                if group_key not in netbox_groups:
+                                    netbox_groups[group_key] = []
+                                netbox_groups[group_key].append({
+                                    'interface': actual_interface_name,
+                                    'current_untagged': current_untagged,
+                                    'proposed_untagged': proposed_untagged,
+                                    'current_tagged': current_tagged,
+                                    'proposed_tagged': proposed_tagged
+                                })
+
+                                # Bond interface - VLANs will be added
+                                group_key = (bond_member_of, 'bond_add')
+                                if group_key not in netbox_groups:
+                                    netbox_groups[group_key] = []
+                                # Only add bond once (check if not already added)
+                                if not any(item['interface'] == bond_member_of for item in netbox_groups[group_key]):
+                                    netbox_groups[group_key].append({
+                                        'interface': bond_member_of,
+                                        'current_untagged': None,  # Bond doesn't have VLANs yet
+                                        'proposed_untagged': primary_vlan_id,  # Will get the VLAN from form
+                                        'current_tagged': [],
+                                        'proposed_tagged': tagged_vlan_ids if tagged_vlan_ids else []
+                                    })
+                            else:
+                                # Standalone interface
+                                group_key = ('standalone', 'update')
+                                if group_key not in netbox_groups:
+                                    netbox_groups[group_key] = []
+                                netbox_groups[group_key].append({
+                                    'interface': actual_interface_name,
+                                    'current_untagged': current_untagged,
+                                    'proposed_untagged': proposed_untagged,
+                                    'current_tagged': current_tagged,
+                                    'proposed_tagged': proposed_tagged
+                                })
+                        except Exception as e:
+                            logger.warning(f"Could not parse NetBox state for {actual_interface_name}: {e}")
+                            continue
+
+                    # Display grouped NetBox changes
+                    if netbox_groups:
+                        # First show member interface changes (VLANs being removed)
+                        member_groups = {k: v for k, v in netbox_groups.items() if k[1] == 'member_clear'}
+                        if member_groups:
+                            device_logs.append("Member Interfaces (VLANs will be REMOVED and migrated to bond):")
+                            device_logs.append("")
+                            for (bond_name, change_type), interfaces in sorted(member_groups.items()):
+                                for item in interfaces:
+                                    iface = item['interface']
+                                    curr_untag = item['current_untagged']
+                                    prop_untag = item['proposed_untagged']
+                                    curr_tag = item['current_tagged']
+                                    prop_tag = item['proposed_tagged']
+
+                                    changes = []
+                                    if curr_untag != prop_untag:
+                                        changes.append(f"Untagged VLAN {curr_untag} → {prop_untag}")
+                                    if curr_tag != prop_tag:
+                                        curr_tag_str = f"[{', '.join(map(str, curr_tag))}]" if curr_tag else "[]"
+                                        prop_tag_str = f"[{', '.join(map(str, prop_tag))}]" if prop_tag else "[]"
+                                        changes.append(f"Tagged VLANs {curr_tag_str} → {prop_tag_str}")
+
+                                    if changes:
+                                        device_logs.append(f"  {iface}: {', '.join(changes)}")
+                            device_logs.append("")
+
+                        # Then show bond interface changes (VLANs being added)
+                        bond_groups = {k: v for k, v in netbox_groups.items() if k[1] == 'bond_add'}
+                        if bond_groups:
+                            device_logs.append("Bond Interfaces (VLANs will be ADDED):")
+                            device_logs.append("")
+                            for (bond_name, change_type), interfaces in sorted(bond_groups.items()):
+                                for item in interfaces:
+                                    iface = item['interface']
+                                    curr_untag = item['current_untagged']
+                                    prop_untag = item['proposed_untagged']
+                                    curr_tag = item['current_tagged']
+                                    prop_tag = item['proposed_tagged']
+
+                                    changes = []
+                                    if curr_untag != prop_untag:
+                                        changes.append(f"Untagged VLAN {curr_untag} → {prop_untag}")
+                                    if curr_tag != prop_tag:
+                                        curr_tag_str = f"[{', '.join(map(str, curr_tag))}]" if curr_tag else "[]"
+                                        prop_tag_str = f"[{', '.join(map(str, prop_tag))}]" if prop_tag else "[]"
+                                        changes.append(f"Tagged VLANs {curr_tag_str} → {prop_tag_str}")
+
+                                    if changes:
+                                        device_logs.append(f"  {iface}: {', '.join(changes)}")
+                            device_logs.append("")
+
+                        # Finally show standalone interface changes
+                        standalone_groups = {k: v for k, v in netbox_groups.items() if k[1] == 'update'}
+                        if standalone_groups:
+                            device_logs.append("Standalone Interfaces (VLAN updates):")
+                            device_logs.append("")
+                            for (group_name, change_type), interfaces in sorted(standalone_groups.items()):
+                                for item in interfaces:
+                                    iface = item['interface']
+                                    curr_untag = item['current_untagged']
+                                    prop_untag = item['proposed_untagged']
+                                    curr_tag = item['current_tagged']
+                                    prop_tag = item['proposed_tagged']
+
+                                    changes = []
+                                    if curr_untag != prop_untag:
+                                        changes.append(f"Untagged VLAN {curr_untag} → {prop_untag}")
+                                    if curr_tag != prop_tag:
+                                        curr_tag_str = f"[{', '.join(map(str, curr_tag))}]" if curr_tag else "[]"
+                                        prop_tag_str = f"[{', '.join(map(str, prop_tag))}]" if prop_tag else "[]"
+                                        changes.append(f"Tagged VLANs {curr_tag_str} → {prop_tag_str}")
+
+                                    if changes:
+                                        device_logs.append(f"  {iface}: {', '.join(changes)}")
+                            device_logs.append("")
+                    else:
+                        device_logs.append("(no NetBox changes)")
+                        device_logs.append("")
                 else:
                     device_logs.append("(no NetBox changes)")
                     device_logs.append("")
@@ -5710,11 +5895,14 @@ class VLANDeploymentView(View):
                     device_logs.append("(no configuration changes)")
                 device_logs.append("")
 
-                # Build consolidated NetBox config section (all interfaces together)
+                # Build consolidated NetBox config section (GROUPED)
                 device_logs.append("=" * 80)
                 device_logs.append("NETBOX CONFIGURATION CHANGES")
                 device_logs.append("=" * 80)
                 device_logs.append("")
+
+                # Group NetBox changes by bond status and change type
+                netbox_groups = {}  # Key: (bond_name or 'standalone', change_type), Value: list of (interface_name, changes)
 
                 for actual_interface_name in device_interfaces:
                     bond_member_of = bond_info_map.get(device.name, {}).get(actual_interface_name, None)
@@ -5737,16 +5925,135 @@ class VLANDeploymentView(View):
                             bond_name=bond_name_for_netbox
                         )
 
-                        if netbox_diff:
-                            device_logs.append(f"# Interface: {actual_interface_name}")
-                            for line in netbox_diff.split('\n'):
-                                if line.strip():
-                                    device_logs.append(line)
-                            device_logs.append("")
+                        if netbox_diff and netbox_diff != "No changes (NetBox already has this configuration)":
+                            current = netbox_state.get('current', {})
+                            proposed = netbox_state.get('proposed', {})
+
+                            # Extract VLAN changes
+                            current_untagged = current.get('untagged_vlan')
+                            proposed_untagged = proposed.get('untagged_vlan')
+                            current_tagged = current.get('tagged_vlans', [])
+                            proposed_tagged = proposed.get('tagged_vlans', [])
+
+                            # Group by bond status
+                            if bond_member_of:
+                                # Member interface - VLANs will be removed
+                                group_key = (bond_member_of, 'member_clear')
+                                if group_key not in netbox_groups:
+                                    netbox_groups[group_key] = []
+                                netbox_groups[group_key].append({
+                                    'interface': actual_interface_name,
+                                    'current_untagged': current_untagged,
+                                    'proposed_untagged': proposed_untagged,
+                                    'current_tagged': current_tagged,
+                                    'proposed_tagged': proposed_tagged
+                                })
+
+                                # Bond interface - VLANs will be added
+                                group_key = (bond_member_of, 'bond_add')
+                                if group_key not in netbox_groups:
+                                    netbox_groups[group_key] = []
+                                # Only add bond once (check if not already added)
+                                if not any(item['interface'] == bond_member_of for item in netbox_groups[group_key]):
+                                    netbox_groups[group_key].append({
+                                        'interface': bond_member_of,
+                                        'current_untagged': None,  # Bond doesn't have VLANs yet
+                                        'proposed_untagged': primary_vlan_id,  # Will get the VLAN from form
+                                        'current_tagged': [],
+                                        'proposed_tagged': tagged_vlan_ids if tagged_vlan_ids else []
+                                    })
+                            else:
+                                # Standalone interface
+                                group_key = ('standalone', 'update')
+                                if group_key not in netbox_groups:
+                                    netbox_groups[group_key] = []
+                                netbox_groups[group_key].append({
+                                    'interface': actual_interface_name,
+                                    'current_untagged': current_untagged,
+                                    'proposed_untagged': proposed_untagged,
+                                    'current_tagged': current_tagged,
+                                    'proposed_tagged': proposed_tagged
+                                })
                     except Exception as e:
                         logger.debug(f"Could not generate NetBox diff for {actual_interface_name}: {e}")
 
-                if not any("# Interface:" in line for line in device_logs[-20:]):
+                # Display grouped NetBox changes
+                if netbox_groups:
+                    # First show member interface changes (VLANs being removed)
+                    member_groups = {k: v for k, v in netbox_groups.items() if k[1] == 'member_clear'}
+                    if member_groups:
+                        device_logs.append("Member Interfaces (VLANs will be REMOVED and migrated to bond):")
+                        device_logs.append("")
+                        for (bond_name, change_type), interfaces in sorted(member_groups.items()):
+                            for item in interfaces:
+                                iface = item['interface']
+                                curr_untag = item['current_untagged']
+                                prop_untag = item['proposed_untagged']
+                                curr_tag = item['current_tagged']
+                                prop_tag = item['proposed_tagged']
+
+                                changes = []
+                                if curr_untag != prop_untag:
+                                    changes.append(f"Untagged VLAN {curr_untag} → {prop_untag}")
+                                if curr_tag != prop_tag:
+                                    curr_tag_str = f"[{', '.join(map(str, curr_tag))}]" if curr_tag else "[]"
+                                    prop_tag_str = f"[{', '.join(map(str, prop_tag))}]" if prop_tag else "[]"
+                                    changes.append(f"Tagged VLANs {curr_tag_str} → {prop_tag_str}")
+
+                                if changes:
+                                    device_logs.append(f"  {iface}: {', '.join(changes)}")
+                        device_logs.append("")
+
+                    # Then show bond interface changes (VLANs being added)
+                    bond_groups = {k: v for k, v in netbox_groups.items() if k[1] == 'bond_add'}
+                    if bond_groups:
+                        device_logs.append("Bond Interfaces (VLANs will be ADDED):")
+                        device_logs.append("")
+                        for (bond_name, change_type), interfaces in sorted(bond_groups.items()):
+                            for item in interfaces:
+                                iface = item['interface']
+                                curr_untag = item['current_untagged']
+                                prop_untag = item['proposed_untagged']
+                                curr_tag = item['current_tagged']
+                                prop_tag = item['proposed_tagged']
+
+                                changes = []
+                                if curr_untag != prop_untag:
+                                    changes.append(f"Untagged VLAN {curr_untag} → {prop_untag}")
+                                if curr_tag != prop_tag:
+                                    curr_tag_str = f"[{', '.join(map(str, curr_tag))}]" if curr_tag else "[]"
+                                    prop_tag_str = f"[{', '.join(map(str, prop_tag))}]" if prop_tag else "[]"
+                                    changes.append(f"Tagged VLANs {curr_tag_str} → {prop_tag_str}")
+
+                                if changes:
+                                    device_logs.append(f"  {iface}: {', '.join(changes)}")
+                        device_logs.append("")
+
+                    # Finally show standalone interface changes
+                    standalone_groups = {k: v for k, v in netbox_groups.items() if k[1] == 'update'}
+                    if standalone_groups:
+                        device_logs.append("Standalone Interfaces (VLAN updates):")
+                        device_logs.append("")
+                        for (group_name, change_type), interfaces in sorted(standalone_groups.items()):
+                            for item in interfaces:
+                                iface = item['interface']
+                                curr_untag = item['current_untagged']
+                                prop_untag = item['proposed_untagged']
+                                curr_tag = item['current_tagged']
+                                prop_tag = item['proposed_tagged']
+
+                                changes = []
+                                if curr_untag != prop_untag:
+                                    changes.append(f"Untagged VLAN {curr_untag} → {prop_untag}")
+                                if curr_tag != prop_tag:
+                                    curr_tag_str = f"[{', '.join(map(str, curr_tag))}]" if curr_tag else "[]"
+                                    prop_tag_str = f"[{', '.join(map(str, prop_tag))}]" if prop_tag else "[]"
+                                    changes.append(f"Tagged VLANs {curr_tag_str} → {prop_tag_str}")
+
+                                if changes:
+                                    device_logs.append(f"  {iface}: {', '.join(changes)}")
+                        device_logs.append("")
+                else:
                     device_logs.append("(no NetBox changes)")
                 device_logs.append("")
 
