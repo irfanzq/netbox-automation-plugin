@@ -3237,6 +3237,7 @@ class VLANDeploymentView(View):
 
                 # Step 1: Check all interfaces for bond membership from NetBox
                 all_device_interfaces = list(tagged_interfaces_by_device.get(device.name, [])) + list(untagged_interfaces_by_device.get(device.name, []))
+                logger.error(f"[SYNC DRY RUN] Checking {len(all_device_interfaces)} interfaces on {device.name} for bond membership")
                 for interface in all_device_interfaces:
                     # Check bond membership from NetBox
                     try:
@@ -3246,18 +3247,25 @@ class VLANDeploymentView(View):
                                 'bond_id': str(interface.lag.id),
                                 'source': 'netbox'
                             }
+                            logger.error(f"[SYNC DRY RUN] {device.name}:{interface.name} - Found LAG in NetBox: {interface.lag.name}")
+                        else:
+                            logger.error(f"[SYNC DRY RUN] {device.name}:{interface.name} - No LAG in NetBox")
                     except Exception as e:
-                        logger.debug(f"Error checking bond membership for {interface.name}: {e}")
+                        logger.error(f"[SYNC DRY RUN] Error checking bond membership for {interface.name}: {e}")
 
                 # Step 2: Check device config for bonds that might not be in NetBox
                 # For each interface, check if it's a bond member on the device
+                logger.error(f"[SYNC DRY RUN] Step 2: Checking device config for bonds not in NetBox")
                 for interface in all_device_interfaces:
                     # Skip if already found in NetBox
                     if interface.name in device_bond_map:
+                        logger.error(f"[SYNC DRY RUN] {device.name}:{interface.name} - Skipping (already in device_bond_map)")
                         continue
 
                     # Check device config for bond membership
+                    logger.error(f"[SYNC DRY RUN] {device.name}:{interface.name} - Calling _get_bond_interface_for_member()")
                     bond_info = self._get_bond_interface_for_member(device, interface.name, platform=platform)
+                    logger.error(f"[SYNC DRY RUN] {device.name}:{interface.name} - _get_bond_interface_for_member() returned: {bond_info}")
                     if bond_info:
                         bond_name = bond_info['bond_name']
                         device_bond_map[interface.name] = {
