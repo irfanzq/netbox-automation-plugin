@@ -2942,6 +2942,9 @@ class VLANDeploymentView(View):
         untagged_vlan = interface.untagged_vlan.vid if interface.untagged_vlan else None
         tagged_vlans = list(interface.tagged_vlans.values_list('vid', flat=True))
 
+        # DEBUG: Log what NetBox has for this interface
+        logger.info(f"[NETBOX CONFIG] {device.name}:{interface.name} - Mode: {mode}, Untagged: {untagged_vlan}, Tagged: {tagged_vlans}")
+
         # Check if interface is a bond member - if so, use bond interface
         # Priority: 1) NetBox lag attribute, 2) bond_info_map, 3) device config
         target_interface = interface.name
