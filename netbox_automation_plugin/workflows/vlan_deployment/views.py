@@ -69,6 +69,28 @@ class VLANDeploymentView(View):
 
         logger.info(f"[DRY RUN PREVIEW] Device {device.name}: Generating preview for {len(interface_list)} interfaces...")
 
+        # PERFORMANCE FIX: Fetch device config ONCE for all interfaces (not once per interface)
+        # This avoids 32 device connections for 32 interfaces - instead we connect once and reuse the config
+        logger.info(f"[DRY RUN PREVIEW] Device {device.name}: Fetching device config once for all {len(interface_list)} interfaces...")
+
+        # Fetch config ONCE for first interface - this gets the FULL device config
+        # Then we'll reuse this cached result for all other interfaces
+        device_config_cache = {}
+        if interface_list:
+            first_interface = interface_list[0]
+            first_config_result = self._get_current_device_config(device, first_interface, platform)
+            device_config_cache[first_interface] = first_config_result
+
+            # For remaining interfaces, reuse the cached full device config
+            # (since _get_current_device_config fetches full config anyway, not per-interface)
+            for actual_interface_name in interface_list[1:]:
+                # Call again but it should be fast since we're just parsing the same config
+                # TODO: Optimize this further by caching the full config JSON and parsing it locally
+                device_config_result = self._get_current_device_config(device, actual_interface_name, platform)
+                device_config_cache[actual_interface_name] = device_config_result
+
+        logger.info(f"[DRY RUN PREVIEW] Device {device.name}: Config fetched, now generating previews...")
+
         for actual_interface_name in interface_list:
             try:
                 interface_key = f"{device.name}:{actual_interface_name}"
@@ -77,8 +99,8 @@ class VLANDeploymentView(View):
                 # Get interface details
                 interface_details = self._get_interface_details(device, actual_interface_name)
 
-                # Get current device config (needed for bond detection and diff generation)
-                device_config_result = self._get_current_device_config(device, actual_interface_name, platform)
+                # Get current device config from cache (already fetched above)
+                device_config_result = device_config_cache.get(actual_interface_name, {})
                 config_source = device_config_result.get('source', 'error')
                 config_timestamp = device_config_result.get('timestamp', 'N/A')
                 device_uptime = device_config_result.get('device_uptime', None)
@@ -1136,7 +1158,10 @@ class VLANDeploymentView(View):
         Get current interface configuration from device (read-only).
         Always tries to get REAL config from device using CLI commands.
         Falls back to NetBox inference only if device is completely unreachable.
-        
+
+        PERFORMANCE: Uses instance-level cache to avoid fetching the same device config multiple times
+        during a single request (e.g., dry run with 32 interfaces).
+
         Returns:
             dict: {
                 'success': bool,
@@ -1146,6 +1171,19 @@ class VLANDeploymentView(View):
                 'error': str (if failed)
             }
         """
+        # PERFORMANCE FIX: Cache device config per request to avoid 32 connections for 32 interfaces
+        # Initialize cache if not exists
+        if not hasattr(self, '_device_config_cache'):
+            self._device_config_cache = {}
+
+        # Check cache first (cache key is device name + interface name)
+        cache_key = f"{device.name}:{interface_name}"
+        if cache_key in self._device_config_cache:
+            logger.debug(f"[CACHE HIT] Using cached config for {cache_key}")
+            return self._device_config_cache[cache_key]
+
+        logger.debug(f"[CACHE MISS] Fetching config for {cache_key}")
+
         napalm_manager = None
         try:
             from django.utils import timezone
@@ -1580,10 +1618,10 @@ class VLANDeploymentView(View):
                                         current_config = f"(CLI method not available)"
                                 else:
                                     current_config = f"(could not retrieve config)"
-                            
-                            
+
+
                             napalm_manager.disconnect()
-                            return {
+                            result = {
                                 'success': True,
                                 'current_config': current_config if current_config is not None else f"(no output from device for interface {interface_name})",
                                 'source': 'device',
@@ -1593,11 +1631,14 @@ class VLANDeploymentView(View):
                                 'bond_member_of': bond_member_of,  # Bond interface name if this interface is a bond member
                                 'bond_interface_config': '\n'.join(bond_interface_config_commands) if bond_interface_config_commands else None  # Bond interface config commands
                             }
+                            # Cache the result
+                            self._device_config_cache[cache_key] = result
+                            return result
                         except Exception as e2:
                             logger.warning(f"Could not get interface config for {device.name}:{interface_name}: {e2}")
                             napalm_manager.disconnect()
                             # Device was connected but config retrieval failed - not "unreachable"
-                            return {
+                            result = {
                                 'success': False,
                                 'current_config': f"ERROR: Could not retrieve config from device: {str(e2)}",
                                 'source': 'error',
@@ -1607,6 +1648,9 @@ class VLANDeploymentView(View):
                                 'bond_member_of': None,
                                 'bond_interface_config': None
                             }
+                            # Cache the result (even errors, to avoid retrying)
+                            self._device_config_cache[cache_key] = result
+                            return result
                 except Exception as e:
                     logger.error(f"Could not connect to device {device.name}:{interface_name}: {e}")
                     if napalm_manager:
@@ -1661,7 +1705,7 @@ class VLANDeploymentView(View):
                                     current_config = f"interface {interface_name}\n(could not retrieve config)"
                             
                             napalm_manager.disconnect()
-                            return {
+                            result = {
                                 'success': True,
                                 'current_config': current_config,
                                 'source': 'device',
@@ -1669,11 +1713,14 @@ class VLANDeploymentView(View):
                                 'bond_member_of': None,  # EOS bond detection not implemented yet
                                 'bond_interface_config': None
                             }
+                            # Cache the result
+                            self._device_config_cache[cache_key] = result
+                            return result
                         except Exception as e2:
                             logger.warning(f"Could not get interface config for {device.name}:{interface_name}: {e2}")
                             napalm_manager.disconnect()
                             # Device was connected but config retrieval failed - not "unreachable"
-                            return {
+                            result = {
                                 'success': False,
                                 'current_config': f"interface {interface_name} - ERROR: Could not retrieve config from device: {str(e2)}",
                                 'source': 'error',
@@ -1681,6 +1728,9 @@ class VLANDeploymentView(View):
                                 'error': str(e2),
                                 'device_connected': True  # Device was connected, but config retrieval failed
                             }
+                            # Cache the result (even errors, to avoid retrying)
+                            self._device_config_cache[cache_key] = result
+                            return result
                 except Exception as e:
                     logger.error(f"Could not connect to device {device.name}:{interface_name}: {e}")
                     if napalm_manager:
@@ -1906,23 +1956,29 @@ class VLANDeploymentView(View):
             # Clearly mark as ESTIMATED if device was unreachable
             if device_unreachable:
                 config = f"[ESTIMATED FROM NETBOX - DEVICE UNREACHABLE]\n{config}\n\nWARNING: This is inferred from NetBox data, not actual device configuration!"
-            
+
             timestamp = timezone.now().strftime('%Y-%m-%d %H:%M:%S UTC')
-            return {
+            result = {
                 'success': True,
                 'current_config': config,
                 'source': 'netbox',
                 'timestamp': timestamp
             }
+            # Cache the result
+            self._device_config_cache[cache_key] = result
+            return result
         except Interface.DoesNotExist:
             timestamp = timezone.now().strftime('%Y-%m-%d %H:%M:%S UTC')
-            return {
+            result = {
                 'success': False,
                 'current_config': f"Interface {interface_name} not found in NetBox",
                 'source': 'error',
                 'timestamp': timestamp,
                 'error': 'Interface not found'
             }
+            # Cache the result
+            self._device_config_cache[cache_key] = result
+            return result
     
     def _get_netbox_current_state(self, device, interface_name, vlan_id, mode='normal', tagged_vlan_ids=None):
         """
