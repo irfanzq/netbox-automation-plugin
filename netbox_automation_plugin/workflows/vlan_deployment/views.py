@@ -3023,11 +3023,13 @@ class VLANDeploymentView(View):
             # IMPORTANT: In Cumulus NVUE, interfaces ONLY use 'access' mode
             # Tagged VLANs are ONLY configured on the bridge domain (done above)
             # There is NO 'tagged' or 'untagged' command for interfaces
+            logger.info(f"[NETBOX CONFIG] {device.name}:{interface.name} - About to check untagged_vlan: {untagged_vlan}, type: {type(untagged_vlan)}")
             if untagged_vlan:
                 # Set interface to access mode with untagged VLAN
                 access_cmd = f"nv set interface {target_interface} bridge domain br_default access {untagged_vlan}"
                 commands.append(access_cmd)
                 logger.info(f"[NETBOX CONFIG] Generated access command for {target_interface}: {access_cmd}")
+                logger.info(f"[NETBOX CONFIG] Commands list now has {len(commands)} items")
             else:
                 logger.warning(f"[NETBOX CONFIG] No untagged VLAN for {interface.name} (target: {target_interface}) - skipping access command")
             
