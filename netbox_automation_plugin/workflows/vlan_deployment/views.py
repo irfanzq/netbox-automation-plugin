@@ -4046,8 +4046,7 @@ class VLANDeploymentView(View):
             platform=platform,
             timeout=90,
             bond_info_map=bond_info_map if bond_info_map else None,
-            dry_run=False,
-            sync_netbox_to_device=True  # Tell Nornir this is sync mode
+            dry_run=False
         )
 
         logger.info(f"[SYNC DEPLOYMENT] Nornir deployment completed for {len(nornir_results)} devices")
