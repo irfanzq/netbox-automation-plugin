@@ -864,8 +864,18 @@
 
               {# Field 1: Checkbox list for available interfaces #}
               <div class="mb-2">
-                <label class="form-label text-muted small" style="color: var(--nbx-color-fg-default) !important; opacity: 1 !important;">Available Interfaces (select from device)</label>
-                <div id="interfaces-checkbox-container" style="max-height: 200px; overflow-y: auto; border: 1px solid var(--nbx-color-border-default); padding: 10px; border-radius: 4px; background-color: var(--nbx-color-bg-secondary); color: var(--nbx-color-fg-default);">
+                <div class="d-flex justify-content-between align-items-center mb-2">
+                  <label class="form-label text-muted small mb-0" style="color: var(--nbx-color-fg-default) !important; opacity: 1 !important;">Available Interfaces (select from device)</label>
+
+                  {# Master Select All / Deselect All checkbox #}
+                  <div class="form-check" id="master-select-all-container" style="display: none;">
+                    <input type="checkbox" class="form-check-input" id="master-select-all-checkbox">
+                    <label class="form-check-label" for="master-select-all-checkbox" style="color: var(--nbx-color-fg-default) !important; font-weight: 600;">
+                      Select All / Deselect All
+                    </label>
+                  </div>
+                </div>
+                <div id="interfaces-checkbox-container" style="max-height: 400px; overflow-y: auto; border: 1px solid var(--nbx-color-border-default); padding: 10px; border-radius: 4px; background-color: var(--nbx-color-bg-secondary); color: var(--nbx-color-fg-default);">
                   <p class="text-muted mb-0" style="color: var(--nbx-color-fg-default) !important; opacity: 1 !important;">Select devices first to load interfaces</p>
                 </div>
               </div>
@@ -1234,7 +1244,14 @@
               
               if (isSyncMode) {
                 console.log('>>> APPLYING SYNC MODE - hiding VLAN fields');
-                
+
+                // Hide master "Select All" checkbox in sync mode
+                const masterSelectAllContainer = document.getElementById('master-select-all-container');
+                if (masterSelectAllContainer) {
+                  masterSelectAllContainer.style.display = 'none';
+                  console.log('Master select all checkbox hidden in sync mode');
+                }
+
                 // Hide VLAN configuration container (untagged and tagged VLAN fields)
                 if (vlanConfigContainer) {
                   console.log('Hiding VLAN config container');
@@ -1324,7 +1341,10 @@
                 }
               } else {
                 console.log('>>> REMOVING SYNC MODE - showing VLAN fields');
-                
+
+                // Show master "Select All" checkbox in normal mode (will be shown by setupSelectAllCheckboxes if interfaces exist)
+                // Don't show it here - let setupSelectAllCheckboxes handle it after interfaces are loaded
+
                 // Show VLAN configuration container (normal mode)
                 if (vlanConfigContainer) {
                   console.log('Showing VLAN config container');
@@ -1522,9 +1542,45 @@
                 const badgeSpan = document.createElement('span');
                 badgeSpan.className = 'badge bg-secondary ms-2';
                 badgeSpan.textContent = `${interfaces.length} interface${interfaces.length !== 1 ? 's' : ''}`;
-                
+
+                // Add per-device "Select All" checkbox (only in normal mode, not sync mode)
+                const deviceCheckboxWrapper = document.createElement('span');
+                deviceCheckboxWrapper.className = 'ms-3';
+                deviceCheckboxWrapper.style.cssText = 'display: inline-flex; align-items: center;';
+
+                const deviceCheckbox = document.createElement('input');
+                deviceCheckbox.type = 'checkbox';
+                deviceCheckbox.className = 'form-check-input device-select-all-checkbox';
+                deviceCheckbox.id = `device-select-all-${deviceName.replace(/[^a-zA-Z0-9]/g, '_')}`;
+                deviceCheckbox.dataset.deviceName = deviceName;
+                deviceCheckbox.style.cssText = 'margin: 0 5px 0 0; cursor: pointer;';
+
+                // Prevent accordion toggle when clicking checkbox
+                deviceCheckbox.addEventListener('click', (e) => {
+                  e.stopPropagation();
+                });
+
+                const deviceCheckboxLabel = document.createElement('label');
+                deviceCheckboxLabel.className = 'form-check-label';
+                deviceCheckboxLabel.htmlFor = deviceCheckbox.id;
+                deviceCheckboxLabel.textContent = 'Select All';
+                deviceCheckboxLabel.style.cssText = `color: ${textColor}; font-size: 0.875rem; cursor: pointer; margin: 0;`;
+
+                // Prevent accordion toggle when clicking label
+                deviceCheckboxLabel.addEventListener('click', (e) => {
+                  e.stopPropagation();
+                });
+
+                deviceCheckboxWrapper.appendChild(deviceCheckbox);
+                deviceCheckboxWrapper.appendChild(deviceCheckboxLabel);
+
                 button.appendChild(strongEl);
                 button.appendChild(badgeSpan);
+
+                // Only show device checkbox in normal mode (not sync mode)
+                if (!syncMode) {
+                  button.appendChild(deviceCheckboxWrapper);
+                }
                 
                 // Ensure device name color persists (vibrant color already set above)
                 // Use MutationObserver to maintain vibrant color if DOM changes
@@ -1619,6 +1675,7 @@
                   checkbox.name = 'interfaces_select';
                   checkbox.value = checkboxValue;
                   checkbox.id = checkboxId;
+                  checkbox.dataset.deviceName = deviceName; // Track which device this interface belongs to
                   if (checked) checkbox.checked = true;
                   
                   const labelWrapper = document.createElement('div');
@@ -1852,6 +1909,125 @@
               }
             }
 
+            // Setup master and per-device "Select All" checkboxes (ONLY for normal mode, NOT sync mode)
+            function setupSelectAllCheckboxes() {
+              // Check if we're in sync mode - if so, don't setup select all checkboxes
+              const syncCheckbox = document.getElementById('id_sync_netbox_to_device');
+              if (syncCheckbox && syncCheckbox.checked) {
+                console.log('Sync mode detected - skipping select all checkbox setup');
+                return;
+              }
+
+              const masterCheckbox = document.getElementById('master-select-all-checkbox');
+              const masterContainer = document.getElementById('master-select-all-container');
+              const interfacesContainer = document.getElementById('interfaces-checkbox-container');
+
+              if (!masterCheckbox || !interfacesContainer) {
+                return;
+              }
+
+              // Get all interface checkboxes
+              const allInterfaceCheckboxes = interfacesContainer.querySelectorAll('input[name="interfaces_select"]');
+
+              // Show master checkbox only if there are interfaces AND in normal mode
+              if (allInterfaceCheckboxes.length > 0) {
+                masterContainer.style.display = 'block';
+              } else {
+                masterContainer.style.display = 'none';
+                return;
+              }
+
+              // Master checkbox: Select/Deselect ALL interfaces across ALL devices
+              masterCheckbox.addEventListener('change', function() {
+                const isChecked = this.checked;
+
+                // Update all interface checkboxes
+                allInterfaceCheckboxes.forEach(checkbox => {
+                  checkbox.checked = isChecked;
+                });
+
+                // Update all per-device checkboxes
+                const deviceCheckboxes = interfacesContainer.querySelectorAll('.device-select-all-checkbox');
+                deviceCheckboxes.forEach(deviceCheckbox => {
+                  deviceCheckbox.checked = isChecked;
+                });
+              });
+
+              // Per-device checkboxes: Select/Deselect all interfaces for that device
+              const deviceCheckboxes = interfacesContainer.querySelectorAll('.device-select-all-checkbox');
+              deviceCheckboxes.forEach(deviceCheckbox => {
+                deviceCheckbox.addEventListener('change', function(e) {
+                  e.stopPropagation(); // Prevent accordion toggle
+
+                  const deviceName = this.dataset.deviceName;
+                  const isChecked = this.checked;
+
+                  // Find all interface checkboxes for this device using data-device-name attribute
+                  const deviceInterfaceCheckboxes = interfacesContainer.querySelectorAll(
+                    `input[name="interfaces_select"][data-device-name="${deviceName}"]`
+                  );
+
+                  console.log(`Device checkbox for ${deviceName} changed to ${isChecked}, found ${deviceInterfaceCheckboxes.length} interfaces`);
+
+                  // Update all interface checkboxes for this device
+                  deviceInterfaceCheckboxes.forEach(checkbox => {
+                    checkbox.checked = isChecked;
+                  });
+
+                  // Update master checkbox state
+                  updateMasterCheckboxState();
+                });
+              });
+
+              // Individual interface checkboxes: Update per-device and master checkbox states
+              allInterfaceCheckboxes.forEach(checkbox => {
+                checkbox.addEventListener('change', function() {
+                  // Find the device this interface belongs to using data-device-name attribute
+                  const deviceName = this.dataset.deviceName;
+
+                  if (deviceName) {
+                    updateDeviceCheckboxState(deviceName);
+                  }
+
+                  // Update master checkbox state
+                  updateMasterCheckboxState();
+                });
+              });
+
+              // Helper: Update per-device checkbox state based on its interfaces
+              function updateDeviceCheckboxState(deviceName) {
+                const deviceCheckbox = interfacesContainer.querySelector(`.device-select-all-checkbox[data-device-name="${deviceName}"]`);
+                if (!deviceCheckbox) return;
+
+                const deviceInterfaceCheckboxes = interfacesContainer.querySelectorAll(
+                  `input[name="interfaces_select"][data-device-name="${deviceName}"]`
+                );
+
+                if (deviceInterfaceCheckboxes.length === 0) return;
+
+                const allChecked = Array.from(deviceInterfaceCheckboxes).every(cb => cb.checked);
+                const someChecked = Array.from(deviceInterfaceCheckboxes).some(cb => cb.checked);
+
+                deviceCheckbox.checked = allChecked;
+                deviceCheckbox.indeterminate = someChecked && !allChecked;
+              }
+
+              // Helper: Update master checkbox state based on all interfaces
+              function updateMasterCheckboxState() {
+                const allInterfaceCheckboxes = interfacesContainer.querySelectorAll('input[name="interfaces_select"]');
+                if (allInterfaceCheckboxes.length === 0) return;
+
+                const allChecked = Array.from(allInterfaceCheckboxes).every(cb => cb.checked);
+                const someChecked = Array.from(allInterfaceCheckboxes).some(cb => cb.checked);
+
+                masterCheckbox.checked = allChecked;
+                masterCheckbox.indeterminate = someChecked && !allChecked;
+              }
+
+              // Initialize states
+              updateMasterCheckboxState();
+            }
+
             // Helper function to render interface checkboxes (legacy - for backward compatibility)
             function renderInterfaceCheckboxes(interfaces, container) {
               // If interfaces is an object (grouped by device), use accordion
@@ -1859,10 +2035,10 @@
                 renderInterfacesAccordion(interfaces, container, false);
                 return;
               }
-              
+
               // Otherwise, render as flat list (backward compatibility)
               container.innerHTML = '';
-              
+
               if (!interfaces || interfaces.length === 0) {
                 const p = document.createElement('p');
                 p.className = 'text-muted mb-0';
@@ -1978,6 +2154,9 @@
                   
                   // Render two sections: tagged and untagged
                   renderSyncModeInterfaces(data, interfacesContainer);
+
+                  // Setup select all checkboxes after rendering (sync mode auto-selects all, so hide master checkbox)
+                  // In sync mode, we don't show the master checkbox since all are auto-selected
                 })
                 .catch(error => {
                   console.error('Error loading interfaces for sync:', error);
@@ -2066,6 +2245,11 @@
                     // Backward compatibility: if old format, render as flat list
                   renderInterfaceCheckboxes(data.interfaces, interfacesContainer);
                   }
+
+                  // Setup select all checkboxes after rendering (normal mode)
+                  setTimeout(() => {
+                    setupSelectAllCheckboxes();
+                  }, 100);
 
                   // Also filter VLANs by site of selected devices (only in normal mode, not sync mode)
                   const syncCheckbox = document.getElementById('id_sync_netbox_to_device');
@@ -2164,6 +2348,9 @@
                     console.log('Sync interface data received:', data);
                     // Render two sections: tagged and untagged
                     renderSyncModeInterfaces(data, interfacesContainer);
+
+                    // Setup select all checkboxes after rendering (sync mode - group)
+                    // In sync mode, we don't show the master checkbox since all are auto-selected
                   })
                   .catch(error => {
                     console.error('Error loading interfaces for sync:', error);
@@ -2193,7 +2380,7 @@
                 .then(data => {
                   console.log('Interface data received:', data);
                     console.log(`Found ${data.device_count} devices with interfaces`);
-                    
+
                     // Use accordion format (interfaces_by_device)
                     if (data.interfaces_by_device) {
                       renderInterfacesAccordion(data.interfaces_by_device, interfacesContainer, false);
@@ -2201,7 +2388,12 @@
                       // Backward compatibility: if old format, render as flat list
                   renderInterfaceCheckboxes(data.interfaces, interfacesContainer);
                     }
-                  
+
+                  // Setup select all checkboxes after rendering (normal mode - group)
+                  setTimeout(() => {
+                    setupSelectAllCheckboxes();
+                  }, 100);
+
                   // Also load VLANs for this site
                   filterVLANsBySite();
                 })
