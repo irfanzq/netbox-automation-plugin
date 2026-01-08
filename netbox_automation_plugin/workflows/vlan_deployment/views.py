@@ -417,7 +417,7 @@ class VLANDeploymentView(View):
 
         return []
 
-    def _validate_tags_for_dry_run(self, devices, interface_list):
+    def _validate_tags_for_dry_run(self, devices, interface_list, sync_mode=False):
         """
         Validate tags for dry run mode - shows what would block/warn/pass.
         Returns validation results without blocking.
@@ -540,31 +540,32 @@ class VLANDeploymentView(View):
                         }
                         continue
                     
-                    # Note: Port-channel/bond membership is handled automatically - 
+                    # Note: Port-channel/bond membership is handled automatically -
                     # config is applied to bond interface instead of member (no blocking needed)
-                    
-                    # Check cable
-                    if not interface.cable:
+
+                    # Check cable (skip in sync mode)
+                    if not sync_mode and not interface.cable:
                         results['interface_validation'][key] = {
                             'status': 'block',
                             'message': f"Interface not cabled - would block deployment"
                         }
                         continue
-                    
-                    # Check connected device status
-                    try:
-                        endpoints = interface.connected_endpoints
-                        if endpoints:
-                            endpoint = endpoints[0]
-                            connected_device = endpoint.device
-                            if connected_device.status in ['offline', 'decommissioning']:
-                                results['interface_validation'][key] = {
-                                    'status': 'block',
-                                    'message': f"Connected device status '{connected_device.status}' - would block deployment"
-                                }
-                                continue
-                    except Exception:
-                        pass
+
+                    # Check connected device status (skip in sync mode)
+                    if not sync_mode:
+                        try:
+                            endpoints = interface.connected_endpoints
+                            if endpoints:
+                                endpoint = endpoints[0]
+                                connected_device = endpoint.device
+                                if connected_device.status in ['offline', 'decommissioning']:
+                                    results['interface_validation'][key] = {
+                                        'status': 'block',
+                                        'message': f"Connected device status '{connected_device.status}' - would block deployment"
+                                    }
+                                    continue
+                        except Exception:
+                            pass
                     
                     # Check for warnings
                     if interface_tags.get('needs-review') and interface_tags['needs-review'].name in interface_tag_names_list:
@@ -3301,8 +3302,8 @@ class VLANDeploymentView(View):
 
             logger.info(f"[SYNC DRY RUN] Total interfaces to preview: {len(interface_list)}")
 
-            # Run tag validation for dry run
-            validation_results = self._validate_tags_for_dry_run(devices, interface_list)
+            # Run tag validation for dry run (sync mode - skip cable checks)
+            validation_results = self._validate_tags_for_dry_run(devices, interface_list, sync_mode=True)
 
             # Create preview callback for sync mode
             def sync_preview_callback(device, device_interfaces, platform, vlan_id, bond_info_map_param):
