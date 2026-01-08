@@ -148,6 +148,16 @@ class VLANDeploymentView(View):
                         vlans_already_in_bridge = config_info.get('vlans_already_in_bridge', [])
                         vlans_to_add_to_bridge = config_info.get('vlans_to_add_to_bridge', [])
                         logger.debug(f"[SYNC MODE] Interface {actual_interface_name} → target: {target_interface_for_config}")
+
+                        # DEBUG: Add debug info to proposed config for display
+                        debug_info = []
+                        debug_info.append(f"# DEBUG: NetBox has untagged={sync_mode_untagged_vlan}, tagged={sync_mode_tagged_vlans}")
+                        debug_info.append(f"# DEBUG: Generated {len(config_info.get('commands', []))} commands: {config_info.get('commands', [])}")
+                        debug_info.append(f"# DEBUG: Target interface: {target_interface_for_config}")
+                        if debug_info and proposed_config:
+                            proposed_config = '\n'.join(debug_info) + '\n' + proposed_config
+                        elif debug_info and not proposed_config:
+                            proposed_config = '\n'.join(debug_info) + '\n# No commands generated'
                     else:
                         proposed_config = ""
 
@@ -2945,12 +2955,15 @@ class VLANDeploymentView(View):
                 'is_bond_member': bool (True if interface is bond member)
             }
         """
+        # DEBUG: Log entry to this method (using ERROR level to ensure it shows)
+        logger.error(f"[DEBUG ENTRY] _generate_config_from_netbox called for {device.name}:{interface.name}")
+
         mode = getattr(interface, 'mode', None)
         untagged_vlan = interface.untagged_vlan.vid if interface.untagged_vlan else None
         tagged_vlans = list(interface.tagged_vlans.values_list('vid', flat=True))
 
-        # DEBUG: Log what NetBox has for this interface
-        logger.info(f"[NETBOX CONFIG] {device.name}:{interface.name} - Mode: {mode}, Untagged: {untagged_vlan}, Tagged: {tagged_vlans}")
+        # DEBUG: Log what NetBox has for this interface (using ERROR level to ensure it shows)
+        logger.error(f"[NETBOX CONFIG] {device.name}:{interface.name} - Mode: {mode}, Untagged: {untagged_vlan}, Tagged: {tagged_vlans}")
 
         # Check if interface is a bond member - if so, use bond interface
         # Priority: 1) NetBox lag attribute, 2) bond_info_map, 3) device config
@@ -3030,15 +3043,15 @@ class VLANDeploymentView(View):
             # IMPORTANT: In Cumulus NVUE, interfaces ONLY use 'access' mode
             # Tagged VLANs are ONLY configured on the bridge domain (done above)
             # There is NO 'tagged' or 'untagged' command for interfaces
-            logger.info(f"[NETBOX CONFIG] {device.name}:{interface.name} - About to check untagged_vlan: {untagged_vlan}, type: {type(untagged_vlan)}")
+            logger.error(f"[NETBOX CONFIG] {device.name}:{interface.name} - About to check untagged_vlan: {untagged_vlan}, type: {type(untagged_vlan)}")
             if untagged_vlan:
                 # Set interface to access mode with untagged VLAN
                 access_cmd = f"nv set interface {target_interface} bridge domain br_default access {untagged_vlan}"
                 commands.append(access_cmd)
-                logger.info(f"[NETBOX CONFIG] Generated access command for {target_interface}: {access_cmd}")
-                logger.info(f"[NETBOX CONFIG] Commands list now has {len(commands)} items")
+                logger.error(f"[NETBOX CONFIG] Generated access command for {target_interface}: {access_cmd}")
+                logger.error(f"[NETBOX CONFIG] Commands list now has {len(commands)} items")
             else:
-                logger.warning(f"[NETBOX CONFIG] No untagged VLAN for {interface.name} (target: {target_interface}) - skipping access command")
+                logger.error(f"[NETBOX CONFIG] No untagged VLAN for {interface.name} (target: {target_interface}) - skipping access command")
             
             # Note: "nv config apply" is handled by the deployment method, don't include here
         
@@ -3070,8 +3083,8 @@ class VLANDeploymentView(View):
             'vlans_already_in_bridge': vlans_already_in_bridge if platform == 'cumulus' else [],
         }
 
-        # DEBUG: Log the final result
-        logger.info(f"[NETBOX CONFIG] {device.name}:{interface.name} → Returning {len(commands)} commands: {commands}")
+        # DEBUG: Log the final result (using ERROR level to ensure it shows)
+        logger.error(f"[NETBOX CONFIG] {device.name}:{interface.name} → Returning {len(commands)} commands: {commands}")
 
         return result
 
