@@ -112,11 +112,15 @@ class VLANDeploymentView(View):
                     from dcim.models import Interface
                     interface_obj = Interface.objects.filter(device=device, name=actual_interface_name).first()
                     if interface_obj:
-                        config_info = self._generate_config_from_netbox(device, interface_obj, platform)
+                        # IMPORTANT: Pass bond_info_map to use NetBox bond info instead of querying device
+                        config_info = self._generate_config_from_netbox(device, interface_obj, platform, bond_info_map=bond_info_map)
                         proposed_config = '\n'.join(config_info.get('commands', []))
                         # Extract VLAN info from NetBox for sync mode
                         sync_mode_untagged_vlan = config_info.get('untagged_vlan')
                         sync_mode_tagged_vlans = config_info.get('tagged_vlans', [])
+                        # Use target_interface from config_info (bond if member, original otherwise)
+                        target_interface_for_config = config_info.get('target_interface', actual_interface_name)
+                        logger.debug(f"[SYNC MODE] Interface {actual_interface_name} → target: {target_interface_for_config}")
                     else:
                         proposed_config = ""
 
@@ -448,8 +452,20 @@ class VLANDeploymentView(View):
                 }
             
             # Validate each interface
-            for iface_name in interface_list:
-                key = f"{device.name}:{iface_name}"
+            for iface_entry in interface_list:
+                # Handle both formats: "interface_name" (normal mode) and "device:interface_name" (sync mode)
+                if ':' in iface_entry:
+                    # Sync mode format: "device:interface"
+                    entry_device_name, iface_name = iface_entry.split(':', 1)
+                    # Only process if this interface belongs to current device
+                    if entry_device_name != device.name:
+                        continue
+                    key = iface_entry  # Already in "device:interface" format
+                else:
+                    # Normal mode format: just "interface_name"
+                    iface_name = iface_entry
+                    key = f"{device.name}:{iface_name}"
+
                 try:
                     interface = Interface.objects.get(device=device, name=iface_name)
                     interface.refresh_from_db()
