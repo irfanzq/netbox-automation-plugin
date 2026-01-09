@@ -482,7 +482,7 @@ class NAPALMDeviceManager:
                 pass
             return False
     
-    def get_lldp_neighbors(self):
+    def get_lldp_neighbors(self, max_retries=3, retry_delay=2):
         """
         Get LLDP neighbors using direct device commands (not NAPALM).
 
@@ -492,105 +492,135 @@ class NAPALMDeviceManager:
         For Cumulus: Uses 'sudo lldpctl -f json'
         For Arista EOS: Uses 'show lldp neighbors'
 
+        Args:
+            max_retries: Number of retry attempts if LLDP query fails (default: 3)
+            retry_delay: Seconds to wait between retries (default: 2)
+
         Returns:
             Dictionary mapping local interface names to list of neighbor dictionaries
             Example: {
                 'swp1': [{'hostname': 'switch1', 'port': 'swp2'}],
                 'swp2': [{'hostname': 'switch2', 'port': 'Ethernet1'}]
             }
-            Returns None if LLDP query fails
+            Returns None if LLDP query fails after all retries
         """
         if not self.connection:
             if not self.connect():
                 return None
 
-        try:
-            driver_name = self.get_driver_name()
-            lldp_data = {}
+        # Retry logic for LLDP queries
+        last_error = None
+        for attempt in range(1, max_retries + 1):
+            try:
+                if attempt > 1:
+                    logger.info(f"LLDP query retry attempt {attempt}/{max_retries} for {self.device.name}")
+                    import time
+                    time.sleep(retry_delay)
 
-            if driver_name == 'cumulus':
-                # Use direct lldpctl command for Cumulus
-                if hasattr(self.connection, 'device') and hasattr(self.connection.device, 'send_command'):
-                    try:
-                        # Try with sudo first (works on Cumulus)
-                        lldp_output = self.connection.device.send_command('sudo lldpctl -f json', read_timeout=30)
+                driver_name = self.get_driver_name()
+                lldp_data = {}
 
-                        if lldp_output:
-                            import json
-                            lldp_json = json.loads(lldp_output)
+                if driver_name == 'cumulus':
+                    # Use direct lldpctl command for Cumulus
+                    if hasattr(self.connection, 'device') and hasattr(self.connection.device, 'send_command'):
+                        try:
+                            # Try with sudo first (works on Cumulus)
+                            lldp_output = self.connection.device.send_command('sudo lldpctl -f json', read_timeout=30)
 
-                            # Parse lldpctl JSON format
-                            # Format: {"lldp": {"interface": {"swp1": {"port": ...}, "swp2": {...}}}}
-                            if 'lldp' in lldp_json and 'interface' in lldp_json['lldp']:
-                                interfaces = lldp_json['lldp']['interface']
+                            if lldp_output:
+                                import json
+                                lldp_json = json.loads(lldp_output)
 
-                                for iface_name, iface_data in interfaces.items():
-                                    # Each interface can have multiple neighbors (rare but possible)
-                                    neighbors = []
+                                # Parse lldpctl JSON format
+                                # Format: {"lldp": {"interface": {"swp1": {"port": ...}, "swp2": {...}}}}
+                                if 'lldp' in lldp_json and 'interface' in lldp_json['lldp']:
+                                    interfaces = lldp_json['lldp']['interface']
 
-                                    # Check if there's port data (neighbor info)
-                                    if 'port' in iface_data:
-                                        port_data = iface_data['port']
+                                    for iface_name, iface_data in interfaces.items():
+                                        # Each interface can have multiple neighbors (rare but possible)
+                                        neighbors = []
 
-                                        # Port data can be a list or a single dict
-                                        if isinstance(port_data, list):
-                                            for port in port_data:
-                                                neighbor = self._parse_lldp_port_cumulus(port)
+                                        # Check if there's port data (neighbor info)
+                                        if 'port' in iface_data:
+                                            port_data = iface_data['port']
+
+                                            # Port data can be a list or a single dict
+                                            if isinstance(port_data, list):
+                                                for port in port_data:
+                                                    neighbor = self._parse_lldp_port_cumulus(port)
+                                                    if neighbor:
+                                                        neighbors.append(neighbor)
+                                            else:
+                                                neighbor = self._parse_lldp_port_cumulus(port_data)
                                                 if neighbor:
                                                     neighbors.append(neighbor)
-                                        else:
-                                            neighbor = self._parse_lldp_port_cumulus(port_data)
-                                            if neighbor:
-                                                neighbors.append(neighbor)
 
-                                    # Only add interface if it has neighbors
-                                    if neighbors:
-                                        lldp_data[iface_name] = neighbors
+                                        # Only add interface if it has neighbors
+                                        if neighbors:
+                                            lldp_data[iface_name] = neighbors
 
-                            logger.info(f"Collected LLDP data from {self.device.name}: {len(lldp_data)} interfaces with neighbors")
-                            return lldp_data
-                        else:
-                            logger.warning(f"Empty LLDP output from {self.device.name}")
-                            return {}
-                    except Exception as cumulus_error:
-                        logger.error(f"Failed to get LLDP from Cumulus device {self.device.name}: {cumulus_error}")
-                        # Fallback to NAPALM
+                                logger.info(f"Collected LLDP data from {self.device.name}: {len(lldp_data)} interfaces with neighbors")
+                                return lldp_data
+                            else:
+                                logger.warning(f"Empty LLDP output from {self.device.name}")
+                                return {}
+                        except Exception as cumulus_error:
+                            logger.warning(f"Attempt {attempt}/{max_retries}: Failed to get LLDP from Cumulus device {self.device.name}: {cumulus_error}")
+                            last_error = cumulus_error
+                            if attempt == max_retries:
+                                # Last attempt failed, try NAPALM fallback
+                                logger.info(f"All direct LLDP attempts failed, trying NAPALM fallback for {self.device.name}")
+                                return self._get_lldp_napalm_fallback()
+                            # Otherwise continue to next retry
+                            continue
+                    else:
+                        # No direct device access, use NAPALM fallback
+                        return self._get_lldp_napalm_fallback()
+
+                elif driver_name == 'eos':
+                    # Use direct show command for Arista EOS
+                    if hasattr(self.connection, 'device') and hasattr(self.connection.device, 'send_command'):
+                        try:
+                            lldp_output = self.connection.device.send_command('show lldp neighbors', read_timeout=30)
+
+                            if lldp_output:
+                                # Parse EOS LLDP output (text format)
+                                # Example:
+                                # Port          Neighbor Device ID       Neighbor Port ID    TTL
+                                # Et1           switch1                  Ethernet1           120
+                                lldp_data = self._parse_lldp_eos_text(lldp_output)
+                                logger.info(f"Collected LLDP data from {self.device.name}: {len(lldp_data)} interfaces with neighbors")
+                                return lldp_data
+                            else:
+                                logger.warning(f"Empty LLDP output from {self.device.name}")
+                                return {}
+                        except Exception as eos_error:
+                            logger.warning(f"Attempt {attempt}/{max_retries}: Failed to get LLDP from EOS device {self.device.name}: {eos_error}")
+                            last_error = eos_error
+                            if attempt == max_retries:
+                                # Last attempt failed, try NAPALM fallback
+                                logger.info(f"All direct LLDP attempts failed, trying NAPALM fallback for {self.device.name}")
+                                return self._get_lldp_napalm_fallback()
+                            # Otherwise continue to next retry
+                            continue
+                    else:
+                        # No direct device access, use NAPALM fallback
                         return self._get_lldp_napalm_fallback()
                 else:
-                    # No direct device access, use NAPALM fallback
+                    # Other platforms: use NAPALM
                     return self._get_lldp_napalm_fallback()
 
-            elif driver_name == 'eos':
-                # Use direct show command for Arista EOS
-                if hasattr(self.connection, 'device') and hasattr(self.connection.device, 'send_command'):
-                    try:
-                        lldp_output = self.connection.device.send_command('show lldp neighbors', read_timeout=30)
+            except Exception as e:
+                logger.warning(f"Attempt {attempt}/{max_retries}: Failed to get LLDP neighbors from {self.device.name}: {e}")
+                last_error = e
+                if attempt == max_retries:
+                    logger.error(f"All {max_retries} LLDP query attempts failed for {self.device.name}: {last_error}")
+                    return None
+                # Otherwise continue to next retry
 
-                        if lldp_output:
-                            # Parse EOS LLDP output (text format)
-                            # Example:
-                            # Port          Neighbor Device ID       Neighbor Port ID    TTL
-                            # Et1           switch1                  Ethernet1           120
-                            lldp_data = self._parse_lldp_eos_text(lldp_output)
-                            logger.info(f"Collected LLDP data from {self.device.name}: {len(lldp_data)} interfaces with neighbors")
-                            return lldp_data
-                        else:
-                            logger.warning(f"Empty LLDP output from {self.device.name}")
-                            return {}
-                    except Exception as eos_error:
-                        logger.error(f"Failed to get LLDP from EOS device {self.device.name}: {eos_error}")
-                        # Fallback to NAPALM
-                        return self._get_lldp_napalm_fallback()
-                else:
-                    # No direct device access, use NAPALM fallback
-                    return self._get_lldp_napalm_fallback()
-            else:
-                # Other platforms: use NAPALM
-                return self._get_lldp_napalm_fallback()
-
-        except Exception as e:
-            logger.error(f"Failed to get LLDP neighbors from {self.device.name}: {e}")
-            return None
+        # Should not reach here, but just in case
+        logger.error(f"LLDP query failed after {max_retries} attempts for {self.device.name}")
+        return None
 
     def _get_lldp_napalm_fallback(self):
         """Fallback to NAPALM get_lldp_neighbors() if direct commands fail"""
