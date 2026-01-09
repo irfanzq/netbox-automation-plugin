@@ -69,6 +69,25 @@ class VLANDeploymentView(View):
 
         logger.info(f"[DRY RUN PREVIEW] Device {device.name}: Generating preview for {len(interface_list)} interfaces...")
 
+        # DEVICE-LEVEL LLDP COLLECTION (runs once per device in Nornir batch deployment)
+        device_lldp_data = {}
+        try:
+            logger.info(f"[DRY RUN] Collecting device-level LLDP data for {device.name}...")
+            from netbox_automation_plugin.core.napalm_integration import NAPALMDeviceManager
+            napalm_mgr = NAPALMDeviceManager(device)
+            if napalm_mgr.connect():
+                device_lldp_data = napalm_mgr.get_lldp_neighbors()
+                if device_lldp_data:
+                    total_neighbors = sum(len(neighbors) for neighbors in device_lldp_data.values())
+                    logger.info(f"[DRY RUN] Collected LLDP data for {device.name}: {len(device_lldp_data)} interfaces with {total_neighbors} total neighbors")
+                else:
+                    logger.warning(f"[DRY RUN] No LLDP data collected for {device.name}")
+                napalm_mgr.disconnect()
+            else:
+                logger.error(f"[DRY RUN] Failed to connect to {device.name} for LLDP collection")
+        except Exception as e:
+            logger.error(f"[DRY RUN] Failed to collect LLDP data for {device.name}: {e}")
+
         # PERFORMANCE FIX: Fetch device config ONCE for all interfaces (not once per interface)
         # This avoids 32 device connections for 32 interfaces - instead we connect once and reuse the config
         logger.info(f"[DRY RUN PREVIEW] Device {device.name}: Fetching device config once for all {len(interface_list)} interfaces...")
@@ -255,6 +274,13 @@ class VLANDeploymentView(View):
                     bond_config_result = self._get_current_device_config(device, bond_member_of, platform)
                     bond_interface_config = bond_config_result.get('current_config', '')
 
+                # Get LLDP neighbors for this interface from device-level collection
+                lldp_neighbors = []
+                lldp_neighbor_count = 0
+                if device_lldp_data and actual_interface_name in device_lldp_data:
+                    lldp_neighbors = device_lldp_data[actual_interface_name]
+                    lldp_neighbor_count = len(lldp_neighbors)
+
                 # Store result for this interface
                 device_results[actual_interface_name] = {
                     'interface_name': actual_interface_name,
@@ -290,6 +316,8 @@ class VLANDeploymentView(View):
                     'vlans_to_add_to_bridge': vlans_to_add_to_bridge,
                     'device_connected': device_config_result.get('device_connected', False),
                     'error_details': device_config_result.get('error', None),
+                    'lldp_neighbors': lldp_neighbors,
+                    'lldp_neighbor_count': lldp_neighbor_count,
                 }
 
                 logger.debug(f"[DRY RUN PREVIEW] Device {device.name}, Interface {actual_interface_name}: Preview generated successfully")
@@ -4411,50 +4439,50 @@ class VLANDeploymentView(View):
                 device_logs.append("(no NetBox configuration)")
                 device_logs.append("")
 
-            # Show device-level pre-deployment checks ONCE at the top
+            # Show device-level pre-deployment checks from Nornir baseline
             device_logs.append("=" * 80)
-            device_logs.append("PRE-DEPLOYMENT CHECKS")
+            device_logs.append("PRE-DEPLOYMENT CHECKS (from Nornir baseline)")
             device_logs.append("=" * 80)
             device_logs.append("")
 
-            # 1. Device Connection & Uptime
+            # Get baseline data from Nornir deployment results
+            baseline_data = first_interface_result.get('baseline', {})
+
+            # 1. Device Connection & Uptime (from baseline)
             device_logs.append("1. Device Connection & Uptime:")
-            try:
-                napalm_mgr_temp = NAPALMDeviceManager(device)
-                connection_temp = napalm_mgr_temp.connect()
-                device_uptime_deploy = None
-                if hasattr(connection_temp, 'cli'):
-                    try:
-                        uptime_output = connection_temp.cli(['uptime'])
-                        if uptime_output:
-                            if isinstance(uptime_output, dict):
-                                device_uptime_deploy = list(uptime_output.values())[0] if uptime_output else None
-                            else:
-                                device_uptime_deploy = str(uptime_output).strip() if uptime_output else None
-                    except Exception:
-                        pass
-                napalm_mgr_temp.disconnect()
+            uptime_data = baseline_data.get('uptime')
+            if uptime_data:
                 device_logs.append(f"   [OK] Connected successfully")
-                if device_uptime_deploy:
-                    device_logs.append(f"   Uptime: {device_uptime_deploy}")
-            except Exception as e_conn:
-                device_logs.append(f"   [WARN] Connection check failed: {e_conn}")
+                device_logs.append(f"   Uptime: {uptime_data}")
+            else:
+                device_logs.append(f"   [INFO] Uptime data not available")
             device_logs.append("")
 
-            # 2. Bridge Configuration (Cumulus only)
-            if platform == 'cumulus':
-                device_logs.append("2. Bridge Configuration (br_default):")
-                try:
-                    device_config_result = self._get_current_device_config(device, device_interface_names[0], platform)
-                    bridge_vlans = device_config_result.get('_bridge_vlans', [])
-                    if bridge_vlans and len(bridge_vlans) > 0:
-                        vlan_list_str = self._format_vlan_list(bridge_vlans)
-                        device_logs.append(f"   Current VLANs: {vlan_list_str}")
-                    else:
-                        device_logs.append("   (no VLANs configured or unable to retrieve)")
-                except Exception:
-                    device_logs.append("   (unable to retrieve)")
-                device_logs.append("")
+            # 2. Interface State (from baseline)
+            device_logs.append("2. Interface State:")
+            interface_baseline = baseline_data.get('interface', {})
+            if interface_baseline:
+                is_up = interface_baseline.get('is_up', False)
+                is_enabled = interface_baseline.get('is_enabled', False)
+                status = "UP" if is_up else "DOWN"
+                admin_status = "Enabled" if is_enabled else "Disabled"
+                device_logs.append(f"   Status: {status} (Admin: {admin_status})")
+            else:
+                device_logs.append(f"   [INFO] Interface state data not available")
+            device_logs.append("")
+
+            # 3. Traffic Statistics (from baseline)
+            device_logs.append("3. Traffic Statistics:")
+            if interface_baseline:
+                in_pkts = interface_baseline.get('in_pkts', 0)
+                out_pkts = interface_baseline.get('out_pkts', 0)
+                in_bytes = interface_baseline.get('in_bytes', 0)
+                out_bytes = interface_baseline.get('out_bytes', 0)
+                device_logs.append(f"   RX: {in_pkts:,} pkts ({in_bytes:,} bytes)")
+                device_logs.append(f"   TX: {out_pkts:,} pkts ({out_bytes:,} bytes)")
+            else:
+                device_logs.append(f"   [INFO] Traffic statistics not available")
+            device_logs.append("")
 
             device_logs.append("=" * 80)
             device_logs.append("DEPLOYMENT EXECUTION")
@@ -4469,116 +4497,19 @@ class VLANDeploymentView(View):
                     device_logs.append(str(deployment_logs_from_napalm))
             device_logs.append("")
 
-            # INTERFACE-LEVEL PRE-DEPLOYMENT CHECKS
-            device_logs.append("=" * 80)
-            device_logs.append("INTERFACE-LEVEL PRE-DEPLOYMENT CHECKS")
-            device_logs.append("=" * 80)
-            device_logs.append("")
-
-            # Collect pre-deployment data for all interfaces
-            pre_deployment_data_sync = {}
-            for actual_interface_name in device_interface_names:
-                # Get interface object to check for bond membership
-                try:
-                    interface_obj = Interface.objects.get(device=device, name=actual_interface_name)
-
-                    # Check if this interface is a bond member
-                    bond_member_of = None
-                    if interface_obj.lag:
-                        bond_member_of = interface_obj.lag.name
-
-                    target_interface_for_checks = bond_member_of if bond_member_of else actual_interface_name
-
-                    # Skip if we already checked this bond
-                    if target_interface_for_checks in pre_deployment_data_sync:
-                        continue
-
-                    pre_data = {}
-
-                    # 1. Current VLAN Configuration (on target interface - bond or physical)
-                    try:
-                        device_config_result = self._get_current_device_config(device, actual_interface_name, platform)
-                        current_config = device_config_result.get('current_config', '')
-
-                        # Parse current VLAN from config
-                        current_vlan = None
-                        if platform == 'cumulus' and 'access' in current_config:
-                            import re
-                            match = re.search(r'access\s+(\d+)', current_config)
-                            if match:
-                                current_vlan = match.group(1)
-
-                        pre_data['current_vlan'] = current_vlan
-                    except Exception as e:
-                        pre_data['current_vlan'] = f"ERROR: {e}"
-
-                    # 2. Interface State (on target interface - bond or physical)
-                    try:
-                        interface_state = self._check_interface_state(device, target_interface_for_checks, platform)
-                        pre_data['interface_state'] = interface_state
-                    except Exception as e:
-                        pre_data['interface_state'] = {'error': str(e)}
-
-                    # 3. Traffic Statistics (on target interface - bond or physical)
-                    if platform == 'cumulus':
-                        try:
-                            traffic_stats = self._check_interface_traffic_stats(device, target_interface_for_checks, platform, bond_interface=None)
-                            pre_data['traffic_stats'] = traffic_stats
-                        except Exception as e:
-                            pre_data['traffic_stats'] = {'error': str(e)}
-
-                    # 4. LLDP Neighbor Verification (on physical interface, not bond)
-                    try:
-                        lldp_check = self._verify_lldp_neighbors(device, actual_interface_name, platform)
-                        pre_data['lldp_check'] = lldp_check
-                    except Exception as e:
-                        pre_data['lldp_check'] = {'error': str(e)}
-
-                    pre_deployment_data_sync[target_interface_for_checks] = pre_data
-                except Exception as e:
-                    logger.debug(f"Could not get pre-deployment data for {actual_interface_name}: {e}")
-
-            # Display pre-deployment checks
-            device_logs.append("1. Interface State:")
-            for target_iface, pre_data in sorted(pre_deployment_data_sync.items()):
-                iface_state = pre_data.get('interface_state', {})
-                if iface_state.get('error'):
-                    device_logs.append(f"   {target_iface}: [WARN] {iface_state['error']}")
-                elif iface_state.get('is_up'):
-                    device_logs.append(f"   {target_iface}: [OK] UP")
-                else:
-                    device_logs.append(f"   {target_iface}: [WARN] DOWN")
-            device_logs.append("")
-
-            if platform == 'cumulus':
-                device_logs.append("2. Traffic Analysis:")
-                for target_iface, pre_data in sorted(pre_deployment_data_sync.items()):
-                    traffic_stats = pre_data.get('traffic_stats', {})
-                    if traffic_stats.get('error'):
-                        device_logs.append(f"   {target_iface}: [WARN] {traffic_stats['error']}")
-                    elif traffic_stats.get('has_traffic'):
-                        in_pkts = traffic_stats.get('in_pkts_total', 0)
-                        out_pkts = traffic_stats.get('out_pkts_total', 0)
-                        device_logs.append(f"   {target_iface}: [WARN] Active traffic (RX: {in_pkts:,} pkts, TX: {out_pkts:,} pkts)")
+            # Get LLDP baseline from deployment results (collected during deployment)
+            device_logs.append("4. LLDP Neighbors (Device-Level Baseline):")
+            baseline_data = first_interface_result.get('baseline', {})
+            lldp_all_interfaces = baseline_data.get('lldp_all_interfaces', {})
+            if lldp_all_interfaces:
+                for iface_name in sorted(lldp_all_interfaces.keys()):
+                    neighbor_count = lldp_all_interfaces[iface_name]
+                    if neighbor_count > 0:
+                        device_logs.append(f"   {iface_name}: {neighbor_count} neighbor(s)")
                     else:
-                        device_logs.append(f"   {target_iface}: [OK] No active traffic")
-                device_logs.append("")
-
-            device_logs.append("4. LLDP Neighbor Verification:")
-            for target_iface, pre_data in sorted(pre_deployment_data_sync.items()):
-                lldp_check = pre_data.get('lldp_check', {})
-                if lldp_check.get('error'):
-                    device_logs.append(f"   {target_iface}: [WARN] {lldp_check['error']}")
-                elif lldp_check.get('matches'):
-                    expected = lldp_check.get('expected_neighbor', 'N/A')
-                    actual = lldp_check.get('actual_neighbor', 'N/A')
-                    device_logs.append(f"   {target_iface}: [OK] Expected: {expected}, Actual: {actual}")
-                elif lldp_check.get('expected_neighbor'):
-                    expected = lldp_check.get('expected_neighbor', 'N/A')
-                    actual = lldp_check.get('actual_neighbor', 'None')
-                    device_logs.append(f"   {target_iface}: [WARN] Expected: {expected}, Actual: {actual}")
-                else:
-                    device_logs.append(f"   {target_iface}: [INFO] No LLDP neighbor expected")
+                        device_logs.append(f"   {iface_name}: No LLDP neighbors")
+            else:
+                device_logs.append("   (LLDP data not collected)")
             device_logs.append("")
 
             # Show interface details for each interface - GROUP SIMILAR INTERFACES
@@ -5860,50 +5791,50 @@ class VLANDeploymentView(View):
                 first_interface_result = device_results.get(device_interfaces[0], {})
                 deployment_logs_from_napalm = first_interface_result.get('logs', [])
 
-                # Show device-level pre-deployment checks ONCE at the top
+                # Show device-level pre-deployment checks from Nornir baseline
                 device_logs.append("=" * 80)
-                device_logs.append("PRE-DEPLOYMENT CHECKS")
+                device_logs.append("PRE-DEPLOYMENT CHECKS (from Nornir baseline)")
                 device_logs.append("=" * 80)
                 device_logs.append("")
 
-                # 1. Device Connection & Uptime
+                # Get baseline data from Nornir deployment results
+                baseline_data = first_interface_result.get('baseline', {})
+
+                # 1. Device Connection & Uptime (from baseline)
                 device_logs.append("1. Device Connection & Uptime:")
-                try:
-                    napalm_mgr_temp = NAPALMDeviceManager(device)
-                    connection_temp = napalm_mgr_temp.connect()
-                    device_uptime_deploy = None
-                    if hasattr(connection_temp, 'cli'):
-                        try:
-                            uptime_output = connection_temp.cli(['uptime'])
-                            if uptime_output:
-                                if isinstance(uptime_output, dict):
-                                    device_uptime_deploy = list(uptime_output.values())[0] if uptime_output else None
-                                else:
-                                    device_uptime_deploy = str(uptime_output).strip() if uptime_output else None
-                        except Exception:
-                            pass
-                    napalm_mgr_temp.disconnect()
+                uptime_data = baseline_data.get('uptime')
+                if uptime_data:
                     device_logs.append(f"   [OK] Connected successfully")
-                    if device_uptime_deploy:
-                        device_logs.append(f"   Uptime: {device_uptime_deploy}")
-                except Exception as e_conn:
-                    device_logs.append(f"   [WARN] Connection check failed: {e_conn}")
+                    device_logs.append(f"   Uptime: {uptime_data}")
+                else:
+                    device_logs.append(f"   [INFO] Uptime data not available")
                 device_logs.append("")
 
-                # 2. Bridge Configuration (Cumulus only)
-                if platform == 'cumulus':
-                    device_logs.append("2. Bridge Configuration (br_default):")
-                    try:
-                        device_config_result = self._get_current_device_config(device, device_interfaces[0], platform)
-                        bridge_vlans = device_config_result.get('_bridge_vlans', [])
-                        if bridge_vlans and len(bridge_vlans) > 0:
-                            vlan_list_str = self._format_vlan_list(bridge_vlans)
-                            device_logs.append(f"   Current VLANs: {vlan_list_str}")
-                        else:
-                            device_logs.append("   (no VLANs configured or unable to retrieve)")
-                    except Exception:
-                        device_logs.append("   (unable to retrieve)")
-                    device_logs.append("")
+                # 2. Interface State (from baseline)
+                device_logs.append("2. Interface State:")
+                interface_baseline = baseline_data.get('interface', {})
+                if interface_baseline:
+                    is_up = interface_baseline.get('is_up', False)
+                    is_enabled = interface_baseline.get('is_enabled', False)
+                    status = "UP" if is_up else "DOWN"
+                    admin_status = "Enabled" if is_enabled else "Disabled"
+                    device_logs.append(f"   Status: {status} (Admin: {admin_status})")
+                else:
+                    device_logs.append(f"   [INFO] Interface state data not available")
+                device_logs.append("")
+
+                # 3. Traffic Statistics (from baseline)
+                device_logs.append("3. Traffic Statistics:")
+                if interface_baseline:
+                    in_pkts = interface_baseline.get('in_pkts', 0)
+                    out_pkts = interface_baseline.get('out_pkts', 0)
+                    in_bytes = interface_baseline.get('in_bytes', 0)
+                    out_bytes = interface_baseline.get('out_bytes', 0)
+                    device_logs.append(f"   RX: {in_pkts:,} pkts ({in_bytes:,} bytes)")
+                    device_logs.append(f"   TX: {out_pkts:,} pkts ({out_bytes:,} bytes)")
+                else:
+                    device_logs.append(f"   [INFO] Traffic statistics not available")
+                device_logs.append("")
 
                 device_logs.append("=" * 80)
                 device_logs.append("DEPLOYMENT EXECUTION")
@@ -5918,106 +5849,19 @@ class VLANDeploymentView(View):
                         device_logs.append(str(deployment_logs_from_napalm))
                 device_logs.append("")
 
-                # INTERFACE-LEVEL PRE-DEPLOYMENT CHECKS
-                device_logs.append("=" * 80)
-                device_logs.append("INTERFACE-LEVEL PRE-DEPLOYMENT CHECKS")
-                device_logs.append("=" * 80)
-                device_logs.append("")
-
-                # Collect pre-deployment data for all interfaces
-                pre_deployment_data = {}
-                for actual_interface_name in device_interfaces:
-                    bond_member_of = bond_info_map.get(device.name, {}).get(actual_interface_name, None)
-                    target_interface_for_checks = bond_member_of if bond_member_of else actual_interface_name
-
-                    # Skip if we already checked this bond
-                    if target_interface_for_checks in pre_deployment_data:
-                        continue
-
-                    pre_data = {}
-
-                    # 1. Current VLAN Configuration (on target interface - bond or physical)
-                    try:
-                        device_config_result = self._get_current_device_config(device, actual_interface_name, platform)
-                        current_config = device_config_result.get('current_config', '')
-
-                        # Parse current VLAN from config
-                        current_vlan = None
-                        if platform == 'cumulus' and 'access' in current_config:
-                            import re
-                            match = re.search(r'access\s+(\d+)', current_config)
-                            if match:
-                                current_vlan = match.group(1)
-
-                        pre_data['current_vlan'] = current_vlan
-                    except Exception as e:
-                        pre_data['current_vlan'] = f"ERROR: {e}"
-
-                    # 2. Interface State (on target interface - bond or physical)
-                    try:
-                        interface_state = self._check_interface_state(device, target_interface_for_checks, platform)
-                        pre_data['interface_state'] = interface_state
-                    except Exception as e:
-                        pre_data['interface_state'] = {'error': str(e)}
-
-                    # 3. Traffic Statistics (on target interface - bond or physical)
-                    if platform == 'cumulus':
-                        try:
-                            traffic_stats = self._check_interface_traffic_stats(device, target_interface_for_checks, platform, bond_interface=None)
-                            pre_data['traffic_stats'] = traffic_stats
-                        except Exception as e:
-                            pre_data['traffic_stats'] = {'error': str(e)}
-
-                    # 4. LLDP Neighbor Verification (on physical interface, not bond)
-                    try:
-                        lldp_check = self._verify_lldp_neighbors(device, actual_interface_name, platform)
-                        pre_data['lldp_check'] = lldp_check
-                    except Exception as e:
-                        pre_data['lldp_check'] = {'error': str(e)}
-
-                    pre_deployment_data[target_interface_for_checks] = pre_data
-
-                # Display pre-deployment checks
-                device_logs.append("1. Interface State:")
-                for target_iface, pre_data in sorted(pre_deployment_data.items()):
-                    iface_state = pre_data.get('interface_state', {})
-                    if iface_state.get('error'):
-                        device_logs.append(f"   {target_iface}: [WARN] {iface_state['error']}")
-                    elif iface_state.get('is_up'):
-                        device_logs.append(f"   {target_iface}: [OK] UP")
-                    else:
-                        device_logs.append(f"   {target_iface}: [WARN] DOWN")
-                device_logs.append("")
-
-                if platform == 'cumulus':
-                    device_logs.append("2. Traffic Analysis:")
-                    for target_iface, pre_data in sorted(pre_deployment_data.items()):
-                        traffic_stats = pre_data.get('traffic_stats', {})
-                        if traffic_stats.get('error'):
-                            device_logs.append(f"   {target_iface}: [WARN] {traffic_stats['error']}")
-                        elif traffic_stats.get('has_traffic'):
-                            in_pkts = traffic_stats.get('in_pkts_total', 0)
-                            out_pkts = traffic_stats.get('out_pkts_total', 0)
-                            device_logs.append(f"   {target_iface}: [WARN] Active traffic (RX: {in_pkts:,} pkts, TX: {out_pkts:,} pkts)")
+                # Get LLDP baseline from deployment results (collected during deployment)
+                device_logs.append("4. LLDP Neighbors (Device-Level Baseline):")
+                baseline_data = first_interface_result.get('baseline', {})
+                lldp_all_interfaces = baseline_data.get('lldp_all_interfaces', {})
+                if lldp_all_interfaces:
+                    for iface_name in sorted(lldp_all_interfaces.keys()):
+                        neighbor_count = lldp_all_interfaces[iface_name]
+                        if neighbor_count > 0:
+                            device_logs.append(f"   {iface_name}: {neighbor_count} neighbor(s)")
                         else:
-                            device_logs.append(f"   {target_iface}: [OK] No active traffic")
-                    device_logs.append("")
-
-                device_logs.append("4. LLDP Neighbor Verification:")
-                for target_iface, pre_data in sorted(pre_deployment_data.items()):
-                    lldp_check = pre_data.get('lldp_check', {})
-                    if lldp_check.get('error'):
-                        device_logs.append(f"   {target_iface}: [WARN] {lldp_check['error']}")
-                    elif lldp_check.get('matches'):
-                        expected = lldp_check.get('expected_neighbor', 'N/A')
-                        actual = lldp_check.get('actual_neighbor', 'N/A')
-                        device_logs.append(f"   {target_iface}: [OK] Expected: {expected}, Actual: {actual}")
-                    elif lldp_check.get('expected_neighbor'):
-                        expected = lldp_check.get('expected_neighbor', 'N/A')
-                        actual = lldp_check.get('actual_neighbor', 'None')
-                        device_logs.append(f"   {target_iface}: [WARN] Expected: {expected}, Actual: {actual}")
-                    else:
-                        device_logs.append(f"   {target_iface}: [INFO] No LLDP neighbor expected")
+                            device_logs.append(f"   {iface_name}: No LLDP neighbors")
+                else:
+                    device_logs.append("   (LLDP data not collected)")
                 device_logs.append("")
 
                 # Show interface details for each interface - GROUP SIMILAR INTERFACES
