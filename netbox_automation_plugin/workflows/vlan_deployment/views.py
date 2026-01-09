@@ -4975,31 +4975,86 @@ class VLANDeploymentView(View):
             validation_results = self._validate_tags_for_dry_run(devices, interface_list)
 
             # Build bond_info_map for preview callback
+            # Also detect bonds that exist in NetBox but not on device (Case 2)
             bond_info_map = {}
+            bonds_to_create_on_device = {}  # Case 2: bonds in NetBox but not on device
             logger.info(f"[DRY RUN] Building bond_info_map for {len(devices)} devices, {len(interface_list)} interfaces")
             for device in devices:
                 device_bond_map = {}
+                device_bonds_to_create_on_device = {}
+
+                # Get all interfaces for this device
+                device_interfaces = []
                 for interface_name in interface_list:
                     # Parse "device:interface" format if in sync mode
                     if sync_netbox_to_device and ':' in interface_name:
                         iface_device_name, actual_interface_name = interface_name.split(':', 1)
                         if iface_device_name != device.name:
                             continue
+                        device_interfaces.append(actual_interface_name)
                     else:
-                        actual_interface_name = interface_name
+                        device_interfaces.append(interface_name)
 
+                # Step 1: Check device config for bonds that exist on device
+                for actual_interface_name in device_interfaces:
                     # Check bond membership
                     try:
                         device_config_result = self._get_current_device_config(device, actual_interface_name, platform)
                         bond_member_of = device_config_result.get('bond_member_of', None)
                         if bond_member_of:
                             device_bond_map[actual_interface_name] = bond_member_of
-                            logger.info(f"[DRY RUN] Bond detected: {device.name}:{actual_interface_name} → {bond_member_of}")
+                            logger.info(f"[DRY RUN] Bond detected on device: {device.name}:{actual_interface_name} → {bond_member_of}")
                     except Exception as e:
                         logger.warning(f"[DRY RUN] Could not check bond for {device.name}:{actual_interface_name}: {e}")
 
+                # Step 2: Check for bonds in NetBox but NOT on device (Case 2)
+                netbox_bonds = {}  # {bond_name: [member_interfaces]}
+                for actual_interface_name in device_interfaces:
+                    try:
+                        interface_obj = Interface.objects.get(device=device, name=actual_interface_name)
+                        if hasattr(interface_obj, 'lag') and interface_obj.lag:
+                            bond_name = interface_obj.lag.name
+                            if bond_name not in netbox_bonds:
+                                netbox_bonds[bond_name] = []
+                            netbox_bonds[bond_name].append(actual_interface_name)
+                    except Interface.DoesNotExist:
+                        pass
+                    except Exception as e:
+                        logger.debug(f"Error checking NetBox bond for {actual_interface_name}: {e}")
+
+                # For each NetBox bond, check if it exists on the device
+                for bond_name, member_names in netbox_bonds.items():
+                    bond_exists_on_device = False
+                    for member_name in member_names:
+                        try:
+                            device_config_result = self._get_current_device_config(device, member_name, platform)
+                            device_bond_name = device_config_result.get('bond_member_of', None)
+                            if device_bond_name == bond_name:
+                                bond_exists_on_device = True
+                                break
+                        except Exception as e:
+                            logger.debug(f"Error checking device config for {member_name}: {e}")
+
+                    if not bond_exists_on_device:
+                        # Bond exists in NetBox but NOT on device - need to create it on device
+                        logger.info(f"[DRY RUN] Bond {bond_name} exists in NetBox but NOT on device - will create on device")
+
+                        try:
+                            bond_interface = Interface.objects.get(device=device, name=bond_name)
+                            device_bonds_to_create_on_device[bond_name] = {
+                                'members': member_names,
+                                'bond_interface': bond_interface
+                            }
+                        except Interface.DoesNotExist:
+                            logger.error(f"Bond interface {bond_name} not found in NetBox")
+
                 if device_bond_map:
                     bond_info_map[device.name] = device_bond_map
+                if device_bonds_to_create_on_device:
+                    bonds_to_create_on_device[device.name] = device_bonds_to_create_on_device
+
+            logger.info(f"[DRY RUN] Bond info map: {bond_info_map}")
+            logger.info(f"[DRY RUN] Bonds to create on device: {bonds_to_create_on_device}")
 
             # Create preview callback that captures context
             def preview_callback(device, device_interfaces, platform, vlan_id, bond_info_map_param):
@@ -5028,6 +5083,7 @@ class VLANDeploymentView(View):
                 platform=platform,
                 timeout=90,
                 bond_info_map=bond_info_map if bond_info_map else None,
+                bonds_to_create_on_device=bonds_to_create_on_device if bonds_to_create_on_device else None,
                 dry_run=True,
                 preview_callback=preview_callback
             )
@@ -5660,31 +5716,86 @@ class VLANDeploymentView(View):
                 logger.warning(f"Could not look up VLAN name for ID {primary_vlan_id}: {e}")
 
             # Build bond_info_map first: {device_name: {interface_name: bond_name}}
+            # Also detect bonds that exist in NetBox but not on device (Case 2)
             bond_info_map = {}
+            bonds_to_create_on_device = {}  # Case 2: bonds in NetBox but not on device
             logger.info(f"[DEPLOYMENT] Building bond_info_map for {len(devices)} devices")
             for device in devices:
                 device_bond_map = {}
+                device_bonds_to_create_on_device = {}
+
+                # Get all interfaces for this device
+                device_interfaces = []
                 for interface_name in interface_list:
                     # In sync mode, interface_name is in "device:interface" format
                     if sync_netbox_to_device and ':' in interface_name:
                         iface_device_name, actual_interface_name = interface_name.split(':', 1)
                         if iface_device_name != device.name:
                             continue
+                        device_interfaces.append(actual_interface_name)
                     else:
-                        actual_interface_name = interface_name
+                        device_interfaces.append(interface_name)
 
-                    # Check if interface is a bond member
+                # Step 1: Check device config for bonds that exist on device
+                for actual_interface_name in device_interfaces:
+                    # Check if interface is a bond member on device
                     try:
                         device_config_result = self._get_current_device_config(device, actual_interface_name, platform)
                         bond_member_of = device_config_result.get('bond_member_of', None)
                         if bond_member_of:
                             device_bond_map[actual_interface_name] = bond_member_of
-                            logger.info(f"[DEPLOYMENT] Bond detected: {device.name}:{actual_interface_name} -> {bond_member_of}")
+                            logger.info(f"[DEPLOYMENT] Bond detected on device: {device.name}:{actual_interface_name} -> {bond_member_of}")
                     except Exception as e:
                         logger.warning(f"[DEPLOYMENT] Could not check bond for {device.name}:{actual_interface_name}: {e}")
 
+                # Step 2: Check for bonds in NetBox but NOT on device (Case 2)
+                netbox_bonds = {}  # {bond_name: [member_interfaces]}
+                for actual_interface_name in device_interfaces:
+                    try:
+                        interface_obj = Interface.objects.get(device=device, name=actual_interface_name)
+                        if hasattr(interface_obj, 'lag') and interface_obj.lag:
+                            bond_name = interface_obj.lag.name
+                            if bond_name not in netbox_bonds:
+                                netbox_bonds[bond_name] = []
+                            netbox_bonds[bond_name].append(actual_interface_name)
+                    except Interface.DoesNotExist:
+                        pass
+                    except Exception as e:
+                        logger.debug(f"Error checking NetBox bond for {actual_interface_name}: {e}")
+
+                # For each NetBox bond, check if it exists on the device
+                for bond_name, member_names in netbox_bonds.items():
+                    bond_exists_on_device = False
+                    for member_name in member_names:
+                        try:
+                            device_config_result = self._get_current_device_config(device, member_name, platform)
+                            device_bond_name = device_config_result.get('bond_member_of', None)
+                            if device_bond_name == bond_name:
+                                bond_exists_on_device = True
+                                break
+                        except Exception as e:
+                            logger.debug(f"Error checking device config for {member_name}: {e}")
+
+                    if not bond_exists_on_device:
+                        # Bond exists in NetBox but NOT on device - need to create it on device
+                        logger.info(f"[DEPLOYMENT] Bond {bond_name} exists in NetBox but NOT on device - will create on device")
+
+                        try:
+                            bond_interface = Interface.objects.get(device=device, name=bond_name)
+                            device_bonds_to_create_on_device[bond_name] = {
+                                'members': member_names,
+                                'bond_interface': bond_interface
+                            }
+                        except Interface.DoesNotExist:
+                            logger.error(f"Bond interface {bond_name} not found in NetBox")
+
                 if device_bond_map:
                     bond_info_map[device.name] = device_bond_map
+                if device_bonds_to_create_on_device:
+                    bonds_to_create_on_device[device.name] = device_bonds_to_create_on_device
+
+            logger.info(f"[DEPLOYMENT] Bond info map: {bond_info_map}")
+            logger.info(f"[DEPLOYMENT] Bonds to create on device: {bonds_to_create_on_device}")
 
             # Initialize Nornir and deploy
             nornir_manager = NornirDeviceManager(devices=devices)
@@ -5696,7 +5807,8 @@ class VLANDeploymentView(View):
                 vlan_id=primary_vlan_id,
                 platform=platform,
                 timeout=90,
-                bond_info_map=bond_info_map if bond_info_map else None
+                bond_info_map=bond_info_map if bond_info_map else None,
+                bonds_to_create_on_device=bonds_to_create_on_device if bonds_to_create_on_device else None
             )
 
             logger.info(f"[DEPLOYMENT] Nornir deployment completed for {len(nornir_results)} devices")

@@ -928,17 +928,17 @@ class NAPALMDeviceManager:
             }
         
         # Check 5: Overall System Health (with baseline comparison)
-        logger.info(f"VLAN Verification Check 5/5: System health...")
+        logger.info(f"VLAN Verification Check 5/6: System health...")
         try:
             facts = self.get_facts()
             if facts:
                 uptime_after = facts.get('uptime', -1)
                 hostname_after = facts.get('hostname', 'unknown')
-                
+
                 # Compare with baseline
                 if baseline and baseline.get('uptime') is not None:
                     uptime_before = baseline.get('uptime', -1)
-                    
+
                     # CRITICAL: Device rebooted? (uptime decreased significantly)
                     if uptime_before > 0 and uptime_after > 0 and uptime_after < (uptime_before - 10):
                         checks['system_health'] = {
@@ -981,7 +981,116 @@ class NAPALMDeviceManager:
             logger.warning(f"System health check failed: {e}")
             all_passed = False
             messages.append(f"ERROR: System: Could not verify")
-        
+
+        # Check 6: Traffic Flow (INFORMATIONAL ONLY - does NOT fail deployment)
+        logger.info(f"VLAN Verification Check 6/6: Traffic flow (informational)...")
+        try:
+            if baseline and baseline.get('interface'):
+                baseline_iface = baseline['interface']
+                in_pkts_before = baseline_iface.get('in_pkts', 0)
+                out_pkts_before = baseline_iface.get('out_pkts', 0)
+                in_bytes_before = baseline_iface.get('in_bytes', 0)
+                out_bytes_before = baseline_iface.get('out_bytes', 0)
+
+                # Get current interface stats
+                interfaces = self.get_interfaces()
+                if interfaces and interface_name in interfaces:
+                    iface_data = interfaces[interface_name]
+
+                    # Try to get packet counters from interface data
+                    # Note: NAPALM's get_interfaces() may not always include counters
+                    # For Cumulus, we may need to query directly
+                    driver_name = self.get_driver_name()
+                    in_pkts_after = 0
+                    out_pkts_after = 0
+                    in_bytes_after = 0
+                    out_bytes_after = 0
+
+                    if driver_name == 'cumulus':
+                        # For Cumulus, query stats directly using NVUE
+                        try:
+                            if hasattr(self.connection, 'device') and hasattr(self.connection.device, 'send_command'):
+                                stats_output = self.connection.device.send_command(
+                                    f'nv show interface {interface_name} counters -o json',
+                                    read_timeout=10
+                                )
+                                if stats_output:
+                                    import json
+                                    stats_data = json.loads(stats_output)
+                                    in_pkts_after = stats_data.get('in-pkts', 0)
+                                    out_pkts_after = stats_data.get('out-pkts', 0)
+                                    in_bytes_after = stats_data.get('in-bytes', 0)
+                                    out_bytes_after = stats_data.get('out-bytes', 0)
+                        except Exception as stats_error:
+                            logger.debug(f"Could not get Cumulus stats: {stats_error}")
+                    else:
+                        # For other platforms, try to get from NAPALM interface data
+                        # (may not be available)
+                        in_pkts_after = iface_data.get('in_pkts', 0)
+                        out_pkts_after = iface_data.get('out_pkts', 0)
+                        in_bytes_after = iface_data.get('in_bytes', 0)
+                        out_bytes_after = iface_data.get('out_bytes', 0)
+
+                    # Calculate differences
+                    in_pkts_delta = in_pkts_after - in_pkts_before
+                    out_pkts_delta = out_pkts_after - out_pkts_before
+                    in_bytes_delta = in_bytes_after - in_bytes_before
+                    out_bytes_delta = out_bytes_after - out_bytes_before
+
+                    # INFORMATIONAL: Check if traffic is flowing
+                    # This does NOT fail deployment - just logs the status
+                    if in_pkts_delta > 0 or out_pkts_delta > 0:
+                        checks['traffic_flow'] = {
+                            'success': True,  # Always success (informational only)
+                            'message': f"ℹ️ Traffic detected: IN +{in_pkts_delta} pkts (+{in_bytes_delta} bytes), OUT +{out_pkts_delta} pkts (+{out_bytes_delta} bytes)",
+                            'data': {
+                                'in_pkts_delta': in_pkts_delta,
+                                'out_pkts_delta': out_pkts_delta,
+                                'in_bytes_delta': in_bytes_delta,
+                                'out_bytes_delta': out_bytes_delta
+                            }
+                        }
+                        messages.append(f"ℹ️ Traffic: Active (IN +{in_pkts_delta} pkts, OUT +{out_pkts_delta} pkts)")
+                        logger.info(f"Traffic flow detected on {interface_name}: IN +{in_pkts_delta} pkts, OUT +{out_pkts_delta} pkts")
+                    else:
+                        checks['traffic_flow'] = {
+                            'success': True,  # Always success (informational only)
+                            'message': f"ℹ️ No traffic detected (interface may be down or no cable connected)",
+                            'data': {
+                                'in_pkts_delta': 0,
+                                'out_pkts_delta': 0,
+                                'in_bytes_delta': 0,
+                                'out_bytes_delta': 0
+                            }
+                        }
+                        messages.append(f"ℹ️ Traffic: None detected (interface may be down)")
+                        logger.info(f"No traffic flow detected on {interface_name} (this is informational only)")
+                else:
+                    # Interface not found
+                    checks['traffic_flow'] = {
+                        'success': True,  # Always success (informational only)
+                        'message': f"ℹ️ Traffic check skipped (interface not found)",
+                        'data': None
+                    }
+                    messages.append(f"ℹ️ Traffic: Check skipped")
+            else:
+                # No baseline, skip traffic check
+                checks['traffic_flow'] = {
+                    'success': True,  # Always success (informational only)
+                    'message': f"ℹ️ Traffic check skipped (no baseline)",
+                    'data': None
+                }
+                messages.append(f"ℹ️ Traffic: Check skipped (no baseline)")
+        except Exception as e:
+            # Traffic check failed - but this is informational only, don't fail deployment
+            checks['traffic_flow'] = {
+                'success': True,  # Always success (informational only)
+                'message': f"ℹ️ Traffic check failed: {str(e)} (non-critical)",
+                'data': None
+            }
+            logger.debug(f"Traffic flow check failed (non-critical): {e}")
+            messages.append(f"ℹ️ Traffic: Could not verify (non-critical)")
+
         # Summary
         summary_message = ' | '.join(messages)
         return {
