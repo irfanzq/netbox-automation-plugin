@@ -1635,7 +1635,10 @@ class NornirDeviceManager:
                 return device_name
                 
             except Exception as e:
+                import traceback
+                error_traceback = traceback.format_exc()
                 logger.error(f"Device {device_name}: Critical error during deployment: {e}")
+                logger.error(f"Device {device_name}: Full traceback:\n{error_traceback}")
                 # Mark all interfaces as failed for this device (only those belonging to this device)
                 device_interfaces = {}
                 for iface in interface_list:
@@ -1652,7 +1655,8 @@ class NornirDeviceManager:
                         'committed': False,
                         'rolled_back': False,
                         'error': str(e),
-                        'message': f'Device deployment failed: {str(e)}'
+                        'message': f'Device deployment failed: {str(e)}',
+                        'traceback': error_traceback
                     }
 
                 with results_lock:
