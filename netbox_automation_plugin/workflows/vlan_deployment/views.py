@@ -3608,7 +3608,7 @@ class VLANDeploymentView(View):
             validation_results = self._validate_tags_for_dry_run(devices, interface_list, sync_mode=True)
 
             # Create preview callback for sync mode
-            def sync_preview_callback(device, device_interfaces, platform, vlan_id, bond_info_map_param,
+            def sync_preview_callback(device, device_interfaces, platform, vlan_id, bond_info_map,
                                      device_lldp_data=None, device_config_data=None, device_uptime=None):
                 """
                 Generate dry run preview for sync mode.
@@ -3648,7 +3648,7 @@ class VLANDeploymentView(View):
                             interface_list=[actual_interface_name],
                             platform=platform,
                             vlan_id=primary_vlan_id,
-                            bond_info_map=bond_info_map_param,
+                            bond_info_map=bond_info_map,
                             validation_results=validation_results,
                             sync_netbox_to_device=True,
                             untagged_vlan_id=untagged_vlan_id,
@@ -5123,14 +5123,14 @@ class VLANDeploymentView(View):
 
             # Create preview callback that captures context
             # PERFORMANCE: This callback receives pre-fetched device data from Nornir
-            def preview_callback(device, device_interfaces, platform, vlan_id, bond_info_map_param,
+            def preview_callback(device, device_interfaces, platform, vlan_id, bond_info_map,
                                 device_lldp_data=None, device_config_data=None, device_uptime=None):
                 return self._generate_dry_run_preview(
                     device=device,
                     interface_list=device_interfaces,
                     platform=platform,
                     vlan_id=vlan_id,
-                    bond_info_map=bond_info_map_param,
+                    bond_info_map=bond_info_map,
                     validation_results=validation_results,
                     sync_netbox_to_device=sync_netbox_to_device,
                     untagged_vlan_id=untagged_vlan_id,
