@@ -3254,7 +3254,7 @@ class VLANDeploymentView(View):
                         logger.error(f"[SYNC DRY RUN] Error checking bond membership for {interface.name}: {e}")
 
                 # Step 2: Check device config for bonds that might not be in NetBox
-                # For each interface, check if it's a bond member on the device
+                # Use _get_current_device_config() which is cached and returns bond_member_of directly
                 logger.error(f"[SYNC DRY RUN] Step 2: Checking device config for bonds not in NetBox")
                 for interface in all_device_interfaces:
                     # Skip if already found in NetBox
@@ -3262,34 +3262,53 @@ class VLANDeploymentView(View):
                         logger.error(f"[SYNC DRY RUN] {device.name}:{interface.name} - Skipping (already in device_bond_map)")
                         continue
 
-                    # Check device config for bond membership
-                    logger.error(f"[SYNC DRY RUN] {device.name}:{interface.name} - Calling _get_bond_interface_for_member()")
-                    bond_info = self._get_bond_interface_for_member(device, interface.name, platform=platform)
-                    logger.error(f"[SYNC DRY RUN] {device.name}:{interface.name} - _get_bond_interface_for_member() returned: {bond_info}")
-                    if bond_info:
-                        bond_name = bond_info['bond_name']
-                        device_bond_map[interface.name] = {
-                            'bond_name': bond_name,
-                            'bond_id': None,  # No NetBox ID yet
-                            'source': 'device'
-                        }
+                    # Check device config for bond membership using cached method
+                    logger.error(f"[SYNC DRY RUN] {device.name}:{interface.name} - Calling _get_current_device_config()")
+                    try:
+                        device_config_result = self._get_current_device_config(device, interface.name, platform)
+                        bond_member_of = device_config_result.get('bond_member_of', None)
+                        logger.error(f"[SYNC DRY RUN] {device.name}:{interface.name} - bond_member_of from device config: {bond_member_of}")
 
-                        # Track this bond for creation in NetBox
-                        if bond_name not in device_bonds_to_create:
-                            device_bonds_to_create[bond_name] = {
-                                'members': [],
-                                'vlans_to_migrate': {}  # Map of member_name -> {untagged, tagged}
-                            }
-                        device_bonds_to_create[bond_name]['members'].append(interface.name)
+                        if bond_member_of:
+                            # Check if this bond exists in NetBox
+                            from dcim.models import Interface as InterfaceModel
+                            bond_exists_in_netbox = InterfaceModel.objects.filter(device=device, name=bond_member_of).exists()
+                            logger.error(f"[SYNC DRY RUN] {device.name}:{interface.name} - Bond {bond_member_of} exists in NetBox: {bond_exists_in_netbox}")
 
-                        # Collect VLANs from this member interface for migration
-                        vlans_info = {
-                            'untagged': interface.untagged_vlan.vid if interface.untagged_vlan else None,
-                            'tagged': list(interface.tagged_vlans.values_list('vid', flat=True))
-                        }
-                        device_bonds_to_create[bond_name]['vlans_to_migrate'][interface.name] = vlans_info
+                            if not bond_exists_in_netbox:
+                                # Bond exists on device but not in NetBox - track it
+                                device_bond_map[interface.name] = {
+                                    'bond_name': bond_member_of,
+                                    'bond_id': None,  # No NetBox ID yet
+                                    'source': 'device'
+                                }
 
-                        logger.info(f"[SYNC DRY RUN] Detected bond {bond_name} on device {device.name} (not in NetBox) - member: {interface.name}, VLANs: {vlans_info}")
+                                # Track this bond for creation in NetBox
+                                if bond_member_of not in device_bonds_to_create:
+                                    device_bonds_to_create[bond_member_of] = {
+                                        'members': [],
+                                        'vlans_to_migrate': {}  # Map of member_name -> {untagged, tagged}
+                                    }
+                                device_bonds_to_create[bond_member_of]['members'].append(interface.name)
+
+                                # Collect VLANs from this member interface for migration
+                                vlans_info = {
+                                    'untagged': interface.untagged_vlan.vid if interface.untagged_vlan else None,
+                                    'tagged': list(interface.tagged_vlans.values_list('vid', flat=True))
+                                }
+                                device_bonds_to_create[bond_member_of]['vlans_to_migrate'][interface.name] = vlans_info
+
+                                logger.error(f"[SYNC DRY RUN] Detected bond {bond_member_of} on device {device.name} (not in NetBox) - member: {interface.name}, VLANs: {vlans_info}")
+                            else:
+                                # Bond exists in both device and NetBox - just track it
+                                device_bond_map[interface.name] = {
+                                    'bond_name': bond_member_of,
+                                    'bond_id': None,
+                                    'source': 'device'
+                                }
+                                logger.error(f"[SYNC DRY RUN] {device.name}:{interface.name} - Bond {bond_member_of} exists in both device and NetBox")
+                    except Exception as e:
+                        logger.error(f"[SYNC DRY RUN] Error checking device config for {device.name}:{interface.name}: {e}")
 
                 if device_bond_map:
                     bond_info_map[device.name] = device_bond_map
