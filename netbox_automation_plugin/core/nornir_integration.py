@@ -1443,11 +1443,12 @@ class NornirDeviceManager:
                     combined_logs.append("")
                     
                     # Deploy all interfaces in one commit-confirm session
+                    # Pass ALL interfaces for interface-level pre-checks and post-checks
                     deploy_result = napalm_mgr.deploy_config_safe(
                         config=combined_config,
                         timeout=timeout,
                         replace=False,
-                        interface_name=None,  # Multiple interfaces, no single interface_name
+                        interface_names=interface_list,  # ✅ ALL interfaces for interface-level checks
                         vlan_id=vlan_id
                     )
                     

@@ -1663,20 +1663,20 @@ class NAPALMDeviceManager:
             logger.error(f"Error clearing pending commit: {e}")
             return False
     
-    def deploy_config_safe(self, config, replace=True, timeout=60, 
+    def deploy_config_safe(self, config, replace=True, timeout=60,
                           checks=['connectivity', 'interfaces', 'lldp'],
-                          critical_interfaces=None, min_neighbors=0, 
-                          vlan_id=None, interface_name=None):
+                          critical_interfaces=None, min_neighbors=0,
+                          vlan_id=None, interface_name=None, interface_names=None):
         """
         Deploy configuration with Juniper-style commit-confirm failsafe
-        
+
         This method implements a safe deployment workflow:
         1. Load configuration (replace or merge)
         2. Commit with automatic rollback timer
         3. Verify device health (connectivity, interfaces, LLDP)
         4. Confirm commit if all checks pass
         5. Auto-rollback if checks fail or timeout expires
-        
+
         Args:
             config: Configuration string to deploy
             replace: If True, replace entire config. If False, merge incrementally
@@ -1684,7 +1684,10 @@ class NAPALMDeviceManager:
             checks: List of verification checks to perform ['connectivity', 'interfaces', 'lldp']
             critical_interfaces: List of interface names that must be up (for interface check)
             min_neighbors: Minimum LLDP neighbors required (for LLDP check)
-        
+            vlan_id: VLAN ID being deployed (for VLAN-specific verification)
+            interface_name: Single interface name (legacy, use interface_names instead)
+            interface_names: List of interface names to run interface-level checks on
+
         Returns:
             dict: {
                 'success': bool,
@@ -1693,7 +1696,8 @@ class NAPALMDeviceManager:
                 'message': str,
                 'verification_results': dict,
                 'config_deployed': str,
-                'logs': list
+                'logs': list,
+                'baseline': dict  # Contains per-interface baseline data
             }
         """
         # CRITICAL: Validate config parameter before proceeding
@@ -1730,7 +1734,22 @@ class NAPALMDeviceManager:
             }
         
         logger.debug(f"[VALIDATION] Config parameter validated: {len(config)} characters, {len(config.splitlines())} lines")
-        
+
+        # Handle both single interface and multiple interfaces
+        # Priority: interface_names (list) > interface_name (single) > None (device-level only)
+        interfaces_to_check = []
+        if interface_names:
+            # Multiple interfaces provided as list
+            interfaces_to_check = interface_names if isinstance(interface_names, list) else [interface_names]
+            logger.info(f"Interface-level checks will run for {len(interfaces_to_check)} interface(s): {interfaces_to_check}")
+        elif interface_name:
+            # Single interface provided (legacy parameter)
+            interfaces_to_check = [interface_name]
+            logger.info(f"Interface-level checks will run for 1 interface: {interface_name}")
+        else:
+            # No interfaces specified - device-level checks only
+            logger.info(f"No interfaces specified - device-level checks only (LLDP, connectivity, uptime)")
+
         result = {
             'success': False,
             'committed': False,
@@ -1738,7 +1757,8 @@ class NAPALMDeviceManager:
             'message': '',
             'verification_results': {},
             'config_deployed': config,
-            'logs': []
+            'logs': [],
+            'baseline': {}  # Will store per-interface baseline data
         }
 
         # Initialize detailed logs
@@ -1903,9 +1923,19 @@ class NAPALMDeviceManager:
         driver_name = self.get_driver_name()
 
         try:
-            # Collect interface state if specific interface is being configured
-            # Note: interface_name may be a bond interface if original_interface_name is a bond member
-            if interface_name:
+            # Collect interface state for ALL interfaces being configured
+            # Store per-interface baseline in baseline['interfaces'] dict
+            baseline['interfaces'] = {}
+
+            if interfaces_to_check:
+                logs.append(f"  Collecting interface-level baseline for {len(interfaces_to_check)} interface(s)...")
+
+                for iface_idx, interface_name in enumerate(interfaces_to_check, 1):
+                    logger.info(f"  [{iface_idx}/{len(interfaces_to_check)}] Collecting baseline for interface: {interface_name}")
+                    logs.append(f"  [{iface_idx}/{len(interfaces_to_check)}] Interface: {interface_name}")
+
+                    # Initialize baseline for this interface
+                    interface_baseline = {}
                 baseline_interface_name = interface_name  # Default to interface_name (could be bond)
                 
                 # For Cumulus devices, use direct NVUE command instead of NAPALM's get_interfaces()
@@ -2048,7 +2078,8 @@ class NAPALMDeviceManager:
                                                 except:
                                                     pass  # Description is optional
                                                 
-                                                baseline['interface'] = {
+                                                # Store baseline for this specific interface
+                                                interface_baseline = {
                                                     'name': test_interface,
                                                     'is_up': is_up,
                                                     'is_enabled': is_enabled,
@@ -2063,12 +2094,13 @@ class NAPALMDeviceManager:
                                                     'in_errors': in_errors,
                                                     'out_errors': out_errors,
                                                 }
+                                                baseline['interfaces'][interface_name] = interface_baseline
                                                 logger.info(f"  Baseline: {test_interface} is_up={is_up}, is_enabled={is_enabled}, in_pkts={in_pkts}, out_pkts={out_pkts}")
-                                                logs.append(f"  SUCCESS: Interface {test_interface}: UP={is_up}, Enabled={is_enabled}, In-Pkts={in_pkts}, Out-Pkts={out_pkts}")
-                                                
+                                                logs.append(f"    SUCCESS: UP={is_up}, Enabled={is_enabled}, In-Pkts={in_pkts}, Out-Pkts={out_pkts}")
+
                                                 if test_interface != interface_name:
-                                                    logs.append(f"  Note: Collected baseline for {test_interface} (interface_name was {interface_name})")
-                                                
+                                                    logs.append(f"    Note: Collected baseline for {test_interface} (requested {interface_name})")
+
                                                 # Success - baseline collected
                                                 baseline_collected = True
                                                 break  # Found working interface, stop trying
@@ -2296,17 +2328,18 @@ class NAPALMDeviceManager:
                 # Now we have a valid baseline_interface_name, collect baseline
                 # For non-Cumulus or if Cumulus direct NVUE failed, use NAPALM's get_interfaces()
                 if not baseline_collected and interfaces_before and baseline_interface_name in interfaces_before:
-                    baseline['interface'] = {
+                    interface_baseline = {
                         'name': baseline_interface_name,
                         'is_up': interfaces_before[baseline_interface_name].get('is_up', False),
                         'is_enabled': interfaces_before[baseline_interface_name].get('is_enabled', True),
                         'description': interfaces_before[baseline_interface_name].get('description', ''),
                     }
-                    logger.info(f"  Baseline: {baseline_interface_name} is_up={baseline['interface']['is_up']}, is_enabled={baseline['interface']['is_enabled']}")
-                    logs.append(f"  SUCCESS: Interface {baseline_interface_name}: UP={baseline['interface']['is_up']}, Enabled={baseline['interface']['is_enabled']}")
+                    baseline['interfaces'][interface_name] = interface_baseline
+                    logger.info(f"  Baseline: {baseline_interface_name} is_up={interface_baseline['is_up']}, is_enabled={interface_baseline['is_enabled']}")
+                    logs.append(f"    SUCCESS: UP={interface_baseline['is_up']}, Enabled={interface_baseline['is_enabled']}")
                     # Note if we used bond instead of member
                     if baseline_interface_name != interface_name:
-                        logs.append(f"  Note: Using bond interface {baseline_interface_name} for baseline (member {interface_name})")
+                        logs.append(f"    Note: Using bond interface {baseline_interface_name} for baseline (member {interface_name})")
                     baseline_collected = True  # Mark as collected
                 elif not baseline_collected:
                     # Baseline collection failed - this is now mandatory
@@ -2325,7 +2358,10 @@ class NAPALMDeviceManager:
                     result['logs'] = logs
                     return result
 
-            # Collect LLDP neighbors baseline (if checking)
+                # End of per-interface baseline collection loop
+                logger.info(f"Completed baseline collection for {len(baseline['interfaces'])} interface(s)")
+
+            # Collect LLDP neighbors baseline (if checking) - DEVICE-LEVEL
             if 'lldp' in checks:
                 try:
                     logs.append(f"  Collecting LLDP neighbors (device-level)...")
@@ -3973,29 +4009,63 @@ class NAPALMDeviceManager:
         all_checks_passed = True
 
         # If this is a VLAN deployment, use comprehensive VLAN verification with baseline
-        if vlan_id and interface_name:
-            logger.info(f"Running comprehensive VLAN verification for {interface_name} VLAN {vlan_id}...")
-            logs.append(f"  Running comprehensive VLAN verification...")
-            logs.append(f"  Interface: {interface_name}")
+        # Run interface-level checks for ALL interfaces in interfaces_to_check
+        if vlan_id and interfaces_to_check:
+            logger.info(f"Running comprehensive VLAN verification for {len(interfaces_to_check)} interface(s), VLAN {vlan_id}...")
+            logs.append(f"  Running comprehensive VLAN verification for {len(interfaces_to_check)} interface(s)...")
             logs.append(f"  VLAN ID: {vlan_id}")
+
             baseline_data = result.get('baseline', {})
-            vlan_check = self.verify_vlan_deployment(interface_name, vlan_id, baseline=baseline_data)
-            result['verification_results'] = vlan_check['checks']
-            all_checks_passed = vlan_check['success']
+            result['verification_results'] = {}
 
-            # Log each verification check result
-            for check_name, check_data in vlan_check['checks'].items():
-                if check_data.get('success'):
-                    logs.append(f"  SUCCESS: {check_name}: {check_data.get('message', 'OK')}")
+            # Verify EACH interface
+            for iface_idx, iface_name in enumerate(interfaces_to_check, 1):
+                logger.info(f"  [{iface_idx}/{len(interfaces_to_check)}] Verifying interface: {iface_name}")
+                logs.append(f"")
+                logs.append(f"  [{iface_idx}/{len(interfaces_to_check)}] Interface: {iface_name}")
+
+                # Get baseline for this specific interface
+                interface_baseline = baseline_data.get('interfaces', {}).get(iface_name, {})
+                if interface_baseline:
+                    # Create a baseline dict with the old structure for compatibility
+                    iface_baseline_compat = {
+                        'interface': interface_baseline,
+                        'lldp_all_interfaces': baseline_data.get('lldp_all_interfaces', {}),
+                        'uptime': baseline_data.get('uptime'),
+                        'hostname': baseline_data.get('hostname')
+                    }
                 else:
-                    logs.append(f"  ✗ {check_name}: {check_data.get('message', 'FAILED')}")
+                    # No baseline for this interface - use device-level only
+                    iface_baseline_compat = baseline_data
 
+                vlan_check = self.verify_vlan_deployment(iface_name, vlan_id, baseline=iface_baseline_compat)
+                result['verification_results'][iface_name] = vlan_check['checks']
+
+                # Log each verification check result for this interface
+                for check_name, check_data in vlan_check['checks'].items():
+                    if check_data.get('success'):
+                        logs.append(f"    ✓ {check_name}: {check_data.get('message', 'OK')}")
+                    else:
+                        logs.append(f"    ✗ {check_name}: {check_data.get('message', 'FAILED')}")
+                        all_checks_passed = False  # ANY interface failure = overall failure
+
+                if vlan_check['success']:
+                    logger.info(f"  [{iface_idx}/{len(interfaces_to_check)}] SUCCESS: {iface_name} verification passed")
+                    logs.append(f"    SUCCESS: Interface {iface_name} verification PASSED")
+                else:
+                    logger.error(f"  [{iface_idx}/{len(interfaces_to_check)}] FAILED: {iface_name} verification failed: {vlan_check['message']}")
+                    logs.append(f"    ✗ Interface {iface_name} verification FAILED")
+                    all_checks_passed = False
+
+            # Summary
             if all_checks_passed:
-                logger.info(f"SUCCESS: VLAN verification passed: {vlan_check['message']}")
-                logs.append(f"  SUCCESS: All verification checks PASSED")
+                logger.info(f"SUCCESS: All {len(interfaces_to_check)} interface(s) verification passed")
+                logs.append(f"")
+                logs.append(f"  SUCCESS: All {len(interfaces_to_check)} interface(s) verification PASSED")
             else:
-                logger.error(f"ERROR: VLAN verification failed: {vlan_check['message']}")
-                logs.append(f"  ✗ Verification FAILED")
+                logger.error(f"ERROR: One or more interface verification checks failed")
+                logs.append(f"")
+                logs.append(f"  ✗ One or more interface verification checks FAILED")
         else:
             # Standard verification checks
             logs.append(f"  Running standard verification checks...")

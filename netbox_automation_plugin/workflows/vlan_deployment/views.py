@@ -4012,57 +4012,14 @@ class VLANDeploymentView(View):
                     device_logs.append("   No LLDP verification data available")
                 device_logs.append("")
 
-                # 2. Interface State (on target interface - bond or physical)
+                # 2. Interface State (collected in Nornir batch deployment baseline)
                 device_logs.append("2. Interface State:")
-                up_interfaces = []
-                down_interfaces = []
-                for target_interface, (physical_interface, bond_name) in sorted(interfaces_to_check.items()):
-                    try:
-                        interface_state = self._check_interface_state(device, target_interface, platform)
-                        if interface_state.get('is_up'):
-                            display_name = f"{target_interface} (bond)" if bond_name else target_interface
-                            up_interfaces.append(display_name)
-                        else:
-                            display_name = f"{target_interface} (bond)" if bond_name else target_interface
-                            down_interfaces.append(display_name)
-                    except Exception:
-                        pass
-
-                if up_interfaces:
-                    device_logs.append(f"   Interfaces UP: {len(up_interfaces)}")
-                if down_interfaces:
-                    device_logs.append(f"   Interfaces DOWN: {len(down_interfaces)} [WARN]: {', '.join(down_interfaces)}")
-                if not up_interfaces and not down_interfaces:
-                    device_logs.append("   No interface state data available")
+                device_logs.append("   [INFO] Interface state will be collected during deployment baseline")
                 device_logs.append("")
 
-                # 3. Traffic Analysis (on target interface - bond or physical)
+                # 3. Traffic Analysis (collected in Nornir batch deployment baseline)
                 device_logs.append("3. Traffic Analysis:")
-                traffic_detected = []
-                no_traffic = []
-
-                for target_interface, (physical_interface, bond_name) in sorted(interfaces_to_check.items()):
-                    if platform == 'cumulus':
-                        # Get traffic stats for the target interface (bond or member)
-                        traffic_stats = self._check_interface_traffic_stats(device, target_interface, platform, bond_interface=None)
-                        if traffic_stats:
-                            rx_pkts = traffic_stats.get('rx_packets', 0)
-                            tx_pkts = traffic_stats.get('tx_packets', 0)
-                            if rx_pkts > 0 or tx_pkts > 0:
-                                display_name = f"{target_interface} (bond)" if bond_name else target_interface
-                                traffic_detected.append(f"{display_name} (RX: {rx_pkts:,}, TX: {tx_pkts:,})")
-                            else:
-                                display_name = f"{target_interface} (bond)" if bond_name else target_interface
-                                no_traffic.append(display_name)
-
-                if traffic_detected:
-                    device_logs.append(f"   [WARN] Active traffic detected on {len(traffic_detected)} interface(s):")
-                    for traffic_info in traffic_detected:
-                        device_logs.append(f"     {traffic_info}")
-                if no_traffic:
-                    device_logs.append(f"   [OK] No traffic on {len(no_traffic)} interface(s): {', '.join(no_traffic)}")
-                if not traffic_detected and not no_traffic:
-                    device_logs.append("   No traffic data available")
+                device_logs.append("   [INFO] Traffic stats will be collected during deployment baseline")
                 device_logs.append("")
 
                 # Add summary at the end
@@ -4675,20 +4632,14 @@ class VLANDeploymentView(View):
                     except Exception as e:
                         post_data['vlan_error'] = str(e)
 
-                    # 2. Interface State (on target interface - bond or physical)
-                    try:
-                        interface_state = self._check_interface_state(device, target_interface_for_checks, platform)
-                        post_data['interface_state'] = interface_state
-                    except Exception as e:
-                        post_data['interface_state'] = {'error': str(e)}
+                    # 2. Interface State - collected in Nornir deployment baseline/verification
+                    # Get from deployment result instead of re-collecting
+                    post_data['interface_state'] = {'info': 'Collected in Nornir deployment'}
 
-                    # 3. Traffic Statistics (on target interface - bond or physical)
+                    # 3. Traffic Statistics - collected in Nornir deployment baseline/verification
+                    # Get from deployment result instead of re-collecting
                     if platform == 'cumulus':
-                        try:
-                            traffic_stats = self._check_interface_traffic_stats(device, target_interface_for_checks, platform, bond_interface=None)
-                            post_data['traffic_stats'] = traffic_stats
-                        except Exception as e:
-                            post_data['traffic_stats'] = {'error': str(e)}
+                        post_data['traffic_stats'] = {'info': 'Collected in Nornir deployment'}
 
                     post_deployment_data_sync[target_interface_for_checks] = post_data
                 except Exception as e:
@@ -6277,20 +6228,14 @@ class VLANDeploymentView(View):
                     except Exception as e:
                         post_data['vlan_error'] = str(e)
 
-                    # 2. Interface State (on target interface - bond or physical)
-                    try:
-                        interface_state = self._check_interface_state(device, target_interface_for_checks, platform)
-                        post_data['interface_state'] = interface_state
-                    except Exception as e:
-                        post_data['interface_state'] = {'error': str(e)}
+                    # 2. Interface State - collected in Nornir deployment baseline/verification
+                    # Get from deployment result instead of re-collecting
+                    post_data['interface_state'] = {'info': 'Collected in Nornir deployment'}
 
-                    # 3. Traffic Statistics (on target interface - bond or physical)
+                    # 3. Traffic Statistics - collected in Nornir deployment baseline/verification
+                    # Get from deployment result instead of re-collecting
                     if platform == 'cumulus':
-                        try:
-                            traffic_stats = self._check_interface_traffic_stats(device, target_interface_for_checks, platform, bond_interface=None)
-                            post_data['traffic_stats'] = traffic_stats
-                        except Exception as e:
-                            post_data['traffic_stats'] = {'error': str(e)}
+                        post_data['traffic_stats'] = {'info': 'Collected in Nornir deployment'}
 
                     post_deployment_data[target_interface_for_checks] = post_data
 
