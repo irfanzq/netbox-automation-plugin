@@ -4691,10 +4691,12 @@ class VLANDeploymentView(View):
                     status = "ERROR"
                     interface_statuses.append("ERROR")
 
-                # Get VLAN info
+                # Get VLAN info and bond membership
                 vlan_id = None
                 vlan_name = None
                 tagged_vlan_str = None
+                bond_member_of = None
+                target_interface = actual_interface_name
                 try:
                     interface_obj = Interface.objects.get(device=device, name=actual_interface_name)
                     untagged_vlan = interface_obj.untagged_vlan
@@ -4705,12 +4707,22 @@ class VLANDeploymentView(View):
                         vlan_name = untagged_vlan.name
                     if tagged_vlans:
                         tagged_vlan_str = ', '.join([f"{v.vid} ({v.name})" for v in tagged_vlans])
+
+                    # Check bond membership
+                    if interface_obj.lag:
+                        bond_member_of = interface_obj.lag.name
+                        target_interface = bond_member_of
+                    elif bond_info_map and device.name in bond_info_map:
+                        device_bond_map = bond_info_map[device.name]
+                        if actual_interface_name in device_bond_map:
+                            bond_member_of = device_bond_map[actual_interface_name]['bond_name']
+                            target_interface = bond_member_of
                 except Exception as e:
                     vlan_id = "ERROR"
                     vlan_name = str(e)
 
-                # Group by status and VLAN
-                group_key = (status, vlan_id)
+                # Group by status, VLAN, and target interface (bond or physical)
+                group_key = (status, vlan_id, target_interface)
                 if group_key not in interface_groups:
                     interface_groups[group_key] = []
                 interface_groups[group_key].append(actual_interface_name)
@@ -4721,23 +4733,30 @@ class VLANDeploymentView(View):
                     'vlan_id': vlan_id,
                     'vlan_name': vlan_name,
                     'tagged_vlans': tagged_vlan_str,
-                    'error': error
+                    'error': error,
+                    'bond_member_of': bond_member_of,
+                    'target_interface': target_interface
                 }
 
             # Display grouped interfaces
             for group_key, interface_names in sorted(interface_groups.items()):
-                status, vlan_id = group_key
-
-                # Show group header
-                if len(interface_names) == 1:
-                    device_logs.append(f"--- Interface: {interface_names[0]} ---")
-                else:
-                    device_logs.append(f"--- Interfaces: {', '.join(sorted(interface_names))} ({len(interface_names)} interfaces) ---")
-                device_logs.append("")
+                status, vlan_id, target_interface = group_key
 
                 # Get data from first interface in group (all should be same)
                 first_iface = interface_names[0]
                 iface_data = interface_data_map[first_iface]
+
+                # Show group header
+                if len(interface_names) == 1:
+                    # Single interface
+                    if iface_data['bond_member_of']:
+                        device_logs.append(f"--- Interface: {interface_names[0]} ---")
+                    else:
+                        device_logs.append(f"--- Interface: {interface_names[0]} ---")
+                else:
+                    # Multiple interfaces
+                    device_logs.append(f"--- Interfaces ({len(interface_names)}): {', '.join(sorted(interface_names))} ---")
+                device_logs.append("")
 
                 # Show VLAN info
                 if iface_data['vlan_id'] and iface_data['vlan_id'] != "ERROR":
@@ -4746,6 +4765,11 @@ class VLANDeploymentView(View):
                     device_logs.append(f"  Tagged VLANs: {iface_data['tagged_vlans']}")
                 if iface_data['vlan_id'] == "ERROR":
                     device_logs.append(f"  [WARN] Could not get VLAN info: {iface_data['vlan_name']}")
+
+                # Show target interface (bond) if different from physical interface
+                if iface_data['bond_member_of']:
+                    device_logs.append(f"  Target: {iface_data['bond_member_of']}")
+
                 device_logs.append("")
 
                 # Show deployment status
