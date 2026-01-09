@@ -1368,7 +1368,8 @@ class NornirDeviceManager:
                     if bond_info_map and device_name in bond_info_map:
                         device_bond_map = bond_info_map[device_name]
                         if actual_interface_name in device_bond_map:
-                            target_interface = device_bond_map[actual_interface_name]
+                            # bond_info_map structure: {device_name: {interface_name: {'bond_name': str, 'bond_id': str, 'source': str}}}
+                            target_interface = device_bond_map[actual_interface_name]['bond_name']
                             logger.info(f"[DEBUG] SUCCESS: BOND REDIRECT: Device {device_name}: Interface {actual_interface_name} → Bond {target_interface}")
                         else:
                             logger.debug(f"[DEBUG] Device {device_name}: Interface {actual_interface_name} not in bond map - using directly")
