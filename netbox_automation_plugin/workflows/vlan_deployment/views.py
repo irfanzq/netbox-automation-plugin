@@ -5099,7 +5099,12 @@ class VLANDeploymentView(View):
                         device_config_result = self._get_current_device_config(device, actual_interface_name, platform)
                         bond_member_of = device_config_result.get('bond_member_of', None)
                         if bond_member_of:
-                            device_bond_map[actual_interface_name] = bond_member_of
+                            # Store in dictionary format to match sync mode
+                            device_bond_map[actual_interface_name] = {
+                                'bond_name': bond_member_of,
+                                'bond_id': None,
+                                'source': 'device'
+                            }
                             logger.info(f"[DRY RUN] Bond detected on device: {device.name}:{actual_interface_name} → {bond_member_of}")
                     except Exception as e:
                         logger.warning(f"[DRY RUN] Could not check bond for {device.name}:{actual_interface_name}: {e}")
@@ -5845,7 +5850,12 @@ class VLANDeploymentView(View):
                         device_config_result = self._get_current_device_config(device, actual_interface_name, platform)
                         bond_member_of = device_config_result.get('bond_member_of', None)
                         if bond_member_of:
-                            device_bond_map[actual_interface_name] = bond_member_of
+                            # Store in dictionary format to match sync mode
+                            device_bond_map[actual_interface_name] = {
+                                'bond_name': bond_member_of,
+                                'bond_id': None,
+                                'source': 'device'
+                            }
                             logger.info(f"[DEPLOYMENT] Bond detected on device: {device.name}:{actual_interface_name} -> {bond_member_of}")
                     except Exception as e:
                         logger.warning(f"[DEPLOYMENT] Could not check bond for {device.name}:{actual_interface_name}: {e}")
@@ -6066,7 +6076,8 @@ class VLANDeploymentView(View):
                         interface_statuses.append("ERROR")
 
                     # Get bond info
-                    bond_member_of = bond_info_map.get(device.name, {}).get(actual_interface_name, None)
+                    bond_info = bond_info_map.get(device.name, {}).get(actual_interface_name, None)
+                    bond_member_of = bond_info['bond_name'] if bond_info else None
                     bond_status = f"bond:{bond_member_of}" if bond_member_of else "standalone"
 
                     # Get cable status
@@ -6201,7 +6212,8 @@ class VLANDeploymentView(View):
                 all_proposed_configs = []
 
                 for actual_interface_name in device_interfaces:
-                    bond_member_of = bond_info_map.get(device.name, {}).get(actual_interface_name, None)
+                    bond_info = bond_info_map.get(device.name, {}).get(actual_interface_name, None)
+                    bond_member_of = bond_info['bond_name'] if bond_info else None
                     target_interface = bond_member_of if bond_member_of else actual_interface_name
 
                     # Get current config
@@ -6258,7 +6270,8 @@ class VLANDeploymentView(View):
                 netbox_groups = {}  # Key: (bond_name or 'standalone', change_type), Value: list of (interface_name, changes)
 
                 for actual_interface_name in device_interfaces:
-                    bond_member_of = bond_info_map.get(device.name, {}).get(actual_interface_name, None)
+                    bond_info = bond_info_map.get(device.name, {}).get(actual_interface_name, None)
+                    bond_member_of = bond_info['bond_name'] if bond_info else None
 
                     # Get NetBox state and diff (normal mode - will clear tagged VLANs)
                     try:
@@ -6425,7 +6438,8 @@ class VLANDeploymentView(View):
                     if not (interface_result.get('success') and interface_result.get('committed')):
                         continue
 
-                    bond_member_of = bond_info_map.get(device.name, {}).get(actual_interface_name, None)
+                    bond_info = bond_info_map.get(device.name, {}).get(actual_interface_name, None)
+                    bond_member_of = bond_info['bond_name'] if bond_info else None
                     target_interface_for_checks = bond_member_of if bond_member_of else actual_interface_name
 
                     # Skip if we already checked this bond
@@ -6588,7 +6602,8 @@ class VLANDeploymentView(View):
                         if interface_result.get('success') and interface_result.get('committed'):
                             try:
                                 # Check if this interface is a bond member
-                                bond_member_of = bond_info_map.get(device.name, {}).get(actual_interface_name, None)
+                                bond_info = bond_info_map.get(device.name, {}).get(actual_interface_name, None)
+                                bond_member_of = bond_info['bond_name'] if bond_info else None
 
                                 # If interface is bond member, update bond instead of member interface
                                 if bond_member_of:
