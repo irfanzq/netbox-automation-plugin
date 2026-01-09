@@ -1539,11 +1539,19 @@ class NornirDeviceManager:
                     combined_logs.append("")
                     combined_logs.append("Interfaces being configured:")
                     for interface_name in interface_list:
-                        target_interface = interface_mapping[interface_name]
-                        if target_interface != interface_name:
-                            combined_logs.append(f"  - {interface_name} → {target_interface} (bond detected)")
+                        # Parse interface name if in "device:interface" format
+                        actual_interface_name = interface_name
+                        if ':' in interface_name:
+                            iface_device_name, actual_interface_name = interface_name.split(':', 1)
+                            # Skip if this interface doesn't belong to current device
+                            if iface_device_name != device_name:
+                                continue
+
+                        target_interface = interface_mapping[actual_interface_name]
+                        if target_interface != actual_interface_name:
+                            combined_logs.append(f"  - {actual_interface_name} → {target_interface} (bond detected)")
                         else:
-                            combined_logs.append(f"  - {interface_name}")
+                            combined_logs.append(f"  - {actual_interface_name}")
                     combined_logs.append("")
                     combined_logs.append(f"Combined configuration ({len(all_config_lines)} commands):")
                     for line in all_config_lines:

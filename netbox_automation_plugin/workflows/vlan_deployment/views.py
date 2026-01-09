@@ -3770,6 +3770,8 @@ class VLANDeploymentView(View):
                     device_logs.append(f"   Note: Actual device config may differ from NetBox state")
                 else:
                     device_logs.append(f"   [FAIL] Config retrieval failed")
+                    device_logs.append(f"   DEBUG: config_source = '{config_source}'")
+                    device_logs.append(f"   DEBUG: device_connected = {device_connected}")
                     if error_details:
                         device_logs.append(f"   Error: {error_details}")
                 device_logs.append("")
@@ -3783,6 +3785,9 @@ class VLANDeploymentView(View):
                 all_current_configs = []
                 all_proposed_configs = []
                 all_netbox_diffs = []
+
+                # DEBUG: Track config collection
+                debug_config_collection = []
 
                 # ISSUE #4 FIX: Group interfaces by validation status and VLAN
                 # First pass: collect all data and group interfaces
@@ -3823,6 +3828,27 @@ class VLANDeploymentView(View):
                     interface_details = interface_preview.get('interface_details', {})
 
                     # Collect configs for consolidation
+                    # DEBUG: Track what's happening with config collection
+                    current_config_status = f"Interface {interface_name}: current_device_config="
+                    if not current_device_config:
+                        current_config_status += "None/Empty"
+                    elif current_device_config == 'Unable to fetch':
+                        current_config_status += "'Unable to fetch'"
+                    elif current_device_config.startswith('ERROR:'):
+                        current_config_status += f"ERROR (first 50 chars: {current_device_config[:50]})"
+                    else:
+                        current_config_status += f"OK (length: {len(current_device_config)})"
+
+                    proposed_config_status = f", proposed_config="
+                    if not proposed_config:
+                        proposed_config_status += "None/Empty"
+                    elif proposed_config.strip():
+                        proposed_config_status += f"OK (length: {len(proposed_config)})"
+                    else:
+                        proposed_config_status += "Whitespace only"
+
+                    debug_config_collection.append(current_config_status + proposed_config_status)
+
                     if current_device_config and current_device_config != 'Unable to fetch':
                         all_current_configs.append(f"# Interface: {interface_name}")
                         all_current_configs.append(current_device_config)
@@ -4067,6 +4093,14 @@ class VLANDeploymentView(View):
                 device_logs.append("=" * 80)
                 device_logs.append("")
 
+                # DEBUG: Show config collection status
+                device_logs.append("# DEBUG: Config Collection Status")
+                device_logs.append(f"# all_current_configs: {len(all_current_configs)} items")
+                device_logs.append(f"# all_proposed_configs: {len(all_proposed_configs)} items")
+                for debug_line in debug_config_collection:
+                    device_logs.append(f"# {debug_line}")
+                device_logs.append("")
+
                 if all_current_configs and all_proposed_configs:
                     device_logs.append("Current Device Configuration:")
                     device_logs.append("-" * 80)
@@ -4181,11 +4215,10 @@ class VLANDeploymentView(View):
                     if target_interface not in interfaces_to_check:
                         interfaces_to_check[target_interface] = (interface_name, bond_member_of)
 
-                # 1. LLDP Neighbor Verification (using device-level LLDP data from Nornir)
-                device_logs.append("1. LLDP Neighbor Verification:")
-                lldp_ok_count = 0
-                lldp_mismatch_count = 0
-                lldp_missing_count = 0
+                # 1. LLDP Neighbor Data Collection (baseline for post-deployment verification)
+                device_logs.append("1. LLDP Neighbor Data Collection (Baseline):")
+                lldp_collected_count = 0
+                lldp_no_data_count = 0
 
                 for target_interface, (physical_interface, bond_name) in sorted(interfaces_to_check.items()):
                     interface_preview = device_results_map.get(physical_interface, {})
@@ -4193,36 +4226,18 @@ class VLANDeploymentView(View):
                     # Get actual LLDP neighbors from device (collected in Nornir batch deployment)
                     lldp_neighbors = interface_preview.get('lldp_neighbors', [])
 
-                    # Get expected neighbor from NetBox cable
-                    interface_details = interface_preview.get('interface_details', {})
-                    expected_device = interface_details.get('connected_device')
-
                     if lldp_neighbors:
-                        # We have LLDP data - verify it matches NetBox
+                        # We have LLDP data - just show what we collected
                         actual_hostnames = [n.get('hostname', '') for n in lldp_neighbors]
-                        if expected_device:
-                            # Check if expected device is in LLDP neighbors
-                            if any(expected_device.lower() in hostname.lower() for hostname in actual_hostnames):
-                                device_logs.append(f"   Interface {physical_interface} → {expected_device} [OK]")
-                                lldp_ok_count += 1
-                            else:
-                                device_logs.append(f"   Interface {physical_interface} → Expected: {expected_device}, Actual: {', '.join(actual_hostnames)} [MISMATCH]")
-                                lldp_mismatch_count += 1
-                        else:
-                            # No NetBox cable, but we have LLDP data
-                            device_logs.append(f"   Interface {physical_interface} → {', '.join(actual_hostnames)} [OK - No NetBox cable]")
-                            lldp_ok_count += 1
-                    elif expected_device:
-                        # NetBox says there should be a connection, but no LLDP data
-                        device_logs.append(f"   Interface {physical_interface} → Expected: {expected_device} [NO LLDP DATA]")
-                        lldp_missing_count += 1
+                        device_logs.append(f"   Interface {physical_interface} → {', '.join(actual_hostnames)}")
+                        lldp_collected_count += 1
                     else:
-                        # No LLDP data and no NetBox cable
-                        device_logs.append(f"   Interface {physical_interface} → No connection expected [OK]")
-                        lldp_ok_count += 1
+                        # No LLDP data collected
+                        device_logs.append(f"   Interface {physical_interface} → No LLDP data")
+                        lldp_no_data_count += 1
 
-                if lldp_ok_count == 0 and lldp_mismatch_count == 0 and lldp_missing_count == 0:
-                    device_logs.append("   No interfaces to verify")
+                if lldp_collected_count == 0 and lldp_no_data_count == 0:
+                    device_logs.append("   No interfaces to check")
                 device_logs.append("")
 
                 # 2. Interface State (collected in Nornir batch deployment baseline)
@@ -5327,6 +5342,8 @@ class VLANDeploymentView(View):
                     device_logs.append(f"   Note: Actual device config may differ from NetBox state")
                 else:
                     device_logs.append(f"   [FAIL] Config retrieval failed")
+                    device_logs.append(f"   DEBUG: config_source = '{config_source}'")
+                    device_logs.append(f"   DEBUG: device_connected = {device_connected}")
                     if error_details:
                         device_logs.append(f"   Error: {error_details}")
                 device_logs.append("")
@@ -5694,11 +5711,10 @@ class VLANDeploymentView(View):
                 device_logs.append("=" * 80)
                 device_logs.append("")
 
-                # 1. LLDP Neighbor Verification (using device-level LLDP data from Nornir)
-                device_logs.append("1. LLDP Neighbor Verification:")
-                lldp_ok_count = 0
-                lldp_mismatch_count = 0
-                lldp_missing_count = 0
+                # 1. LLDP Neighbor Data Collection (baseline for post-deployment verification)
+                device_logs.append("1. LLDP Neighbor Data Collection (Baseline):")
+                lldp_collected_count = 0
+                lldp_no_data_count = 0
 
                 for actual_interface_name, interface_preview in sorted(device_results.items()):
                     if 'error' in interface_preview:
@@ -5707,36 +5723,18 @@ class VLANDeploymentView(View):
                     # Get actual LLDP neighbors from device (collected in Nornir batch deployment)
                     lldp_neighbors = interface_preview.get('lldp_neighbors', [])
 
-                    # Get expected neighbor from NetBox cable
-                    interface_details = interface_preview.get('interface_details', {})
-                    expected_device = interface_details.get('connected_device')
-
                     if lldp_neighbors:
-                        # We have LLDP data - verify it matches NetBox
+                        # We have LLDP data - just show what we collected
                         actual_hostnames = [n.get('hostname', '') for n in lldp_neighbors]
-                        if expected_device:
-                            # Check if expected device is in LLDP neighbors
-                            if any(expected_device.lower() in hostname.lower() for hostname in actual_hostnames):
-                                device_logs.append(f"   Interface {actual_interface_name} → {expected_device} [OK]")
-                                lldp_ok_count += 1
-                            else:
-                                device_logs.append(f"   Interface {actual_interface_name} → Expected: {expected_device}, Actual: {', '.join(actual_hostnames)} [MISMATCH]")
-                                lldp_mismatch_count += 1
-                        else:
-                            # No NetBox cable, but we have LLDP data
-                            device_logs.append(f"   Interface {actual_interface_name} → {', '.join(actual_hostnames)} [OK - No NetBox cable]")
-                            lldp_ok_count += 1
-                    elif expected_device:
-                        # NetBox says there should be a connection, but no LLDP data
-                        device_logs.append(f"   Interface {actual_interface_name} → Expected: {expected_device} [NO LLDP DATA]")
-                        lldp_missing_count += 1
+                        device_logs.append(f"   Interface {actual_interface_name} → {', '.join(actual_hostnames)}")
+                        lldp_collected_count += 1
                     else:
-                        # No LLDP data and no NetBox cable
-                        device_logs.append(f"   Interface {actual_interface_name} → No connection expected [OK]")
-                        lldp_ok_count += 1
+                        # No LLDP data collected
+                        device_logs.append(f"   Interface {actual_interface_name} → No LLDP data")
+                        lldp_no_data_count += 1
 
-                if lldp_ok_count == 0 and lldp_mismatch_count == 0 and lldp_missing_count == 0:
-                    device_logs.append("   No interfaces to verify")
+                if lldp_collected_count == 0 and lldp_no_data_count == 0:
+                    device_logs.append("   No interfaces to check")
                 device_logs.append("")
 
                 # 2. Interface State
