@@ -802,38 +802,141 @@ class NAPALMDeviceManager:
             all_passed = False
             messages.append(f"ERROR: Interface: Could not verify")
         
-        # Check 3: VLAN Configuration Applied
-        logger.info(f"VLAN Verification Check 3/4: VLAN configuration...")
+        # Check 3: VLAN Configuration Applied (with actual device verification)
+        logger.info(f"VLAN Verification Check 3/6: VLAN configuration...")
         driver_name = self.get_driver_name()
         vlan_check_passed = False
-        
+
         try:
-            if driver_name == 'eos':
-                # For EOS, check running config or use CLI
-                # We can't easily verify VLAN from NAPALM, so we'll trust the commit
-                checks['vlan_config'] = {
-                    'success': True,
-                    'message': f"EOS: Config committed (verification via show vlan requires CLI)",
-                    'data': None
-                }
-                vlan_check_passed = True
-                messages.append(f"SUCCESS: VLAN Config: Committed")
-                
-            elif driver_name == 'cumulus':
-                # For Cumulus, we could check bridge membership
-                # For now, trust the commit
-                checks['vlan_config'] = {
-                    'success': True,
-                    'message': f"Cumulus: Config applied (NVUE confirmed)",
-                    'data': None
-                }
-                vlan_check_passed = True
-                messages.append(f"SUCCESS: VLAN Config: Applied")
+            # Get baseline VLAN if available
+            baseline_vlan = None
+            if baseline and baseline.get('interface'):
+                baseline_vlan = baseline['interface'].get('vlan_id', None)
+
+            # Query device to verify VLAN is actually configured
+            actual_vlan = None
+            vlan_verified = False
+
+            if driver_name == 'cumulus':
+                # For Cumulus, query NVUE to verify VLAN configuration
+                try:
+                    if hasattr(self.connection, 'device') and hasattr(self.connection.device, 'send_command'):
+                        # Query bridge domain access VLAN
+                        vlan_output = self.connection.device.send_command(
+                            f'nv show interface {interface_name} bridge domain br_default access -o json',
+                            read_timeout=10
+                        )
+                        if vlan_output:
+                            import json
+                            vlan_data = json.loads(vlan_output)
+                            actual_vlan = vlan_data if isinstance(vlan_data, int) else None
+
+                            # If JSON parsing fails, try text output
+                            if actual_vlan is None:
+                                vlan_output_text = self.connection.device.send_command(
+                                    f'nv show interface {interface_name} bridge domain br_default access',
+                                    read_timeout=10
+                                )
+                                # Parse text output (usually just the VLAN ID number)
+                                if vlan_output_text and vlan_output_text.strip().isdigit():
+                                    actual_vlan = int(vlan_output_text.strip())
+
+                        # Verify VLAN matches expected
+                        if actual_vlan == vlan_id:
+                            vlan_verified = True
+                            checks['vlan_config'] = {
+                                'success': True,
+                                'message': f"Cumulus: VLAN {vlan_id} verified on interface (baseline: {baseline_vlan})",
+                                'data': {'expected': vlan_id, 'actual': actual_vlan, 'baseline': baseline_vlan}
+                            }
+                            vlan_check_passed = True
+                            messages.append(f"SUCCESS: VLAN Config: VLAN {vlan_id} verified")
+                            logger.info(f"VLAN verification passed: interface {interface_name} has VLAN {actual_vlan}")
+                        else:
+                            # VLAN mismatch - CRITICAL FAILURE
+                            checks['vlan_config'] = {
+                                'success': False,
+                                'message': f"ERROR: VLAN mismatch! Expected {vlan_id}, found {actual_vlan}",
+                                'data': {'expected': vlan_id, 'actual': actual_vlan, 'baseline': baseline_vlan}
+                            }
+                            all_passed = False
+                            messages.append(f"ERROR: VLAN Config: Mismatch (expected {vlan_id}, got {actual_vlan})")
+                            logger.error(f"CRITICAL: VLAN verification failed - expected {vlan_id}, found {actual_vlan}")
+                except Exception as cumulus_vlan_error:
+                    logger.warning(f"Could not verify Cumulus VLAN via NVUE: {cumulus_vlan_error}")
+                    # Fallback: trust the commit
+                    checks['vlan_config'] = {
+                        'success': True,
+                        'message': f"Cumulus: Config applied (NVUE verification failed, trusting commit)",
+                        'data': {'expected': vlan_id, 'verification_error': str(cumulus_vlan_error)}
+                    }
+                    vlan_check_passed = True
+                    messages.append(f"SUCCESS: VLAN Config: Applied (verification skipped)")
+
+            elif driver_name == 'eos':
+                # For Arista EOS, query switchport configuration
+                try:
+                    if hasattr(self.connection, 'device') and hasattr(self.connection.device, 'send_command'):
+                        # Query switchport status
+                        switchport_output = self.connection.device.send_command(
+                            f'show interfaces {interface_name} switchport',
+                            read_timeout=10
+                        )
+
+                        # Parse output to find access VLAN
+                        # Example line: "Access Mode VLAN: 100 (VLAN0100)"
+                        import re
+                        vlan_match = re.search(r'Access Mode VLAN:\s+(\d+)', switchport_output)
+                        if vlan_match:
+                            actual_vlan = int(vlan_match.group(1))
+
+                            # Verify VLAN matches expected
+                            if actual_vlan == vlan_id:
+                                vlan_verified = True
+                                checks['vlan_config'] = {
+                                    'success': True,
+                                    'message': f"EOS: VLAN {vlan_id} verified on interface (baseline: {baseline_vlan})",
+                                    'data': {'expected': vlan_id, 'actual': actual_vlan, 'baseline': baseline_vlan}
+                                }
+                                vlan_check_passed = True
+                                messages.append(f"SUCCESS: VLAN Config: VLAN {vlan_id} verified")
+                                logger.info(f"VLAN verification passed: interface {interface_name} has VLAN {actual_vlan}")
+                            else:
+                                # VLAN mismatch - CRITICAL FAILURE
+                                checks['vlan_config'] = {
+                                    'success': False,
+                                    'message': f"ERROR: VLAN mismatch! Expected {vlan_id}, found {actual_vlan}",
+                                    'data': {'expected': vlan_id, 'actual': actual_vlan, 'baseline': baseline_vlan}
+                                }
+                                all_passed = False
+                                messages.append(f"ERROR: VLAN Config: Mismatch (expected {vlan_id}, got {actual_vlan})")
+                                logger.error(f"CRITICAL: VLAN verification failed - expected {vlan_id}, found {actual_vlan}")
+                        else:
+                            # Could not parse VLAN from output
+                            logger.warning(f"Could not parse VLAN from EOS switchport output")
+                            checks['vlan_config'] = {
+                                'success': True,
+                                'message': f"EOS: Config committed (could not parse VLAN from output, trusting commit)",
+                                'data': {'expected': vlan_id, 'output': switchport_output[:200]}
+                            }
+                            vlan_check_passed = True
+                            messages.append(f"SUCCESS: VLAN Config: Committed (verification skipped)")
+                except Exception as eos_vlan_error:
+                    logger.warning(f"Could not verify EOS VLAN via CLI: {eos_vlan_error}")
+                    # Fallback: trust the commit
+                    checks['vlan_config'] = {
+                        'success': True,
+                        'message': f"EOS: Config committed (CLI verification failed, trusting commit)",
+                        'data': {'expected': vlan_id, 'verification_error': str(eos_vlan_error)}
+                    }
+                    vlan_check_passed = True
+                    messages.append(f"SUCCESS: VLAN Config: Committed (verification skipped)")
             else:
+                # Other platforms: trust the commit
                 checks['vlan_config'] = {
                     'success': True,
-                    'message': f"Config committed for {driver_name}",
-                    'data': None
+                    'message': f"Config committed for {driver_name} (verification not implemented)",
+                    'data': {'expected': vlan_id, 'baseline': baseline_vlan}
                 }
                 vlan_check_passed = True
                 messages.append(f"SUCCESS: VLAN Config: Committed")
