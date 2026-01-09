@@ -3691,9 +3691,19 @@ class VLANDeploymentView(View):
                 device_logs.append("# DEBUG: Bond Detection Info")
                 device_logs.append(f"# Device {device.name} in bonds_to_create_in_netbox: {device.name in bonds_to_create_in_netbox}")
                 if device.name in bond_info_map:
-                    device_logs.append(f"# bond_info_map for {device.name}: {bond_info_map[device.name]}")
+                    device_logs.append(f"# bond_info_map for {device.name}:")
+                    for iface_name, bond_data in bond_info_map[device.name].items():
+                        device_logs.append(f"#   {iface_name} -> {bond_data['bond_name']} (source: {bond_data['source']})")
+                else:
+                    device_logs.append(f"# bond_info_map: No bonds found for {device.name}")
                 if device.name in bonds_to_create_in_netbox:
                     device_logs.append(f"# bonds_to_create_in_netbox for {device.name}: {bonds_to_create_in_netbox[device.name]}")
+                else:
+                    device_logs.append(f"# bonds_to_create_in_netbox: No bonds to create for {device.name}")
+
+                # Show which interfaces were checked
+                all_device_interfaces = list(tagged_interfaces_by_device.get(device.name, [])) + list(untagged_interfaces_by_device.get(device.name, []))
+                device_logs.append(f"# Interfaces checked: {[iface.name for iface in all_device_interfaces]}")
                 device_logs.append("")
 
                 # Check if this device has bonds to create in NetBox
