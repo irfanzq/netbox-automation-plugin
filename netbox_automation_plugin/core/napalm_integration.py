@@ -791,7 +791,7 @@ class NAPALMDeviceManager:
                         'message': f"Interface not found (didn't exist before either)",
                         'data': None
                     }
-                    messages.append(f"⚠️ Interface: Not found (expected)")
+                    messages.append(f"WARNING: Interface: Not found (expected)")
         except Exception as e:
             checks['interface_status'] = {
                 'success': False,
@@ -845,7 +845,7 @@ class NAPALMDeviceManager:
             }
             logger.warning(f"Could not verify VLAN configuration: {e}")
             all_passed = False
-            messages.append(f"⚠️ VLAN Config: Could not verify")
+            messages.append(f"WARNING: VLAN Config: Could not verify")
         
         # Check 4: LLDP Neighbors (device-level check with interface exclusion)
         logger.info(f"VLAN Verification Check 4/5: LLDP neighbors (device-level)...")
@@ -918,7 +918,7 @@ class NAPALMDeviceManager:
                     'message': f"Could not verify LLDP (non-critical)",
                     'data': None
                 }
-                messages.append(f"⚠️ LLDP: Could not verify")
+                messages.append(f"WARNING: LLDP: Could not verify")
         else:
             # No LLDP baseline, skip check
             checks['lldp_neighbors'] = {
@@ -1042,7 +1042,7 @@ class NAPALMDeviceManager:
                     if in_pkts_delta > 0 or out_pkts_delta > 0:
                         checks['traffic_flow'] = {
                             'success': True,  # Always success (informational only)
-                            'message': f"ℹ️ Traffic detected: IN +{in_pkts_delta} pkts (+{in_bytes_delta} bytes), OUT +{out_pkts_delta} pkts (+{out_bytes_delta} bytes)",
+                            'message': f"INFO: Traffic detected: IN +{in_pkts_delta} pkts (+{in_bytes_delta} bytes), OUT +{out_pkts_delta} pkts (+{out_bytes_delta} bytes)",
                             'data': {
                                 'in_pkts_delta': in_pkts_delta,
                                 'out_pkts_delta': out_pkts_delta,
@@ -1050,12 +1050,12 @@ class NAPALMDeviceManager:
                                 'out_bytes_delta': out_bytes_delta
                             }
                         }
-                        messages.append(f"ℹ️ Traffic: Active (IN +{in_pkts_delta} pkts, OUT +{out_pkts_delta} pkts)")
+                        messages.append(f"INFO: Traffic: Active (IN +{in_pkts_delta} pkts, OUT +{out_pkts_delta} pkts)")
                         logger.info(f"Traffic flow detected on {interface_name}: IN +{in_pkts_delta} pkts, OUT +{out_pkts_delta} pkts")
                     else:
                         checks['traffic_flow'] = {
                             'success': True,  # Always success (informational only)
-                            'message': f"ℹ️ No traffic detected (interface may be down or no cable connected)",
+                            'message': f"INFO: No traffic detected (interface may be down or no cable connected)",
                             'data': {
                                 'in_pkts_delta': 0,
                                 'out_pkts_delta': 0,
@@ -1063,33 +1063,33 @@ class NAPALMDeviceManager:
                                 'out_bytes_delta': 0
                             }
                         }
-                        messages.append(f"ℹ️ Traffic: None detected (interface may be down)")
+                        messages.append(f"INFO: Traffic: None detected (interface may be down)")
                         logger.info(f"No traffic flow detected on {interface_name} (this is informational only)")
                 else:
                     # Interface not found
                     checks['traffic_flow'] = {
                         'success': True,  # Always success (informational only)
-                        'message': f"ℹ️ Traffic check skipped (interface not found)",
+                        'message': f"INFO: Traffic check skipped (interface not found)",
                         'data': None
                     }
-                    messages.append(f"ℹ️ Traffic: Check skipped")
+                    messages.append(f"INFO: Traffic: Check skipped")
             else:
                 # No baseline, skip traffic check
                 checks['traffic_flow'] = {
                     'success': True,  # Always success (informational only)
-                    'message': f"ℹ️ Traffic check skipped (no baseline)",
+                    'message': f"INFO: Traffic check skipped (no baseline)",
                     'data': None
                 }
-                messages.append(f"ℹ️ Traffic: Check skipped (no baseline)")
+                messages.append(f"INFO: Traffic: Check skipped (no baseline)")
         except Exception as e:
             # Traffic check failed - but this is informational only, don't fail deployment
             checks['traffic_flow'] = {
                 'success': True,  # Always success (informational only)
-                'message': f"ℹ️ Traffic check failed: {str(e)} (non-critical)",
+                'message': f"INFO: Traffic check failed: {str(e)} (non-critical)",
                 'data': None
             }
             logger.debug(f"Traffic flow check failed (non-critical): {e}")
-            messages.append(f"ℹ️ Traffic: Could not verify (non-critical)")
+            messages.append(f"INFO: Traffic: Could not verify (non-critical)")
 
         # Summary
         summary_message = ' | '.join(messages)
