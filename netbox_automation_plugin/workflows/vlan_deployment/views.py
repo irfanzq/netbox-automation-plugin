@@ -3230,10 +3230,12 @@ class VLANDeploymentView(View):
             # This map will contain bonds from BOTH NetBox AND device config
             bond_info_map = {}
             bonds_to_create_in_netbox = {}  # Track bonds that exist on device but not in NetBox
+            bonds_to_create_on_device = {}  # Track bonds that exist in NetBox but not on device (Case 2)
 
             for device in devices:
                 device_bond_map = {}
                 device_bonds_to_create = {}
+                device_bonds_to_create_on_device = {}  # Case 2: bonds in NetBox but not on device
 
                 # Step 1: Check all interfaces for bond membership from NetBox
                 all_device_interfaces = list(tagged_interfaces_by_device.get(device.name, [])) + list(untagged_interfaces_by_device.get(device.name, []))
@@ -3310,13 +3312,62 @@ class VLANDeploymentView(View):
                     except Exception as e:
                         logger.error(f"[SYNC DRY RUN] Error checking device config for {device.name}:{interface.name}: {e}")
 
+                # Step 3: Check for bonds in NetBox but NOT on device (Case 2)
+                # Track bonds that need to be created on the device
+                device_bonds_to_create_on_device = {}  # {bond_name: {'members': [], 'bond_interface': Interface}}
+                logger.error(f"[SYNC DRY RUN] Step 3: Checking for bonds in NetBox but not on device")
+
+                # Build a map of NetBox bonds and their members
+                netbox_bonds = {}  # {bond_name: [member_interfaces]}
+                for interface in all_device_interfaces:
+                    if hasattr(interface, 'lag') and interface.lag:
+                        bond_name = interface.lag.name
+                        if bond_name not in netbox_bonds:
+                            netbox_bonds[bond_name] = []
+                        netbox_bonds[bond_name].append(interface.name)
+
+                # For each NetBox bond, check if it exists on the device
+                for bond_name, member_names in netbox_bonds.items():
+                    logger.error(f"[SYNC DRY RUN] Checking NetBox bond {bond_name} with members {member_names}")
+
+                    # Check if ANY member of this bond has the bond configured on the device
+                    bond_exists_on_device = False
+                    for member_name in member_names:
+                        try:
+                            device_config_result = self._get_current_device_config(device, member_name, platform)
+                            device_bond_name = device_config_result.get('bond_member_of', None)
+                            if device_bond_name == bond_name:
+                                bond_exists_on_device = True
+                                logger.error(f"[SYNC DRY RUN] Bond {bond_name} exists on device (member {member_name} has bond_member_of={device_bond_name})")
+                                break
+                        except Exception as e:
+                            logger.error(f"[SYNC DRY RUN] Error checking device config for {member_name}: {e}")
+
+                    if not bond_exists_on_device:
+                        # Bond exists in NetBox but NOT on device - need to create it on device
+                        logger.error(f"[SYNC DRY RUN] Bond {bond_name} exists in NetBox but NOT on device - will create on device")
+
+                        # Get the bond interface object from NetBox
+                        from dcim.models import Interface as InterfaceModel
+                        try:
+                            bond_interface = InterfaceModel.objects.get(device=device, name=bond_name)
+                            device_bonds_to_create_on_device[bond_name] = {
+                                'members': member_names,
+                                'bond_interface': bond_interface
+                            }
+                        except InterfaceModel.DoesNotExist:
+                            logger.error(f"[SYNC DRY RUN] Bond interface {bond_name} not found in NetBox (should not happen)")
+
                 if device_bond_map:
                     bond_info_map[device.name] = device_bond_map
                 if device_bonds_to_create:
                     bonds_to_create_in_netbox[device.name] = device_bonds_to_create
+                if device_bonds_to_create_on_device:
+                    bonds_to_create_on_device[device.name] = device_bonds_to_create_on_device
 
             logger.info(f"[SYNC DRY RUN] Built bond_info_map: {bond_info_map}")
             logger.info(f"[SYNC DRY RUN] Bonds to create in NetBox: {bonds_to_create_in_netbox}")
+            logger.info(f"[SYNC DRY RUN] Bonds to create on device: {bonds_to_create_on_device}")
 
             # Add tagged interfaces
             for device in devices:
@@ -3709,6 +3760,7 @@ class VLANDeploymentView(View):
                 # DEBUG: Show bond detection info
                 device_logs.append("# DEBUG: Bond Detection Info")
                 device_logs.append(f"# Device {device.name} in bonds_to_create_in_netbox: {device.name in bonds_to_create_in_netbox}")
+                device_logs.append(f"# Device {device.name} in bonds_to_create_on_device: {device.name in bonds_to_create_on_device}")
                 if device.name in bond_info_map:
                     device_logs.append(f"# bond_info_map for {device.name}:")
                     for iface_name, bond_data in bond_info_map[device.name].items():
@@ -3719,6 +3771,12 @@ class VLANDeploymentView(View):
                     device_logs.append(f"# bonds_to_create_in_netbox for {device.name}: {bonds_to_create_in_netbox[device.name]}")
                 else:
                     device_logs.append(f"# bonds_to_create_in_netbox: No bonds to create for {device.name}")
+                if device.name in bonds_to_create_on_device:
+                    device_logs.append(f"# bonds_to_create_on_device for {device.name}:")
+                    for bond_name, bond_data in bonds_to_create_on_device[device.name].items():
+                        device_logs.append(f"#   {bond_name}: members={bond_data['members']}")
+                else:
+                    device_logs.append(f"# bonds_to_create_on_device: No bonds to create on device for {device.name}")
 
                 # Show which interfaces were checked
                 all_device_interfaces = list(tagged_interfaces_by_device.get(device.name, [])) + list(untagged_interfaces_by_device.get(device.name, []))
@@ -3815,6 +3873,43 @@ class VLANDeploymentView(View):
                     device_logs.append("")
                     device_logs.append("Proposed Device Configuration:")
                     device_logs.append("-" * 80)
+
+                    # BOND CREATION COMMANDS (Case 2: bonds in NetBox but not on device)
+                    if device.name in bonds_to_create_on_device:
+                        device_logs.append("# BOND CREATION - Bonds exist in NetBox but NOT on device")
+                        device_logs.append("#" + "=" * 78)
+                        device_logs.append("")
+
+                        for bond_name, bond_data in bonds_to_create_on_device[device.name].items():
+                            members = bond_data['members']
+                            bond_interface = bond_data['bond_interface']
+
+                            device_logs.append(f"# Creating bond {bond_name} on device (from NetBox)")
+                            device_logs.append(f"# Members: {', '.join(members)}")
+                            device_logs.append(f"nv set interface {bond_name} type bond")
+
+                            # Add all members
+                            for member in members:
+                                device_logs.append(f"nv set interface {bond_name} bond member {member}")
+
+                            # LACP settings
+                            device_logs.append(f"nv set interface {bond_name} bond lacp-rate fast")
+                            device_logs.append(f"nv set interface {bond_name} bond lacp-bypass on")
+
+                            # Add bond to bridge domain
+                            device_logs.append(f"nv set interface {bond_name} bridge domain br_default")
+
+                            # If bond has VLANs in NetBox, they will be applied in the VLAN commands below
+                            if bond_interface.untagged_vlan:
+                                device_logs.append(f"# Bond will have untagged VLAN {bond_interface.untagged_vlan.vid} (configured below)")
+                            if bond_interface.tagged_vlans.exists():
+                                tagged_vids = list(bond_interface.tagged_vlans.values_list('vid', flat=True))
+                                device_logs.append(f"# Bond will have tagged VLANs {tagged_vids} (configured below)")
+
+                            device_logs.append("")
+
+                        device_logs.append("#" + "=" * 78)
+                        device_logs.append("")
 
                     # ISSUE #2 FIX: Consolidate bridge VLAN commands from all interfaces
                     if platform == 'cumulus':
@@ -4011,10 +4106,12 @@ class VLANDeploymentView(View):
         # This map will contain bonds from BOTH NetBox AND device config
         bond_info_map = {}
         bonds_to_create_in_netbox = {}  # Track bonds that exist on device but not in NetBox
+        bonds_to_create_on_device = {}  # Track bonds that exist in NetBox but not on device (Case 2)
 
         for device in devices:
             device_bond_map = {}
             device_bonds_to_create = {}
+            device_bonds_to_create_on_device = {}  # Case 2: bonds in NetBox but not on device
 
             # Step 1: Check all interfaces for bond membership from NetBox
             all_device_interfaces = list(tagged_interfaces_by_device.get(device.name, [])) + list(untagged_interfaces_by_device.get(device.name, []))
@@ -4064,13 +4161,112 @@ class VLANDeploymentView(View):
 
                     logger.info(f"[SYNC DEPLOYMENT] Detected bond {bond_name} on device {device.name} (not in NetBox) - member: {interface.name}, VLANs: {vlans_info}")
 
+            # Step 3: Check for bonds in NetBox but NOT on device (Case 2)
+            netbox_bonds = {}  # {bond_name: [member_interfaces]}
+            for interface in all_device_interfaces:
+                if hasattr(interface, 'lag') and interface.lag:
+                    bond_name = interface.lag.name
+                    if bond_name not in netbox_bonds:
+                        netbox_bonds[bond_name] = []
+                    netbox_bonds[bond_name].append(interface.name)
+
+            # For each NetBox bond, check if it exists on the device
+            for bond_name, member_names in netbox_bonds.items():
+                bond_exists_on_device = False
+                for member_name in member_names:
+                    try:
+                        device_config_result = self._get_current_device_config(device, member_name, platform)
+                        device_bond_name = device_config_result.get('bond_member_of', None)
+                        if device_bond_name == bond_name:
+                            bond_exists_on_device = True
+                            break
+                    except Exception as e:
+                        logger.debug(f"Error checking device config for {member_name}: {e}")
+
+                if not bond_exists_on_device:
+                    # Bond exists in NetBox but NOT on device - need to create it on device
+                    logger.info(f"[SYNC DEPLOYMENT] Bond {bond_name} exists in NetBox but NOT on device - will create on device")
+
+                    from dcim.models import Interface as InterfaceModel
+                    try:
+                        bond_interface = InterfaceModel.objects.get(device=device, name=bond_name)
+                        device_bonds_to_create_on_device[bond_name] = {
+                            'members': member_names,
+                            'bond_interface': bond_interface
+                        }
+                    except InterfaceModel.DoesNotExist:
+                        logger.error(f"Bond interface {bond_name} not found in NetBox")
+
             if device_bond_map:
                 bond_info_map[device.name] = device_bond_map
             if device_bonds_to_create:
                 bonds_to_create_in_netbox[device.name] = device_bonds_to_create
+            if device_bonds_to_create_on_device:
+                bonds_to_create_on_device[device.name] = device_bonds_to_create_on_device
 
         logger.info(f"[SYNC DEPLOYMENT] Built bond_info_map: {bond_info_map}")
         logger.info(f"[SYNC DEPLOYMENT] Bonds to create in NetBox: {bonds_to_create_in_netbox}")
+        logger.info(f"[SYNC DEPLOYMENT] Bonds to create on device: {bonds_to_create_on_device}")
+
+        # Create bonds on device FIRST (Case 2: bonds in NetBox but not on device)
+        # This must be done BEFORE VLAN deployment so the bond interfaces exist
+        for device in devices:
+            if device.name in bonds_to_create_on_device:
+                logger.info(f"[SYNC DEPLOYMENT] Creating bonds on device {device.name} (bonds exist in NetBox but not on device)")
+
+                from netbox_automation_plugin.core.napalm_integration import NAPALMDeviceManager
+                napalm_manager = NAPALMDeviceManager(device)
+
+                if napalm_manager.connect():
+                    try:
+                        connection = napalm_manager.connection
+
+                        for bond_name, bond_data in bonds_to_create_on_device[device.name].items():
+                            members = bond_data['members']
+                            bond_interface = bond_data['bond_interface']
+
+                            logger.info(f"[SYNC DEPLOYMENT] Creating bond {bond_name} on device {device.name} with members {members}")
+
+                            # Generate bond creation commands
+                            bond_commands = []
+                            bond_commands.append(f"nv set interface {bond_name} type bond")
+
+                            # Add all members
+                            for member in members:
+                                bond_commands.append(f"nv set interface {bond_name} bond member {member}")
+
+                            # LACP settings
+                            bond_commands.append(f"nv set interface {bond_name} bond lacp-rate fast")
+                            bond_commands.append(f"nv set interface {bond_name} bond lacp-bypass on")
+
+                            # Add bond to bridge domain
+                            bond_commands.append(f"nv set interface {bond_name} bridge domain br_default")
+
+                            # Apply bond creation commands
+                            logger.info(f"[SYNC DEPLOYMENT] Applying bond creation commands for {bond_name}: {bond_commands}")
+
+                            if hasattr(connection, 'cli'):
+                                # Execute commands one by one
+                                for cmd in bond_commands:
+                                    try:
+                                        connection.cli([cmd])
+                                        logger.info(f"[SYNC DEPLOYMENT] Executed: {cmd}")
+                                    except Exception as e:
+                                        logger.error(f"[SYNC DEPLOYMENT] Failed to execute '{cmd}': {e}")
+
+                                # Apply configuration
+                                try:
+                                    connection.cli(['nv config apply'])
+                                    logger.info(f"[SYNC DEPLOYMENT] Bond {bond_name} created on device {device.name}")
+                                except Exception as e:
+                                    logger.error(f"[SYNC DEPLOYMENT] Failed to apply bond config for {bond_name}: {e}")
+
+                    except Exception as e:
+                        logger.error(f"[SYNC DEPLOYMENT] Error creating bonds on device {device.name}: {e}")
+                    finally:
+                        napalm_manager.disconnect()
+                else:
+                    logger.error(f"[SYNC DEPLOYMENT] Failed to connect to device {device.name} for bond creation")
 
         # Initialize Nornir and deploy using batch deployment
         nornir_manager = NornirDeviceManager(devices=devices)
@@ -4083,6 +4279,7 @@ class VLANDeploymentView(View):
             platform=platform,
             timeout=90,
             bond_info_map=bond_info_map if bond_info_map else None,
+            bonds_to_create_on_device=bonds_to_create_on_device if bonds_to_create_on_device else None,
             dry_run=False
         )
 

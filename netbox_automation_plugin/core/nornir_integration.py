@@ -1125,7 +1125,7 @@ class NornirDeviceManager:
         
         return results
 
-    def deploy_vlan(self, interface_list: List[str], vlan_id: int, platform: str, timeout: int = 90, bond_info_map: Optional[Dict[str, Dict[str, str]]] = None, dry_run: bool = False, preview_callback: Optional[Callable] = None) -> Dict[str, Any]:
+    def deploy_vlan(self, interface_list: List[str], vlan_id: int, platform: str, timeout: int = 90, bond_info_map: Optional[Dict[str, Dict[str, str]]] = None, bonds_to_create_on_device: Optional[Dict[str, Dict[str, Any]]] = None, dry_run: bool = False, preview_callback: Optional[Callable] = None) -> Dict[str, Any]:
         """
         Deploy VLAN configuration to multiple interfaces across all devices in parallel.
 
@@ -1145,6 +1145,8 @@ class NornirDeviceManager:
             timeout: Rollback timeout in seconds (default: 90)
             bond_info_map: Optional dict mapping device_name -> {interface_name: bond_name}
                           If provided, uses bond_name instead of interface_name for config generation
+            bonds_to_create_on_device: Optional dict mapping device_name -> {bond_name: {'members': [...], 'bond_interface': obj}}
+                                      Bonds that exist in NetBox but not on device - will be created on device
             dry_run: If True, preview changes without deploying (default: False)
             preview_callback: Optional callback function for dry run preview generation
                             Signature: callback(device, interface_list_for_device, platform, vlan_id) -> dict
@@ -1317,6 +1319,37 @@ class NornirDeviceManager:
                 all_config_lines = []
                 interface_mapping = {}  # {original_interface: target_interface} for NetBox updates
 
+                # STEP 1: Add bond creation commands FIRST (Case 2: bonds in NetBox but not on device)
+                if bonds_to_create_on_device and device_name in bonds_to_create_on_device:
+                    logger.info(f"Device {device_name}: Creating {len(bonds_to_create_on_device[device_name])} bond(s) on device (from NetBox)")
+                    all_config_lines.append("# BOND CREATION - Bonds exist in NetBox but NOT on device")
+                    all_config_lines.append("#" + "=" * 78)
+
+                    for bond_name, bond_data in bonds_to_create_on_device[device_name].items():
+                        members = bond_data['members']
+                        bond_interface = bond_data['bond_interface']
+
+                        all_config_lines.append(f"# Creating bond {bond_name} on device (from NetBox)")
+                        all_config_lines.append(f"# Members: {', '.join(members)}")
+                        all_config_lines.append(f"nv set interface {bond_name} type bond")
+
+                        # Add all members
+                        for member in members:
+                            all_config_lines.append(f"nv set interface {bond_name} bond member {member}")
+
+                        # LACP settings
+                        all_config_lines.append(f"nv set interface {bond_name} bond lacp-rate fast")
+                        all_config_lines.append(f"nv set interface {bond_name} bond lacp-bypass on")
+
+                        # Add bond to bridge domain
+                        all_config_lines.append(f"nv set interface {bond_name} bridge domain br_default")
+                        all_config_lines.append("")
+
+                    all_config_lines.append("#" + "=" * 78)
+                    all_config_lines.append("")
+                    logger.info(f"Device {device_name}: Added bond creation commands for {len(bonds_to_create_on_device[device_name])} bond(s)")
+
+                # STEP 2: Add VLAN configuration commands
                 for interface_name in interface_list:
                     # In sync mode, interface_name might be in "device:interface" format
                     # Parse it and skip if it doesn't belong to this device
