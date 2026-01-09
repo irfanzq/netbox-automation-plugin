@@ -4754,6 +4754,14 @@ class VLANDeploymentView(View):
                     device_logs.append(f"    [ERROR] Deployment failed")
                     if iface_data['error']:
                         device_logs.append(f"    Error: {iface_data['error']}")
+                    # Show traceback if available (for debugging)
+                    interface_result = device_results.get(first_iface, {})
+                    if 'traceback' in interface_result:
+                        device_logs.append(f"    ")
+                        device_logs.append(f"    Full Traceback:")
+                        for line in interface_result['traceback'].split('\n'):
+                            if line.strip():
+                                device_logs.append(f"      {line}")
                 elif status == "PASS":
                     device_logs.append(f"    [OK] Successfully deployed and committed")
                 elif status == "WARN":
@@ -6148,6 +6156,14 @@ class VLANDeploymentView(View):
                         device_logs.append(f"    [ERROR] Deployment failed")
                         if iface_data['error']:
                             device_logs.append(f"    Error: {iface_data['error']}")
+                        # Show traceback if available (for debugging)
+                        interface_result = device_results.get(first_iface, {})
+                        if 'traceback' in interface_result:
+                            device_logs.append(f"    ")
+                            device_logs.append(f"    Full Traceback:")
+                            for line in interface_result['traceback'].split('\n'):
+                                if line.strip():
+                                    device_logs.append(f"      {line}")
                     device_logs.append("")
 
                 # Build consolidated device config section (all interfaces together)
