@@ -484,22 +484,218 @@ class NAPALMDeviceManager:
     
     def get_lldp_neighbors(self):
         """
-        Get LLDP neighbors using NAPALM
+        Get LLDP neighbors using direct device commands (not NAPALM).
+
+        This method queries LLDP information directly from the device using platform-specific
+        commands to get the most accurate and complete LLDP data.
+
+        For Cumulus: Uses 'sudo lldpctl -f json'
+        For Arista EOS: Uses 'show lldp neighbors'
 
         Returns:
-            Dictionary mapping local interface names to list of neighbors
-            Example: {'Ethernet1': [{'hostname': 'switch1', 'port': 'Eth1/1'}]}
+            Dictionary mapping local interface names to list of neighbor dictionaries
+            Example: {
+                'swp1': [{'hostname': 'switch1', 'port': 'swp2'}],
+                'swp2': [{'hostname': 'switch2', 'port': 'Ethernet1'}]
+            }
+            Returns None if LLDP query fails
         """
         if not self.connection:
             if not self.connect():
                 return None
 
         try:
-            lldp_neighbors = self.connection.get_lldp_neighbors()
-            return lldp_neighbors
+            driver_name = self.get_driver_name()
+            lldp_data = {}
+
+            if driver_name == 'cumulus':
+                # Use direct lldpctl command for Cumulus
+                if hasattr(self.connection, 'device') and hasattr(self.connection.device, 'send_command'):
+                    try:
+                        # Try with sudo first (works on Cumulus)
+                        lldp_output = self.connection.device.send_command('sudo lldpctl -f json', read_timeout=30)
+
+                        if lldp_output:
+                            import json
+                            lldp_json = json.loads(lldp_output)
+
+                            # Parse lldpctl JSON format
+                            # Format: {"lldp": {"interface": {"swp1": {"port": ...}, "swp2": {...}}}}
+                            if 'lldp' in lldp_json and 'interface' in lldp_json['lldp']:
+                                interfaces = lldp_json['lldp']['interface']
+
+                                for iface_name, iface_data in interfaces.items():
+                                    # Each interface can have multiple neighbors (rare but possible)
+                                    neighbors = []
+
+                                    # Check if there's port data (neighbor info)
+                                    if 'port' in iface_data:
+                                        port_data = iface_data['port']
+
+                                        # Port data can be a list or a single dict
+                                        if isinstance(port_data, list):
+                                            for port in port_data:
+                                                neighbor = self._parse_lldp_port_cumulus(port)
+                                                if neighbor:
+                                                    neighbors.append(neighbor)
+                                        else:
+                                            neighbor = self._parse_lldp_port_cumulus(port_data)
+                                            if neighbor:
+                                                neighbors.append(neighbor)
+
+                                    # Only add interface if it has neighbors
+                                    if neighbors:
+                                        lldp_data[iface_name] = neighbors
+
+                            logger.info(f"Collected LLDP data from {self.device.name}: {len(lldp_data)} interfaces with neighbors")
+                            return lldp_data
+                        else:
+                            logger.warning(f"Empty LLDP output from {self.device.name}")
+                            return {}
+                    except Exception as cumulus_error:
+                        logger.error(f"Failed to get LLDP from Cumulus device {self.device.name}: {cumulus_error}")
+                        # Fallback to NAPALM
+                        return self._get_lldp_napalm_fallback()
+                else:
+                    # No direct device access, use NAPALM fallback
+                    return self._get_lldp_napalm_fallback()
+
+            elif driver_name == 'eos':
+                # Use direct show command for Arista EOS
+                if hasattr(self.connection, 'device') and hasattr(self.connection.device, 'send_command'):
+                    try:
+                        lldp_output = self.connection.device.send_command('show lldp neighbors', read_timeout=30)
+
+                        if lldp_output:
+                            # Parse EOS LLDP output (text format)
+                            # Example:
+                            # Port          Neighbor Device ID       Neighbor Port ID    TTL
+                            # Et1           switch1                  Ethernet1           120
+                            lldp_data = self._parse_lldp_eos_text(lldp_output)
+                            logger.info(f"Collected LLDP data from {self.device.name}: {len(lldp_data)} interfaces with neighbors")
+                            return lldp_data
+                        else:
+                            logger.warning(f"Empty LLDP output from {self.device.name}")
+                            return {}
+                    except Exception as eos_error:
+                        logger.error(f"Failed to get LLDP from EOS device {self.device.name}: {eos_error}")
+                        # Fallback to NAPALM
+                        return self._get_lldp_napalm_fallback()
+                else:
+                    # No direct device access, use NAPALM fallback
+                    return self._get_lldp_napalm_fallback()
+            else:
+                # Other platforms: use NAPALM
+                return self._get_lldp_napalm_fallback()
+
         except Exception as e:
             logger.error(f"Failed to get LLDP neighbors from {self.device.name}: {e}")
             return None
+
+    def _get_lldp_napalm_fallback(self):
+        """Fallback to NAPALM get_lldp_neighbors() if direct commands fail"""
+        try:
+            lldp_neighbors = self.connection.get_lldp_neighbors()
+            return lldp_neighbors
+        except Exception as e:
+            logger.error(f"NAPALM LLDP fallback failed for {self.device.name}: {e}")
+            return None
+
+    def _parse_lldp_port_cumulus(self, port_data):
+        """
+        Parse Cumulus lldpctl port data into neighbor dict
+
+        Args:
+            port_data: Dict from lldpctl JSON output
+
+        Returns:
+            Dict with 'hostname' and 'port' keys, or None if parsing fails
+        """
+        try:
+            neighbor = {}
+
+            # Get neighbor hostname (system name)
+            if 'chassis' in port_data:
+                chassis = port_data['chassis']
+                if isinstance(chassis, list):
+                    chassis = chassis[0]
+
+                # Try different fields for hostname
+                if 'name' in chassis:
+                    neighbor['hostname'] = chassis['name'].get('value', '') if isinstance(chassis['name'], dict) else chassis['name']
+                elif 'id' in chassis:
+                    neighbor['hostname'] = chassis['id'].get('value', '') if isinstance(chassis['id'], dict) else chassis['id']
+
+            # Get neighbor port ID
+            if 'id' in port_data:
+                port_id = port_data['id']
+                neighbor['port'] = port_id.get('value', '') if isinstance(port_id, dict) else port_id
+            elif 'descr' in port_data:
+                port_descr = port_data['descr']
+                neighbor['port'] = port_descr.get('value', '') if isinstance(port_descr, dict) else port_descr
+
+            # Only return if we have both hostname and port
+            if 'hostname' in neighbor and 'port' in neighbor:
+                return neighbor
+            else:
+                return None
+        except Exception as e:
+            logger.debug(f"Failed to parse Cumulus LLDP port data: {e}")
+            return None
+
+    def _parse_lldp_eos_text(self, lldp_output):
+        """
+        Parse Arista EOS 'show lldp neighbors' text output
+
+        Args:
+            lldp_output: Text output from 'show lldp neighbors'
+
+        Returns:
+            Dict mapping interface names to list of neighbors
+        """
+        lldp_data = {}
+
+        try:
+            lines = lldp_output.split('\n')
+
+            # Skip header lines (usually first 2-3 lines)
+            data_started = False
+            for line in lines:
+                line = line.strip()
+
+                # Skip empty lines
+                if not line:
+                    continue
+
+                # Skip header lines
+                if 'Port' in line and 'Neighbor' in line:
+                    data_started = True
+                    continue
+
+                if not data_started:
+                    continue
+
+                # Parse data lines
+                # Format: Et1           switch1                  Ethernet1           120
+                parts = line.split()
+                if len(parts) >= 3:
+                    local_port = parts[0]
+                    neighbor_device = parts[1]
+                    neighbor_port = parts[2]
+
+                    # Add to lldp_data
+                    if local_port not in lldp_data:
+                        lldp_data[local_port] = []
+
+                    lldp_data[local_port].append({
+                        'hostname': neighbor_device,
+                        'port': neighbor_port
+                    })
+
+            return lldp_data
+        except Exception as e:
+            logger.error(f"Failed to parse EOS LLDP output: {e}")
+            return {}
 
     def get_lldp_neighbors_detail(self, interface=''):
         """
@@ -964,41 +1160,49 @@ class NAPALMDeviceManager:
 
                 lldp_before_all = baseline.get('lldp_all_interfaces', {})
 
-                # Check for lost LLDP neighbors on OTHER interfaces (not the one we're configuring)
+                # Check for lost LLDP neighbors on ALL interfaces (including the one being configured)
+                # ANY lost neighbor is a CRITICAL failure that triggers rollback
                 lost_neighbors = []
-                for iface, count_before in lldp_before_all.items():
-                    # Skip the interface we're configuring (it's allowed to change)
-                    if interface_name and iface == interface_name:
-                        continue
+                lost_details = []
 
+                for iface, count_before in lldp_before_all.items():
                     count_after = lldp_after_all.get(iface, 0)
 
-                    # CRITICAL: Lost neighbors on other interfaces
+                    # CRITICAL: Lost ALL neighbors on any interface
                     if count_before > 0 and count_after == 0:
-                        lost_neighbors.append(f"{iface} (lost {count_before} neighbors)")
+                        lost_neighbors.append(iface)
+                        lost_details.append(f"{iface} (lost ALL {count_before} neighbors)")
                         logger.error(f"CRITICAL: Lost all LLDP neighbors on {iface}! (had {count_before}, now 0)")
+                    # WARNING: Lost SOME neighbors on any interface
                     elif count_before > count_after:
-                        lost_neighbors.append(f"{iface} ({count_before}→{count_after})")
-                        logger.warning(f"WARNING: Lost LLDP neighbors on {iface}: {count_before}→{count_after}")
+                        lost_neighbors.append(iface)
+                        lost_details.append(f"{iface} (lost {count_before - count_after} of {count_before} neighbors)")
+                        logger.error(f"CRITICAL: Lost LLDP neighbors on {iface}: {count_before}→{count_after}")
 
-                # If we lost neighbors on OTHER interfaces, FAIL
+                # If we lost neighbors on ANY interface, FAIL and trigger rollback
                 if lost_neighbors:
                     checks['lldp_neighbors'] = {
                         'success': False,
-                        'message': f"ERROR: Lost LLDP neighbors on other interfaces: {', '.join(lost_neighbors)}",
-                        'data': {'lost_on': lost_neighbors}
+                        'message': f"ERROR: Lost LLDP neighbors on {len(lost_neighbors)} interface(s): {', '.join(lost_details)}",
+                        'data': {
+                            'lost_on': lost_neighbors,
+                            'details': lost_details,
+                            'before': lldp_before_all,
+                            'after': lldp_after_all
+                        }
                     }
                     all_passed = False
                     messages.append(f"ERROR: LLDP: Lost neighbors on {len(lost_neighbors)} interface(s)")
-                    logger.error(f"CRITICAL: VLAN deployment broke LLDP on other interfaces: {lost_neighbors}")
+                    logger.error(f"CRITICAL: VLAN deployment caused LLDP neighbor loss - TRIGGERING ROLLBACK")
+                    logger.error(f"Lost neighbors: {', '.join(lost_details)}")
 
-                # GOOD: No neighbors lost on other interfaces
+                # GOOD: No neighbors lost on any interface
                 else:
                     # Calculate totals for summary
                     total_before = sum(lldp_before_all.values())
                     total_after = sum(lldp_after_all.values())
 
-                    # Get specific interface status
+                    # Get specific interface status (if single interface deployment)
                     if interface_name:
                         iface_before = lldp_before_all.get(interface_name, 0)
                         iface_after = lldp_after_all.get(interface_name, 0)
@@ -1009,19 +1213,27 @@ class NAPALMDeviceManager:
                     checks['lldp_neighbors'] = {
                         'success': True,
                         'message': f"Device-level LLDP stable (total: {total_before}→{total_after}, {iface_status})",
-                        'data': {'total_before': total_before, 'total_after': total_after, 'interface_status': iface_status}
+                        'data': {
+                            'total_before': total_before,
+                            'total_after': total_after,
+                            'interface_status': iface_status,
+                            'before': lldp_before_all,
+                            'after': lldp_after_all
+                        }
                     }
                     messages.append(f"SUCCESS: LLDP: Device-level stable ({total_after} total)")
                     logger.info(f"LLDP check passed: Device has {total_after} total neighbors (was {total_before})")
 
             except Exception as e:
-                logger.debug(f"Could not verify LLDP neighbors: {e}")
+                logger.error(f"Could not verify LLDP neighbors: {e}")
+                # LLDP verification failure is now CRITICAL - fail deployment
                 checks['lldp_neighbors'] = {
-                    'success': True,  # Don't fail if LLDP check has issues
-                    'message': f"Could not verify LLDP (non-critical)",
+                    'success': False,
+                    'message': f"ERROR: Could not verify LLDP neighbors: {str(e)}",
                     'data': None
                 }
-                messages.append(f"WARNING: LLDP: Could not verify")
+                all_passed = False
+                messages.append(f"ERROR: LLDP: Verification failed")
         else:
             # No LLDP baseline, skip check
             checks['lldp_neighbors'] = {
@@ -1029,6 +1241,7 @@ class NAPALMDeviceManager:
                 'message': "LLDP check skipped (no baseline)",
                 'data': None
             }
+            messages.append(f"INFO: LLDP: Check skipped (no baseline)")
         
         # Check 5: Overall System Health (with baseline comparison)
         logger.info(f"VLAN Verification Check 5/6: System health...")
