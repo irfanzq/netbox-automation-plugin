@@ -1332,8 +1332,9 @@ class NornirDeviceManager:
 
                 # Normal deployment mode - continue with existing logic
                 napalm_mgr = NAPALMDeviceManager(device)
-                
+
                 # Check if bridge VLAN already exists (for Cumulus only)
+                # PERFORMANCE: Keep connection open - deploy_config_safe() will reuse it
                 bridge_vlans = []
                 bridge_vlan_needed = True
                 if platform == 'cumulus':
@@ -1348,18 +1349,18 @@ class NornirDeviceManager:
                                     config_show_output = connection.device.send_command('nv config show -o json', read_timeout=60)
                                 else:
                                     config_show_output = None
-                                
+
                                 if config_show_output:
                                     # Extract JSON string
                                     if isinstance(config_show_output, dict):
                                         config_json_str = config_show_output.get('nv config show -o json') or list(config_show_output.values())[0] if config_show_output else None
                                     else:
                                         config_json_str = str(config_show_output).strip()
-                                    
+
                                     if config_json_str:
                                         import json
                                         config_data = json.loads(config_json_str)
-                                        
+
                                         # Extract bridge VLANs from JSON (same logic as views.py)
                                         # config_data is a list of dicts, each with 'set' key
                                         bridge_vlans = []
@@ -1383,7 +1384,7 @@ class NornirDeviceManager:
                                                                                     bridge_vlans.append(vlan_key)
                                         except Exception as e:
                                             logger.debug(f"Could not parse bridge VLANs from JSON: {e}")
-                                        
+
                                         # Check if VLAN already exists using same logic as views.py
                                         bridge_vlan_needed = True
                                         if bridge_vlans:
@@ -1407,15 +1408,16 @@ class NornirDeviceManager:
                                                                 existing_vlan_ids.add(int(part))
                                                             except:
                                                                 pass
-                                            
+
                                             if vlan_id in existing_vlan_ids:
                                                 bridge_vlan_needed = False
                                                 logger.info(f"Device {device_name}: VLAN {vlan_id} already exists in bridge - will skip bridge VLAN command")
                             except Exception as e:
                                 logger.warning(f"Could not get bridge VLANs from {device_name}: {e}")
                                 # Continue - will add command anyway (idempotent)
-                            finally:
-                                napalm_mgr.disconnect()
+                            # PERFORMANCE FIX: Don't disconnect here - keep connection open
+                            # deploy_config_safe() will reuse the existing connection (line 1795 in napalm_integration.py)
+                            logger.info(f"Device {device_name}: Keeping connection open for deployment (performance optimization)")
                     except Exception as e:
                         logger.warning(f"Could not connect to {device_name} to check bridge VLANs: {e}")
                         # Continue - will add command anyway (idempotent)
