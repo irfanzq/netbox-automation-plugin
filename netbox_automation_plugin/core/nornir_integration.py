@@ -1214,9 +1214,114 @@ class NornirDeviceManager:
                         else:
                             device_interfaces.append(interface_name)
 
-                    # Call preview callback to generate preview data
-                    logger.info(f"Device {device_name}: Calling preview callback for {len(device_interfaces)} interfaces...")
-                    preview_result = preview_callback(device, device_interfaces, platform, vlan_id, bond_info_map)
+                    # PERFORMANCE FIX: Fetch device data ONCE in Nornir (not in preview_callback)
+                    # This avoids multiple connections per device
+                    logger.info(f"Device {device_name}: Fetching device data (LLDP + config) for {len(device_interfaces)} interfaces...")
+
+                    # Initialize data structures
+                    device_lldp_data = {}
+                    device_config_data = {}
+                    device_uptime = None
+
+                    # Connect to device ONCE and fetch all data
+                    napalm_mgr = NAPALMDeviceManager(device)
+                    if napalm_mgr.connect():
+                        try:
+                            # 1. Collect LLDP neighbors (device-level, all interfaces)
+                            logger.info(f"Device {device_name}: Collecting LLDP neighbors...")
+                            try:
+                                device_lldp_data = napalm_mgr.get_lldp_neighbors()
+                                if device_lldp_data:
+                                    total_neighbors = sum(len(neighbors) for neighbors in device_lldp_data.values())
+                                    logger.info(f"Device {device_name}: Collected LLDP data for {len(device_lldp_data)} interfaces with {total_neighbors} total neighbors")
+                                else:
+                                    logger.warning(f"Device {device_name}: No LLDP data collected")
+                            except Exception as e:
+                                logger.error(f"Device {device_name}: Failed to collect LLDP data: {e}")
+
+                            # 2. Collect device config ONCE (for all interfaces)
+                            logger.info(f"Device {device_name}: Collecting device configuration...")
+                            try:
+                                connection = napalm_mgr.connection
+
+                                # Get device uptime
+                                try:
+                                    if hasattr(connection, 'cli'):
+                                        uptime_output = connection.cli(['uptime'])
+                                        if uptime_output:
+                                            if isinstance(uptime_output, dict):
+                                                device_uptime = list(uptime_output.values())[0] if uptime_output else None
+                                            else:
+                                                device_uptime = str(uptime_output).strip() if uptime_output else None
+                                except Exception as e_uptime:
+                                    logger.debug(f"Device {device_name}: Could not get uptime: {e_uptime}")
+
+                                # Get full device config (platform-specific)
+                                if platform == 'cumulus':
+                                    # Use nv config show -o json for Cumulus
+                                    try:
+                                        if hasattr(connection, 'cli'):
+                                            config_show_output = connection.cli(['nv config show -o json'])
+                                        elif hasattr(connection, 'device') and hasattr(connection.device, 'send_command'):
+                                            config_show_output = connection.device.send_command('nv config show -o json', read_timeout=60)
+                                        else:
+                                            config_show_output = None
+
+                                        if config_show_output:
+                                            # Extract JSON string
+                                            if isinstance(config_show_output, dict):
+                                                config_json_str = config_show_output.get('nv config show -o json') or list(config_show_output.values())[0] if config_show_output else None
+                                            else:
+                                                config_json_str = str(config_show_output).strip()
+
+                                            if config_json_str:
+                                                import json
+                                                device_config_data = json.loads(config_json_str)
+                                                logger.info(f"Device {device_name}: Collected device config ({len(str(device_config_data))} bytes)")
+                                    except Exception as e_config:
+                                        logger.error(f"Device {device_name}: Failed to collect config: {e_config}")
+
+                                elif platform == 'eos':
+                                    # Use show running-config for EOS
+                                    try:
+                                        if hasattr(connection, 'cli'):
+                                            config_show_output = connection.cli(['show running-config'])
+                                        elif hasattr(connection, 'device') and hasattr(connection.device, 'send_command'):
+                                            config_show_output = connection.device.send_command('show running-config')
+                                        else:
+                                            config_show_output = None
+
+                                        if config_show_output:
+                                            if isinstance(config_show_output, dict):
+                                                device_config_data = list(config_show_output.values())[0] if config_show_output else ''
+                                            else:
+                                                device_config_data = str(config_show_output).strip()
+                                            logger.info(f"Device {device_name}: Collected device config ({len(str(device_config_data))} bytes)")
+                                    except Exception as e_config:
+                                        logger.error(f"Device {device_name}: Failed to collect config: {e_config}")
+
+                            except Exception as e:
+                                logger.error(f"Device {device_name}: Failed to collect device data: {e}")
+
+                        finally:
+                            # Disconnect after collecting all data
+                            napalm_mgr.disconnect()
+                            logger.info(f"Device {device_name}: Disconnected after data collection")
+                    else:
+                        logger.error(f"Device {device_name}: Failed to connect for data collection")
+
+                    # Call preview callback with pre-fetched data
+                    logger.info(f"Device {device_name}: Calling preview callback with pre-fetched data...")
+                    preview_result = preview_callback(
+                        device=device,
+                        device_interfaces=device_interfaces,
+                        platform=platform,
+                        vlan_id=vlan_id,
+                        bond_info_map=bond_info_map,
+                        device_lldp_data=device_lldp_data,
+                        device_config_data=device_config_data,
+                        device_uptime=device_uptime
+                    )
 
                     # Store preview results
                     with results_lock:

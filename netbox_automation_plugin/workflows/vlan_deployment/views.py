@@ -34,10 +34,15 @@ class VLANDeploymentView(View):
         # Form uses untagged_vlan (IntegerField), not a ModelChoiceField, so no queryset to set
         return render(request, self.template_name_form, {"form": form})
 
-    def _generate_dry_run_preview(self, device, interface_list, platform, vlan_id, bond_info_map, validation_results, sync_netbox_to_device=False, untagged_vlan_id=None, tagged_vlan_ids=None, vlan=None, primary_vlan_id=None):
+    def _generate_dry_run_preview(self, device, interface_list, platform, vlan_id, bond_info_map, validation_results,
+                                   sync_netbox_to_device=False, untagged_vlan_id=None, tagged_vlan_ids=None, vlan=None, primary_vlan_id=None,
+                                   device_lldp_data=None, device_config_data=None, device_uptime=None):
         """
         Generate dry run preview for all interfaces on a single device.
         Called by Nornir in parallel for each device.
+
+        PERFORMANCE: This method receives pre-fetched device data from Nornir batch deployment.
+        It does NOT make any device connections - all data is passed as parameters.
 
         Args:
             device: Device object
@@ -51,6 +56,9 @@ class VLANDeploymentView(View):
             tagged_vlan_ids: Tagged VLAN IDs (normal mode)
             vlan: VLAN object (normal mode)
             primary_vlan_id: Primary VLAN ID for display
+            device_lldp_data: Pre-fetched LLDP data from Nornir (dict)
+            device_config_data: Pre-fetched device config from Nornir (dict or str)
+            device_uptime: Pre-fetched device uptime from Nornir (str)
 
         Returns:
             Dictionary mapping interface names to preview results
@@ -69,46 +77,36 @@ class VLANDeploymentView(View):
 
         logger.info(f"[DRY RUN PREVIEW] Device {device.name}: Generating preview for {len(interface_list)} interfaces...")
 
-        # DEVICE-LEVEL LLDP COLLECTION (runs once per device in Nornir batch deployment)
-        device_lldp_data = {}
-        try:
-            logger.info(f"[DRY RUN] Collecting device-level LLDP data for {device.name}...")
-            from netbox_automation_plugin.core.napalm_integration import NAPALMDeviceManager
-            napalm_mgr = NAPALMDeviceManager(device)
-            if napalm_mgr.connect():
-                device_lldp_data = napalm_mgr.get_lldp_neighbors()
-                if device_lldp_data:
-                    total_neighbors = sum(len(neighbors) for neighbors in device_lldp_data.values())
-                    logger.info(f"[DRY RUN] Collected LLDP data for {device.name}: {len(device_lldp_data)} interfaces with {total_neighbors} total neighbors")
-                else:
-                    logger.warning(f"[DRY RUN] No LLDP data collected for {device.name}")
-                napalm_mgr.disconnect()
-            else:
-                logger.error(f"[DRY RUN] Failed to connect to {device.name} for LLDP collection")
-        except Exception as e:
-            logger.error(f"[DRY RUN] Failed to collect LLDP data for {device.name}: {e}")
+        # Use pre-fetched LLDP data (passed from Nornir batch deployment)
+        # No device connection needed here!
+        if device_lldp_data is None:
+            device_lldp_data = {}
+            logger.warning(f"[DRY RUN PREVIEW] No LLDP data provided for {device.name}")
+        else:
+            total_neighbors = sum(len(neighbors) for neighbors in device_lldp_data.values())
+            logger.info(f"[DRY RUN PREVIEW] Using pre-fetched LLDP data for {device.name}: {len(device_lldp_data)} interfaces with {total_neighbors} total neighbors")
 
-        # PERFORMANCE FIX: Fetch device config ONCE for all interfaces (not once per interface)
-        # This avoids 32 device connections for 32 interfaces - instead we connect once and reuse the config
-        logger.info(f"[DRY RUN PREVIEW] Device {device.name}: Fetching device config once for all {len(interface_list)} interfaces...")
+        # Use pre-fetched device config (passed from Nornir batch deployment)
+        # Parse it locally for each interface without reconnecting
+        logger.info(f"[DRY RUN PREVIEW] Device {device.name}: Parsing pre-fetched config for {len(interface_list)} interfaces...")
 
-        # Fetch config ONCE for first interface - this gets the FULL device config
-        # Then we'll reuse this cached result for all other interfaces
         device_config_cache = {}
-        if interface_list:
-            first_interface = interface_list[0]
-            first_config_result = self._get_current_device_config(device, first_interface, platform)
-            device_config_cache[first_interface] = first_config_result
+        if device_config_data:
+            # Parse the pre-fetched config for each interface
+            for actual_interface_name in interface_list:
+                # Parse config locally without device connection
+                config_result = self._parse_device_config_for_interface(
+                    device=device,
+                    interface_name=actual_interface_name,
+                    platform=platform,
+                    config_data=device_config_data,
+                    device_uptime=device_uptime
+                )
+                device_config_cache[actual_interface_name] = config_result
+        else:
+            logger.warning(f"[DRY RUN PREVIEW] No device config provided for {device.name}")
 
-            # For remaining interfaces, reuse the cached full device config
-            # (since _get_current_device_config fetches full config anyway, not per-interface)
-            for actual_interface_name in interface_list[1:]:
-                # Call again but it should be fast since we're just parsing the same config
-                # TODO: Optimize this further by caching the full config JSON and parsing it locally
-                device_config_result = self._get_current_device_config(device, actual_interface_name, platform)
-                device_config_cache[actual_interface_name] = device_config_result
-
-        logger.info(f"[DRY RUN PREVIEW] Device {device.name}: Config fetched, now generating previews...")
+        logger.info(f"[DRY RUN PREVIEW] Device {device.name}: Config parsed, now generating previews...")
 
         for actual_interface_name in interface_list:
             try:
@@ -365,14 +363,14 @@ class VLANDeploymentView(View):
             excluded_device_ids = {d.id for d in excluded_devices}
             devices = [d for d in devices if d.id not in excluded_device_ids]
             logger.info(f"Excluded {len(excluded_devices)} devices. Remaining: {len(devices)} devices for deployment")
-            
+
             if not devices:
                 form.add_error(None, _("All devices were excluded. Please select at least one device for deployment."))
                 return render(request, self.template_name_form, {"form": form})
 
         # Check if sync mode is enabled
         sync_netbox_to_device = form.cleaned_data.get('sync_netbox_to_device', False)
-        
+
         # Additional tag validation before deployment (even for dry run, to show warnings)
         # This provides a second layer of validation and shows warnings even in dry run mode
         # NOTE: Skip this validation in sync mode - sync mode uses different validation logic
@@ -401,7 +399,7 @@ class VLANDeploymentView(View):
 
         table = VLANDeploymentResultTable(results, orderable=True)
         summary = self._build_summary(results, len(devices))
-        
+
         # Calculate device summaries and status counts
         device_summaries = self._build_device_summaries(results)
         status_counts = self._calculate_status_counts(results)
@@ -459,7 +457,7 @@ class VLANDeploymentView(View):
         """
         Validate tags for dry run mode - shows what would block/warn/pass.
         Returns validation results without blocking.
-        
+
         Tagging Priority Hierarchy (highest to lowest):
         1. Device: automation-ready:vlan (required for deployment)
         2. Interface tags (checked in priority order):
@@ -468,7 +466,7 @@ class VLANDeploymentView(View):
            - vlan-mode:tagged (if connected to Host AND has tagged/untagged VLANs - ALLOWS)
            - vlan-mode:access (if connected to Host AND has only untagged VLAN - ALLOWS)
            - vlan-mode:needs-review (if unclear or conflicts - WARNS but allows, lowest priority)
-        
+
         Returns:
             dict: {
                 'device_validation': {device_name: {'status': 'pass'|'block'|'warn', 'message': str}},
@@ -476,18 +474,18 @@ class VLANDeploymentView(View):
             }
         """
         from extras.models import Tag
-        
+
         results = {
             'device_validation': {},
             'interface_validation': {},
         }
-        
+
         # Get tags
         try:
             device_tag = Tag.objects.get(name='automation-ready:vlan')
         except Tag.DoesNotExist:
             device_tag = None
-        
+
         interface_tag_names = {
             'uplink': 'vlan-mode:uplink',
             'routed': 'vlan-mode:routed',
@@ -501,12 +499,12 @@ class VLANDeploymentView(View):
                 interface_tags[key] = Tag.objects.get(name=tag_name)
             except Tag.DoesNotExist:
                 interface_tags[key] = None
-        
+
         # Validate each device
         for device in devices:
             device.refresh_from_db()
             device_tags = list(device.tags.all())
-            
+
             if device_tag and device_tag not in device_tags:
                 results['device_validation'][device.name] = {
                     'status': 'block',
@@ -517,7 +515,7 @@ class VLANDeploymentView(View):
                     'status': 'pass',
                     'message': f"Device tagged as 'automation-ready:vlan' - would pass"
                 }
-            
+
             # Validate each interface
             for iface_entry in interface_list:
                 # Handle both formats: "interface_name" (normal mode) and "device:interface_name" (sync mode)
@@ -538,7 +536,7 @@ class VLANDeploymentView(View):
                     interface.refresh_from_db()
                     interface_tag_list = list(interface.tags.all())
                     interface_tag_names_list = [t.name for t in interface_tag_list]
-                    
+
                     # CRITICAL CHECK: Interface with IP address or VRF is a routed port (BLOCKING)
                     # Priority 1: vlan-mode:routed (if interface has IP address or in VRF, it's routed - highest priority)
                     # This must be checked BEFORE tag checks, as IP address/VRF is a stronger signal
@@ -550,7 +548,7 @@ class VLANDeploymentView(View):
                             if hasattr(ip_addr, 'vrf') and ip_addr.vrf:
                                 has_vrf = True
                                 break
-                    
+
                     if has_ip or has_vrf:
                         reason = []
                         if has_ip:
@@ -562,7 +560,7 @@ class VLANDeploymentView(View):
                             'message': f"Interface has {' and '.join(reason)} (routed port) - would block deployment"
                         }
                         continue  # Skip further checks for this interface
-                    
+
                     # Check for blocking tags
                     if interface_tags.get('uplink') and interface_tags['uplink'].name in interface_tag_names_list:
                         results['interface_validation'][key] = {
@@ -570,14 +568,14 @@ class VLANDeploymentView(View):
                             'message': f"Interface marked as 'vlan-mode:uplink' - would block deployment"
                         }
                         continue
-                    
+
                     if interface_tags.get('routed') and interface_tags['routed'].name in interface_tag_names_list:
                         results['interface_validation'][key] = {
                             'status': 'block',
                             'message': f"Interface marked as 'vlan-mode:routed' - would block deployment"
                         }
                         continue
-                    
+
                     # Note: Port-channel/bond membership is handled automatically -
                     # config is applied to bond interface instead of member (no blocking needed)
 
@@ -604,7 +602,7 @@ class VLANDeploymentView(View):
                                     continue
                         except Exception:
                             pass
-                    
+
                     # Check for warnings
                     if interface_tags.get('needs-review') and interface_tags['needs-review'].name in interface_tag_names_list:
                         results['interface_validation'][key] = {
@@ -634,13 +632,13 @@ class VLANDeploymentView(View):
                             'status': 'block',
                             'message': f"Interface not tagged as 'vlan-mode:access' or 'vlan-mode:tagged' - would block deployment"
                         }
-                
+
                 except Interface.DoesNotExist:
                     results['interface_validation'][key] = {
                         'status': 'block',
                         'message': f"Interface does not exist - would block deployment"
                     }
-        
+
         return results
 
     def _looks_like_value(self, key):
@@ -672,7 +670,7 @@ class VLANDeploymentView(View):
         # Exact match
         if interface_name == range_key:
             return True
-        
+
         # Range pattern: swp1-32, bond3-6, swp1s0-1, etc.
         # Pattern 1: Simple range like swp1-32
         range_match = re.match(r'^([a-zA-Z]+)(\d+)-(\d+)$', range_key)
@@ -680,29 +678,29 @@ class VLANDeploymentView(View):
             prefix = range_match.group(1)
             start = int(range_match.group(2))
             end = int(range_match.group(3))
-            
+
             # Check if interface matches the prefix and is in range
             # Try simple pattern first: swp5
             interface_match = re.match(r'^([a-zA-Z]+)(\d+)$', interface_name)
             if interface_match:
                 iface_prefix = interface_match.group(1)
                 iface_num = int(interface_match.group(2))
-                
+
                 if iface_prefix == prefix and start <= iface_num <= end:
                     return True
-            
+
             # Also check complex interfaces like swp1s0 against parent range swp1-64
             # Extract base number from complex interface (e.g., swp1s0 -> 1)
             interface_match_complex = re.match(r'^([a-zA-Z]+)(\d+)([a-zA-Z]+)(\d+)$', interface_name)
             if interface_match_complex:
                 iface_prefix = interface_match_complex.group(1)
                 iface_base_num = int(interface_match_complex.group(2))
-                
+
                 # If prefix matches and base number is in range, it's a match
                 # Example: swp1s0 matches swp1-64 (base number 1 is in range 1-64)
                 if iface_prefix == prefix and start <= iface_base_num <= end:
                     return True
-        
+
         # Pattern 2: Complex range like swp1s0-1, swp2s0-3
         # Match pattern: prefix + digits + suffix + digits - digits
         range_match_complex = re.match(r'^([a-zA-Z]+)(\d+)([a-zA-Z]+)(\d+)-(\d+)$', range_key)
@@ -712,7 +710,7 @@ class VLANDeploymentView(View):
             suffix = range_match_complex.group(3)
             start = int(range_match_complex.group(4))
             end = int(range_match_complex.group(5))
-            
+
             # Check if interface matches: swp1s0, swp2s1, etc.
             interface_match_complex = re.match(r'^([a-zA-Z]+)(\d+)([a-zA-Z]+)(\d+)$', interface_name)
             if interface_match_complex:
@@ -720,37 +718,37 @@ class VLANDeploymentView(View):
                 iface_prefix_num = int(interface_match_complex.group(2))
                 iface_suffix = interface_match_complex.group(3)
                 iface_suffix_num = int(interface_match_complex.group(4))
-                
+
                 # Match prefix, prefix number, suffix, and suffix number in range
-                if (iface_prefix == prefix and 
-                    iface_prefix_num == prefix_num and 
-                    iface_suffix == suffix and 
+                if (iface_prefix == prefix and
+                    iface_prefix_num == prefix_num and
+                    iface_suffix == suffix and
                     start <= iface_suffix_num <= end):
                     return True
-        
+
         # Comma-separated list: bond3,5-6 or swp1s0-1,swp2s0-3
         if ',' in range_key:
             parts = range_key.split(',')
             for part in parts:
                 if self._interface_matches_range(interface_name, part.strip()):
                     return True
-        
+
         return False
 
     def _get_bridge_vlans_from_json(self, config_data):
         """
         Extract bridge domain br_default VLAN list from JSON config.
         Handles VLAN ranges and comma-separated values in all formats.
-        
+
         Supports three formats:
         1. Single key with comma-separated and range: {"10,3000-3199": {}}
         2. Single key with range and nested vni: {"3019-3099": {"vni": {"auto": {}}}}
         3. Multiple keys (comma-separated and range) with nested vni:
            {"2000,3000": {}, "3019-3099": {"vni": {"auto": {}}}}
-        
+
         The function extracts VLAN strings from dict keys regardless of nested structures.
         Example: "10,3000-3199" -> [10, 3000, 3001, ..., 3199]
-        
+
         Returns:
             list: Sorted list of individual VLAN IDs that are already on the bridge.
         """
@@ -769,7 +767,7 @@ class VLANDeploymentView(View):
                                 br_default_data = domain_data['br_default']
                                 if isinstance(br_default_data, dict) and 'vlan' in br_default_data:
                                     vlan_data = br_default_data['vlan']
-                                    
+
                                     # VLAN data structure examples:
                                     # Format 1: {"10,3000-3199": {}}
                                     # Format 2: {"3019-3099": {"vni": {"auto": {}}}}
@@ -804,13 +802,13 @@ class VLANDeploymentView(View):
             logger.debug(f"Could not extract bridge VLANs from JSON: {e}")
             import traceback
             logger.debug(f"Traceback: {traceback.format_exc()}")
-        
+
         # Remove duplicates and sort
         bridge_vlans = sorted(list(set(bridge_vlans)))
         if bridge_vlans:
             logger.debug(f"Extracted {len(bridge_vlans)} unique bridge VLAN IDs: {bridge_vlans[:10]}{'...' if len(bridge_vlans) > 10 else ''}")
         return bridge_vlans
-    
+
     def _parse_vlan_string(self, vlan_string):
         """
         Parse VLAN string that can contain:
@@ -818,13 +816,13 @@ class VLANDeploymentView(View):
         - Comma-separated: "10,20,30"
         - Ranges: "3000-3199"
         - Mixed: "10,3000-3199,4000"
-        
+
         Returns list of VLAN IDs.
         """
         vlan_ids = []
         if not vlan_string:
             return vlan_ids
-        
+
         try:
             # Split by comma to handle multiple VLANs/ranges
             parts = str(vlan_string).split(',')
@@ -832,7 +830,7 @@ class VLANDeploymentView(View):
                 part = part.strip()
                 if not part:
                     continue
-                
+
                 # Check if it's a range (e.g., "3000-3199")
                 if '-' in part:
                     try:
@@ -855,9 +853,9 @@ class VLANDeploymentView(View):
                         pass
         except Exception as e:
             logger.debug(f"Error parsing VLAN string '{vlan_string}': {e}")
-        
+
         return vlan_ids
-    
+
     def _format_vlan_list(self, vlan_list):
         """
         Format a list of VLAN IDs into a readable string with ranges.
@@ -865,20 +863,20 @@ class VLANDeploymentView(View):
         """
         if not vlan_list:
             return "None"
-        
+
         # Sort the list
         sorted_vlans = sorted(set(vlan_list))
-        
+
         if len(sorted_vlans) == 0:
             return "None"
         if len(sorted_vlans) == 1:
             return str(sorted_vlans[0])
-        
+
         # Group consecutive VLANs into ranges
         result = []
         start = sorted_vlans[0]
         end = sorted_vlans[0]
-        
+
         for i in range(1, len(sorted_vlans)):
             if sorted_vlans[i] == end + 1:
                 # Consecutive, extend range
@@ -891,35 +889,35 @@ class VLANDeploymentView(View):
                     result.append(f"{start}-{end}")
                 start = sorted_vlans[i]
                 end = sorted_vlans[i]
-        
+
         # Add the last range/individual
         if start == end:
             result.append(str(start))
         else:
             result.append(f"{start}-{end}")
-        
+
         return ",".join(result)
-    
+
     def _is_vlan_in_bridge_vlans(self, vlan_id, bridge_vlans):
         """
         Check if a VLAN ID already exists in bridge VLANs (handles both individual VLANs and ranges).
-        
+
         Args:
             vlan_id: VLAN ID to check (int)
             bridge_vlans: List of existing bridge VLANs, which can be:
                 - List of integers: [3019, 3020, 3021, ...]
                 - List of strings with ranges: ["3019-3099", "4000"]
                 - Mixed: [3019, "3020-3030", 4000]
-        
+
         Returns:
             bool: True if VLAN already exists in bridge VLANs, False otherwise
         """
         if not bridge_vlans:
             return False
-        
+
         # Parse all bridge VLANs into a set of individual VLAN IDs
         existing_vlan_ids = set()
-        
+
         for vlan_item in bridge_vlans:
             if isinstance(vlan_item, int):
                 existing_vlan_ids.add(vlan_item)
@@ -933,9 +931,9 @@ class VLANDeploymentView(View):
                     existing_vlan_ids.add(int(vlan_item))
                 except (ValueError, TypeError):
                     pass
-        
+
         return vlan_id in existing_vlan_ids
-    
+
     def _deep_merge_dicts(self, base_dict, override_dict):
         """
         Deep merge two dictionaries. Values from override_dict take precedence.
@@ -944,7 +942,7 @@ class VLANDeploymentView(View):
         if not isinstance(base_dict, dict) or not isinstance(override_dict, dict):
             # If either is not a dict, return override (or base if override is None)
             return override_dict if override_dict is not None else base_dict
-        
+
         result = base_dict.copy()
         for key, value in override_dict.items():
             if key in result and isinstance(result[key], dict) and isinstance(value, dict):
@@ -954,7 +952,7 @@ class VLANDeploymentView(View):
                 # Override with new value
                 result[key] = value
         return result
-    
+
     def _find_interface_config_in_json(self, config_data, interface_name):
         """
         Find ALL interface configurations in JSON that apply to the interface.
@@ -962,12 +960,12 @@ class VLANDeploymentView(View):
         1. Direct/exact match (e.g., swp1s0: {...})
         2. Range matches (e.g., swp1-64: {...}, swp1s0-1: {...})
         3. Bond member configs (if interface is a bond member)
-        
+
         Handles complex ranges like:
         - swp1-64 (simple range)
         - swp1s0-1 (split range)
         - swp1-31,33-64,swp1s0-1,swp2s0-1 (comma-separated ranges)
-        
+
         Returns merged config dict with all applicable configs, or None if not found.
         """
         # Navigate to interface section - extract from "interface" key
@@ -978,14 +976,14 @@ class VLANDeploymentView(View):
                 if isinstance(set_data, dict) and 'interface' in set_data:
                     interfaces = set_data['interface']  # Extract from "interface" key
                     break
-        
+
         if not interfaces or not isinstance(interfaces, dict):
             return None
-        
+
         merged_config = {}
         inherited_from = []
         bond_member_of = None
-        
+
         # ALWAYS check for bond membership FIRST (independent of interface config)
         # Interface can exist in config AND be a bond member - both should be detected
         for bond_name, bond_config in interfaces.items():
@@ -997,7 +995,7 @@ class VLANDeploymentView(View):
                     if isinstance(bond_config, dict):
                         merged_config = self._deep_merge_dicts(merged_config, bond_config)
                     break  # Only one bond per interface
-        
+
         # 1. Check for exact match (highest priority - most specific)
         # This runs independently of bond detection - interface can have its own config too
         if interface_name in interfaces:
@@ -1005,21 +1003,21 @@ class VLANDeploymentView(View):
             if isinstance(exact_config, dict):
                 # Merge interface config with bond config (if bond was found above)
                 merged_config = self._deep_merge_dicts(merged_config, exact_config)
-        
+
         # 2. Check ALL range matches (collect all, don't stop at first)
         # This handles cases where interface matches multiple ranges
         for range_key, range_config in interfaces.items():
             # Skip exact match (already handled above)
             if range_key == interface_name:
                 continue
-            
+
             # Check if interface matches this range
             if self._interface_matches_range(interface_name, range_key):
                 if isinstance(range_config, dict):
                     # Merge range config into merged_config
                     merged_config = self._deep_merge_dicts(merged_config, range_config)
                     inherited_from.append(range_key)
-        
+
         # Return config with metadata if we found ANY config (interface config, bond config, or range config)
         # OR if bond membership was detected (even if no config found)
         if merged_config or bond_member_of:
@@ -1028,39 +1026,39 @@ class VLANDeploymentView(View):
                 merged_config['_inherited_from'] = inherited_from
             if bond_member_of:
                 merged_config['_bond_member_of'] = bond_member_of
-            
+
             # Return config dict (even if empty, it will have bond_member_of metadata)
             # This ensures bond membership is always detected and returned
             if not merged_config:
                 merged_config = {}  # Return empty dict with just metadata
-            
+
             return merged_config
-        
+
         return None
 
     def _parse_json_to_nv_commands(self, config_dict, base_path, interface_name):
         """
         Recursively parse JSON structure from nv config show -o json and generate nv set commands.
-        This is a fully generic parser with NO hardcoding - it parses and displays whatever is 
+        This is a fully generic parser with NO hardcoding - it parses and displays whatever is
         present in the interface configuration (ranges, individual interfaces, bond members, etc.).
-        
+
         Args:
             config_dict: Dictionary from JSON (interface configuration from "interface" key)
             base_path: Current path prefix (e.g., "ip", "bridge domain", "link state")
             interface_name: Interface name for the nv set command
-            
+
         Returns:
             List of nv set command strings - shows all configs as-is, no filtering/hardcoding
         """
         commands = []
-        
+
         if not isinstance(config_dict, dict):
             return commands
-        
+
         for key, value in config_dict.items():
             # Build the path
             path = f"{base_path} {key}" if base_path else key
-            
+
             # Check if value is a dict (nested structure)
             if isinstance(value, dict):
                 # Check if dict is empty {} - this means the key itself might be a value or a boolean flag
@@ -1093,19 +1091,19 @@ class VLANDeploymentView(View):
                     # Convert value to string
                     value_str = str(value)
                     commands.append(f"nv set interface {interface_name} {path} {value_str}")
-        
+
         return commands
 
     def _parse_yaml_to_nv_commands(self, block_lines, base_path, interface_name):
         """
         Recursively parse YAML-like structure from nv config show and generate nv set commands.
         This is a generic parser that doesn't hardcode specific fields - it parses whatever is present.
-        
+
         Args:
             block_lines: List of lines from the YAML-like config
             base_path: Current path prefix (e.g., "ip", "bridge domain")
             interface_name: Interface name for the nv set command
-            
+
         Returns:
             List of nv set command strings
         """
@@ -1116,27 +1114,27 @@ class VLANDeploymentView(View):
             if not line.strip():
                 i += 1
                 continue
-            
+
             # Get indentation level
             indent = len(line) - len(line.lstrip())
             stripped = line.strip()
-            
+
             # Skip if no colon (not a key:value pair)
             if ':' not in stripped:
                 i += 1
                 continue
-            
+
             # Parse key: value or key: (with nested structure)
             key_part, value_part = stripped.split(':', 1)
             key = key_part.strip()
             value = value_part.strip()
-            
+
             # Check if next line is more indented (nested structure)
             if i + 1 < len(block_lines):
                 next_line = block_lines[i + 1]
                 next_indent = len(next_line) - len(next_line.lstrip())
                 next_stripped = next_line.strip()
-                
+
                 if next_indent > indent and ':' in next_stripped:
                     # Check if next line's key looks like a value (e.g., IP address as key)
                     next_key_part = next_stripped.split(':', 1)[0].strip()
@@ -1151,7 +1149,7 @@ class VLANDeploymentView(View):
                             commands.append(f"nv set interface {interface_name} {path} {next_key_part}")
                         i += 1  # Skip next line
                         continue
-                    
+
                     # Regular nested structure - recurse
                     nested_lines = []
                     for j in range(i + 1, len(block_lines)):
@@ -1160,17 +1158,17 @@ class VLANDeploymentView(View):
                         if nested_indent <= indent:
                             break
                         nested_lines.append(nested_line)
-                    
+
                     # Recursively parse nested structure
                     nested_commands = self._parse_yaml_to_nv_commands(
-                        nested_lines, 
+                        nested_lines,
                         f"{base_path} {key}" if base_path else key,
                         interface_name
                     )
                     commands.extend(nested_commands)
                     i = j
                     continue
-            
+
             # Leaf value - generate command
             # Check if key itself looks like a value (e.g., IP address as key: "172.19.1.29/23: {}")
             if self._looks_like_value(key) and (value == '' or value == '{}'):
@@ -1193,9 +1191,9 @@ class VLANDeploymentView(View):
                     else:
                         commands.append(f"nv set interface {interface_name} {path} {value_clean}")
             # If value is empty and we didn't recurse, it's a parent key with no direct value
-            
+
             i += 1
-        
+
         return commands
 
     def _get_current_device_config(self, device, interface_name, platform):
@@ -1234,7 +1232,7 @@ class VLANDeploymentView(View):
             from django.utils import timezone
             napalm_manager = NAPALMDeviceManager(device)
             timestamp = timezone.now().strftime('%Y-%m-%d %H:%M:%S UTC')
-            
+
             if platform == 'cumulus':
                 # For Cumulus, use nv config show (most complete, shows bridge/VLAN configs)
                 # Note: We don't use nv show interface -o json as fallback because it's incomplete
@@ -1242,7 +1240,7 @@ class VLANDeploymentView(View):
                 try:
                     if napalm_manager.connect():
                         connection = napalm_manager.connection
-                        
+
                         # Primary method: Use nv config show (more complete, shows bridge/VLAN configs)
                         # Add retry logic in case command fails if sent too early
                         current_config = None
@@ -1265,7 +1263,7 @@ class VLANDeploymentView(View):
                                             logger.debug(f"Device {device.name} uptime: {device_uptime}")
                                 except Exception as e_uptime:
                                     logger.debug(f"Could not get uptime for {device.name}: {e_uptime}")
-                                
+
                                 # Primary: Use nv config show -o json (more reliable than YAML parsing)
                                 # Retry up to 3 times with 1 second delay between retries
                                 # Initialize config_json_str before loop to ensure it's always in scope
@@ -1275,7 +1273,7 @@ class VLANDeploymentView(View):
                                 for attempt in range(max_retries):
                                     try:
                                         config_show_output = connection.cli(['nv config show -o json'])
-                                        
+
                                         # If cli() returns None, try Netmiko fallback (Cumulus driver may not implement cli() properly)
                                         if config_show_output is None and hasattr(connection, 'device') and hasattr(connection.device, 'send_command'):
                                             logger.debug(f"cli() returned None, falling back to Netmiko send_command() for {device.name}")
@@ -1284,7 +1282,7 @@ class VLANDeploymentView(View):
                                             except Exception as netmiko_error:
                                                 logger.debug(f"Netmiko fallback also failed: {netmiko_error}")
                                                 config_show_output = None
-                                        
+
                                         if config_show_output:
                                             # Extract output (might be keyed by command)
                                             if isinstance(config_show_output, dict):
@@ -1297,7 +1295,7 @@ class VLANDeploymentView(View):
                                             else:
                                                 # Netmiko returns string directly
                                                 config_json_str = str(config_show_output).strip()
-                                            
+
                                             if config_json_str and config_json_str.strip():
                                                 break  # Success, exit retry loop
                                         if attempt < max_retries - 1:
@@ -1311,25 +1309,25 @@ class VLANDeploymentView(View):
                                             logger.debug(f"nv config show attempt {attempt + 1} failed with error: {e_retry}, retrying...")
                                         else:
                                             logger.warning(f"nv config show failed after {max_retries} attempts: {e_retry}")
-                                
+
                                 # Parse JSON config if we got it
                                 # config_json_str is initialized to None before the loop, so it's always defined
                                 json_parsed_successfully = False
                                 if config_json_str and config_json_str.strip():
                                     import json
                                     command_lines = []
-                                    
+
                                     try:
                                         # Parse JSON
                                         config_data = json.loads(config_json_str)
                                         json_parsed_successfully = True  # Mark that we successfully parsed JSON
-                                        
+
                                         # Extract bridge VLANs for later use (to check if VLAN already exists)
                                         bridge_vlans = self._get_bridge_vlans_from_json(config_data)
-                                        
+
                                         # Find interface config (handles ranges and bond members)
                                         interface_config = self._find_interface_config_in_json(config_data, interface_name)
-                                        
+
                                         # Check if config is inherited from range or bond
                                         inherited_from = None
                                         bond_member_of = None
@@ -1338,7 +1336,7 @@ class VLANDeploymentView(View):
                                         if isinstance(interface_config, dict):
                                             inherited_from = interface_config.pop('_inherited_from', None)
                                             bond_member_of = interface_config.pop('_bond_member_of', None)
-                                        
+
                                         # If interface is a bond member, get the bond interface config
                                         if bond_member_of:
                                             bond_interface_config = self._find_interface_config_in_json(config_data, bond_member_of)
@@ -1350,15 +1348,15 @@ class VLANDeploymentView(View):
                                                 # Convert bond interface config to commands
                                                 bond_parsed_commands = self._parse_json_to_nv_commands(bond_interface_config, "", bond_member_of)
                                                 bond_interface_config_commands.extend(bond_parsed_commands)
-                                        
+
                                         if interface_config:
                                             # Convert JSON structure to nv set commands
                                             parsed_commands = self._parse_json_to_nv_commands(interface_config, "", interface_name)
                                             command_lines.extend(parsed_commands)
-                                            
+
                                             # Don't add inheritance notes - just show actual configs
                                             # (inheritance info is metadata, not actual config)
-                                        
+
                                         if command_lines:
                                             current_config = '\n'.join(command_lines)
                                             # bridge_vlans is already extracted and stored in the variable above
@@ -1400,7 +1398,7 @@ class VLANDeploymentView(View):
                                                                             break
                                                     except Exception as bond_check_error:
                                                         logger.debug(f"Could not check bond membership when interface not found: {bond_check_error}")
-                                                
+
                                                 # Set current_config message based on whether bond was found
                                                 if bond_member_of:
                                                     current_config = f"(interface {interface_name} not found in config, but detected as bond member of {bond_member_of})"
@@ -1410,7 +1408,7 @@ class VLANDeploymentView(View):
                                     except json.JSONDecodeError as e:
                                         logger.warning(f"Failed to parse JSON config for {device.name}:{interface_name}: {e}")
                                         current_config = None  # JSON parse failed - will try grep fallback
-                                        
+
                                         # Still try to detect bond membership even if JSON parse failed
                                         if not bond_member_of and config_data:
                                             try:
@@ -1444,7 +1442,7 @@ class VLANDeploymentView(View):
                                     except Exception as e:
                                         error_msg = str(e)
                                         logger.warning(f"Error processing JSON config for {device.name}:{interface_name}: {error_msg}")
-                                        
+
                                         # Try to detect bond membership even if config processing failed
                                         if not bond_member_of and config_data:
                                             try:
@@ -1475,12 +1473,12 @@ class VLANDeploymentView(View):
                                                                 break
                                             except Exception as bond_check_error:
                                                 logger.debug(f"Could not check bond membership after config processing error: {bond_check_error}")
-                                        
+
                                         # If it's a variable error, provide more context
                                         if 'cannot access local variable' in error_msg or 'not associated with a value' in error_msg:
                                             logger.error(f"Variable scope error in config parsing - config_json_str may not be initialized. Error: {error_msg}")
                                         current_config = None  # Processing error - will try grep fallback
-                                
+
                                 # Fallback: If interface not found (even if JSON parsed successfully) or JSON parsing failed
                                 # Try grep fallback to catch interfaces that might be in ranges we didn't match properly
                                 if not current_config:
@@ -1490,7 +1488,7 @@ class VLANDeploymentView(View):
                                         # Note: grep works better with YAML format (line-based)
                                         grep_command = f'nv config show | grep -A15 -B15 {interface_name}'
                                         grep_output = connection.cli([grep_command])
-                                        
+
                                         if grep_output:
                                             # Extract output
                                             grep_result = None
@@ -1501,19 +1499,19 @@ class VLANDeploymentView(View):
                                                     grep_result = list(grep_output.values())[0] if grep_output else None
                                             else:
                                                 grep_result = str(grep_output)
-                                            
+
                                             if grep_result and grep_result.strip():
                                                 # Parse grep output (has context lines before/after)
                                                 import re
                                                 command_lines = []
-                                                
+
                                                 # Find the interface line in grep output
                                                 grep_lines = grep_result.split('\n')
                                                 interface_found = False
                                                 interface_block_lines = []
                                                 interface_indent = None
                                                 range_key_found = None
-                                                
+
                                                 # First, try exact match
                                                 for i, line in enumerate(grep_lines):
                                                     stripped = line.strip()
@@ -1533,7 +1531,7 @@ class VLANDeploymentView(View):
                                                                 break
                                                             interface_block_lines.append(next_line)
                                                         break
-                                                
+
                                                 # If exact match not found, try to find range that contains this interface
                                                 if not interface_found:
                                                     # Try simple pattern first: swp5
@@ -1541,7 +1539,7 @@ class VLANDeploymentView(View):
                                                     if interface_match:
                                                         iface_prefix = interface_match.group(1)
                                                         iface_num = int(interface_match.group(2))
-                                                        
+
                                                         # Look for range patterns like swp1-32, swp1-2, etc.
                                                         for i, line in enumerate(grep_lines):
                                                             stripped = line.strip()
@@ -1552,7 +1550,7 @@ class VLANDeploymentView(View):
                                                                 range_prefix = range_match.group(1)
                                                                 range_start = int(range_match.group(2))
                                                                 range_end = int(range_match.group(3))
-                                                                
+
                                                                 # Check if our interface is in this range
                                                                 if iface_prefix == range_prefix and range_start <= iface_num <= range_end:
                                                                     range_key_found = f"{range_prefix}{range_start}-{range_end}"
@@ -1571,7 +1569,7 @@ class VLANDeploymentView(View):
                                                                             break
                                                                         interface_block_lines.append(next_line)
                                                                     break
-                                                    
+
                                                     # Try complex pattern: swp1s0
                                                     if not interface_found:
                                                         interface_match_complex = re.match(r'^([a-zA-Z]+)(\d+)([a-zA-Z]+)(\d+)$', interface_name)
@@ -1580,7 +1578,7 @@ class VLANDeploymentView(View):
                                                             iface_prefix_num = int(interface_match_complex.group(2))
                                                             iface_suffix = interface_match_complex.group(3)
                                                             iface_suffix_num = int(interface_match_complex.group(4))
-                                                            
+
                                                             # Look for range patterns like swp1s0-1:, swp2s0-3:, etc.
                                                             for i, line in enumerate(grep_lines):
                                                                 stripped = line.strip()
@@ -1592,11 +1590,11 @@ class VLANDeploymentView(View):
                                                                     range_suffix = range_match_complex.group(3)
                                                                     range_start = int(range_match_complex.group(4))
                                                                     range_end = int(range_match_complex.group(5))
-                                                                    
+
                                                                     # Check if our interface is in this range
-                                                                    if (iface_prefix == range_prefix and 
-                                                                        iface_prefix_num == range_prefix_num and 
-                                                                        iface_suffix == range_suffix and 
+                                                                    if (iface_prefix == range_prefix and
+                                                                        iface_prefix_num == range_prefix_num and
+                                                                        iface_suffix == range_suffix and
                                                                         range_start <= iface_suffix_num <= range_end):
                                                                         range_key_found = f"{range_prefix}{range_prefix_num}{range_suffix}{range_start}-{range_end}"
                                                                         interface_found = True
@@ -1614,20 +1612,20 @@ class VLANDeploymentView(View):
                                                                                 break
                                                                             interface_block_lines.append(next_line)
                                                                         break
-                                                
+
                                                 if interface_found and interface_block_lines:
                                                     # Use the same generic parser for grep output
                                                     parsed_commands = self._parse_yaml_to_nv_commands(interface_block_lines, "", interface_name)
-                                                    
+
                                                     # Don't add inheritance notes - just show actual configs
                                                     # Add all parsed commands (link-local IPv6 already filtered in parser)
                                                     command_lines.extend(parsed_commands)
-                                                
+
                                                 if command_lines:
                                                     current_config = '\n'.join(command_lines)
                                     except Exception as e_grep:
                                         logger.debug(f"Grep fallback failed for {device.name}:{interface_name}: {e_grep}")
-                                
+
                                 # Final check: If both methods failed, show appropriate message
                                 if not current_config:
                                     if device_connected:
@@ -1702,13 +1700,13 @@ class VLANDeploymentView(View):
                         napalm_manager.disconnect()
                     # Device unreachable - fallback to NetBox with clear marking
                     return self._get_netbox_inferred_config(device, interface_name, platform, device_unreachable=True)
-            
+
             elif platform == 'eos':
                 # For EOS, get full interface config using CLI - no hardcoding
                 try:
                     if napalm_manager.connect():
                         connection = napalm_manager.connection
-                        
+
                         # Get full interface config using show running-config
                         try:
                             if hasattr(connection, 'cli'):
@@ -1748,7 +1746,7 @@ class VLANDeploymentView(View):
                                         current_config = f"interface {interface_name}\n(could not parse config - CLI method not available)"
                                 else:
                                     current_config = f"interface {interface_name}\n(could not retrieve config)"
-                            
+
                             napalm_manager.disconnect()
                             result = {
                                 'success': True,
@@ -1782,10 +1780,10 @@ class VLANDeploymentView(View):
                         napalm_manager.disconnect()
                     # Device unreachable - fallback to NetBox with clear marking
                     return self._get_netbox_inferred_config(device, interface_name, platform, device_unreachable=True)
-            
+
             # Unknown platform - fallback to NetBox
             return self._get_netbox_inferred_config(device, interface_name, platform, device_unreachable=True)
-            
+
         except Exception as e:
             logger.error(f"Error getting device config for {device.name}:{interface_name}: {e}")
             if napalm_manager:
@@ -1795,7 +1793,186 @@ class VLANDeploymentView(View):
                     pass
             # Device unreachable - fallback to NetBox with clear marking
             return self._get_netbox_inferred_config(device, interface_name, platform, device_unreachable=True)
-    
+
+
+    def _parse_device_config_for_interface(self, device, interface_name, platform, config_data, device_uptime=None):
+        """
+        Parse pre-fetched device config for a specific interface (NO device connection).
+
+        This method is used in dry run preview to parse the config that was already fetched
+        by Nornir batch deployment, avoiding multiple device connections.
+
+        Args:
+            device: Device object
+            interface_name: Interface name to parse config for
+            platform: Platform type ('cumulus' or 'eos')
+            config_data: Pre-fetched device config (dict for Cumulus JSON, str for EOS)
+            device_uptime: Pre-fetched device uptime (str)
+
+        Returns:
+            dict: Same structure as _get_current_device_config
+                {
+                    'success': bool,
+                    'current_config': str,
+                    'source': 'device'|'error',
+                    'timestamp': str,
+                    'device_uptime': str,
+                    '_bridge_vlans': list,
+                    'bond_member_of': str or None,
+                    'bond_interface_config': str or None
+                }
+        """
+        import logging
+        logger = logging.getLogger('netbox_automation_plugin')
+
+        from django.utils import timezone
+        timestamp = timezone.now().strftime('%Y-%m-%d %H:%M:%S UTC')
+
+        # Default values
+        current_config = None
+        bridge_vlans = []
+        bond_member_of = None
+        bond_interface_config_commands = []
+
+        try:
+            if platform == 'cumulus' and config_data:
+                # Parse Cumulus JSON config (same logic as _get_current_device_config)
+                import json
+                import re
+
+                # config_data should be a list of dicts with 'set' key
+                if isinstance(config_data, list):
+                    # Extract bridge VLANs
+                    try:
+                        for item in config_data:
+                            if isinstance(item, dict) and 'set' in item:
+                                set_data = item['set']
+                                if isinstance(set_data, dict) and 'bridge' in set_data:
+                                    bridge_data = set_data['bridge']
+                                    if isinstance(bridge_data, dict) and 'domain' in bridge_data:
+                                        domain_data = bridge_data['domain']
+                                        if isinstance(domain_data, dict) and 'br_default' in domain_data:
+                                            br_default_data = domain_data['br_default']
+                                            if isinstance(br_default_data, dict) and 'vlan' in br_default_data:
+                                                vlan_data = br_default_data['vlan']
+                                                if isinstance(vlan_data, dict):
+                                                    for vlan_key in vlan_data.keys():
+                                                        if isinstance(vlan_key, str):
+                                                            bridge_vlans.append(vlan_key)
+                    except Exception as e:
+                        logger.debug(f"Could not parse bridge VLANs: {e}")
+
+                    # Check if interface is a bond member
+                    try:
+                        for item in config_data:
+                            if isinstance(item, dict) and 'set' in item:
+                                set_data = item['set']
+                                if isinstance(set_data, dict) and 'interface' in set_data:
+                                    interface_data = set_data['interface']
+                                    if isinstance(interface_data, dict):
+                                        # Look for bond interfaces
+                                        for iface_name, iface_config in interface_data.items():
+                                            if isinstance(iface_config, dict) and 'bond' in iface_config:
+                                                bond_config = iface_config['bond']
+                                                if isinstance(bond_config, dict) and 'member' in bond_config:
+                                                    members = bond_config['member']
+                                                    if isinstance(members, dict) and interface_name in members:
+                                                        bond_member_of = iface_name
+                                                        logger.debug(f"Interface {interface_name} is a member of bond {bond_member_of}")
+                                                        break
+                                        if bond_member_of:
+                                            break
+                    except Exception as e:
+                        logger.debug(f"Could not check bond membership: {e}")
+
+                    # Parse interface config
+                    try:
+                        # Use the target interface (bond if member, otherwise original)
+                        target_interface = bond_member_of if bond_member_of else interface_name
+
+                        command_lines = []
+                        for item in config_data:
+                            if isinstance(item, dict) and 'set' in item:
+                                set_data = item['set']
+                                if isinstance(set_data, dict) and 'interface' in set_data:
+                                    interface_data = set_data['interface']
+                                    if isinstance(interface_data, dict) and target_interface in interface_data:
+                                        iface_config = interface_data[target_interface]
+                                        # Convert to nv commands (simplified version)
+                                        if isinstance(iface_config, dict):
+                                            for key, value in iface_config.items():
+                                                if isinstance(value, dict):
+                                                    for subkey, subvalue in value.items():
+                                                        command_lines.append(f"nv set interface {target_interface} {key} {subkey} {subvalue}")
+                                                else:
+                                                    command_lines.append(f"nv set interface {target_interface} {key} {value}")
+
+                        if command_lines:
+                            current_config = '\n'.join(command_lines)
+                        else:
+                            current_config = f"(no configuration found for interface {interface_name})"
+
+                    except Exception as e:
+                        logger.debug(f"Could not parse interface config: {e}")
+                        current_config = f"(error parsing config: {e})"
+
+                elif isinstance(config_data, str):
+                    # Fallback: config_data is a string (shouldn't happen for Cumulus)
+                    current_config = f"(config data is string, expected JSON)"
+
+            elif platform == 'eos' and config_data:
+                # Parse EOS config (string format)
+                if isinstance(config_data, str):
+                    # Extract interface section
+                    lines = config_data.split('\n')
+                    interface_lines = []
+                    in_interface = False
+                    for line in lines:
+                        if f"interface {interface_name}" in line:
+                            in_interface = True
+                            interface_lines.append(line)
+                        elif in_interface:
+                            if line.startswith('interface '):
+                                # Hit another interface, stop
+                                break
+                            interface_lines.append(line)
+
+                    if interface_lines:
+                        current_config = '\n'.join(interface_lines)
+                    else:
+                        current_config = f"(no configuration found for interface {interface_name})"
+                else:
+                    current_config = f"(config data is not string for EOS)"
+
+            else:
+                current_config = f"(no config data provided)"
+
+            # Return result in same format as _get_current_device_config
+            return {
+                'success': True if current_config and not current_config.startswith('(') else False,
+                'current_config': current_config if current_config else f"(no configuration found for interface {interface_name})",
+                'source': 'device',
+                'timestamp': timestamp,
+                'device_uptime': device_uptime,
+                '_bridge_vlans': bridge_vlans,
+                'bond_member_of': bond_member_of,
+                'bond_interface_config': '\n'.join(bond_interface_config_commands) if bond_interface_config_commands else None
+            }
+
+        except Exception as e:
+            logger.error(f"Error parsing config for {device.name}:{interface_name}: {e}")
+            return {
+                'success': False,
+                'current_config': f"ERROR: Could not parse config: {str(e)}",
+                'source': 'error',
+                'timestamp': timestamp,
+                'error': str(e),
+                'device_uptime': device_uptime,
+                '_bridge_vlans': [],
+                'bond_member_of': None,
+                'bond_interface_config': None
+            }
+
     def _parse_cumulus_cli_output(self, cli_output, interface_name):
         """
         Parse Cumulus CLI output from 'nv show interface' command.
@@ -1804,10 +1981,10 @@ class VLANDeploymentView(View):
         try:
             if not cli_output:
                 return f"interface {interface_name} - no config found"
-            
+
             # Parse text output from nv show
             lines = cli_output.split('\n') if isinstance(cli_output, str) else str(cli_output).split('\n')
-            
+
             # Look for bridge domain access VLAN
             for line in lines:
                 line_lower = line.lower().strip()
@@ -1827,17 +2004,17 @@ class VLANDeploymentView(View):
                             after_colon = line.split(':', 1)[1].strip()
                             if after_colon.isdigit():
                                 return f"nv set interface {interface_name} bridge domain br_default access {after_colon}"
-            
+
             # If we found bridge domain but no access VLAN, return what we have
             if any('bridge' in line.lower() and 'domain' in line.lower() for line in lines):
                 return f"interface {interface_name} bridge domain config:\n{cli_output.strip()}"
-            
+
             # No bridge domain found
             return f"interface {interface_name} - no bridge domain config found"
         except Exception as e:
             logger.warning(f"Error parsing Cumulus CLI output for {interface_name}: {e}")
             return f"interface {interface_name}\n{cli_output.strip()}" if cli_output else f"interface {interface_name} - error parsing output"
-    
+
     def _parse_eos_cli_output(self, cli_output, interface_name):
         """
         Parse EOS CLI output from 'show running-config interface' command.
@@ -1846,12 +2023,12 @@ class VLANDeploymentView(View):
         try:
             if not cli_output:
                 return f"interface {interface_name} - no config found"
-            
+
             # Extract interface section from output
             lines = cli_output.split('\n') if isinstance(cli_output, str) else str(cli_output).split('\n')
             interface_lines = []
             in_interface = False
-            
+
             for line in lines:
                 if f"interface {interface_name}" in line:
                     in_interface = True
@@ -1860,7 +2037,7 @@ class VLANDeploymentView(View):
                     if line.strip().startswith('interface ') or line.strip() == '!':
                         break
                     interface_lines.append(line)
-            
+
             if interface_lines:
                 return '\n'.join(interface_lines)
             else:
@@ -1868,7 +2045,7 @@ class VLANDeploymentView(View):
         except Exception as e:
             logger.warning(f"Error parsing EOS CLI output for {interface_name}: {e}")
             return f"interface {interface_name}\n{cli_output.strip()}" if cli_output else f"interface {interface_name} - error parsing output"
-    
+
     def _parse_cumulus_interface_config(self, config_output, interface_name):
         """
         Parse Cumulus config to extract interface bridge domain settings.
@@ -1876,7 +2053,7 @@ class VLANDeploymentView(View):
         """
         try:
             import json
-            
+
             # Handle different input formats
             config_dict = None
             if isinstance(config_output, dict):
@@ -1900,7 +2077,7 @@ class VLANDeploymentView(View):
                 except json.JSONDecodeError:
                     # Not JSON, return placeholder
                     return f"interface {interface_name} - bridge domain config (text format, cannot parse)"
-            
+
             # Navigate NVUE JSON structure: interface -> bridge -> domain -> br_default -> access
             if config_dict and isinstance(config_dict, dict):
                 # NVUE JSON structure: {"interface": {"eth1": {"bridge": {"domain": {"br_default": {"access": 3020}}}}}}
@@ -1912,10 +2089,10 @@ class VLANDeploymentView(View):
                         domain_config = bridge_config.get('domain', {})
                         br_default = domain_config.get('br_default', {})
                         access_vlan = br_default.get('access')
-                        
+
                         if access_vlan:
                             return f"nv set interface {interface_name} bridge domain br_default access {access_vlan}"
-                
+
                 # Alternative structure: direct interface name at root
                 if interface_name in config_dict:
                     iface_config = config_dict[interface_name]
@@ -1923,16 +2100,16 @@ class VLANDeploymentView(View):
                     domain_config = bridge_config.get('domain', {})
                     br_default = domain_config.get('br_default', {})
                     access_vlan = br_default.get('access')
-                    
+
                     if access_vlan:
                         return f"nv set interface {interface_name} bridge domain br_default access {access_vlan}"
-            
+
             # If we couldn't parse it, return a generic message
             return f"interface {interface_name} - no bridge domain config found (interface may not be configured for bridging)"
         except Exception as e:
             logger.warning(f"Error parsing Cumulus config for {interface_name}: {e}")
             return f"interface {interface_name} - error parsing config: {str(e)}"
-    
+
     def _parse_eos_interface_config(self, config_dict, interface_name):
         """
         Parse EOS config to extract interface switchport settings.
@@ -1953,7 +2130,7 @@ class VLANDeploymentView(View):
                     interface_lines.append(line)
             return '\n'.join(interface_lines) if interface_lines else f"Interface {interface_name} - no config found"
         return f"Interface {interface_name} - no config found"
-    
+
     def _get_netbox_inferred_config(self, device, interface_name, platform, device_unreachable=False):
         """
         Infer current config from NetBox interface state.
@@ -1961,18 +2138,18 @@ class VLANDeploymentView(View):
         Clearly marks config as ESTIMATED/INFERRED, not real device config.
         """
         from django.utils import timezone
-        
+
         try:
             interface = Interface.objects.get(device=device, name=interface_name)
             interface.refresh_from_db()
-            
+
             untagged_vlan = interface.untagged_vlan.vid if interface.untagged_vlan else None
             tagged_vlans = list(interface.tagged_vlans.values_list('vid', flat=True))
             mode = interface.mode if hasattr(interface, 'mode') else None
-            
+
             # Check if interface has IP address (routed)
             has_ip = interface.ip_addresses.exists()
-            
+
             if has_ip:
                 # Routed interface - show IP info
                 ip_lines = []
@@ -1997,7 +2174,7 @@ class VLANDeploymentView(View):
                     config = f"interface {interface_name} - no VLAN configured"
             else:
                 config = f"interface {interface_name} - unknown platform"
-            
+
             # Clearly mark as ESTIMATED if device was unreachable
             if device_unreachable:
                 config = f"[ESTIMATED FROM NETBOX - DEVICE UNREACHABLE]\n{config}\n\nWARNING: This is inferred from NetBox data, not actual device configuration!"
@@ -2024,7 +2201,7 @@ class VLANDeploymentView(View):
             # Cache the result
             self._device_config_cache[cache_key] = result
             return result
-    
+
     def _get_netbox_current_state(self, device, interface_name, vlan_id, mode='normal', tagged_vlan_ids=None):
         """
         Get current NetBox interface state (comprehensive - VLAN-relevant only).
@@ -2125,7 +2302,7 @@ class VLANDeploymentView(View):
             proposed_connected_to = current_connected_to  # Keep connected device
             proposed_enabled = current_enabled  # Keep enabled status
             proposed_port_channel_member = current_port_channel_member  # Keep port-channel status
-            
+
             # Check if there are changes
             has_changes = (
                 current_mode != proposed_mode or
@@ -2134,7 +2311,7 @@ class VLANDeploymentView(View):
                 set(current_ip_addresses) != set(proposed_ip_addresses) or
                 current_vrf != proposed_vrf
             )
-            
+
             return {
                 'current': {
                     'mode': current_mode,
@@ -2186,30 +2363,30 @@ class VLANDeploymentView(View):
                 },
                 'has_changes': True
             }
-    
+
     def _generate_config_diff(self, current_config, proposed_config, platform, device=None, interface_name=None, bridge_vlans=None):
         """
         Generate a diff between current and proposed config.
-        
+
         Args:
             current_config: Current device configuration
             proposed_config: Proposed configuration command
             platform: Platform type ('cumulus' or 'eos')
             device: Device object (optional, for bridge-level VLAN checks)
             interface_name: Interface name (optional, for bridge-level VLAN checks)
-        
+
         Returns:
             str: Formatted diff showing changes
         """
         if current_config == proposed_config:
             return "No changes (config already applied)"
-        
+
         # Simple diff format
         diff_lines = []
         diff_lines.append("--- Current Configuration")
         diff_lines.append("+++ Proposed Configuration")
         diff_lines.append("")
-        
+
         if platform == 'cumulus':
             # For Cumulus, show what's currently configured vs what commands will be executed
             if "no current config" in current_config.lower() or "no config found" in current_config.lower() or "(no configuration" in current_config.lower() or "ERROR:" in current_config:
@@ -2225,7 +2402,7 @@ class VLANDeploymentView(View):
                 current_bridge_configs = []
                 current_vlan_configs = []  # All VLAN-related configs (bridge domain access)
                 has_ip_or_vrf = False
-                
+
                 # Find current bridge domain configs (these will be replaced)
                 # IMPORTANT: We only show bridge domain configs as "removed/replaced"
                 # We do NOT show link state, type, or other non-VLAN configs (these are preserved)
@@ -2251,14 +2428,14 @@ class VLANDeploymentView(View):
                         # Safety check: IP/VRF configs should be blocked by validation
                         elif 'ip address' in line or 'ip gateway' in line or 'ip vrf' in line:
                             has_ip_or_vrf = True
-                
+
                 # Warn if IP/VRF detected (indicates validation bug - these ports should be blocked)
                 if has_ip_or_vrf:
                     diff_lines.append("[WARN] Interface has IP address or VRF configuration.")
                     diff_lines.append("      This interface should have been blocked by validation.")
                     diff_lines.append("      Deployment will NOT proceed for interfaces with IP/VRF.")
                     diff_lines.append("")
-                
+
                 # Show current VLAN configs with "-" signs (what will be removed/replaced)
                 if current_vlan_configs:
                     for item in current_vlan_configs:
@@ -2267,7 +2444,7 @@ class VLANDeploymentView(View):
                     # No current VLAN configs to remove
                     diff_lines.append("  (no current VLAN configuration to remove)")
                 diff_lines.append("")
-                
+
                 # Show proposed configs with "+" signs (what will be added)
                 proposed_lines = [line.strip() for line in proposed_config.split('\n') if line.strip()]
                 for line in proposed_lines:
@@ -2279,12 +2456,12 @@ class VLANDeploymentView(View):
                 diff_lines.append("      Only the access VLAN is replaced - bridge domain membership is preserved.")
                 diff_lines.append("      The bridge 'nv set' command is additive - it adds the VLAN to the")
                 diff_lines.append("      existing bridge VLAN list without replacing it.")
-                
+
         elif platform == 'eos':
             # For EOS, show what's currently configured vs what commands will be executed
             current_lines = [line.strip() for line in current_config.split('\n') if line.strip()]
             proposed_lines = [line.strip() for line in proposed_config.split('\n') if line.strip()]
-            
+
             # Show what's currently configured (for reference)
             if current_lines:
                 diff_lines.append("Currently Configured (will be replaced):")
@@ -2292,40 +2469,40 @@ class VLANDeploymentView(View):
                     if line.strip():
                         diff_lines.append(f"  {line}")
                 diff_lines.append("")
-            
+
             # Show actual deployment commands that will be executed
             diff_lines.append("Commands to Execute:")
             for line in proposed_lines:
                 if line.strip():
                     diff_lines.append(f"  {line}")
-        
+
         return '\n'.join(diff_lines)
-    
+
     def _generate_netbox_diff(self, current_state, proposed_state, bond_info=None, interface_name=None, bond_name=None):
         """
         Generate a diff for NetBox interface state changes (comprehensive).
         Shows all VLAN-relevant changes including IP/VRF removals.
-        
+
         ISSUE 5 FIX: For sync mode with bond detection, shows VLAN migration from interface to bond.
-        
+
         Args:
             current_state: Current NetBox state dict
             proposed_state: Proposed NetBox state dict
             bond_info: Optional bond information dict (for sync mode)
             interface_name: Original interface name (e.g., 'swp3')
             bond_name: Bond interface name (e.g., 'bond3')
-        
+
         Returns:
             str: Formatted diff showing NetBox changes
         """
         if not current_state['has_changes']:
             return "No changes (NetBox already has this configuration)"
-        
+
         diff_lines = []
         diff_lines.append("--- Current NetBox State")
         diff_lines.append("+++ Proposed NetBox State")
         diff_lines.append("")
-        
+
         # BOND DETECTION: Show bond creation/migration messages
         # Check for bond_name and interface_name (bond_info can be None if NetBox doesn't have bond yet)
         if bond_name and interface_name:
@@ -2375,20 +2552,20 @@ class VLANDeploymentView(View):
             diff_lines.append("=" * 60)
             diff_lines.append("")
             return '\n'.join(diff_lines)
-        
+
         # Normal mode (no bond migration)
         # Mode change
         old_mode = current_state['current']['mode'] or 'None'
         new_mode = proposed_state['mode']
         if old_mode != new_mode:
             diff_lines.append(f"  802.1Q Mode: {old_mode} → {new_mode}")
-        
+
         # Untagged VLAN change
         old_untagged = current_state['current']['untagged_vlan'] or 'None'
         new_untagged = proposed_state['untagged_vlan'] or 'None'
         if old_untagged != new_untagged:
             diff_lines.append(f"  Untagged VLAN: {old_untagged} → {new_untagged}")
-        
+
         # Tagged VLANs change
         old_tagged_set = set(current_state['current']['tagged_vlans'])
         new_tagged_set = set(proposed_state['tagged_vlans'])
@@ -2396,7 +2573,7 @@ class VLANDeploymentView(View):
             old_tagged = ', '.join(map(str, sorted(current_state['current']['tagged_vlans']))) or 'None'
             new_tagged = ', '.join(map(str, sorted(proposed_state['tagged_vlans']))) or 'None'
             diff_lines.append(f"  Tagged VLANs: [{old_tagged}] → [{new_tagged}]")
-        
+
         # IP Addresses change (removal for routed → bridged)
         old_ip_set = set(current_state['current']['ip_addresses'])
         new_ip_set = set(proposed_state['ip_addresses'])
@@ -2404,13 +2581,13 @@ class VLANDeploymentView(View):
             old_ips = ', '.join(current_state['current']['ip_addresses']) or 'None'
             new_ips = ', '.join(proposed_state['ip_addresses']) or 'None'
             diff_lines.append(f"  IP Addresses: {old_ips} → {new_ips} (removed - interface changing from routed to bridged)")
-        
+
         # VRF change (removal for routed → bridged)
         old_vrf = current_state['current']['vrf'] or 'None'
         new_vrf = proposed_state['vrf'] or 'None'
         if old_vrf != new_vrf:
             diff_lines.append(f"  VRF: {old_vrf} → {new_vrf} (removed - interface changing from routed to bridged)")
-        
+
         # Show unchanged fields (for completeness)
         if current_state['current']['cable_status'] == proposed_state['cable_status']:
             diff_lines.append(f"  Cable Status: {proposed_state['cable_status']} → {proposed_state['cable_status']} (no change)")
@@ -2421,30 +2598,30 @@ class VLANDeploymentView(View):
             diff_lines.append(f"  Enabled: {proposed_state['enabled']} → {proposed_state['enabled']} (no change)")
         if current_state['current']['port_channel_member'] == proposed_state['port_channel_member']:
             diff_lines.append(f"  Port-Channel Member: {proposed_state['port_channel_member']} → {proposed_state['port_channel_member']} (no change)")
-        
+
         # Add warning if IP/VRF are being removed
         if old_ip_set and not new_ip_set:
             diff_lines.append("")
             diff_lines.append("[WARN] IP addresses will be removed from NetBox interface (routed → bridged)")
         if old_vrf != 'None' and new_vrf == 'None':
             diff_lines.append("[WARN] VRF will be removed from NetBox interface (routed → bridged)")
-        
+
         if len(diff_lines) == 3:  # Only header lines
             return "No changes"
-        
+
         return '\n'.join(diff_lines)
-    
+
     def _get_interface_details(self, device, interface_name):
         """
         Get detailed interface information for dry run display.
-        
+
         Returns:
             dict: Interface details including type, cable, connected device, etc.
         """
         try:
             interface = Interface.objects.get(device=device, name=interface_name)
             interface.refresh_from_db()
-            
+
             details = {
                 'name': interface_name,
                 'type': interface.type if hasattr(interface, 'type') else 'Unknown',
@@ -2455,12 +2632,12 @@ class VLANDeploymentView(View):
                 'port_channel_member': False,
                 'port_channel_name': None,
             }
-            
+
             # Check port-channel membership
             if hasattr(interface, 'lag') and interface.lag:
                 details['port_channel_member'] = True
                 details['port_channel_name'] = interface.lag.name
-            
+
             # Get connected device info
             if interface.cable:
                 try:
@@ -2473,7 +2650,7 @@ class VLANDeploymentView(View):
                         details['connected_status'] = connected_device.status
                 except Exception as e:
                     logger.debug(f"Could not get connected device info: {e}")
-            
+
             return details
         except Interface.DoesNotExist:
             return {
@@ -2485,12 +2662,12 @@ class VLANDeploymentView(View):
                 'connected_role': None,
                 'port_channel_member': False,
             }
-    
+
     def _generate_rollback_info(self, device, interface_name, vlan_id, platform, timeout=90, current_config=None):
         """
         Generate comprehensive rollback information for both Cumulus and EOS.
         Includes previous running config for manual rollback if auto-rollback fails.
-        
+
         Args:
             device: Device object
             interface_name: Interface name
@@ -2498,25 +2675,25 @@ class VLANDeploymentView(View):
             platform: Platform type ('cumulus' or 'eos')
             timeout: Rollback timer in seconds
             current_config: Current device configuration (for manual rollback)
-        
+
         Returns:
             str: Formatted rollback information
         """
         rollback_lines = []
         rollback_lines.append("Rollback Plan:")
         rollback_lines.append("")
-        
+
         # Show captured interface-specific running config for reference (in case auto-rollback fails)
         if current_config and not ('ERROR' in current_config or 'Unable to fetch' in current_config or 'no configuration' in current_config.lower()):
             rollback_lines.append("Captured Interface Config (before deployment):")
             rollback_lines.append("  This is the interface configuration that was active before deployment.")
             rollback_lines.append("  Use these commands to manually restore if auto-rollback fails.")
             rollback_lines.append("")
-            
+
             # Extract interface-specific configs (same logic as dry run mode)
             config_lines = current_config.split('\n')
             interface_config_found = False
-            
+
             if platform == 'cumulus':
                 # For Cumulus, show all nv set/unset commands for this interface
                 for line in config_lines:
@@ -2544,11 +2721,11 @@ class VLANDeploymentView(View):
                         if stripped:  # Skip empty lines
                             rollback_lines.append(f"  {line.strip()}")
                             interface_config_found = True
-            
+
             if not interface_config_found:
                 rollback_lines.append("  # No previous VLAN configuration found for this interface")
             rollback_lines.append("")
-        
+
         if platform == 'cumulus':
             rollback_lines.append("Platform: Cumulus Linux (NVUE)")
             rollback_lines.append("")
@@ -2595,7 +2772,7 @@ class VLANDeploymentView(View):
             rollback_lines.append("")
             rollback_lines.append("To Confirm (prevent rollback):")
             rollback_lines.append("  nv config confirm")
-            
+
         elif platform == 'eos':
             rollback_lines.append("Platform: Arista EOS")
             rollback_lines.append("")
@@ -2662,13 +2839,13 @@ class VLANDeploymentView(View):
             rollback_lines.append("Auto-Rollback:")
             rollback_lines.append("  [WARN] Not supported on this platform")
             rollback_lines.append("  • Manual intervention may be required")
-        
+
         return '\n'.join(rollback_lines)
-    
+
     def _generate_validation_table(self, device_validation, interface_validation):
         """
         Generate a formatted validation breakdown table.
-        
+
         Returns:
             str: Formatted validation table
         """
@@ -2677,32 +2854,32 @@ class VLANDeploymentView(View):
         table_lines.append("")
         table_lines.append("Check                          | Status | Details")
         table_lines.append("-" * 80)
-        
+
         # Device validation
         device_status = device_validation.get('status', 'unknown')
         device_msg = device_validation.get('message', '')
         status_symbol = '[BLOCK]' if device_status == 'block' else '[WARN]' if device_status == 'warn' else '[PASS]'
         table_lines.append(f"Device: automation-ready:vlan    | {status_symbol} {device_status.upper():5} | {device_msg}")
-        
+
         # Interface validation
         iface_status = interface_validation.get('status', 'unknown')
         iface_msg = interface_validation.get('message', '')
         status_symbol = '[BLOCK]' if iface_status == 'block' else '[WARN]' if iface_status == 'warn' else '[PASS]'
         table_lines.append(f"Interface: tag check            | {status_symbol} {iface_status.upper():5} | {iface_msg}")
-        
+
         return '\n'.join(table_lines)
-    
+
     def _generate_risk_assessment(self, device_validation, interface_validation, current_vlan, new_vlan):
         """
         Generate risk assessment based on validation and changes.
-        
+
         Returns:
             str: Risk assessment text
         """
         risk_lines = []
         risk_lines.append("Risk Assessment:")
         risk_lines.append("")
-        
+
         # Determine risk level
         if device_validation.get('status') == 'block' or interface_validation.get('status') == 'block':
             risk_level = "HIGH"
@@ -2713,10 +2890,10 @@ class VLANDeploymentView(View):
         else:
             risk_level = "LOW"
             risk_icon = "[LOW]"
-        
+
         risk_lines.append(f"Risk Level: {risk_icon} {risk_level}")
         risk_lines.append("")
-        
+
         # List risk factors
         risk_factors = []
         if device_validation.get('status') == 'block':
@@ -2727,21 +2904,21 @@ class VLANDeploymentView(View):
             risk_factors.append("Interface not properly tagged (would warn but allow)")
         if current_vlan and current_vlan != new_vlan:
             risk_factors.append(f"VLAN change: {current_vlan} → {new_vlan} (existing configuration will be modified)")
-        
+
         if risk_factors:
             risk_lines.append("Risk Factors:")
             for factor in risk_factors:
                 risk_lines.append(f"  • {factor}")
         else:
             risk_lines.append("Risk Factors: None identified")
-        
+
         return '\n'.join(risk_lines)
 
     def _validate_tags_before_deployment(self, devices, interface_list):
         """
         Final validation before deployment - double-check tags and interface eligibility.
         This is a safety check that runs even after form validation.
-        
+
         Tagging Priority Hierarchy (highest to lowest):
         1. Device: automation-ready:vlan (required for deployment)
         2. Interface tags (checked in priority order):
@@ -2750,18 +2927,18 @@ class VLANDeploymentView(View):
            - vlan-mode:tagged (if connected to Host AND has tagged/untagged VLANs - ALLOWS)
            - vlan-mode:access (if connected to Host AND has only untagged VLAN - ALLOWS)
            - vlan-mode:needs-review (if unclear or conflicts - WARNS but allows, lowest priority)
-        
+
         Returns list of error messages (empty if all valid).
         """
         errors = []
-        
+
         # Get tags
         try:
             device_tag = Tag.objects.get(name='automation-ready:vlan')
         except Tag.DoesNotExist:
             device_tag = None
             logger.warning("Tag 'automation-ready:vlan' does not exist - skipping device tag validation")
-        
+
         interface_tag_names = {
             'uplink': 'vlan-mode:uplink',
             'routed': 'vlan-mode:routed',
@@ -2774,19 +2951,19 @@ class VLANDeploymentView(View):
                 interface_tags[key] = Tag.objects.get(name=tag_name)
             except Tag.DoesNotExist:
                 interface_tags[key] = None
-        
+
         # Validate each device
         for device in devices:
             device.refresh_from_db()
             device_tags = list(device.tags.all())
-            
+
             # Check device tag (BLOCKING)
             if device_tag and device_tag not in device_tags:
                 errors.append(
                     "Device '" + device.name + "' is not tagged as 'automation-ready:vlan'. "
                     "Please run the Tagging Workflow first to tag this device."
                 )
-            
+
             # Validate each interface on this device
             for iface_name in interface_list:
                 try:
@@ -2794,7 +2971,7 @@ class VLANDeploymentView(View):
                     interface.refresh_from_db()
                     interface_tag_list = list(interface.tags.all())
                     interface_tag_names_list = [t.name for t in interface_tag_list]
-                    
+
                     # CRITICAL CHECK: Interface with IP address or VRF is a routed port (BLOCKING)
                     # Priority 1: vlan-mode:routed (if interface has IP address or in VRF, it's routed - highest priority)
                     # This must be checked BEFORE tag checks, as IP address/VRF is a stronger signal
@@ -2806,7 +2983,7 @@ class VLANDeploymentView(View):
                             if hasattr(ip_addr, 'vrf') and ip_addr.vrf:
                                 has_vrf = True
                                 break
-                    
+
                     if has_ip or has_vrf:
                         reason = []
                         if has_ip:
@@ -2817,7 +2994,7 @@ class VLANDeploymentView(View):
                             "Interface '" + iface_name + "' on device '" + device.name + "' has " + ' and '.join(reason) + " (routed port) - cannot modify routed interfaces."
                         )
                         continue  # Skip further checks for this interface
-                    
+
                     # Check for blocking tags (BLOCKING)
                     if interface_tags.get('uplink') and interface_tags['uplink'].name in interface_tag_names_list:
                         errors.append(
@@ -2830,8 +3007,8 @@ class VLANDeploymentView(View):
                             "Interface '" + iface_name + "' on device '" + device.name + "' is marked as 'vlan-mode:routed' - cannot modify routed interfaces."
                         )
                         continue
-                    
-                    # Note: Port-channel/bond membership is handled automatically - 
+
+                    # Note: Port-channel/bond membership is handled automatically -
                     # config is applied to bond interface instead of member (no blocking needed)
 
                     # Check if cabled (BLOCKING)
@@ -2840,7 +3017,7 @@ class VLANDeploymentView(View):
                             "Interface '" + iface_name + "' on device '" + device.name + "' is not cabled in NetBox - please add cable information first."
                         )
                         continue
-                    
+
                     # Check connected device status (BLOCKING)
                     try:
                         endpoints = interface.connected_endpoints
@@ -2855,7 +3032,7 @@ class VLANDeploymentView(View):
                                 continue
                     except Exception as e:
                         logger.warning("Could not get connected endpoints for " + device.name + ":" + iface_name + ": " + str(e))
-                    
+
                     # REQUIRED: Interface must be tagged as 'access' or 'tagged' to allow deployment (BLOCKING)
                     has_access_tag = interface_tags.get('access') and interface_tags['access'].name in interface_tag_names_list
                     has_tagged_tag = interface_tags.get('tagged') and interface_tags['tagged'].name in interface_tag_names_list
@@ -2870,21 +3047,21 @@ class VLANDeploymentView(View):
                     errors.append(
                         "Interface '" + iface_name + "' does not exist on device '" + device.name + "'"
                     )
-        
+
         return errors
 
     def _get_interfaces_for_sync(self, devices, selected_interface_names=None, include_untagged=False):
         """
         Get interfaces from NetBox for selected devices that have VLAN configuration.
         Separates into tagged and untagged sections.
-        
+
         Args:
             devices: QuerySet or list of Device objects
             selected_interface_names: Optional list of interface names selected by user.
                                      Format: ["device1:swp1", "device1:swp2", "device2:Ethernet1"]
                                      If None, returns all interfaces with VLAN config.
             include_untagged: If True, include untagged interfaces (Section 2). Default: False
-        
+
         Returns:
             dict: {
                 'tagged': {device_name: [Interface objects]},
@@ -2893,33 +3070,33 @@ class VLANDeploymentView(View):
         """
         tagged_interfaces_by_device = {}
         untagged_interfaces_by_device = {}
-        
+
         # Management interfaces to exclude
         management_interfaces = {'eth0', 'lo', 'mgmt', 'management', 'loopback', 'Loopback0'}
-        
+
         for device in devices:
             device_interfaces = Interface.objects.filter(
                 device=device
             ).select_related('untagged_vlan').prefetch_related('tagged_vlans', 'tags')
-            
+
             tagged_interfaces = []
             untagged_interfaces = []
-            
+
             for iface in device_interfaces:
                 # Skip management interfaces
                 if iface.name.lower() in [m.lower() for m in management_interfaces]:
                     continue
-                
+
                 # Only process interfaces with VLAN config
                 if not (iface.untagged_vlan or iface.tagged_vlans.exists()):
                     continue
-                
+
                 # If user selected specific interfaces, filter to those
                 if selected_interface_names:
                     interface_key = f"{device.name}:{iface.name}"
                     if interface_key not in selected_interface_names:
                         continue
-                
+
                 # Check tags
                 interface_tags = set(iface.tags.values_list('name', flat=True))
                 has_vlan_mode_access_tagged = any(
@@ -2927,7 +3104,7 @@ class VLANDeploymentView(View):
                     for tag in interface_tags
                 )
                 has_any_tags = iface.tags.exists()
-                
+
                 # Explicit duplicate prevention: if interface has vlan-mode:access or vlan-mode:tagged,
                 # it MUST go to Section 1 only, never Section 2
                 if has_vlan_mode_access_tagged:
@@ -2939,7 +3116,7 @@ class VLANDeploymentView(View):
                     # This includes: untagged, uplink/routed, needs-review, or any other vlan-mode tags
                     untagged_interfaces.append(iface)
                 # Note: Interfaces without VLAN config are already filtered out above
-            
+
             # Safety check: Verify no duplicates between Section 1 and Section 2
             tagged_interface_ids = {iface.id for iface in tagged_interfaces}
             untagged_interface_ids = {iface.id for iface in untagged_interfaces}
@@ -2948,12 +3125,12 @@ class VLANDeploymentView(View):
                 logger.warning(f"Found duplicate interfaces between Section 1 and Section 2 for device {device.name}: {duplicates}")
                 # Remove duplicates from Section 2 (Section 1 takes priority)
                 untagged_interfaces = [iface for iface in untagged_interfaces if iface.id not in duplicates]
-            
+
             if tagged_interfaces:
                 tagged_interfaces_by_device[device.name] = tagged_interfaces
             if untagged_interfaces:
                 untagged_interfaces_by_device[device.name] = untagged_interfaces
-        
+
         return {
             'tagged': tagged_interfaces_by_device,
             'untagged': untagged_interfaces_by_device,
@@ -3020,7 +3197,7 @@ class VLANDeploymentView(View):
 
         if not is_bond_member:
             logger.debug(f"[BOND DETECTION] {interface.name} → standalone interface")
-        
+
         commands = []
         bridge_vlans = []
         vlans_to_add = []
@@ -3041,7 +3218,7 @@ class VLANDeploymentView(View):
                         device_bridge_vlans = self._get_bridge_vlans_from_json(config_data)
             except Exception as e:
                 logger.debug(f"Could not get bridge VLANs for check: {e}")
-            
+
             # 1. Add VLANs to bridge (untagged + tagged) - only add missing VLANs
             # Collect all VLANs that need to be added to bridge
             all_vlans = set()
@@ -3066,7 +3243,7 @@ class VLANDeploymentView(View):
                     logger.debug(f"VLAN {vlan} already exists in bridge (range or individual) - skipping bridge VLAN command")
 
             bridge_vlans = sorted(all_vlans)
-            
+
             # 2. Set interface VLAN configuration - use target_interface (bond if member)
             # IMPORTANT: In Cumulus NVUE, interfaces ONLY use 'access' mode
             # Tagged VLANs are ONLY configured on the bridge domain (done above)
@@ -3080,9 +3257,9 @@ class VLANDeploymentView(View):
                 logger.error(f"[NETBOX CONFIG] Commands list now has {len(commands)} items")
             else:
                 logger.error(f"[NETBOX CONFIG] No untagged VLAN for {interface.name} (target: {target_interface}) - skipping access command")
-            
+
             # Note: "nv config apply" is handled by the deployment method, don't include here
-        
+
         elif platform == 'eos':
             # EOS: Config is interface-level - use target_interface (bond if member)
             if mode == 'access' and untagged_vlan:
@@ -3098,7 +3275,7 @@ class VLANDeploymentView(View):
                 # If untagged VLAN exists, set native VLAN
                 if untagged_vlan:
                     commands.append(f"   switchport trunk native vlan {untagged_vlan}")
-        
+
         result = {
             'commands': commands,
             'mode': mode or 'access',
@@ -3120,23 +3297,23 @@ class VLANDeploymentView(View):
         """
         Auto-tag interface based on NetBox VLAN config after successful deployment.
         Bypasses analysis criteria (cable checks, etc.) since we've already deployed.
-        
+
         Args:
             interface: Interface object from NetBox
             replace_conflicting_tags: If True, remove vlan-mode:uplink/routed tags before adding new tag
-        
+
         Returns:
             str: Tag name that was applied, or None if tagging failed/skipped
         """
         from extras.models import Tag
-        
+
         # Refresh interface from DB to get latest tags
         interface.refresh_from_db()
-        
+
         # Read NetBox VLAN config
         has_untagged = interface.untagged_vlan is not None
         has_tagged = interface.tagged_vlans.exists()
-        
+
         # Determine tag based on VLAN config only (no mode check)
         if has_tagged:
             tag_name = "vlan-mode:tagged"
@@ -3146,14 +3323,14 @@ class VLANDeploymentView(View):
             # No VLAN config - shouldn't happen, but skip
             logger.warning(f"Interface {interface.name} has no VLAN config, skipping auto-tag")
             return None
-        
+
         # Get Tag objects
         try:
             new_tag = Tag.objects.get(name=tag_name)
         except Tag.DoesNotExist:
             logger.error(f"Tag '{tag_name}' not found in NetBox - cannot auto-tag interface {interface.name}")
             return None
-        
+
         # If replacing conflicting tags, remove vlan-mode:uplink and vlan-mode:routed tags first
         if replace_conflicting_tags:
             conflicting_tags_to_remove = []
@@ -3161,13 +3338,13 @@ class VLANDeploymentView(View):
             for tag in interface_tags:
                 if tag.name.startswith('vlan-mode:uplink') or tag.name.startswith('vlan-mode:routed'):
                     conflicting_tags_to_remove.append(tag)
-            
+
             if conflicting_tags_to_remove:
                 for old_tag in conflicting_tags_to_remove:
                     interface.tags.remove(old_tag)
                     logger.info(f"Removed conflicting tag '{old_tag.name}' from interface {interface.device.name}:{interface.name}")
                 interface.save()
-        
+
         # Remove any existing vlan-mode:access or vlan-mode:tagged tags (if any) before adding new one
         existing_vlan_mode_tags = [
             tag for tag in interface.tags.all()
@@ -3177,12 +3354,12 @@ class VLANDeploymentView(View):
             for old_tag in existing_vlan_mode_tags:
                 interface.tags.remove(old_tag)
             interface.save()
-        
+
         # Add new tag
         try:
             interface.tags.add(new_tag)
             interface.save()
-            
+
             # Verify tag was added
             interface.refresh_from_db()
             if new_tag in interface.tags.all():
@@ -3200,7 +3377,7 @@ class VLANDeploymentView(View):
         """
         Sync NetBox interface VLAN configurations to devices.
         Uses existing deployment infrastructure (Nornir/NAPALM).
-        
+
         Args:
             devices: QuerySet or list of Device objects
             cleaned_data: Form cleaned data containing:
@@ -3208,13 +3385,13 @@ class VLANDeploymentView(View):
                 - interfaces_select: list (interface names in "device:interface" format)
                 - dry_run: bool
                 - deploy_changes: bool
-        
+
         Returns:
             list: Results in same format as _run_vlan_deployment
         """
         dry_run = cleaned_data.get('dry_run', False)
         deploy_changes = cleaned_data.get('deploy_changes', False)
-        
+
         # Get selected interfaces from form (user may have unchecked some)
         selected_interfaces_str = cleaned_data.get('interfaces_select', [])
         selected_interface_names = None
@@ -3224,7 +3401,7 @@ class VLANDeploymentView(View):
                 selected_interface_names = selected_interfaces_str
             else:
                 selected_interface_names = [s.strip() for s in str(selected_interfaces_str).split(',') if s.strip()]
-        
+
         # Get interfaces for each device from NetBox (filtered by user selection)
         # Returns dict with 'tagged' and 'untagged' sections
         # Always include all interfaces with VLAN configs (both tagged and untagged)
@@ -3236,9 +3413,9 @@ class VLANDeploymentView(View):
 
         tagged_interfaces_by_device = interfaces_dict['tagged']
         untagged_interfaces_by_device = interfaces_dict['untagged']
-        
+
         results = []
-        
+
         # Detect platform - all devices should be same platform
         platform = self._get_device_platform(devices[0]) if devices else 'cumulus'
 
@@ -3431,10 +3608,13 @@ class VLANDeploymentView(View):
             validation_results = self._validate_tags_for_dry_run(devices, interface_list, sync_mode=True)
 
             # Create preview callback for sync mode
-            def sync_preview_callback(device, device_interfaces, platform, vlan_id, bond_info_map_param):
+            def sync_preview_callback(device, device_interfaces, platform, vlan_id, bond_info_map_param,
+                                     device_lldp_data=None, device_config_data=None, device_uptime=None):
                 """
                 Generate dry run preview for sync mode.
                 Returns dict mapping interface names to preview results.
+
+                PERFORMANCE: Receives pre-fetched device data from Nornir (no device connections here).
                 """
                 device_results = {}
 
@@ -3461,7 +3641,7 @@ class VLANDeploymentView(View):
                     tagged_vlan_ids = config_info.get('tagged_vlans', [])
                     primary_vlan_id = untagged_vlan_id if untagged_vlan_id else (tagged_vlan_ids[0] if tagged_vlan_ids else None)
 
-                    # Use the existing preview generation method
+                    # Use the existing preview generation method with pre-fetched data
                     try:
                         preview_result = self._generate_dry_run_preview(
                             device=device,
@@ -3474,7 +3654,10 @@ class VLANDeploymentView(View):
                             untagged_vlan_id=untagged_vlan_id,
                             tagged_vlan_ids=tagged_vlan_ids,
                             vlan=None,
-                            primary_vlan_id=primary_vlan_id
+                            primary_vlan_id=primary_vlan_id,
+                            device_lldp_data=device_lldp_data,
+                            device_config_data=device_config_data,
+                            device_uptime=device_uptime
                         )
 
                         # Extract the result for this interface
@@ -4788,7 +4971,7 @@ class VLANDeploymentView(View):
         # Get VLAN IDs from form (normal mode)
         untagged_vlan_id = cleaned_data.get('untagged_vlan')
         tagged_vlans_str = cleaned_data.get('tagged_vlans', '').strip()
-        
+
         # Parse tagged VLANs from comma-separated string
         tagged_vlan_ids = []
         if tagged_vlans_str:
@@ -4797,10 +4980,10 @@ class VLANDeploymentView(View):
             except ValueError:
                 logger.warning(f"Could not parse tagged VLANs: {tagged_vlans_str}")
                 tagged_vlan_ids = []
-        
+
         # For logging/display purposes, use untagged VLAN ID if available, otherwise first tagged VLAN
         primary_vlan_id = untagged_vlan_id if untagged_vlan_id else (tagged_vlan_ids[0] if tagged_vlan_ids else None)
-        
+
         # Try to get VLAN object and name from NetBox (best effort - may have multiple VLANs with same ID)
         vlan = None
         vlan_name = f"VLAN {primary_vlan_id}" if primary_vlan_id else "VLANs"
@@ -4848,7 +5031,7 @@ class VLANDeploymentView(View):
 
         # Detect platform - all devices should be same platform (enforced by manufacturer filter)
         platform = self._get_device_platform(devices[0]) if devices else 'cumulus'
-        
+
         logger.info(f"VLAN Deployment: {len(devices)} devices, {len(interface_list)} interfaces, platform: {platform}, sync_mode: {sync_netbox_to_device}")
 
         if dry_run:
@@ -4939,7 +5122,9 @@ class VLANDeploymentView(View):
             logger.info(f"[DRY RUN] Bonds to create on device: {bonds_to_create_on_device}")
 
             # Create preview callback that captures context
-            def preview_callback(device, device_interfaces, platform, vlan_id, bond_info_map_param):
+            # PERFORMANCE: This callback receives pre-fetched device data from Nornir
+            def preview_callback(device, device_interfaces, platform, vlan_id, bond_info_map_param,
+                                device_lldp_data=None, device_config_data=None, device_uptime=None):
                 return self._generate_dry_run_preview(
                     device=device,
                     interface_list=device_interfaces,
@@ -4951,7 +5136,10 @@ class VLANDeploymentView(View):
                     untagged_vlan_id=untagged_vlan_id,
                     tagged_vlan_ids=tagged_vlan_ids,
                     vlan=vlan,
-                    primary_vlan_id=primary_vlan_id
+                    primary_vlan_id=primary_vlan_id,
+                    device_lldp_data=device_lldp_data,
+                    device_config_data=device_config_data,
+                    device_uptime=device_uptime
                 )
 
             # Use Nornir for parallel preview generation
@@ -6450,12 +6638,12 @@ class VLANDeploymentView(View):
         Get bond interface name if the given interface is a bond member.
         ALWAYS checks both NetBox and device config side-by-side (not as fallback).
         NetBox is preferred as source of truth, but device config is always checked for comparison.
-        
+
         Args:
             device: Device object
             interface_name: Interface name to check
             platform: Platform type (required for device config check)
-        
+
         Returns:
             dict or None: {
                 'bond_name': str,  # Preferred bond name (NetBox if available, else device)
@@ -6472,7 +6660,7 @@ class VLANDeploymentView(View):
         device_bond_name = None
         all_members = []
         netbox_members = []
-        
+
         # Step 1: ALWAYS check NetBox
         try:
             interface = Interface.objects.get(device=device, name=interface_name)
@@ -6492,14 +6680,14 @@ class VLANDeploymentView(View):
             pass
         except Exception as e:
             logger.debug(f"Error checking NetBox for bond membership: {e}")
-        
+
         # Step 2: ALWAYS check device config (side-by-side, not fallback)
         device_bond_name = None
         if platform and platform == 'cumulus':
             try:
                 from netbox_automation_plugin.core.napalm_integration import NAPALMDeviceManager
                 napalm_manager = NAPALMDeviceManager(device)
-                
+
                 if napalm_manager.connect():
                     connection = napalm_manager.connection
                     try:
@@ -6507,7 +6695,7 @@ class VLANDeploymentView(View):
                         config_show_output = None
                         if hasattr(connection, 'cli'):
                             config_show_output = connection.cli(['nv config show -o json'])
-                            
+
                             # Extract output
                             config_json_str = None
                             if config_show_output:
@@ -6518,17 +6706,17 @@ class VLANDeploymentView(View):
                                         config_json_str = list(config_show_output.values())[0] if config_show_output else None
                                 else:
                                     config_json_str = str(config_show_output).strip()
-                            
+
                             if config_json_str and config_json_str.strip():
                                 import json
                                 config_data = json.loads(config_json_str)
-                                
+
                                 # Find interface config (this method already handles bond member detection)
                                 interface_config = self._find_interface_config_in_json(config_data, interface_name)
-                                
+
                                 if isinstance(interface_config, dict):
                                     device_bond_name = interface_config.get('_bond_member_of')
-                                    
+
                                     # If we found a bond in device config, get all its members
                                     if device_bond_name:
                                         all_members = self._get_all_bond_members_from_config(config_data, device_bond_name)
@@ -6538,14 +6726,14 @@ class VLANDeploymentView(View):
                         napalm_manager.disconnect()
             except Exception as e:
                 logger.debug(f"Error connecting to device to check bond membership: {e}")
-        
+
         # Step 3: Determine status and preferred bond name
         # NetBox is source of truth, but we compare both
         has_mismatch = False
         netbox_missing_bond = False
         needs_migration = False
         preferred_bond_name = None
-        
+
         if netbox_bond_name and device_bond_name:
             # Both have bond info - compare
             if netbox_bond_name != device_bond_name:
@@ -6562,7 +6750,7 @@ class VLANDeploymentView(View):
         else:
             # Neither has bond info - not a bond member
             return None
-        
+
         return {
             'bond_name': preferred_bond_name,
             'netbox_bond_name': netbox_bond_name,
@@ -6577,16 +6765,16 @@ class VLANDeploymentView(View):
     def _get_all_bond_members_from_config(self, config_data, bond_name):
         """
         Get all member interfaces of a bond from device config.
-        
+
         Args:
             config_data: Parsed JSON config from 'nv config show -o json'
             bond_name: Bond interface name (e.g., 'bond3')
-        
+
         Returns:
             list: List of interface names that are members of the bond
         """
         members = []
-        
+
         # Navigate to interface section
         interfaces = None
         for item in config_data:
@@ -6595,10 +6783,10 @@ class VLANDeploymentView(View):
                 if isinstance(set_data, dict) and 'interface' in set_data:
                     interfaces = set_data['interface']
                     break
-        
+
         if not interfaces or not isinstance(interfaces, dict):
             return members
-        
+
         # Find the bond configuration
         bond_config = interfaces.get(bond_name, {})
         if isinstance(bond_config, dict) and 'bond' in bond_config:
@@ -6606,20 +6794,20 @@ class VLANDeploymentView(View):
             if isinstance(bond_members, dict):
                 # Extract all member interface names
                 members = list(bond_members.keys())
-        
+
         return members
 
     def _check_interface_traffic_stats(self, device, interface_name, platform, bond_interface=None):
         """
         Check interface traffic statistics to detect active traffic.
         Runs the command 3 times with 1 second intervals and checks if counters are incrementing.
-        
+
         Args:
             device: Device object
             interface_name: Interface name to check
             platform: Platform type ('cumulus' or 'eos')
             bond_interface: Bond interface name if interface is a bond member (optional)
-        
+
         Returns:
             dict: {
                 'has_traffic': bool,  # True only if counters are incrementing between samples
@@ -6632,7 +6820,7 @@ class VLANDeploymentView(View):
         """
         # Determine which interface to check (bond if member, otherwise original)
         target_interface = bond_interface if bond_interface else interface_name
-        
+
         if platform != 'cumulus':
             # Only Cumulus supports nv show interface link stats
             return {
@@ -6643,14 +6831,14 @@ class VLANDeploymentView(View):
                 'out_pkts_total': 0,
                 'error': 'Traffic stats check only supported for Cumulus'
             }
-        
+
         try:
             from netbox_automation_plugin.core.napalm_integration import NAPALMDeviceManager
             import time
             import json
-            
+
             napalm_manager = NAPALMDeviceManager(device)
-            
+
             if not napalm_manager.connect():
                 return {
                     'has_traffic': False,
@@ -6660,12 +6848,12 @@ class VLANDeploymentView(View):
                     'out_pkts_total': 0,
                     'error': 'Failed to connect to device'
                 }
-            
+
             try:
                 connection = napalm_manager.connection
                 in_pkts_samples = []
                 out_pkts_samples = []
-                
+
                 # Run command 3 times with 1 second intervals
                 for i in range(3):
                     try:
@@ -6684,7 +6872,7 @@ class VLANDeploymentView(View):
                                 'out_pkts_total': 0,
                                 'error': 'No CLI method available'
                             }
-                        
+
                         # Extract and parse JSON output
                         stats_json_str = None
                         if isinstance(stats_output, dict):
@@ -6694,20 +6882,20 @@ class VLANDeploymentView(View):
                                 stats_json_str = list(stats_output.values())[0] if stats_output else None
                         else:
                             stats_json_str = str(stats_output).strip()
-                        
+
                         if stats_json_str:
                             try:
                                 stats_data = json.loads(stats_json_str)
-                                
+
                                 # Extract in-pkts and out-pkts from JSON
                                 # JSON structure: {"in-pkts": 23228402, "out-pkts": 131905897, ...}
                                 in_pkts = stats_data.get('in-pkts', 0)
                                 out_pkts = stats_data.get('out-pkts', 0)
-                                
+
                                 # Convert to int if needed (JSON might return as int already)
                                 in_pkts = int(in_pkts) if in_pkts is not None else 0
                                 out_pkts = int(out_pkts) if out_pkts is not None else 0
-                                
+
                                 in_pkts_samples.append(in_pkts)
                                 out_pkts_samples.append(out_pkts)
                             except (json.JSONDecodeError, ValueError, KeyError) as e:
@@ -6718,7 +6906,7 @@ class VLANDeploymentView(View):
                         else:
                             in_pkts_samples.append(0)
                             out_pkts_samples.append(0)
-                        
+
                         # Wait 1 second before next sample (except for last iteration)
                         if i < 2:
                             time.sleep(1)
@@ -6728,7 +6916,7 @@ class VLANDeploymentView(View):
                         out_pkts_samples.append(0)
                         if i < 2:
                             time.sleep(1)
-                
+
                 # Check if counters are incrementing (traffic is flowing)
                 has_traffic = False
                 if len(in_pkts_samples) >= 2:
@@ -6737,7 +6925,7 @@ class VLANDeploymentView(View):
                     in_pkts_increasing = any(in_pkts_samples[i+1] > in_pkts_samples[i] for i in range(len(in_pkts_samples)-1))
                     out_pkts_increasing = any(out_pkts_samples[i+1] > out_pkts_samples[i] for i in range(len(out_pkts_samples)-1))
                     has_traffic = in_pkts_increasing or out_pkts_increasing
-                
+
                 return {
                     'has_traffic': has_traffic,
                     'in_pkts_samples': in_pkts_samples,
@@ -6762,10 +6950,10 @@ class VLANDeploymentView(View):
     def _generate_vlan_config(self, interface_name, untagged_vlan=None, tagged_vlans=None, platform=None, include_bridge_vlan=True, device=None, bridge_vlans=None, vlan_id=None):
         """
         Generate platform-specific VLAN configuration command.
-        
+
         For Cumulus: Adds VLANs to bridge first (additive), then sets interface access/tagged VLANs.
         For EOS: Sets interface access/tagged VLANs directly.
-        
+
         If interface is a bond member, applies config to bond interface instead.
         If bond migration is needed (NetBox has bond_Swp1 but device has bond1),
         generates commands to create bond_Swp1 and migrate all members.
@@ -6790,17 +6978,17 @@ class VLANDeploymentView(View):
         # Backward compatibility: if vlan_id is provided but untagged_vlan is not, use vlan_id
         if vlan_id is not None and untagged_vlan is None:
             untagged_vlan = vlan_id
-        
+
         # Ensure we have at least one VLAN
         if untagged_vlan is None and (not tagged_vlans or len(tagged_vlans) == 0):
             raise ValueError("At least one VLAN (untagged or tagged) must be provided")
-        
+
         # Normalize tagged_vlans to list of ints
         if tagged_vlans is None:
             tagged_vlans = []
         elif not isinstance(tagged_vlans, list):
             tagged_vlans = list(tagged_vlans)
-        
+
         # Convert VLAN objects to IDs if needed
         if untagged_vlan and hasattr(untagged_vlan, 'vid'):
             untagged_vlan = untagged_vlan.vid
@@ -6811,14 +6999,14 @@ class VLANDeploymentView(View):
         bond_info = None
         if device:
             bond_info = self._get_bond_interface_for_member(device, interface_name, platform=platform)
-            
+
             # If _get_bond_interface_for_member returns None, try to get bond info from device config
             # This handles cases where NetBox doesn't have the bond defined but device config shows bond membership
             if not bond_info:
                 # Get current device config to check for bond_member_of
                 device_config_result = self._get_current_device_config(device, interface_name, platform)
                 bond_member_from_config = device_config_result.get('bond_member_of')
-                
+
                 if bond_member_from_config:
                     # Device config shows bond membership but _get_bond_interface_for_member didn't find it
                     # Create a bond_info dict for consistency
@@ -6832,10 +7020,10 @@ class VLANDeploymentView(View):
                         'netbox_members': []
                     }
                     target_interface = bond_member_from_config
-            
+
             if bond_info:
                 target_interface = bond_info['bond_name']
-        
+
         if platform == 'cumulus':
             commands = []
 
@@ -6935,7 +7123,7 @@ class VLANDeploymentView(View):
                     commands.append(f"nv unset interface {interface_name} bridge domain br_default access")
                     commands.append("")
                 # (falls through to VLAN config below)
-            
+
             # ISSUE 1 FIX: Add VLANs to bridge first (additive - safe, won't remove existing VLANs)
             # But only if they don't already exist in bridge VLANs
             vlans_already_in_bridge = []  # Track VLANs already in bridge for logging
@@ -6982,7 +7170,7 @@ class VLANDeploymentView(View):
                     commands.append(f"# Bridge VLANs already present: {', '.join(map(str, sorted(vlans_already_in_bridge)))}")
                 if vlans_to_add_to_bridge:
                     commands.append(f"# Bridge VLANs to be added: {', '.join(map(str, sorted(vlans_to_add_to_bridge)))}")
-            
+
             # Set interface VLAN configuration - use target_interface (bond if member, NetBox bond name if migration)
             # IMPORTANT: In Cumulus NVUE:
             # - Untagged VLAN (access mode): nv set interface {iface} bridge domain br_default access {vlan_id}
@@ -7005,7 +7193,7 @@ class VLANDeploymentView(View):
             # NAPALM EOS expects config in "configure terminal" format
             # Use target_interface (bond if member)
             commands = [f"interface {target_interface}"]
-            
+
             if untagged_vlan and not tagged_vlans:
                 # Access mode: single untagged VLAN
                 commands.append(f"   switchport mode access")
@@ -7019,7 +7207,7 @@ class VLANDeploymentView(View):
                     # For multiple tagged VLANs, use comma-separated list
                     tagged_vlans_str = ','.join(map(str, tagged_vlans))
                     commands.append(f"   switchport trunk allowed vlan {tagged_vlans_str}")
-            
+
             return "\n".join(commands)
 
         else:
@@ -7030,20 +7218,20 @@ class VLANDeploymentView(View):
         """
         Update NetBox interface with VLAN assignment.
         Replaces ALL existing configs that conflict with VLAN deployment to match device config.
-        
+
         Args:
             device: Device object
             interface_name: Interface name
             untagged_vlan: VLAN object for untagged VLAN (optional)
             tagged_vlans: List of VLAN objects for tagged VLANs (optional)
-        
+
         What we REMOVE/REPLACE (conflicts with VLAN deployment):
         - IP addresses (routed → bridged conversion)
         - VRF (routed → bridged conversion)
         - Old tagged VLANs (replaced with new tagged VLANs)
         - Old untagged VLAN (replaced with new untagged VLAN)
         - Old mode (replaced with 'tagged' if VLANs present, None if no VLANs)
-        
+
         What we KEEP (doesn't conflict with VLAN deployment):
         - Port-channel membership (physical relationship)
         - Cable connections (physical relationship)
@@ -7051,7 +7239,7 @@ class VLANDeploymentView(View):
         - Enabled status (operational state)
         - MTU (doesn't conflict)
         - Tags (metadata, may include automation tags)
-        
+
         This ensures NetBox state matches the actual device configuration after deployment.
 
         Returns:
@@ -7060,7 +7248,7 @@ class VLANDeploymentView(View):
         try:
             from ipam.models import IPAddress
             from ipam.models import VRF
-            
+
             with transaction.atomic():
                 # Find the interface in NetBox
                 interface = Interface.objects.filter(
@@ -7098,7 +7286,7 @@ class VLANDeploymentView(View):
                 # Get old VLANs for logging
                 old_untagged = interface.untagged_vlan.vid if interface.untagged_vlan else None
                 old_tagged = list(interface.tagged_vlans.values_list('vid', flat=True))
-                
+
                 # Replace tagged VLANs
                 interface.tagged_vlans.clear()
                 if tagged_vlans:
@@ -7119,10 +7307,10 @@ class VLANDeploymentView(View):
                     elif not untagged_vlan:
                         removed_configs.append(f"Untagged VLAN {old_untagged}")
                         logger.info(f"Removing untagged VLAN {old_untagged} from interface {interface_name} on {device.name}")
-                
+
                 # Set new VLAN configuration
                 interface.untagged_vlan = untagged_vlan
-                
+
                 # Set mode: 'tagged' if any VLANs are assigned, None if no VLANs
                 if untagged_vlan or tagged_vlans:
                     old_mode = interface.mode if hasattr(interface, 'mode') else None
@@ -7138,7 +7326,7 @@ class VLANDeploymentView(View):
                         removed_configs.append(f"Mode {old_mode}")
                     interface.mode = None
                     logger.info(f"Cleared mode on interface {interface_name} on {device.name} (no VLANs)")
-                
+
                 interface.save()
 
                 vlan_info = []
@@ -7146,7 +7334,7 @@ class VLANDeploymentView(View):
                     vlan_info.append(f"untagged_vlan={untagged_vlan.vid}")
                 if tagged_vlans:
                     vlan_info.append(f"tagged_vlans={[v.vid for v in tagged_vlans]}")
-                
+
                 if removed_configs:
                     logger.info(f"Updated NetBox interface {interface_name} on {device.name}: removed {', '.join(removed_configs)}, set {', '.join(vlan_info) if vlan_info else 'no VLANs'}")
                 else:
@@ -7168,18 +7356,18 @@ class VLANDeploymentView(View):
         """
         Create or update bond interface in NetBox based on device configuration.
         Optionally migrates all VLANs (tagged + untagged) from member interfaces to bond.
-        
+
         This is called:
         - In sync mode: When device has a bond but NetBox doesn't, or when bond exists but VLANs need migration (migrate_vlans=True)
         - In normal mode: When device has a bond but NetBox doesn't, to create bond structure only (migrate_vlans=False)
-        
+
         Args:
             device: Device object
             bond_name: Bond interface name from device config (e.g., 'bond3')
             member_interfaces: List of interface names that are members of the bond
             platform: Platform type (optional)
             migrate_vlans: If True, migrate all VLANs from members to bond and clear members. If False, only create/update bond structure.
-        
+
         Returns:
             dict: {
                 "success": bool,
@@ -7192,14 +7380,14 @@ class VLANDeploymentView(View):
         """
         try:
             from dcim.models import InterfaceTypeChoices
-            
+
             with transaction.atomic():
                 # Check if bond interface already exists in NetBox
                 bond_interface = Interface.objects.filter(
                     device=device,
                     name=bond_name
                 ).first()
-                
+
                 bond_created = False
                 if not bond_interface:
                     # Create bond interface in NetBox
@@ -7212,7 +7400,7 @@ class VLANDeploymentView(View):
                     bond_interface.save()
                     bond_created = True
                     logger.info(f"Created bond interface {bond_name} in NetBox for device {device.name}")
-                
+
                 # Add member interfaces to the bond
                 members_added = 0
                 for member_name in member_interfaces:
@@ -7227,16 +7415,16 @@ class VLANDeploymentView(View):
                         logger.warning(f"Interface {member_name} not found in NetBox, skipping bond membership")
                     except Exception as e:
                         logger.warning(f"Error adding {member_name} to bond {bond_name}: {e}")
-                
+
                 # Migrate ALL VLANs (tagged + untagged) from ALL member interfaces to bond (only if migrate_vlans=True)
                 vlans_migrated = 0
                 members_cleared = 0
-                
+
                 if migrate_vlans:
                     # Collect all VLANs from all member interfaces
                     all_untagged_vlans = []
                     all_tagged_vlans = set()
-                    
+
                     for member_name in member_interfaces:
                         try:
                             member_interface = Interface.objects.get(device=device, name=member_name)
@@ -7248,10 +7436,10 @@ class VLANDeploymentView(View):
                             all_tagged_vlans.update(tagged_vlans)
                         except Interface.DoesNotExist:
                             continue
-                    
+
                     # Apply collected VLANs to bond interface
                     bond_interface.refresh_from_db()
-                    
+
                     # Set untagged VLAN (use first one if multiple, or None if none)
                     if all_untagged_vlans:
                         bond_interface.untagged_vlan = all_untagged_vlans[0]
@@ -7259,7 +7447,7 @@ class VLANDeploymentView(View):
                         logger.info(f"Migrated untagged VLAN {all_untagged_vlans[0].vid} to bond {bond_name} on {device.name}")
                     else:
                         bond_interface.untagged_vlan = None
-                    
+
                     # Set tagged VLANs
                     if all_tagged_vlans:
                         bond_interface.tagged_vlans.set(all_tagged_vlans)
@@ -7267,15 +7455,15 @@ class VLANDeploymentView(View):
                         logger.info(f"Migrated {len(all_tagged_vlans)} tagged VLAN(s) to bond {bond_name} on {device.name}")
                     else:
                         bond_interface.tagged_vlans.clear()
-                    
+
                     # Set mode based on VLANs
                     if bond_interface.untagged_vlan or all_tagged_vlans:
                         bond_interface.mode = 'tagged' if all_tagged_vlans else 'access'
                     else:
                         bond_interface.mode = None
-                    
+
                     bond_interface.save()
-                    
+
                     # Clear VLANs from ALL member interfaces
                     for member_name in member_interfaces:
                         try:
@@ -7289,7 +7477,7 @@ class VLANDeploymentView(View):
                                 logger.info(f"Cleared VLANs from member interface {member_name} on {device.name}")
                         except Interface.DoesNotExist:
                             continue
-                
+
                 return {
                     "success": True,
                     "bond_created": bond_created,
@@ -7298,7 +7486,7 @@ class VLANDeploymentView(View):
                     "members_cleared": members_cleared,
                     "error": None
                 }
-        
+
         except Exception as e:
             logger.error(f"Error syncing bond {bond_name} to NetBox for device {device.name}: {e}")
             return {
@@ -7314,7 +7502,7 @@ class VLANDeploymentView(View):
         """
         Verify NetBox was updated correctly after deployment.
         Checks that NetBox interface state matches what we deployed.
-        
+
         Returns:
             dict: {
                 'success': bool,
@@ -7326,10 +7514,10 @@ class VLANDeploymentView(View):
         try:
             interface = Interface.objects.get(device=device, name=interface_name)
             interface.refresh_from_db()
-            
+
             issues = []
             details = {}
-            
+
             # Verify mode is set to 'tagged'
             current_mode = interface.mode if hasattr(interface, 'mode') else None
             if current_mode != 'tagged':
@@ -7339,7 +7527,7 @@ class VLANDeploymentView(View):
                 'actual': current_mode,
                 'verified': current_mode == 'tagged'
             }
-            
+
             # Verify untagged VLAN matches deployed VLAN
             current_untagged = interface.untagged_vlan.vid if interface.untagged_vlan else None
             if current_untagged != vlan_id:
@@ -7349,7 +7537,7 @@ class VLANDeploymentView(View):
                 'actual': current_untagged,
                 'verified': current_untagged == vlan_id
             }
-            
+
             # Verify tagged VLANs are cleared (for access mode deployment)
             current_tagged = list(interface.tagged_vlans.values_list('vid', flat=True))
             if current_tagged:
@@ -7359,7 +7547,7 @@ class VLANDeploymentView(View):
                 'actual': current_tagged,
                 'verified': len(current_tagged) == 0
             }
-            
+
             # Verify IP addresses are removed
             current_ip_addresses = [str(ip.address) for ip in interface.ip_addresses.all()]
             if current_ip_addresses:
@@ -7369,7 +7557,7 @@ class VLANDeploymentView(View):
                 'actual': current_ip_addresses,
                 'verified': len(current_ip_addresses) == 0
             }
-            
+
             # Verify VRF is removed
             current_vrf = interface.vrf.name if hasattr(interface, 'vrf') and interface.vrf else None
             if current_vrf:
@@ -7379,22 +7567,22 @@ class VLANDeploymentView(View):
                 'actual': current_vrf,
                 'verified': current_vrf is None
             }
-            
+
             # Overall verification status
             verified = len(issues) == 0
-            
+
             if verified:
                 logger.info(f"NetBox verification PASSED for {device.name}:{interface_name} - all checks passed")
             else:
                 logger.warning(f"NetBox verification FAILED for {device.name}:{interface_name} - issues: {', '.join(issues)}")
-            
+
             return {
                 'success': True,
                 'verified': verified,
                 'issues': issues,
                 'details': details
             }
-            
+
         except Interface.DoesNotExist:
             return {
                 'success': False,
@@ -7436,14 +7624,14 @@ class VLANDeploymentView(View):
     def _build_device_summaries(self, results):
         """Build per-device summary statistics."""
         device_data = {}
-        
+
         for r in results:
             device = r.get("device")
             if not device:
                 continue
-            
+
             device_name = device.name if hasattr(device, 'name') else str(device)
-            
+
             if device_name not in device_data:
                 device_data[device_name] = {
                     "device": device,
@@ -7453,13 +7641,13 @@ class VLANDeploymentView(View):
                     "warn": 0,
                     "blocked": 0,
                 }
-            
+
             device_data[device_name]["total"] += 1
-            
+
             # Check both overall_status (dry run) and status (deployment)
             overall_status = r.get("overall_status", "").upper()
             status = r.get("status", "").lower()
-            
+
             # Determine status: prefer overall_status, fallback to status
             if overall_status:
                 if overall_status == "PASS":
@@ -7479,7 +7667,7 @@ class VLANDeploymentView(View):
                 if "WARN" in message and status == "success":
                     device_data[device_name]["warn"] += 1
                     device_data[device_name]["pass"] -= 1  # Adjust: WARN takes precedence
-        
+
         # Convert to list and determine overall device status
         device_summaries = []
         for device_name, data in device_data.items():
@@ -7490,13 +7678,13 @@ class VLANDeploymentView(View):
                 device_status = "warn"
             else:
                 device_status = "pass"
-            
+
             data["device_status"] = device_status
             device_summaries.append(data)
-        
+
         # Sort by device name
         device_summaries.sort(key=lambda x: x["device_name"])
-        
+
         return device_summaries
 
     def _calculate_status_counts(self, results):
@@ -7507,7 +7695,7 @@ class VLANDeploymentView(View):
             "blocked": 0,
             "total": len(results),
         }
-        
+
         for r in results:
             overall_status = r.get("overall_status", "").upper()
             if overall_status == "PASS":
@@ -7516,7 +7704,7 @@ class VLANDeploymentView(View):
                 counts["warn"] += 1
             elif overall_status == "BLOCKED":
                 counts["blocked"] += 1
-        
+
         return counts
 
     def _parse_interface_list(self, interfaces_str):
@@ -7611,7 +7799,7 @@ class GetCommonInterfacesView(View):
     """
     AJAX endpoint to get common interfaces for selected devices.
     Returns JSON list of interfaces that exist on ALL selected devices.
-    
+
     Accepts either:
     - device_ids[]: List of device IDs (Single mode)
     - site_id, location_id, manufacturer_id, role_id: Filter parameters (Group mode)
@@ -7619,7 +7807,7 @@ class GetCommonInterfacesView(View):
 
     def get(self, request):
         device_ids = request.GET.getlist('device_ids[]')
-        
+
         # Group mode filter parameters
         site_id = request.GET.get('site_id')
         location_id = request.GET.get('location_id')
@@ -7642,7 +7830,7 @@ class GetCommonInterfacesView(View):
             ).filter(
                 Q(primary_ip4__isnull=False) | Q(primary_ip6__isnull=False)
             ).select_related('device_type', 'device_type__manufacturer')
-            
+
             logger.info(f"Group mode: Found {devices.count()} devices matching filters (site={site_id}, location={location_id}, manufacturer={manufacturer_id}, role={role_id})")
             # Log device names for debugging
             device_names = [d.name for d in devices]
@@ -7695,22 +7883,22 @@ class GetInterfacesForSyncView(View):
     """
     AJAX endpoint to get interfaces with VLAN config from NetBox for selected devices.
     Used by JavaScript to populate interface checkboxes in sync mode.
-    
+
     Returns interfaces separated into two sections:
     - Section 1 (tagged): Interfaces with vlan-mode:access or vlan-mode:tagged tags
     - Section 2 (untagged): Interfaces with VLAN config but NO tags at all (completely blank)
     """
-    
+
     def get(self, request):
         device_ids = request.GET.getlist('device_ids[]')
-        
+
         # Group mode filter parameters
         site_id = request.GET.get('site_id')
         location_id = request.GET.get('location_id')
         manufacturer_id = request.GET.get('manufacturer_id')
         role_id = request.GET.get('role_id')
         excluded_device_ids = request.GET.getlist('excluded_device_ids[]')
-        
+
         # Get devices either by IDs (Single mode) or by filters (Group mode)
         if device_ids:
             # Single mode: Use provided device IDs
@@ -7729,44 +7917,44 @@ class GetInterfacesForSyncView(View):
             ).filter(
                 Q(primary_ip4__isnull=False) | Q(primary_ip6__isnull=False)
             ).select_related('device_type', 'device_type__manufacturer').order_by('name')
-            
+
             logger.info(f"Sync mode - Group mode: Found {devices.count()} devices matching filters (site={site_id}, location={location_id}, manufacturer={manufacturer_id}, role={role_id})")
         else:
             return JsonResponse({'error': 'No devices selected or incomplete group filters'}, status=400)
-        
+
         # Filter out excluded devices if any
         if excluded_device_ids:
             excluded_ids = [int(did) for did in excluded_device_ids if str(did).isdigit()]
             if excluded_ids:
                 devices = devices.exclude(id__in=excluded_ids)
                 logger.info(f"Sync mode - Excluded {len(excluded_ids)} devices. Remaining: {devices.count()} devices")
-        
+
         if not devices.exists():
             return JsonResponse({'tagged_interfaces': {}, 'untagged_interfaces': {}, 'device_count': 0, 'total_tagged': 0, 'total_untagged': 0})
         tagged_interfaces_by_device = {}
         untagged_interfaces_by_device = {}
-        
+
         # Management interfaces to exclude
         management_interfaces = {'eth0', 'lo', 'mgmt', 'management', 'loopback', 'Loopback0'}
-        
+
         for device in devices:
             device_interfaces = Interface.objects.filter(
                 device=device
             ).select_related('untagged_vlan').prefetch_related('tagged_vlans', 'tags').order_by('name')
-            
+
             # Separate into tagged and untagged
             tagged_interfaces = []
             untagged_interfaces = []
-            
+
             for iface in device_interfaces:
                 # Skip management interfaces
                 if iface.name.lower() in [m.lower() for m in management_interfaces]:
                     continue
-                
+
                 # Only process interfaces with VLAN config
                 if not (iface.untagged_vlan or iface.tagged_vlans.exists()):
                     continue
-                
+
                 # Check interface tags to categorize them
                 interface_tags = set(iface.tags.values_list('name', flat=True))
                 has_vlan_mode_access_tagged = any(
@@ -7778,7 +7966,7 @@ class GetInterfacesForSyncView(View):
                     for tag in interface_tags
                 )
                 has_any_tags = iface.tags.exists()
-                
+
                 # Serialize interface with VLAN config
                 iface_data = {
                     'name': iface.name,
@@ -7794,7 +7982,7 @@ class GetInterfacesForSyncView(View):
                         for v in iface.tagged_vlans.all().order_by('vid')
                     ],
                 }
-                
+
                 # Explicit duplicate prevention: if interface has vlan-mode:access or vlan-mode:tagged,
                 # it MUST go to Section 1 only, never Section 2
                 if has_vlan_mode_access_tagged:
@@ -7802,7 +7990,7 @@ class GetInterfacesForSyncView(View):
                     # Skip strict filtering - these are already validated
                     # Store the actual vlan-mode tags for display
                     vlan_mode_tags = [
-                        tag for tag in interface_tags 
+                        tag for tag in interface_tags
                         if tag.startswith('vlan-mode:access') or tag.startswith('vlan-mode:tagged')
                     ]
                     iface_data['vlan_mode_tags'] = vlan_mode_tags
@@ -7814,28 +8002,28 @@ class GetInterfacesForSyncView(View):
                 else:
                     # Section 2: All interfaces with VLAN config that don't have vlan-mode:access/tagged
                     # Include all interfaces with VLAN config - no strict filtering
-                    
+
                     # Check for any vlan-mode tags (other than access/tagged)
                     other_vlan_mode_tags = [
-                        tag for tag in interface_tags 
-                        if tag.startswith('vlan-mode:') and 
-                        not tag.startswith('vlan-mode:access') and 
+                        tag for tag in interface_tags
+                        if tag.startswith('vlan-mode:') and
+                        not tag.startswith('vlan-mode:access') and
                         not tag.startswith('vlan-mode:tagged')
                     ]
-                    
+
                     # Check for any other tags (non-vlan-mode tags like custom tags)
                     non_vlan_mode_tags = [
-                        tag for tag in interface_tags 
+                        tag for tag in interface_tags
                         if not tag.startswith('vlan-mode:')
                     ]
-                    
+
                     # Combine all tags that will be replaced/warned about
                     all_other_tags = other_vlan_mode_tags + non_vlan_mode_tags
-                    
+
                     # Store tag information for frontend display
                     iface_data['current_tags'] = list(interface_tags)  # All current tags
                     iface_data['has_any_tags'] = has_any_tags
-                    
+
                     if other_vlan_mode_tags:
                         # Has vlan-mode tags that need replacement (uplink, routed, etc.)
                         iface_data['has_conflicting_tags'] = True
@@ -7851,9 +8039,9 @@ class GetInterfacesForSyncView(View):
                         # No tags at all - completely untagged
                         iface_data['has_conflicting_tags'] = False
                         iface_data['info'] = "Untagged interface - will be auto-tagged after deployment."
-                    
+
                     untagged_interfaces.append(iface_data)
-            
+
             # Safety check: Verify no duplicates between Section 1 and Section 2
             tagged_interface_ids = {iface_data['id'] for iface_data in tagged_interfaces}
             untagged_interface_ids = {iface_data['id'] for iface_data in untagged_interfaces}
@@ -7862,19 +8050,19 @@ class GetInterfacesForSyncView(View):
                 logger.warning(f"Found duplicate interfaces between Section 1 and Section 2 for device {device.name}: {duplicates}")
                 # Remove duplicates from Section 2 (Section 1 takes priority)
                 untagged_interfaces = [iface_data for iface_data in untagged_interfaces if iface_data['id'] not in duplicates]
-            
+
             if tagged_interfaces:
                 tagged_interfaces_by_device[device.name] = tagged_interfaces
             if untagged_interfaces:
                 untagged_interfaces_by_device[device.name] = untagged_interfaces
-        
+
         # Count interfaces with conflicting tags (uplink/routed)
         total_conflicting = 0
         for device_name, ifaces in untagged_interfaces_by_device.items():
             for iface_data in ifaces:
                 if iface_data.get('has_conflicting_tags', False):
                     total_conflicting += 1
-        
+
         # Calculate device count properly
         if device_ids:
             device_count = len(device_ids)
@@ -7883,7 +8071,7 @@ class GetInterfacesForSyncView(View):
                 device_count = devices.count() if hasattr(devices, 'count') else len(list(devices))
             except:
                 device_count = 0
-        
+
         return JsonResponse({
             'tagged_interfaces': tagged_interfaces_by_device,
             'untagged_interfaces': untagged_interfaces_by_device,
