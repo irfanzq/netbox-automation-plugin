@@ -1288,28 +1288,101 @@ class NornirDeviceManager:
                                 if config_platform == 'cumulus':
                                     # Use nv config show -o json for Cumulus
                                     try:
+                                        config_show_output = None
+                                        
+                                        # Try connection.cli() first
                                         if hasattr(connection, 'cli'):
-                                            config_show_output = connection.cli(['nv config show -o json'])
-                                        elif hasattr(connection, 'device') and hasattr(connection.device, 'send_command'):
-                                            # CRITICAL FIX: Use send_command_timing() instead of send_command()
-                                            # send_command() waits for prompt pattern which may not match
-                                            # send_command_timing() uses timing-based detection (more reliable)
-                                            logger.info(f"Device {device_name}: Fetching config using send_command_timing()...")
-                                            config_show_output = connection.device.send_command_timing('nv config show -o json', read_timeout=60)
-                                        else:
-                                            config_show_output = None
+                                            try:
+                                                logger.debug(f"Device {device_name}: Trying connection.cli(['nv config show -o json'])...")
+                                                cli_result = connection.cli(['nv config show -o json'])
+                                                logger.debug(f"Device {device_name}: cli() returned type: {type(cli_result)}")
+                                                
+                                                # Extract output from dict if needed
+                                                if isinstance(cli_result, dict):
+                                                    config_show_output = cli_result.get('nv config show -o json') or list(cli_result.values())[0] if cli_result else None
+                                                else:
+                                                    config_show_output = cli_result
+                                                
+                                                if config_show_output:
+                                                    logger.debug(f"Device {device_name}: cli() extracted output length: {len(str(config_show_output))}")
+                                                else:
+                                                    logger.warning(f"Device {device_name}: cli() returned empty/None output")
+                                            except Exception as cli_error:
+                                                logger.warning(f"Device {device_name}: connection.cli() failed: {cli_error}")
+                                                config_show_output = None
+                                        
+                                        # If cli() returned None or failed, try send_command_timing() fallback
+                                        if not config_show_output and hasattr(connection, 'device') and hasattr(connection.device, 'send_command_timing'):
+                                            try:
+                                                logger.info(f"Device {device_name}: Fetching config using send_command_timing('nv config show -o json')...")
+                                                timing_result = connection.device.send_command_timing('nv config show -o json', read_timeout=90, delay_factor=2)
+                                                logger.debug(f"Device {device_name}: send_command_timing() returned type: {type(timing_result)}, length: {len(str(timing_result)) if timing_result else 0}")
+                                                
+                                                if timing_result and str(timing_result).strip():
+                                                    config_show_output = str(timing_result).strip()
+                                                    logger.debug(f"Device {device_name}: send_command_timing() extracted output length: {len(config_show_output)}")
+                                                else:
+                                                    logger.warning(f"Device {device_name}: send_command_timing() returned empty output")
+                                            except Exception as timing_error:
+                                                logger.warning(f"Device {device_name}: send_command_timing() failed: {timing_error}")
+                                                config_show_output = None
+                                        
+                                        # If still no output, try with --applied flag (Cumulus driver format)
+                                        if not config_show_output and hasattr(connection, 'device') and hasattr(connection.device, 'send_command_timing'):
+                                            try:
+                                                logger.info(f"Device {device_name}: Trying with --applied flag...")
+                                                applied_result = connection.device.send_command_timing('nv config show --applied -o json', read_timeout=90, delay_factor=2)
+                                                logger.debug(f"Device {device_name}: --applied flag returned type: {type(applied_result)}, length: {len(str(applied_result)) if applied_result else 0}")
+                                                
+                                                if applied_result and str(applied_result).strip():
+                                                    config_show_output = str(applied_result).strip()
+                                                    logger.debug(f"Device {device_name}: --applied flag extracted output length: {len(config_show_output)}")
+                                                else:
+                                                    logger.warning(f"Device {device_name}: --applied flag returned empty output")
+                                            except Exception as applied_error:
+                                                logger.warning(f"Device {device_name}: --applied flag failed: {applied_error}")
+                                                config_show_output = None
+                                        
+                                        # Last resort: Try NAPALM's get_config() method
+                                        if not config_show_output and hasattr(connection, 'get_config'):
+                                            try:
+                                                logger.info(f"Device {device_name}: Trying NAPALM get_config() method as fallback...")
+                                                napalm_config = connection.get_config(retrieve='running', format='json')
+                                                if napalm_config and 'running' in napalm_config:
+                                                    config_show_output = napalm_config['running']
+                                                    logger.debug(f"Device {device_name}: get_config() returned length: {len(str(config_show_output)) if config_show_output else 0}")
+                                            except Exception as napalm_error:
+                                                logger.warning(f"Device {device_name}: NAPALM get_config() failed: {napalm_error}")
+                                        
+                                        if not config_show_output:
+                                            logger.error(f"Device {device_name}: All config retrieval methods failed or returned no output")
 
                                         if config_show_output:
-                                            # Extract JSON string
+                                            # Extract JSON string - handle different return types
+                                            config_json_str = None
+                                            
                                             if isinstance(config_show_output, dict):
-                                                config_json_str = config_show_output.get('nv config show -o json') or list(config_show_output.values())[0] if config_show_output else None
+                                                # Try multiple keys that might contain the output
+                                                config_json_str = (
+                                                    config_show_output.get('nv config show -o json') or
+                                                    config_show_output.get('nv config show --applied -o json') or
+                                                    list(config_show_output.values())[0] if config_show_output else None
+                                                )
+                                            elif isinstance(config_show_output, str):
+                                                config_json_str = config_show_output.strip()
                                             else:
-                                                config_json_str = str(config_show_output).strip()
-
-                                            if config_json_str:
-                                                import json
-                                                device_config_data = json.loads(config_json_str)
-                                                logger.info(f"Device {device_name}: Collected device config ({len(str(device_config_data))} bytes)")
+                                                config_json_str = str(config_show_output).strip() if config_show_output else None
+                                            
+                                            if config_json_str and config_json_str.strip():
+                                                try:
+                                                    import json
+                                                    device_config_data = json.loads(config_json_str)
+                                                    logger.info(f"Device {device_name}: Collected device config ({len(str(device_config_data))} bytes)")
+                                                except json.JSONDecodeError as json_error:
+                                                    error_msg = f"Failed to parse JSON config: {str(json_error)}"
+                                                    logger.error(f"Device {device_name}: {error_msg}")
+                                                    logger.debug(f"Device {device_name}: JSON parse error, first 200 chars: {config_json_str[:200]}")
+                                                    device_config_data = {'_config_error': error_msg}
                                             else:
                                                 # Empty JSON string
                                                 error_msg = "Config command returned empty output"
@@ -1317,7 +1390,7 @@ class NornirDeviceManager:
                                                 device_config_data = {'_config_error': error_msg}
                                         else:
                                             # No config output
-                                            error_msg = "Config command returned no output"
+                                            error_msg = "Config command returned no output (tried cli, send_command_timing, --applied flag, and NAPALM get_config)"
                                             logger.error(f"Device {device_name}: {error_msg}")
                                             device_config_data = {'_config_error': error_msg}
                                     except Exception as e_config:
