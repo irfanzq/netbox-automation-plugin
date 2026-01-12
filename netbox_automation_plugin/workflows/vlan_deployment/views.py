@@ -5074,6 +5074,9 @@ class VLANDeploymentView(View):
         Environment-agnostic - uses NornirDeviceManager from core.
         Supports both Cumulus and EOS platforms.
         """
+        logger.info(f"[_run_vlan_deployment ENTRY] Called with {len(devices)} devices, cleaned_data keys: {list(cleaned_data.keys())}")
+        logger.info(f"[_run_vlan_deployment] dry_run={cleaned_data.get('dry_run')}, sync_netbox_to_device={cleaned_data.get('sync_netbox_to_device')}")
+
         # Get VLAN IDs from form (normal mode)
         untagged_vlan_id = cleaned_data.get('untagged_vlan')
         tagged_vlans_str = cleaned_data.get('tagged_vlans', '').strip()
@@ -5139,8 +5142,10 @@ class VLANDeploymentView(View):
         platform = self._get_device_platform(devices[0]) if devices else 'cumulus'
 
         logger.info(f"VLAN Deployment: {len(devices)} devices, {len(interface_list)} interfaces, platform: {platform}, sync_mode: {sync_netbox_to_device}")
+        logger.info(f"[_run_vlan_deployment] About to check if dry_run={dry_run}")
 
         if dry_run:
+            logger.info(f"[_run_vlan_deployment] ENTERING DRY RUN MODE")
             # Dry run mode - use Nornir for parallel preview generation
             # First, run tag validation
             validation_results = self._validate_tags_for_dry_run(devices, interface_list)
