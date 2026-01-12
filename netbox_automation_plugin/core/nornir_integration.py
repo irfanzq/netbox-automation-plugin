@@ -1161,12 +1161,16 @@ class NornirDeviceManager:
                 'device2': {...}
             }
         """
+        logger.info(f"[DEPLOY_VLAN ENTRY] Called with dry_run={dry_run}, preview_callback={'provided' if preview_callback else 'None'}, interface_list={interface_list[:3]}... ({len(interface_list)} total)")
+
         if not self.nr:
             self.nr = self.initialize()
 
         num_devices = len(self.nr.inventory.hosts)
         num_interfaces = len(interface_list)
         total_tasks = num_devices * num_interfaces
+
+        logger.info(f"[DEPLOY_VLAN] Nornir inventory has {num_devices} devices: {list(self.nr.inventory.hosts.keys())}")
 
         mode_str = "DRY RUN preview" if dry_run else "deployment"
         logger.info(f"Starting VLAN {vlan_id} {mode_str} to {num_devices} devices, "
