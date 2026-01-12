@@ -3757,6 +3757,7 @@ class VLANDeploymentView(View):
                 bridge_vlans = first_interface_preview.get('bridge_vlans', [])
                 device_connected = first_interface_preview.get('device_connected', False)
                 error_details = first_interface_preview.get('error_details', None)
+                connection_error_msg = first_interface_preview.get('connection_error', None)
 
                 # Show device-level pre-deployment checks ONCE at the top
                 device_logs.append("=" * 80)
@@ -5331,6 +5332,7 @@ class VLANDeploymentView(View):
                 bridge_vlans = first_interface_preview.get('bridge_vlans', [])
                 device_connected = first_interface_preview.get('device_connected', False)
                 error_details = first_interface_preview.get('error_details', None)
+                connection_error_msg = first_interface_preview.get('connection_error', None)
 
                 # Show device-level pre-deployment checks ONCE at the top
                 device_logs.append("=" * 80)
