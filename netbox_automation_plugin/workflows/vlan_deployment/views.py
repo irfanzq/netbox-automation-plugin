@@ -2038,7 +2038,7 @@ class VLANDeploymentView(View):
                                 
                                 # Convert config dict to nv commands using the proper parser
                                 if interface_config:  # Only if there's actual config (not just metadata)
-                                    command_lines = self._parse_json_to_nv_commands(interface_config, f"interface {target_interface}", target_interface)
+                                    command_lines = self._parse_json_to_nv_commands(interface_config, "", target_interface)
                                 
                                 # Add inheritance note if config came from range
                                 if inherited_from:
