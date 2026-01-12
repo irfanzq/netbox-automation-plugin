@@ -96,6 +96,10 @@ class VLANDeploymentView(View):
 
         if device_config_data:
             # Check if this is a connection error or config error
+            # device_config_data can be:
+            # - dict with '_connection_error' or '_config_error' keys (error cases)
+            # - list (Cumulus JSON config - successful)
+            # - str (EOS config - successful)
             if isinstance(device_config_data, dict):
                 if '_connection_error' in device_config_data:
                     connection_error_msg = device_config_data['_connection_error']
@@ -128,20 +132,35 @@ class VLANDeploymentView(View):
                             'bond_interface_config': None
                         }
                 else:
-                    # Valid config data - parse it
-                    # Parse the pre-fetched config for each interface
+                    # Valid config data dict (shouldn't happen for Cumulus/EOS, but handle gracefully)
+                    logger.warning(f"[DRY RUN PREVIEW] Device {device.name}: Unexpected dict format (no error keys): {list(device_config_data.keys())[:5]}")
                     for actual_interface_name in interface_list:
-                        # Parse config locally without device connection
-                        config_result = self._parse_device_config_for_interface(
-                            device=device,
-                            interface_name=actual_interface_name,
-                            platform=platform,
-                            config_data=device_config_data,
-                            device_uptime=device_uptime
-                        )
-                        device_config_cache[actual_interface_name] = config_result
+                        device_config_cache[actual_interface_name] = {
+                            'success': False,
+                            'current_config': 'Unable to fetch',
+                            'source': 'error',
+                            'timestamp': 'N/A',
+                            'error': 'Unexpected config data format (dict without error keys)',
+                            'device_connected': False,
+                            'bond_member_of': None,
+                            'bond_interface_config': None
+                        }
+            elif isinstance(device_config_data, (list, str)):
+                # Valid config data - list for Cumulus JSON, string for EOS
+                # Parse the pre-fetched config for each interface
+                logger.debug(f"[DRY RUN PREVIEW] Device {device.name}: Config data type: {type(device_config_data).__name__}, length: {len(device_config_data) if hasattr(device_config_data, '__len__') else 'N/A'}")
+                for actual_interface_name in interface_list:
+                    # Parse config locally without device connection
+                    config_result = self._parse_device_config_for_interface(
+                        device=device,
+                        interface_name=actual_interface_name,
+                        platform=platform,
+                        config_data=device_config_data,
+                        device_uptime=device_uptime
+                    )
+                    device_config_cache[actual_interface_name] = config_result
             else:
-                # device_config_data is not a dict (shouldn't happen, but handle gracefully)
+                # device_config_data is an unexpected type
                 logger.warning(f"[DRY RUN PREVIEW] Device {device.name}: Unexpected config data type: {type(device_config_data)}")
                 for actual_interface_name in interface_list:
                     device_config_cache[actual_interface_name] = {
@@ -149,7 +168,7 @@ class VLANDeploymentView(View):
                         'current_config': 'Unable to fetch',
                         'source': 'error',
                         'timestamp': 'N/A',
-                        'error': 'Unexpected config data format',
+                        'error': f'Unexpected config data format (type: {type(device_config_data).__name__})',
                         'device_connected': False,
                         'bond_member_of': None,
                         'bond_interface_config': None
