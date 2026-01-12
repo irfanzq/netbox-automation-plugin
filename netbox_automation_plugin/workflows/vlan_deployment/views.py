@@ -3623,6 +3623,11 @@ class VLANDeploymentView(View):
 
                 PERFORMANCE: Receives pre-fetched device data from Nornir (no device connections here).
                 """
+                logger.info(f"[SYNC PREVIEW CALLBACK] Called for device {device.name} with {len(device_interfaces)} interfaces")
+                logger.info(f"[SYNC PREVIEW CALLBACK] device_lldp_data: {type(device_lldp_data)} ({len(device_lldp_data) if device_lldp_data else 0} items)")
+                logger.info(f"[SYNC PREVIEW CALLBACK] device_config_data: {type(device_config_data)} ({len(device_config_data) if device_config_data else 0} items)")
+                logger.info(f"[SYNC PREVIEW CALLBACK] device_uptime: {device_uptime}")
+
                 device_results = {}
 
                 for actual_interface_name in device_interfaces:
@@ -3689,11 +3694,17 @@ class VLANDeploymentView(View):
                 return device_results
 
             # Use Nornir for parallel preview generation
+            logger.info(f"[SYNC DRY RUN] Initializing NornirDeviceManager with {len(devices)} devices: {[d.name for d in devices]}")
             nornir_manager = NornirDeviceManager(devices=devices)
             nornir_manager.initialize()
+            logger.info(f"[SYNC DRY RUN] NornirDeviceManager initialized successfully")
 
             # Call Nornir with dry_run=True and preview callback
             # Use a dummy VLAN ID since sync mode uses per-interface VLANs
+            logger.info(f"[SYNC DRY RUN] Calling nornir_manager.deploy_vlan() with {len(interface_list)} interfaces")
+            logger.info(f"[SYNC DRY RUN] First 5 interfaces: {interface_list[:5]}")
+            logger.info(f"[SYNC DRY RUN] dry_run=True, preview_callback={'provided' if sync_preview_callback else 'None'}")
+
             nornir_results = nornir_manager.deploy_vlan(
                 interface_list=interface_list,
                 vlan_id=0,  # Dummy VLAN ID (not used in sync mode)
@@ -3703,6 +3714,8 @@ class VLANDeploymentView(View):
                 dry_run=True,
                 preview_callback=sync_preview_callback
             )
+
+            logger.info(f"[SYNC DRY RUN] nornir_manager.deploy_vlan() returned {len(nornir_results)} device results")
 
             # Process Nornir results and build final results list (ONE log per device)
             results = []
@@ -3740,6 +3753,12 @@ class VLANDeploymentView(View):
                 device_logs.append("=" * 80)
                 device_logs.append("")
                 device_logs.append(f"Total Interfaces: {len(device_results_map)}")
+                device_logs.append("")
+                device_logs.append("=" * 80)
+                device_logs.append("DEBUG: NORNIR EXECUTION TRACE")
+                device_logs.append("=" * 80)
+                device_logs.append(f"Nornir results received: {len(device_results_map)} interfaces")
+                device_logs.append(f"Device in Nornir results: {'YES' if device_results_map else 'NO'}")
                 device_logs.append("")
 
                 # Collect summary info and device-level data
