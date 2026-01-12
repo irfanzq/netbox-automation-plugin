@@ -3752,13 +3752,19 @@ class VLANDeploymentView(View):
                 device_logs.append(f"SYNC MODE DRY RUN - DEVICE: {device.name}")
                 device_logs.append("=" * 80)
                 device_logs.append("")
-                device_logs.append(f"Total Interfaces: {len(device_results_map)}")
+
+                # DEBUG: Show execution trace
+                device_logs.append("=" * 80)
+                device_logs.append("DEBUG: EXECUTION TRACE")
+                device_logs.append("=" * 80)
+                device_logs.append(f"1. _handle_sync_mode_deployment() was called")
+                device_logs.append(f"2. Nornir manager initialized with {len(devices)} device(s)")
+                device_logs.append(f"3. deploy_vlan() called with {len(interface_list)} interface(s)")
+                device_logs.append(f"4. Nornir results received: {len(device_results_map)} interface(s) for this device")
+                device_logs.append(f"5. Device found in results: {'YES' if device_results_map else 'NO'}")
                 device_logs.append("")
-                device_logs.append("=" * 80)
-                device_logs.append("DEBUG: NORNIR EXECUTION TRACE")
-                device_logs.append("=" * 80)
-                device_logs.append(f"Nornir results received: {len(device_results_map)} interfaces")
-                device_logs.append(f"Device in Nornir results: {'YES' if device_results_map else 'NO'}")
+
+                device_logs.append(f"Total Interfaces: {len(device_results_map)}")
                 device_logs.append("")
 
                 # Collect summary info and device-level data
@@ -5337,6 +5343,19 @@ class VLANDeploymentView(View):
                 device_logs.append(f"NORMAL MODE DRY RUN - DEVICE: {device.name}")
                 device_logs.append("=" * 80)
                 device_logs.append("")
+
+                # DEBUG: Show execution trace
+                device_logs.append("=" * 80)
+                device_logs.append("DEBUG: EXECUTION TRACE")
+                device_logs.append("=" * 80)
+                device_logs.append(f"1. _run_vlan_deployment() was called")
+                device_logs.append(f"2. dry_run=True detected, entering dry run mode")
+                device_logs.append(f"3. Nornir manager initialized with {len(devices)} device(s)")
+                device_logs.append(f"4. deploy_vlan() called with {len(interface_list)} interface(s)")
+                device_logs.append(f"5. Nornir results received: {len(device_results)} interface(s) for this device")
+                device_logs.append(f"6. Device found in results: {'YES' if device_results else 'NO'}")
+                device_logs.append("")
+
                 device_logs.append(f"Total Interfaces: {len(device_results)}")
                 device_logs.append(f"VLAN: {primary_vlan_id} ({vlan.name if vlan else 'N/A'})")
                 device_logs.append("")
