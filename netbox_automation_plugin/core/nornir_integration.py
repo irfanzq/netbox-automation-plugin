@@ -1437,11 +1437,21 @@ class NornirDeviceManager:
                                             config_show_output = None
 
                                         if config_show_output:
+                                            # Extract config string from dict or use directly
                                             if isinstance(config_show_output, dict):
-                                                device_config_data = list(config_show_output.values())[0] if config_show_output else ''
+                                                config_str = list(config_show_output.values())[0] if config_show_output else ''
+                                                # Ensure it's a string
+                                                device_config_data = str(config_str).strip() if config_str else ''
                                             else:
                                                 device_config_data = str(config_show_output).strip()
-                                            logger.info(f"Device {device_name}: Collected device config ({len(str(device_config_data))} bytes)")
+                                            
+                                            if device_config_data:
+                                                logger.info(f"Device {device_name}: Collected device config ({len(device_config_data)} bytes)")
+                                            else:
+                                                # Empty config output
+                                                error_msg = "Config command returned empty output"
+                                                logger.error(f"Device {device_name}: {error_msg}")
+                                                device_config_data = {'_config_error': error_msg}
                                         else:
                                             # No config output
                                             error_msg = "Config command returned no output"

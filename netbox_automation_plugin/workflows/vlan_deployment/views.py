@@ -1975,7 +1975,26 @@ class VLANDeploymentView(View):
                                                 if isinstance(vlan_data, dict):
                                                     for vlan_key in vlan_data.keys():
                                                         if isinstance(vlan_key, str):
-                                                            bridge_vlans.append(vlan_key)
+                                                            # Parse VLAN string (handles "10,3000-3199", "3019-3099", etc.)
+                                                            parsed_vlans = self._parse_vlan_string(vlan_key)
+                                                            bridge_vlans.extend(parsed_vlans)
+                                                            logger.debug(f"Parsed bridge VLAN key '{vlan_key}' -> {len(parsed_vlans)} VLAN IDs")
+                                                        elif isinstance(vlan_key, (int, float)):
+                                                            # Direct VLAN ID (unlikely but handle it)
+                                                            bridge_vlans.append(int(vlan_key))
+                                                elif isinstance(vlan_data, list):
+                                                    # If it's a list, parse each item
+                                                    for vlan_item in vlan_data:
+                                                        if isinstance(vlan_item, str):
+                                                            bridge_vlans.extend(self._parse_vlan_string(vlan_item))
+                                                        elif isinstance(vlan_item, (int, float)):
+                                                            bridge_vlans.append(int(vlan_item))
+                                                elif isinstance(vlan_data, str):
+                                                    # Single string value
+                                                    bridge_vlans.extend(self._parse_vlan_string(vlan_data))
+                                                elif isinstance(vlan_data, (int, float)):
+                                                    # Single numeric value
+                                                    bridge_vlans.append(int(vlan_data))
                     except Exception as e:
                         logger.debug(f"Could not parse bridge VLANs: {e}")
 
@@ -2063,6 +2082,11 @@ class VLANDeploymentView(View):
 
             else:
                 current_config = f"(no config data provided)"
+
+            # Remove duplicates and sort bridge_vlans (same as _get_bridge_vlans_from_json)
+            bridge_vlans = sorted(list(set(bridge_vlans))) if bridge_vlans else []
+            if bridge_vlans:
+                logger.debug(f"Parsed {len(bridge_vlans)} unique bridge VLAN IDs for {device.name}:{interface_name}: {bridge_vlans[:10]}{'...' if len(bridge_vlans) > 10 else ''}")
 
             # Return result in same format as _get_current_device_config
             return {
