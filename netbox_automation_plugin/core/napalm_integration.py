@@ -524,8 +524,11 @@ class NAPALMDeviceManager:
                     # Use direct lldpctl command for Cumulus
                     if hasattr(self.connection, 'device') and hasattr(self.connection.device, 'send_command'):
                         try:
-                            # Try with sudo first (works on Cumulus)
-                            lldp_output = self.connection.device.send_command('sudo lldpctl -f json', read_timeout=30)
+                            # CRITICAL FIX: Use send_command_timing() instead of send_command()
+                            # send_command() waits for prompt pattern which may not match
+                            # send_command_timing() uses timing-based detection (more reliable)
+                            logger.info(f"Fetching LLDP data from {self.device.name} using send_command_timing()...")
+                            lldp_output = self.connection.device.send_command_timing('sudo lldpctl -f json', read_timeout=30)
 
                             if lldp_output:
                                 import json
