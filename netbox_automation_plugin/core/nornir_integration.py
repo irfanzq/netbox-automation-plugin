@@ -1416,8 +1416,13 @@ class NornirDeviceManager:
                                                 device_config_data = {'_config_error': full_error}
                                     except Exception as e_config:
                                         error_msg = f"Config collection failed: {str(e_config)}"
+                                        debug_details = "\n".join(debug_info) if 'debug_info' in locals() and debug_info else "Exception occurred before methods were attempted"
+                                        full_error = f"{error_msg}\n\nDebug Info (methods attempted):\n{debug_details}"
                                         logger.error(f"Device {device_name}: {error_msg}")
-                                        device_config_data = {'_config_error': error_msg}
+                                        logger.error(f"Device {device_name}: Debug info: {debug_details}")
+                                        import traceback
+                                        logger.error(f"Device {device_name}: Traceback: {traceback.format_exc()}")
+                                        device_config_data = {'_config_error': full_error}
 
                                 elif config_platform == 'eos':
                                     # Use show running-config for EOS
