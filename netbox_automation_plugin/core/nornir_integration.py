@@ -1281,7 +1281,11 @@ class NornirDeviceManager:
                                         if hasattr(connection, 'cli'):
                                             config_show_output = connection.cli(['nv config show -o json'])
                                         elif hasattr(connection, 'device') and hasattr(connection.device, 'send_command'):
-                                            config_show_output = connection.device.send_command('nv config show -o json', read_timeout=60)
+                                            # CRITICAL FIX: Use send_command_timing() instead of send_command()
+                                            # send_command() waits for prompt pattern which may not match
+                                            # send_command_timing() uses timing-based detection (more reliable)
+                                            logger.info(f"Device {device_name}: Fetching config using send_command_timing()...")
+                                            config_show_output = connection.device.send_command_timing('nv config show -o json', read_timeout=60)
                                         else:
                                             config_show_output = None
 
@@ -1305,7 +1309,9 @@ class NornirDeviceManager:
                                         if hasattr(connection, 'cli'):
                                             config_show_output = connection.cli(['show running-config'])
                                         elif hasattr(connection, 'device') and hasattr(connection.device, 'send_command'):
-                                            config_show_output = connection.device.send_command('show running-config')
+                                            # CRITICAL FIX: Use send_command_timing() instead of send_command()
+                                            logger.info(f"Device {device_name}: Fetching config using send_command_timing()...")
+                                            config_show_output = connection.device.send_command_timing('show running-config')
                                         else:
                                             config_show_output = None
 
