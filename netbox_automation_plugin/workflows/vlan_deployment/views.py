@@ -2026,22 +2026,29 @@ class VLANDeploymentView(View):
                         # Use the target interface (bond if member, otherwise original)
                         target_interface = bond_member_of if bond_member_of else interface_name
 
+                        # Use _find_interface_config_in_json to handle ranges and bond members
+                        interface_config = self._find_interface_config_in_json(config_data, interface_name)
+                        
                         command_lines = []
-                        for item in config_data:
-                            if isinstance(item, dict) and 'set' in item:
-                                set_data = item['set']
-                                if isinstance(set_data, dict) and 'interface' in set_data:
-                                    interface_data = set_data['interface']
-                                    if isinstance(interface_data, dict) and target_interface in interface_data:
-                                        iface_config = interface_data[target_interface]
-                                        # Convert to nv commands (simplified version)
-                                        if isinstance(iface_config, dict):
-                                            for key, value in iface_config.items():
-                                                if isinstance(value, dict):
-                                                    for subkey, subvalue in value.items():
-                                                        command_lines.append(f"nv set interface {target_interface} {key} {subkey} {subvalue}")
-                                                else:
-                                                    command_lines.append(f"nv set interface {target_interface} {key} {value}")
+                        if interface_config:
+                            # Remove metadata keys before processing
+                            if isinstance(interface_config, dict):
+                                inherited_from = interface_config.pop('_inherited_from', None)
+                                bond_member_of_from_config = interface_config.pop('_bond_member_of', None)
+                                
+                                # Convert config dict to nv commands using the proper parser
+                                if interface_config:  # Only if there's actual config (not just metadata)
+                                    command_lines = self._parse_json_to_nv_commands(interface_config, f"interface {target_interface}", target_interface)
+                                
+                                # Add inheritance note if config came from range
+                                if inherited_from:
+                                    command_lines.insert(0, f"# Config inherited from range(s): {', '.join(inherited_from)}")
+                                
+                                # Restore metadata for later use
+                                if inherited_from:
+                                    interface_config['_inherited_from'] = inherited_from
+                                if bond_member_of_from_config:
+                                    interface_config['_bond_member_of'] = bond_member_of_from_config
 
                         if command_lines:
                             current_config = '\n'.join(command_lines)
