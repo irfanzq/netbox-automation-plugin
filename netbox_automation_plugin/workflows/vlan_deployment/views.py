@@ -3863,9 +3863,15 @@ class VLANDeploymentView(View):
                     if error_details:
                         # error_details contains the actual error message (connection or config collection error)
                         if device_connected:
-                            device_logs.append(f"   Config Collection Error: {error_details}")
+                            device_logs.append(f"   Config Collection Error:")
+                            # Split multi-line error messages and indent each line
+                            for line in str(error_details).split('\n'):
+                                device_logs.append(f"      {line}")
                         else:
-                            device_logs.append(f"   Connection Error: {error_details}")
+                            device_logs.append(f"   Connection Error:")
+                            # Split multi-line error messages and indent each line
+                            for line in str(error_details).split('\n'):
+                                device_logs.append(f"      {line}")
                     else:
                         device_logs.append(f"   Error: Unknown error during config retrieval")
                 device_logs.append("")
@@ -5459,9 +5465,15 @@ class VLANDeploymentView(View):
                     if error_details:
                         # error_details contains the actual error message (connection or config collection error)
                         if device_connected:
-                            device_logs.append(f"   Config Collection Error: {error_details}")
+                            device_logs.append(f"   Config Collection Error:")
+                            # Split multi-line error messages and indent each line
+                            for line in str(error_details).split('\n'):
+                                device_logs.append(f"      {line}")
                         else:
-                            device_logs.append(f"   Connection Error: {error_details}")
+                            device_logs.append(f"   Connection Error:")
+                            # Split multi-line error messages and indent each line
+                            for line in str(error_details).split('\n'):
+                                device_logs.append(f"      {line}")
                     else:
                         device_logs.append(f"   Error: Unknown error during config retrieval")
                 device_logs.append("")

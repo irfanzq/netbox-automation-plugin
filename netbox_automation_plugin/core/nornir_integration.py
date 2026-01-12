@@ -1289,11 +1289,13 @@ class NornirDeviceManager:
                                     # Use nv config show -o json for Cumulus
                                     try:
                                         config_show_output = None
+                                        debug_info = []  # Collect debugging info for UI display
                                         
                                         # Try connection.cli() first
                                         if hasattr(connection, 'cli'):
                                             try:
                                                 logger.debug(f"Device {device_name}: Trying connection.cli(['nv config show -o json'])...")
+                                                debug_info.append("Method 1: connection.cli(['nv config show -o json'])")
                                                 cli_result = connection.cli(['nv config show -o json'])
                                                 logger.debug(f"Device {device_name}: cli() returned type: {type(cli_result)}")
                                                 
@@ -1305,57 +1307,78 @@ class NornirDeviceManager:
                                                 
                                                 if config_show_output:
                                                     logger.debug(f"Device {device_name}: cli() extracted output length: {len(str(config_show_output))}")
+                                                    debug_info.append("  → SUCCESS: Got output")
                                                 else:
                                                     logger.warning(f"Device {device_name}: cli() returned empty/None output")
+                                                    debug_info.append("  → FAILED: Returned empty/None")
                                             except Exception as cli_error:
                                                 logger.warning(f"Device {device_name}: connection.cli() failed: {cli_error}")
+                                                debug_info.append(f"  → FAILED: {str(cli_error)[:100]}")
                                                 config_show_output = None
                                         
                                         # If cli() returned None or failed, try send_command_timing() fallback
                                         if not config_show_output and hasattr(connection, 'device') and hasattr(connection.device, 'send_command_timing'):
                                             try:
                                                 logger.info(f"Device {device_name}: Fetching config using send_command_timing('nv config show -o json')...")
+                                                debug_info.append("Method 2: send_command_timing('nv config show -o json')")
                                                 timing_result = connection.device.send_command_timing('nv config show -o json', read_timeout=90, delay_factor=2)
                                                 logger.debug(f"Device {device_name}: send_command_timing() returned type: {type(timing_result)}, length: {len(str(timing_result)) if timing_result else 0}")
                                                 
                                                 if timing_result and str(timing_result).strip():
                                                     config_show_output = str(timing_result).strip()
                                                     logger.debug(f"Device {device_name}: send_command_timing() extracted output length: {len(config_show_output)}")
+                                                    debug_info.append("  → SUCCESS: Got output")
                                                 else:
                                                     logger.warning(f"Device {device_name}: send_command_timing() returned empty output")
+                                                    debug_info.append("  → FAILED: Returned empty output")
                                             except Exception as timing_error:
                                                 logger.warning(f"Device {device_name}: send_command_timing() failed: {timing_error}")
+                                                debug_info.append(f"  → FAILED: {str(timing_error)[:100]}")
                                                 config_show_output = None
                                         
                                         # If still no output, try with --applied flag (Cumulus driver format)
                                         if not config_show_output and hasattr(connection, 'device') and hasattr(connection.device, 'send_command_timing'):
                                             try:
                                                 logger.info(f"Device {device_name}: Trying with --applied flag...")
+                                                debug_info.append("Method 3: send_command_timing('nv config show --applied -o json')")
                                                 applied_result = connection.device.send_command_timing('nv config show --applied -o json', read_timeout=90, delay_factor=2)
                                                 logger.debug(f"Device {device_name}: --applied flag returned type: {type(applied_result)}, length: {len(str(applied_result)) if applied_result else 0}")
                                                 
                                                 if applied_result and str(applied_result).strip():
                                                     config_show_output = str(applied_result).strip()
                                                     logger.debug(f"Device {device_name}: --applied flag extracted output length: {len(config_show_output)}")
+                                                    debug_info.append("  → SUCCESS: Got output")
                                                 else:
                                                     logger.warning(f"Device {device_name}: --applied flag returned empty output")
+                                                    debug_info.append("  → FAILED: Returned empty output")
                                             except Exception as applied_error:
                                                 logger.warning(f"Device {device_name}: --applied flag failed: {applied_error}")
+                                                debug_info.append(f"  → FAILED: {str(applied_error)[:100]}")
                                                 config_show_output = None
                                         
                                         # Last resort: Try NAPALM's get_config() method
                                         if not config_show_output and hasattr(connection, 'get_config'):
                                             try:
                                                 logger.info(f"Device {device_name}: Trying NAPALM get_config() method as fallback...")
+                                                debug_info.append("Method 4: connection.get_config(retrieve='running', format='json')")
                                                 napalm_config = connection.get_config(retrieve='running', format='json')
                                                 if napalm_config and 'running' in napalm_config:
                                                     config_show_output = napalm_config['running']
                                                     logger.debug(f"Device {device_name}: get_config() returned length: {len(str(config_show_output)) if config_show_output else 0}")
+                                                    debug_info.append("  → SUCCESS: Got output")
+                                                else:
+                                                    debug_info.append("  → FAILED: No 'running' key in result")
                                             except Exception as napalm_error:
                                                 logger.warning(f"Device {device_name}: NAPALM get_config() failed: {napalm_error}")
+                                                debug_info.append(f"  → FAILED: {str(napalm_error)[:100]}")
                                         
                                         if not config_show_output:
+                                            error_msg = "Config command returned no output"
+                                            debug_details = "\n".join(debug_info) if debug_info else "No methods attempted"
+                                            full_error = f"{error_msg}\n\nDebug Info (methods attempted):\n{debug_details}"
                                             logger.error(f"Device {device_name}: All config retrieval methods failed or returned no output")
+                                            logger.error(f"Device {device_name}: Debug info: {debug_details}")
+                                            device_config_data = {'_config_error': full_error}
 
                                         if config_show_output:
                                             # Extract JSON string - handle different return types
@@ -1386,13 +1409,11 @@ class NornirDeviceManager:
                                             else:
                                                 # Empty JSON string
                                                 error_msg = "Config command returned empty output"
+                                                debug_details = "\n".join(debug_info) if debug_info else "No methods attempted"
+                                                full_error = f"{error_msg}\n\nDebug Info (methods attempted):\n{debug_details}"
                                                 logger.error(f"Device {device_name}: {error_msg}")
-                                                device_config_data = {'_config_error': error_msg}
-                                        else:
-                                            # No config output
-                                            error_msg = "Config command returned no output (tried cli, send_command_timing, --applied flag, and NAPALM get_config)"
-                                            logger.error(f"Device {device_name}: {error_msg}")
-                                            device_config_data = {'_config_error': error_msg}
+                                                logger.error(f"Device {device_name}: Debug info: {debug_details}")
+                                                device_config_data = {'_config_error': full_error}
                                     except Exception as e_config:
                                         error_msg = f"Config collection failed: {str(e_config)}"
                                         logger.error(f"Device {device_name}: {error_msg}")
