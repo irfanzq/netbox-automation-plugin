@@ -941,16 +941,51 @@ class VLANDeploymentView(View):
     def _format_vlan_list(self, vlan_list):
         """
         Format a list of VLAN IDs into a readable string with ranges.
+        Handles both integers and strings (including ranges like "3019-3099").
         Example: [10, 3000, 3001, 3002, ..., 3199] -> "10,3000-3199"
+        Example: ["3000", "3019-3099"] -> "3000,3019-3099"
         """
         if not vlan_list:
             return "None"
 
-        # Sort the list
-        sorted_vlans = sorted(set(vlan_list))
+        # Convert all VLANs to integers, handling ranges
+        vlan_ids = set()
+        for vlan_item in vlan_list:
+            if isinstance(vlan_item, int):
+                vlan_ids.add(vlan_item)
+            elif isinstance(vlan_item, str):
+                # Handle ranges like "3019-3099" or single VLANs like "3000"
+                if '-' in vlan_item:
+                    # Range format: "3019-3099"
+                    try:
+                        start, end = map(int, vlan_item.split('-', 1))
+                        vlan_ids.update(range(start, end + 1))
+                    except (ValueError, IndexError):
+                        # Invalid range format, skip
+                        logger.warning(f"Invalid VLAN range format: {vlan_item}")
+                        continue
+                else:
+                    # Single VLAN: "3000"
+                    try:
+                        vlan_ids.add(int(vlan_item))
+                    except ValueError:
+                        # Invalid VLAN ID, skip
+                        logger.warning(f"Invalid VLAN ID format: {vlan_item}")
+                        continue
+            else:
+                # Try to convert to int
+                try:
+                    vlan_ids.add(int(vlan_item))
+                except (ValueError, TypeError):
+                    logger.warning(f"Invalid VLAN item type: {type(vlan_item)}, value: {vlan_item}")
+                    continue
 
-        if len(sorted_vlans) == 0:
+        if len(vlan_ids) == 0:
             return "None"
+
+        # Sort the list
+        sorted_vlans = sorted(vlan_ids)
+
         if len(sorted_vlans) == 1:
             return str(sorted_vlans[0])
 
