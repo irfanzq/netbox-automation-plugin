@@ -92,26 +92,82 @@ class VLANDeploymentView(View):
 
         device_config_cache = {}
         connection_error_msg = None
+        config_error_msg = None
 
         if device_config_data:
-            # Check if this is a connection error
-            if isinstance(device_config_data, dict) and '_connection_error' in device_config_data:
-                connection_error_msg = device_config_data['_connection_error']
-                logger.error(f"[DRY RUN PREVIEW] Device {device.name}: Connection error: {connection_error_msg}")
+            # Check if this is a connection error or config error
+            if isinstance(device_config_data, dict):
+                if '_connection_error' in device_config_data:
+                    connection_error_msg = device_config_data['_connection_error']
+                    logger.error(f"[DRY RUN PREVIEW] Device {device.name}: Connection error: {connection_error_msg}")
+                    # Create error entries for all interfaces
+                    for actual_interface_name in interface_list:
+                        device_config_cache[actual_interface_name] = {
+                            'success': False,
+                            'current_config': f"ERROR: Connection failed - {connection_error_msg}",
+                            'source': 'error',
+                            'timestamp': 'N/A',
+                            'error': connection_error_msg,
+                            'device_connected': False,
+                            'bond_member_of': None,
+                            'bond_interface_config': None
+                        }
+                elif '_config_error' in device_config_data:
+                    config_error_msg = device_config_data['_config_error']
+                    logger.error(f"[DRY RUN PREVIEW] Device {device.name}: Config collection error: {config_error_msg}")
+                    # Create error entries for all interfaces
+                    for actual_interface_name in interface_list:
+                        device_config_cache[actual_interface_name] = {
+                            'success': False,
+                            'current_config': f"ERROR: Config collection failed - {config_error_msg}",
+                            'source': 'error',
+                            'timestamp': 'N/A',
+                            'error': config_error_msg,
+                            'device_connected': True,  # Device was connected, but config retrieval failed
+                            'bond_member_of': None,
+                            'bond_interface_config': None
+                        }
+                else:
+                    # Valid config data - parse it
+                    # Parse the pre-fetched config for each interface
+                    for actual_interface_name in interface_list:
+                        # Parse config locally without device connection
+                        config_result = self._parse_device_config_for_interface(
+                            device=device,
+                            interface_name=actual_interface_name,
+                            platform=platform,
+                            config_data=device_config_data,
+                            device_uptime=device_uptime
+                        )
+                        device_config_cache[actual_interface_name] = config_result
             else:
-                # Parse the pre-fetched config for each interface
+                # device_config_data is not a dict (shouldn't happen, but handle gracefully)
+                logger.warning(f"[DRY RUN PREVIEW] Device {device.name}: Unexpected config data type: {type(device_config_data)}")
                 for actual_interface_name in interface_list:
-                    # Parse config locally without device connection
-                    config_result = self._parse_device_config_for_interface(
-                        device=device,
-                        interface_name=actual_interface_name,
-                        platform=platform,
-                        config_data=device_config_data,
-                        device_uptime=device_uptime
-                    )
-                    device_config_cache[actual_interface_name] = config_result
+                    device_config_cache[actual_interface_name] = {
+                        'success': False,
+                        'current_config': 'Unable to fetch',
+                        'source': 'error',
+                        'timestamp': 'N/A',
+                        'error': 'Unexpected config data format',
+                        'device_connected': False,
+                        'bond_member_of': None,
+                        'bond_interface_config': None
+                    }
         else:
             logger.warning(f"[DRY RUN PREVIEW] No device config provided for {device.name}")
+            # Create error entries for all interfaces when no data provided
+            for actual_interface_name in interface_list:
+                device_config_cache[actual_interface_name] = {
+                    'success': False,
+                    'current_config': 'Unable to fetch',
+                    'source': 'error',
+                    'timestamp': 'N/A',
+                    'error': 'No device config data provided',
+                    'device_connected': False,
+                    'bond_member_of': None,
+                    'bond_interface_config': None
+                }
 
         logger.info(f"[DRY RUN PREVIEW] Device {device.name}: Config parsed, now generating previews...")
 
@@ -3782,7 +3838,6 @@ class VLANDeploymentView(View):
                 bridge_vlans = first_interface_preview.get('bridge_vlans', [])
                 device_connected = first_interface_preview.get('device_connected', False)
                 error_details = first_interface_preview.get('error_details', None)
-                connection_error_msg = first_interface_preview.get('connection_error', None)
 
                 # Show device-level pre-deployment checks ONCE at the top
                 device_logs.append("=" * 80)
@@ -3805,10 +3860,14 @@ class VLANDeploymentView(View):
                     device_logs.append(f"   [FAIL] Config retrieval failed")
                     device_logs.append(f"   DEBUG: config_source = '{config_source}'")
                     device_logs.append(f"   DEBUG: device_connected = {device_connected}")
-                    if connection_error_msg:
-                        device_logs.append(f"   Connection Error: {connection_error_msg}")
                     if error_details:
-                        device_logs.append(f"   Error: {error_details}")
+                        # error_details contains the actual error message (connection or config collection error)
+                        if device_connected:
+                            device_logs.append(f"   Config Collection Error: {error_details}")
+                        else:
+                            device_logs.append(f"   Connection Error: {error_details}")
+                    else:
+                        device_logs.append(f"   Error: Unknown error during config retrieval")
                 device_logs.append("")
 
                 device_logs.append("=" * 80)
@@ -5375,7 +5434,6 @@ class VLANDeploymentView(View):
                 bridge_vlans = first_interface_preview.get('bridge_vlans', [])
                 device_connected = first_interface_preview.get('device_connected', False)
                 error_details = first_interface_preview.get('error_details', None)
-                connection_error_msg = first_interface_preview.get('connection_error', None)
 
                 # Show device-level pre-deployment checks ONCE at the top
                 device_logs.append("=" * 80)
@@ -5398,10 +5456,14 @@ class VLANDeploymentView(View):
                     device_logs.append(f"   [FAIL] Config retrieval failed")
                     device_logs.append(f"   DEBUG: config_source = '{config_source}'")
                     device_logs.append(f"   DEBUG: device_connected = {device_connected}")
-                    if connection_error_msg:
-                        device_logs.append(f"   Connection Error: {connection_error_msg}")
                     if error_details:
-                        device_logs.append(f"   Error: {error_details}")
+                        # error_details contains the actual error message (connection or config collection error)
+                        if device_connected:
+                            device_logs.append(f"   Config Collection Error: {error_details}")
+                        else:
+                            device_logs.append(f"   Connection Error: {error_details}")
+                    else:
+                        device_logs.append(f"   Error: Unknown error during config retrieval")
                 device_logs.append("")
 
                 device_logs.append("=" * 80)

@@ -1275,7 +1275,17 @@ class NornirDeviceManager:
                                     logger.debug(f"Device {device_name}: Could not get uptime: {e_uptime}")
 
                                 # Get full device config (platform-specific)
-                                if platform == 'cumulus':
+                                # CRITICAL FIX: Detect platform internally (like LLDP does) to handle platform mismatches
+                                detected_platform = napalm_mgr.get_driver_name()
+                                logger.debug(f"Device {device_name}: Platform parameter='{platform}', detected='{detected_platform}'")
+                                
+                                # Use detected platform if parameter doesn't match, but log warning
+                                config_platform = platform
+                                if platform != detected_platform:
+                                    logger.warning(f"Device {device_name}: Platform mismatch - parameter='{platform}', detected='{detected_platform}'. Using detected platform.")
+                                    config_platform = detected_platform
+
+                                if config_platform == 'cumulus':
                                     # Use nv config show -o json for Cumulus
                                     try:
                                         if hasattr(connection, 'cli'):
@@ -1300,10 +1310,22 @@ class NornirDeviceManager:
                                                 import json
                                                 device_config_data = json.loads(config_json_str)
                                                 logger.info(f"Device {device_name}: Collected device config ({len(str(device_config_data))} bytes)")
+                                            else:
+                                                # Empty JSON string
+                                                error_msg = "Config command returned empty output"
+                                                logger.error(f"Device {device_name}: {error_msg}")
+                                                device_config_data = {'_config_error': error_msg}
+                                        else:
+                                            # No config output
+                                            error_msg = "Config command returned no output"
+                                            logger.error(f"Device {device_name}: {error_msg}")
+                                            device_config_data = {'_config_error': error_msg}
                                     except Exception as e_config:
-                                        logger.error(f"Device {device_name}: Failed to collect config: {e_config}")
+                                        error_msg = f"Config collection failed: {str(e_config)}"
+                                        logger.error(f"Device {device_name}: {error_msg}")
+                                        device_config_data = {'_config_error': error_msg}
 
-                                elif platform == 'eos':
+                                elif config_platform == 'eos':
                                     # Use show running-config for EOS
                                     try:
                                         if hasattr(connection, 'cli'):
@@ -1321,11 +1343,25 @@ class NornirDeviceManager:
                                             else:
                                                 device_config_data = str(config_show_output).strip()
                                             logger.info(f"Device {device_name}: Collected device config ({len(str(device_config_data))} bytes)")
+                                        else:
+                                            # No config output
+                                            error_msg = "Config command returned no output"
+                                            logger.error(f"Device {device_name}: {error_msg}")
+                                            device_config_data = {'_config_error': error_msg}
                                     except Exception as e_config:
-                                        logger.error(f"Device {device_name}: Failed to collect config: {e_config}")
+                                        error_msg = f"Config collection failed: {str(e_config)}"
+                                        logger.error(f"Device {device_name}: {error_msg}")
+                                        device_config_data = {'_config_error': error_msg}
+                                else:
+                                    # Unsupported platform
+                                    error_msg = f"Unsupported platform for config collection: '{config_platform}' (supported: cumulus, eos)"
+                                    logger.error(f"Device {device_name}: {error_msg}")
+                                    device_config_data = {'_config_error': error_msg}
 
                             except Exception as e:
-                                logger.error(f"Device {device_name}: Failed to collect device data: {e}")
+                                error_msg = f"Device data collection failed: {str(e)}"
+                                logger.error(f"Device {device_name}: {error_msg}")
+                                device_config_data = {'_config_error': error_msg}
 
                         finally:
                             # Disconnect after collecting all data
