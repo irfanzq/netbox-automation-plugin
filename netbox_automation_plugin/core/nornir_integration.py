@@ -1193,6 +1193,7 @@ class NornirDeviceManager:
             try:
                 mode_str = "preview" if dry_run else "deployment"
                 logger.info(f"Device {device_name}: Starting batched {mode_str} of {num_interfaces} interfaces in single session...")
+                logger.info(f"Device {device_name}: dry_run={dry_run}, preview_callback={'provided' if preview_callback else 'None'}")
 
                 # Build config for all interfaces on this device
                 from netbox_automation_plugin.core.napalm_integration import NAPALMDeviceManager
@@ -1204,15 +1205,20 @@ class NornirDeviceManager:
                 if dry_run and preview_callback:
                     # Build list of interfaces for this device
                     device_interfaces = []
+                    logger.info(f"Device {device_name}: Parsing interface_list with {len(interface_list)} entries...")
                     for interface_name in interface_list:
                         # Parse "device:interface" format if present
                         if ':' in interface_name:
                             iface_device_name, actual_interface_name = interface_name.split(':', 1)
+                            logger.debug(f"Device {device_name}: Parsed '{interface_name}' -> device='{iface_device_name}', interface='{actual_interface_name}'")
                             if iface_device_name != device_name:
+                                logger.debug(f"Device {device_name}: Skipping interface '{interface_name}' (belongs to '{iface_device_name}')")
                                 continue
                             device_interfaces.append(actual_interface_name)
                         else:
                             device_interfaces.append(interface_name)
+
+                    logger.info(f"Device {device_name}: Found {len(device_interfaces)} interfaces for this device")
 
                     # PERFORMANCE FIX: Fetch device data ONCE in Nornir (not in preview_callback)
                     # This avoids multiple connections per device
@@ -1222,10 +1228,18 @@ class NornirDeviceManager:
                     device_lldp_data = {}
                     device_config_data = {}
                     device_uptime = None
+                    connection_error = None
 
                     # Connect to device ONCE and fetch all data
                     napalm_mgr = NAPALMDeviceManager(device)
-                    if napalm_mgr.connect():
+                    connection_success = False
+                    try:
+                        connection_success = napalm_mgr.connect()
+                    except Exception as conn_err:
+                        connection_error = str(conn_err)
+                        logger.error(f"Device {device_name}: Connection exception: {connection_error}")
+
+                    if connection_success:
                         try:
                             # 1. Collect LLDP neighbors (device-level, all interfaces)
                             logger.info(f"Device {device_name}: Collecting LLDP neighbors...")
@@ -1308,7 +1322,12 @@ class NornirDeviceManager:
                             napalm_mgr.disconnect()
                             logger.info(f"Device {device_name}: Disconnected after data collection")
                     else:
-                        logger.error(f"Device {device_name}: Failed to connect for data collection")
+                        error_msg = f"Failed to connect for data collection"
+                        if connection_error:
+                            error_msg += f": {connection_error}"
+                        logger.error(f"Device {device_name}: {error_msg}")
+                        # Store connection error for display in UI
+                        device_config_data = {'_connection_error': error_msg}
 
                     # Call preview callback with pre-fetched data
                     logger.info(f"Device {device_name}: Calling preview callback with pre-fetched data...")
