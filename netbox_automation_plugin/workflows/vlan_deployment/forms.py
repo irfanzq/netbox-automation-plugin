@@ -313,13 +313,12 @@ class VLANDeploymentForm(forms.Form):
             self._validate_interfaces_on_devices(devices, combined_interfaces, cleaned_data)
             
             # Validate tags and interface eligibility
-            # For actual deployment: block on errors
-            # For dry run: show warnings but don't block (validation shown in dry run results)
+            # For both deployment and dry run: block on errors
             if deploy_changes:
                 self._validate_tags_and_interfaces(devices, combined_interfaces, cleaned_data, blocking=True)
             elif dry_run:
-                # Dry run: validate but only show warnings, don't block
-                self._validate_tags_and_interfaces(devices, combined_interfaces, cleaned_data, blocking=False)
+                # Dry run: validate and block on errors (same as deployment mode)
+                self._validate_tags_and_interfaces(devices, combined_interfaces, cleaned_data, blocking=True)
 
         # Store combined interface list for use in view
         cleaned_data['combined_interfaces'] = combined_interfaces

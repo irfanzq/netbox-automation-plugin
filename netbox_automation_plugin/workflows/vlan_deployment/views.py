@@ -5,6 +5,7 @@ from django.utils.translation import gettext_lazy as _
 from django.db import transaction
 
 from dcim.models import Device, Interface
+from dcim.choices import InterfaceTypeChoices
 from ipam.models import VLAN
 from extras.models import Tag
 
@@ -3399,6 +3400,7 @@ class VLANDeploymentView(View):
             # IMPORTANT: Check existing bridge VLANs from device config to avoid re-adding VLANs
             # Get current bridge VLANs from device config
             device_bridge_vlans = []
+            device_current_access_vlan = None  # Track current access VLAN on device
             try:
                 device_config_result = self._get_current_device_config(device, target_interface, platform)
                 device_bridge_vlans = device_config_result.get('_bridge_vlans', [])
@@ -3407,8 +3409,25 @@ class VLANDeploymentView(View):
                     config_data = device_config_result.get('_config_data')
                     if config_data:
                         device_bridge_vlans = self._get_bridge_vlans_from_json(config_data)
+                
+                # Extract current access VLAN from device config (for sync mode: need to unset if NetBox has None)
+                config_data = device_config_result.get('_config_data')
+                if config_data:
+                    # Try to extract access VLAN from JSON structure: interface -> bridge -> domain -> br_default -> access
+                    interface_config = self._find_interface_config_in_json(config_data, target_interface)
+                    if interface_config and isinstance(interface_config, dict):
+                        bridge_config = interface_config.get('bridge', {})
+                        domain_config = bridge_config.get('domain', {})
+                        br_default = domain_config.get('br_default', {})
+                        device_current_access_vlan = br_default.get('access')
+                        if device_current_access_vlan:
+                            # Convert to int if it's numeric
+                            try:
+                                device_current_access_vlan = int(device_current_access_vlan)
+                            except (ValueError, TypeError):
+                                pass
             except Exception as e:
-                logger.debug(f"Could not get bridge VLANs for check: {e}")
+                logger.debug(f"Could not get bridge VLANs or access VLAN for check: {e}")
 
             # 1. Add VLANs to bridge (untagged + tagged) - only add missing VLANs
             # Collect all VLANs that need to be added to bridge
@@ -3456,6 +3475,34 @@ class VLANDeploymentView(View):
                 commands.append(access_cmd)
                 logger.error(f"[NETBOX CONFIG] Generated access command for {target_interface}: {access_cmd}")
                 logger.error(f"[NETBOX CONFIG] Commands list now has {len(commands)} items")
+            elif tagged_vlans and not untagged_vlan:
+                # Interface has only tagged VLANs (no untagged VLAN)
+                # In Cumulus NVUE, tagged VLANs don't require explicit interface commands
+                # They're automatically available if they're in the bridge domain
+                # SYNC MODE ONLY: If this interface currently has an access VLAN on device but NetBox has None,
+                # we need to unset it to sync with NetBox config
+                if device_current_access_vlan is not None:
+                    # Device has an access VLAN but NetBox has None - need to unset it (sync mode only)
+                    unset_cmd = f"nv unset interface {target_interface} bridge domain br_default access"
+                    commands.append(unset_cmd)
+                    logger.error(f"[NETBOX CONFIG] Interface {target_interface} has access VLAN {device_current_access_vlan} on device but NetBox has None - adding unset command")
+                elif not commands:
+                    # Only add comment if no other commands were generated and no unset needed
+                    commands.append(f"# Interface {target_interface} configured for tagged VLANs: {', '.join(map(str, sorted(tagged_vlans)))}")
+                    commands.append(f"# Note: No explicit commands needed - tagged VLANs are automatically available if they're in bridge domain")
+                    commands.append(f"# Bridge VLANs already present: {', '.join(map(str, sorted(vlans_already_in_bridge)))}")
+                    logger.error(f"[NETBOX CONFIG] Interface {target_interface} has only tagged VLANs - added informational comment")
+                logger.error(f"[NETBOX CONFIG] No untagged VLAN for {interface.name} (target: {target_interface}) - interface has only tagged VLANs")
+            elif not untagged_vlan and not tagged_vlans:
+                # Interface has no VLANs in NetBox (neither untagged nor tagged)
+                # SYNC MODE ONLY: If device has an access VLAN, we need to unset it to sync with NetBox
+                if device_current_access_vlan is not None:
+                    # Device has an access VLAN but NetBox has None - need to unset it (sync mode only)
+                    unset_cmd = f"nv unset interface {target_interface} bridge domain br_default access"
+                    commands.append(unset_cmd)
+                    logger.error(f"[NETBOX CONFIG] Interface {target_interface} has access VLAN {device_current_access_vlan} on device but NetBox has no VLANs - adding unset command")
+                else:
+                    logger.error(f"[NETBOX CONFIG] No untagged VLAN for {interface.name} (target: {target_interface}) - skipping access command")
             else:
                 logger.error(f"[NETBOX CONFIG] No untagged VLAN for {interface.name} (target: {target_interface}) - skipping access command")
 
@@ -3657,7 +3704,20 @@ class VLANDeploymentView(View):
                 for interface in all_device_interfaces:
                     # Check bond membership from NetBox
                     try:
-                        if hasattr(interface, 'lag') and interface.lag:
+                        # Check if interface is itself a bond (LAG type)
+                        from dcim.choices import InterfaceTypeChoices
+                        is_bond_interface = interface.type == InterfaceTypeChoices.TYPE_LAG
+                        
+                        if is_bond_interface:
+                            # Interface is itself a bond - add it to bond_map with itself as the bond
+                            device_bond_map[interface.name] = {
+                                'bond_name': interface.name,
+                                'bond_id': str(interface.id),
+                                'source': 'netbox'
+                            }
+                            logger.error(f"[SYNC DRY RUN] {device.name}:{interface.name} - Interface is a bond (LAG type) in NetBox")
+                        elif hasattr(interface, 'lag') and interface.lag:
+                            # Interface is a member of a bond
                             device_bond_map[interface.name] = {
                                 'bond_name': interface.lag.name,
                                 'bond_id': str(interface.lag.id),
@@ -3665,7 +3725,7 @@ class VLANDeploymentView(View):
                             }
                             logger.error(f"[SYNC DRY RUN] {device.name}:{interface.name} - Found LAG in NetBox: {interface.lag.name}")
                         else:
-                            logger.error(f"[SYNC DRY RUN] {device.name}:{interface.name} - No LAG in NetBox")
+                            logger.error(f"[SYNC DRY RUN] {device.name}:{interface.name} - No LAG in NetBox (standalone interface)")
                     except Exception as e:
                         logger.error(f"[SYNC DRY RUN] Error checking bond membership for {interface.name}: {e}")
 
@@ -5423,6 +5483,11 @@ class VLANDeploymentView(View):
         logger.info(f"[_run_vlan_deployment ENTRY] Called with {len(devices)} devices, cleaned_data keys: {list(cleaned_data.keys())}")
         logger.info(f"[_run_vlan_deployment] dry_run={cleaned_data.get('dry_run')}, sync_netbox_to_device={cleaned_data.get('sync_netbox_to_device')}")
 
+        # Initialize bond tracking variables at function start to avoid UnboundLocalError
+        # These will be populated later in dry-run or deployment paths
+        bonds_to_create_in_netbox = {}
+        bonds_to_create_on_device = {}
+
         # Get VLAN IDs from form (normal mode)
         untagged_vlan_id = cleaned_data.get('untagged_vlan')
         tagged_vlans_str = cleaned_data.get('tagged_vlans', '').strip()
@@ -5498,12 +5563,15 @@ class VLANDeploymentView(View):
 
             # Build bond_info_map for preview callback
             # Also detect bonds that exist in NetBox but not on device (Case 2)
+            # And bonds that exist on device but not in NetBox (Case 1)
             bond_info_map = {}
             bonds_to_create_on_device = {}  # Case 2: bonds in NetBox but not on device
+            bonds_to_create_in_netbox = {}  # Case 1: bonds on device but not in NetBox
             logger.info(f"[DRY RUN] Building bond_info_map for {len(devices)} devices, {len(interface_list)} interfaces")
             for device in devices:
                 device_bond_map = {}
                 device_bonds_to_create_on_device = {}
+                device_bonds_to_create_in_netbox = {}
 
                 # Get all interfaces for this device
                 device_interfaces = []
@@ -5575,13 +5643,69 @@ class VLANDeploymentView(View):
                         except Interface.DoesNotExist:
                             logger.error(f"Bond interface {bond_name} not found in NetBox")
 
+                # Step 3: Check for bonds that exist on device but NOT in NetBox (Case 1)
+                # Collect all unique bond names from device_bond_map
+                device_bond_names = set()
+                for interface_name, bond_info in device_bond_map.items():
+                    bond_name = bond_info.get('bond_name')
+                    if bond_name:
+                        device_bond_names.add(bond_name)
+
+                # For each bond found on device, check if it exists in NetBox
+                for bond_name in device_bond_names:
+                    bond_exists_in_netbox = False
+                    try:
+                        # Check if bond interface exists in NetBox
+                        bond_interface = Interface.objects.get(device=device, name=bond_name)
+                        # Check if it's actually a LAG type (bond)
+                        if bond_interface.type == InterfaceTypeChoices.TYPE_LAG:
+                            bond_exists_in_netbox = True
+                            logger.info(f"[DRY RUN] Bond {bond_name} exists in NetBox")
+                    except Interface.DoesNotExist:
+                        # Bond doesn't exist in NetBox
+                        bond_exists_in_netbox = False
+                    except Exception as e:
+                        logger.debug(f"Error checking NetBox for bond {bond_name}: {e}")
+                        bond_exists_in_netbox = False
+
+                    if not bond_exists_in_netbox:
+                        # Bond exists on device but NOT in NetBox - need to create it in NetBox
+                        logger.info(f"[DRY RUN] Bond {bond_name} exists on device but NOT in NetBox - will create in NetBox")
+                        
+                        # Collect all members of this bond from device_bond_map
+                        bond_members = []
+                        bond_vlans_to_migrate = {}
+                        for interface_name, bond_info in device_bond_map.items():
+                            if bond_info.get('bond_name') == bond_name:
+                                bond_members.append(interface_name)
+                                # Get VLAN info from NetBox for this member interface
+                                try:
+                                    member_interface = Interface.objects.get(device=device, name=interface_name)
+                                    untagged_vlan = member_interface.untagged_vlan.vid if member_interface.untagged_vlan else None
+                                    tagged_vlans = list(member_interface.tagged_vlans.values_list('vid', flat=True))
+                                    if untagged_vlan or tagged_vlans:
+                                        bond_vlans_to_migrate[interface_name] = {
+                                            'untagged': untagged_vlan,
+                                            'tagged': tagged_vlans
+                                        }
+                                except Interface.DoesNotExist:
+                                    pass
+
+                        device_bonds_to_create_in_netbox[bond_name] = {
+                            'members': bond_members,
+                            'vlans_to_migrate': bond_vlans_to_migrate
+                        }
+
                 if device_bond_map:
                     bond_info_map[device.name] = device_bond_map
                 if device_bonds_to_create_on_device:
                     bonds_to_create_on_device[device.name] = device_bonds_to_create_on_device
+                if device_bonds_to_create_in_netbox:
+                    bonds_to_create_in_netbox[device.name] = device_bonds_to_create_in_netbox
 
             logger.info(f"[DRY RUN] Bond info map: {bond_info_map}")
             logger.info(f"[DRY RUN] Bonds to create on device: {bonds_to_create_on_device}")
+            logger.info(f"[DRY RUN] Bonds to create in NetBox: {bonds_to_create_in_netbox}")
 
             # Create preview callback that captures context
             # PERFORMANCE: This callback receives pre-fetched device data from Nornir
@@ -6369,9 +6493,10 @@ class VLANDeploymentView(View):
             # Build bond_info_map first: {device_name: {interface_name: bond_name}}
             # Also detect bonds that exist in NetBox but not on device (Case 2)
             # And bonds that exist on device but not in NetBox (Case 1)
+            # Note: bonds_to_create_in_netbox and bonds_to_create_on_device are initialized at function start
             bond_info_map = {}
             bonds_to_create_on_device = {}  # Case 2: bonds in NetBox but not on device
-            bonds_to_create_in_netbox = {}  # Case 1: bonds on device but not in NetBox
+            bonds_to_create_in_netbox = {}  # Case 1: bonds on device but not in NetBox (reinitialize for deployment)
             logger.info(f"[DEPLOYMENT] Building bond_info_map for {len(devices)} devices")
             for device in devices:
                 device_bond_map = {}
