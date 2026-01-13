@@ -4759,23 +4759,47 @@ class VLANDeploymentView(View):
         results = []
         interfaces_to_auto_tag = []  # Track interfaces that need auto-tagging
 
-        # Create bonds in NetBox if needed (before processing results)
+        # Create bonds in NetBox if needed (AFTER deployment, only if deployment succeeded)
+        # This handles the case where bonds were detected on device but not in NetBox
+        # We deploy configs to bonds on device, then sync the bond structure to NetBox
         for device in devices:
             if device.name in bonds_to_create_in_netbox:
-                device_bonds = bonds_to_create_in_netbox[device.name]
-                for bond_name, bond_data in device_bonds.items():
-                    logger.info(f"[SYNC DEPLOYMENT] Creating bond {bond_name} in NetBox for device {device.name}")
-                    sync_result = self._sync_bond_to_netbox(
-                        device=device,
-                        bond_name=bond_name,
-                        member_interfaces=bond_data['members'],
-                        platform=platform,
-                        migrate_vlans=True  # Migrate all VLANs from member interfaces to bond
-                    )
-                    if sync_result.get('success'):
-                        logger.info(f"[SYNC DEPLOYMENT] Bond {bond_name} created in NetBox successfully")
-                    else:
-                        logger.error(f"[SYNC DEPLOYMENT] Failed to create bond {bond_name} in NetBox: {sync_result.get('error')}")
+                # Check if deployment was successful for this device
+                device_results = nornir_results.get(device.name, {})
+                deployment_succeeded = False
+                
+                if device_results:
+                    # Check if at least one interface deployment succeeded
+                    for interface_name, interface_result in device_results.items():
+                        if interface_result.get('success', False):
+                            deployment_succeeded = True
+                            break
+                
+                if deployment_succeeded:
+                    device_bonds = bonds_to_create_in_netbox[device.name]
+                    for bond_name, bond_data in device_bonds.items():
+                        logger.info(f"[SYNC DEPLOYMENT] Creating bond {bond_name} in NetBox for device {device.name} (deployment succeeded)")
+                        logger.info(f"[SYNC DEPLOYMENT] Bond members: {', '.join(bond_data['members'])}")
+                        logger.info(f"[SYNC DEPLOYMENT] Migrating VLANs from member interfaces to bond")
+                        sync_result = self._sync_bond_to_netbox(
+                            device=device,
+                            bond_name=bond_name,
+                            member_interfaces=bond_data['members'],
+                            platform=platform,
+                            migrate_vlans=True  # Migrate all VLANs from member interfaces to bond
+                        )
+                        if sync_result.get('success'):
+                            logger.info(f"[SYNC DEPLOYMENT] Bond {bond_name} created in NetBox successfully")
+                            logger.info(f"[SYNC DEPLOYMENT]   - Members added: {sync_result.get('members_added', 0)}")
+                            logger.info(f"[SYNC DEPLOYMENT]   - VLANs migrated: {sync_result.get('vlans_migrated', 0)}")
+                            logger.info(f"[SYNC DEPLOYMENT]   - Members cleared: {sync_result.get('members_cleared', 0)}")
+                        else:
+                            logger.error(f"[SYNC DEPLOYMENT] Failed to create bond {bond_name} in NetBox: {sync_result.get('error')}")
+                else:
+                    logger.warning(f"[SYNC DEPLOYMENT] Skipping bond creation in NetBox for device {device.name} - deployment did not succeed")
+                    device_bonds = bonds_to_create_in_netbox[device.name]
+                    for bond_name in device_bonds.keys():
+                        logger.warning(f"[SYNC DEPLOYMENT]   - Bond {bond_name} will not be created in NetBox until deployment succeeds")
 
         for device in devices:
             device_results = nornir_results.get(device.name, {})
@@ -6231,12 +6255,15 @@ class VLANDeploymentView(View):
 
             # Build bond_info_map first: {device_name: {interface_name: bond_name}}
             # Also detect bonds that exist in NetBox but not on device (Case 2)
+            # And bonds that exist on device but not in NetBox (Case 1)
             bond_info_map = {}
             bonds_to_create_on_device = {}  # Case 2: bonds in NetBox but not on device
+            bonds_to_create_in_netbox = {}  # Case 1: bonds on device but not in NetBox
             logger.info(f"[DEPLOYMENT] Building bond_info_map for {len(devices)} devices")
             for device in devices:
                 device_bond_map = {}
                 device_bonds_to_create_on_device = {}
+                device_bonds_to_create_in_netbox = {}
 
                 # Get all interfaces for this device
                 device_interfaces = []
@@ -6264,6 +6291,36 @@ class VLANDeploymentView(View):
                                 'source': 'device'
                             }
                             logger.info(f"[DEPLOYMENT] Bond detected on device: {device.name}:{actual_interface_name} -> {bond_member_of}")
+                            
+                            # Check if this bond exists in NetBox
+                            from dcim.models import Interface as InterfaceModel
+                            bond_exists_in_netbox = InterfaceModel.objects.filter(device=device, name=bond_member_of).exists()
+                            
+                            if not bond_exists_in_netbox:
+                                # Bond exists on device but not in NetBox - track it for creation
+                                if bond_member_of not in device_bonds_to_create_in_netbox:
+                                    device_bonds_to_create_in_netbox[bond_member_of] = {
+                                        'members': [],
+                                        'vlans_to_migrate': {}  # Map of member_name -> {untagged, tagged}
+                                    }
+                                device_bonds_to_create_in_netbox[bond_member_of]['members'].append(actual_interface_name)
+                                
+                                # Collect VLANs from this member interface for migration
+                                try:
+                                    interface_obj = Interface.objects.get(device=device, name=actual_interface_name)
+                                    vlans_info = {
+                                        'untagged': interface_obj.untagged_vlan.vid if interface_obj.untagged_vlan else None,
+                                        'tagged': list(interface_obj.tagged_vlans.values_list('vid', flat=True))
+                                    }
+                                    device_bonds_to_create_in_netbox[bond_member_of]['vlans_to_migrate'][actual_interface_name] = vlans_info
+                                    logger.info(f"[DEPLOYMENT] Detected bond {bond_member_of} on device {device.name} (not in NetBox) - member: {actual_interface_name}, VLANs: {vlans_info}")
+                                except Interface.DoesNotExist:
+                                    # Interface not in NetBox yet - will be created/updated during NetBox update
+                                    logger.debug(f"[DEPLOYMENT] Interface {actual_interface_name} not in NetBox yet")
+                                    device_bonds_to_create_in_netbox[bond_member_of]['vlans_to_migrate'][actual_interface_name] = {
+                                        'untagged': untagged_vlan_id,  # Will be set from deployment
+                                        'tagged': tagged_vlan_ids if tagged_vlan_ids else []
+                                    }
                     except Exception as e:
                         logger.warning(f"[DEPLOYMENT] Could not check bond for {device.name}:{actual_interface_name}: {e}")
 
@@ -6312,9 +6369,12 @@ class VLANDeploymentView(View):
                     bond_info_map[device.name] = device_bond_map
                 if device_bonds_to_create_on_device:
                     bonds_to_create_on_device[device.name] = device_bonds_to_create_on_device
+                if device_bonds_to_create_in_netbox:
+                    bonds_to_create_in_netbox[device.name] = device_bonds_to_create_in_netbox
 
             logger.info(f"[DEPLOYMENT] Bond info map: {bond_info_map}")
             logger.info(f"[DEPLOYMENT] Bonds to create on device: {bonds_to_create_on_device}")
+            logger.info(f"[DEPLOYMENT] Bonds to create in NetBox: {bonds_to_create_in_netbox}")
 
             # Initialize Nornir and deploy
             nornir_manager = NornirDeviceManager(devices=devices)
@@ -7033,22 +7093,72 @@ class VLANDeploymentView(View):
                     device_logs.append("=" * 80)
                     device_logs.append("")
 
-                    # BOND CREATION: Check if any interface has bond that needs to be synced to NetBox
-                    bonds_to_sync = {}  # {bond_name: [member_interfaces]}
+                    # BOND CREATION: Use bonds_to_create_in_netbox tracked during early detection
+                    # This handles bonds that were detected on device but not in NetBox
+                    if device.name in bonds_to_create_in_netbox:
+                        device_bonds = bonds_to_create_in_netbox[device.name]
+                        for bond_name, bond_data in device_bonds.items():
+                            # Only create bond if deployment succeeded for at least one member
+                            deployment_succeeded = False
+                            for member_name in bond_data['members']:
+                                if member_name in device_interfaces:
+                                    interface_result = device_results.get(member_name, {})
+                                    if interface_result.get('success') and interface_result.get('committed'):
+                                        deployment_succeeded = True
+                                        break
+                            
+                            if deployment_succeeded:
+                                device_logs.append(f"[BOND] Creating bond {bond_name} in NetBox and migrating VLANs...")
+                                device_logs.append(f"     Bond members: {', '.join(bond_data['members'])}")
+                                sync_result = self._sync_bond_to_netbox(
+                                    device=device,
+                                    bond_name=bond_name,
+                                    member_interfaces=bond_data['members'],
+                                    platform=platform,
+                                    migrate_vlans=True  # Migrate all VLANs from member interfaces to bond
+                                )
+                                if sync_result.get('success'):
+                                    device_logs.append(f"[OK] Bond {bond_name} created in NetBox")
+                                    device_logs.append(f"     Members added: {len(bond_data['members'])} ({', '.join(bond_data['members'])})")
+                                    vlans_migrated = sync_result.get('vlans_migrated', 0)
+                                    members_cleared = sync_result.get('members_cleared', 0)
+                                    if vlans_migrated > 0:
+                                        device_logs.append(f"     VLANs migrated to bond: {vlans_migrated}")
+                                    if members_cleared > 0:
+                                        device_logs.append(f"     Member interfaces cleared: {members_cleared}")
+                                    netbox_updated = "Yes"
+                                else:
+                                    device_logs.append(f"[ERROR] Failed to create bond {bond_name}: {sync_result.get('error')}")
+                                device_logs.append("")
+                            else:
+                                device_logs.append(f"[WARN] Skipping bond {bond_name} creation - deployment did not succeed for any members")
+                                device_logs.append("")
+                    
+                    # Also check for bonds that might have been missed (fallback to old method)
+                    # This handles edge cases where bonds were detected during deployment but not tracked earlier
+                    bonds_to_sync_fallback = {}  # {bond_name: [member_interfaces]}
                     for actual_interface_name in device_interfaces:
                         interface_result = device_results.get(actual_interface_name, {})
                         if interface_result.get('success') and interface_result.get('committed'):
-                            # Check if device has bond but NetBox doesn't
+                            # Skip if already handled by bonds_to_create_in_netbox
+                            bond_info = bond_info_map.get(device.name, {}).get(actual_interface_name, None)
+                            if bond_info:
+                                bond_name = bond_info['bond_name']
+                                # Check if this bond was already handled
+                                if device.name in bonds_to_create_in_netbox and bond_name in bonds_to_create_in_netbox[device.name]:
+                                    continue  # Already handled above
+                            
+                            # Check if device has bond but NetBox doesn't (fallback detection)
                             bond_info = self._get_bond_interface_for_member(device, actual_interface_name, platform=platform)
                             if bond_info and bond_info.get('netbox_missing_bond'):
                                 bond_name = bond_info['bond_name']
                                 all_members = bond_info.get('all_members', [actual_interface_name])
-                                if bond_name not in bonds_to_sync:
-                                    bonds_to_sync[bond_name] = all_members
+                                if bond_name not in bonds_to_sync_fallback:
+                                    bonds_to_sync_fallback[bond_name] = all_members
 
-                    # Sync bonds to NetBox (create bond + migrate VLANs from member interfaces)
-                    for bond_name, members in bonds_to_sync.items():
-                        device_logs.append(f"[BOND] Creating bond {bond_name} in NetBox and migrating VLANs...")
+                    # Sync bonds to NetBox (fallback method - for bonds detected during deployment)
+                    for bond_name, members in bonds_to_sync_fallback.items():
+                        device_logs.append(f"[BOND] Creating bond {bond_name} in NetBox (fallback detection) and migrating VLANs...")
                         sync_result = self._sync_bond_to_netbox(
                             device=device,
                             bond_name=bond_name,
