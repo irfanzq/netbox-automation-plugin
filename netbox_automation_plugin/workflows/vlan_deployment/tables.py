@@ -16,7 +16,7 @@ class VLANDeploymentResultTable(NetBoxTable):
     device = tables.Column(
         accessor="device",
         verbose_name=_("Device"),
-        linkify=True,
+        linkify=False,  # Custom render handles linking (supports 'AUTO-TAG' string)
         orderable=True,
     )
     interface = tables.Column(

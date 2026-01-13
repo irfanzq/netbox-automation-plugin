@@ -3198,7 +3198,12 @@ class VLANDeploymentView(View):
                     # config is applied to bond interface instead of member (no blocking needed)
 
                     # Check if cabled (BLOCKING)
-                    if not interface.cable:
+                    # EXCEPTION: Bond interfaces (LAG/port-channel) don't need to be cabled in normal mode
+                    # Bonds are logical interfaces - cables are on member interfaces, not bonds
+                    from dcim.choices import InterfaceTypeChoices
+                    is_bond_interface = interface.type == InterfaceTypeChoices.TYPE_LAG
+                    
+                    if not interface.cable and not is_bond_interface:
                         errors.append(
                             "Interface '" + iface_name + "' on device '" + device.name + "' is not cabled in NetBox - please add cable information first."
                         )
