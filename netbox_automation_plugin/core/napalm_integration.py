@@ -511,19 +511,21 @@ class NAPALMDeviceManager:
                 pass
             return False
     
-    def get_lldp_neighbors(self, max_retries=3, retry_delay=2):
+    def get_lldp_neighbors(self, max_retries=3, retry_delay=2, interfaces=None):
         """
         Get LLDP neighbors using direct device commands (not NAPALM).
 
         This method queries LLDP information directly from the device using platform-specific
         commands to get the most accurate and complete LLDP data.
 
-        For Cumulus: Uses 'sudo lldpctl -f json'
+        For Cumulus: Uses 'nv show interface <interface> lldp -o json' for each interface
         For Arista EOS: Uses 'show lldp neighbors'
 
         Args:
             max_retries: Number of retry attempts if LLDP query fails (default: 3)
             retry_delay: Seconds to wait between retries (default: 2)
+            interfaces: Optional list of interfaces to check. If None, checks all interfaces.
+                       For bonds, will extract member interfaces (swp*, eth*, etc.)
 
         Returns:
             Dictionary mapping local interface names to list of neighbor dictionaries
@@ -539,6 +541,7 @@ class NAPALMDeviceManager:
 
         # Retry logic for LLDP queries
         last_error = None
+        
         for attempt in range(1, max_retries + 1):
             try:
                 if attempt > 1:
@@ -550,71 +553,121 @@ class NAPALMDeviceManager:
                 lldp_data = {}
 
                 if driver_name == 'cumulus':
-                    # Use direct lldpctl command for Cumulus
+                    # Use NVUE command to query each interface individually (doesn't require sudo)
+                    # Command: nv show interface <interface> lldp -o json
                     if hasattr(self.connection, 'device') and hasattr(self.connection.device, 'send_command'):
                         try:
-                            # Use send_command_timing() for reliable command execution
-                            # send_command_timing() uses timing-based detection instead of prompt pattern matching
-                            # This avoids "Pattern not detected" errors that occur with send_command()
-                            logger.info(f"Fetching LLDP data from {self.device.name} using send_command_timing()...")
-                            lldp_output = self.connection.device.send_command_timing('sudo lldpctl -f json', read_timeout=30)
-
-                            if lldp_output and lldp_output.strip():
-                                # Use safe JSON loader to handle various error cases
-                                lldp_json = self._safe_json_loads(lldp_output, context="LLDP")
-                                if lldp_json is None:
-                                    # _safe_json_loads already logged the error, but provide more context
-                                    logger.warning(f"LLDP output from {self.device.name} is not valid JSON. Output preview: {lldp_output[:200]}")
-                                    raise Exception(f"Invalid JSON from lldpctl: Output is not valid JSON format")
-
-                                # Parse lldpctl JSON format
-                                # Format: {"lldp": {"interface": {"swp1": {"port": ...}, "swp2": {...}}}}
-                                if 'lldp' in lldp_json and 'interface' in lldp_json['lldp']:
-                                    interfaces = lldp_json['lldp']['interface']
-
-                                    for iface_name, iface_data in interfaces.items():
-                                        # Each interface can have multiple neighbors (rare but possible)
-                                        neighbors = []
-
-                                        # Check if there's port data (neighbor info)
-                                        if 'port' in iface_data:
-                                            port_data = iface_data['port']
-
-                                            # Port data can be a list or a single dict
-                                            if isinstance(port_data, list):
-                                                for port in port_data:
-                                                    neighbor = self._parse_lldp_port_cumulus(port)
-                                                    if neighbor:
-                                                        neighbors.append(neighbor)
-                                            else:
-                                                neighbor = self._parse_lldp_port_cumulus(port_data)
-                                                if neighbor:
+                            logger.info(f"Fetching LLDP data from {self.device.name} using NVUE commands...")
+                            
+                            # Determine which interfaces to check
+                            interfaces_to_check = []
+                            
+                            if interfaces:
+                                # Use provided interfaces from deployment
+                                logger.debug(f"Using provided interfaces from deployment: {interfaces}")
+                                
+                                # Extract member interfaces from bonds and filter to only member interfaces
+                                for iface in interfaces:
+                                    # Skip bonds - we need to get their member interfaces
+                                    if iface.startswith('bond'):
+                                        # Get bond members
+                                        try:
+                                            bond_output = self.connection.device.send_command_timing(
+                                                f'nv show interface {iface} bond member -o json',
+                                                read_timeout=10
+                                            )
+                                            if bond_output and bond_output.strip():
+                                                bond_json = self._safe_json_loads(bond_output, context=f"Bond {iface} members")
+                                                if bond_json and isinstance(bond_json, dict):
+                                                    # Extract member interface names (swp1, swp2, etc.)
+                                                    for member_iface in bond_json.keys():
+                                                        # Only add member interfaces (swp*, eth*, etc.), not bonds
+                                                        if not member_iface.startswith('bond'):
+                                                            interfaces_to_check.append(member_iface)
+                                                            logger.debug(f"Added member interface {member_iface} from bond {iface}")
+                                        except Exception as bond_error:
+                                            logger.debug(f"Failed to get members for bond {iface}: {bond_error}")
+                                    else:
+                                        # Direct member interface (swp*, eth*, etc.) - add it
+                                        if not iface.startswith('bond'):
+                                            interfaces_to_check.append(iface)
+                            else:
+                                # No interfaces provided - fall back to NAPALM method
+                                logger.warning(f"No interfaces provided, falling back to NAPALM method")
+                                return self._get_lldp_napalm_fallback()
+                            
+                            if not interfaces_to_check:
+                                logger.warning(f"No member interfaces to check, falling back to NAPALM method")
+                                return self._get_lldp_napalm_fallback()
+                            
+                            logger.debug(f"Checking LLDP on {len(interfaces_to_check)} member interface(s): {interfaces_to_check}")
+                            
+                            # Query each member interface individually for LLDP data
+                            for iface_name in interfaces_to_check:
+                                try:
+                                    logger.debug(f"Querying LLDP for interface {iface_name}...")
+                                    lldp_output = self.connection.device.send_command_timing(
+                                        f'nv show interface {iface_name} lldp -o json',
+                                        read_timeout=15
+                                    )
+                                    
+                                    if lldp_output and lldp_output.strip():
+                                        # Parse NVUE LLDP JSON format for this interface
+                                        # Structure: {"neighbor": {"neighbor-name": {"chassis": {"system-name": "..."}, "port": {...}}}}
+                                        lldp_json = self._safe_json_loads(lldp_output, context=f"LLDP for {iface_name}")
+                                        if lldp_json is None:
+                                            logger.debug(f"Failed to parse LLDP JSON for {iface_name}, skipping")
+                                            continue
+                                        
+                                        # Check if this interface has neighbors
+                                        if 'neighbor' in lldp_json and lldp_json['neighbor']:
+                                            neighbors = []
+                                            neighbor_dict = lldp_json['neighbor']
+                                            
+                                            # Each interface can have multiple neighbors (neighbor dict keys are neighbor names)
+                                            for neighbor_name, neighbor_info in neighbor_dict.items():
+                                                neighbor = {}
+                                                
+                                                # Extract hostname from chassis.system-name
+                                                if 'chassis' in neighbor_info and 'system-name' in neighbor_info['chassis']:
+                                                    neighbor['hostname'] = neighbor_info['chassis']['system-name']
+                                                else:
+                                                    # Fallback: use neighbor_name as hostname
+                                                    neighbor['hostname'] = neighbor_name
+                                                
+                                                # Extract port from port.description (preferred) or port.name
+                                                if 'port' in neighbor_info:
+                                                    port_info = neighbor_info['port']
+                                                    if 'description' in port_info:
+                                                        neighbor['port'] = port_info['description']
+                                                    elif 'name' in port_info:
+                                                        neighbor['port'] = port_info['name']
+                                                    else:
+                                                        neighbor['port'] = 'unknown'
+                                                else:
+                                                    neighbor['port'] = 'unknown'
+                                                
+                                                if neighbor.get('hostname'):
                                                     neighbors.append(neighbor)
-
-                                        # Only add interface if it has neighbors
-                                        if neighbors:
-                                            lldp_data[iface_name] = neighbors
-
+                                            
+                                            if neighbors:
+                                                lldp_data[iface_name] = neighbors
+                                                logger.debug(f"Found {len(neighbors)} neighbor(s) on {iface_name}")
+                                
+                                except Exception as iface_error:
+                                    logger.debug(f"Failed to get LLDP for interface {iface_name}: {iface_error}")
+                                    continue  # Continue with next interface
+                            
+                            if lldp_data:
                                 logger.info(f"Collected LLDP data from {self.device.name}: {len(lldp_data)} interfaces with neighbors")
                                 return lldp_data
                             else:
-                                logger.warning(
-                                    f"Empty LLDP output from {self.device.name}. "
-                                    f"This may indicate: (1) LLDP is not enabled, (2) No neighbors detected, "
-                                    f"(3) Connection issue, or (4) Command execution problem. "
-                                    f"Output length: {len(lldp_output) if lldp_output else 0}"
-                                )
-                                # Return empty dict to indicate no LLDP neighbors found
+                                logger.info(f"No LLDP neighbors found on {self.device.name}")
                                 return {}
-                        except Exception as cumulus_error:
-                            logger.warning(f"Attempt {attempt}/{max_retries}: Failed to get LLDP from Cumulus device {self.device.name}: {cumulus_error}")
-                            last_error = cumulus_error
-                            if attempt == max_retries:
-                                # Last attempt failed, try NAPALM fallback
-                                logger.info(f"All direct LLDP attempts failed, trying NAPALM fallback for {self.device.name}")
-                                return self._get_lldp_napalm_fallback()
-                            # Otherwise continue to next retry
-                            continue
+                                
+                        except Exception as nvue_error:
+                            logger.warning(f"NVUE LLDP query failed for {self.device.name}: {nvue_error}, falling back to NAPALM method")
+                            return self._get_lldp_napalm_fallback()
                     else:
                         # No direct device access, use NAPALM fallback
                         return self._get_lldp_napalm_fallback()
@@ -1244,7 +1297,17 @@ class NAPALMDeviceManager:
                                     full_config = json.loads(full_config_output.strip())
                                     
                                     # Navigate to interface section
-                                    interfaces_config = full_config.get('interface', {})
+                                    # Handle case where interface might be a list or dict
+                                    interface_raw = full_config.get('interface', {})
+                                    if isinstance(interface_raw, list):
+                                        # Convert list to dict if needed (shouldn't happen but handle it)
+                                        logger.warning(f"Interface section is a list instead of dict, this is unexpected")
+                                        interfaces_config = {}
+                                    elif isinstance(interface_raw, dict):
+                                        interfaces_config = interface_raw
+                                    else:
+                                        logger.warning(f"Interface section is neither list nor dict: {type(interface_raw)}")
+                                        interfaces_config = {}
                                     
                                     if not interfaces_config:
                                         logger.debug(f"No 'interface' section found in config JSON")
@@ -1807,7 +1870,8 @@ class NAPALMDeviceManager:
                             if 'no changes' in diff_check.lower() or not diff_check.strip() or diff_check.strip() == '':
                                 return True, "Rollback verified: No pending changes detected"
                             else:
-                                return False, f"Rollback may have failed: Pending changes still exist - {diff_check[:100]}"
+                                # Show full diff output (no truncation) so user can see all pending changes including VLAN numbers and all interfaces
+                                return False, f"Rollback may have failed: Pending changes still exist -\n{diff_check}"
                         else:
                             # Empty diff means no pending changes
                             return True, "Rollback verified: No pending changes detected"
@@ -2805,8 +2869,8 @@ class NAPALMDeviceManager:
                         logs.append(f"  Collecting LLDP neighbors (device-level, no specific interfaces)...")
                         interfaces_for_lldp = None
                     
-                    # Collect LLDP data (device-level collection, then filter to our interfaces)
-                    lldp_before = self.get_lldp_neighbors()
+                    # Collect LLDP data for deployment interfaces (member interfaces, not bonds)
+                    lldp_before = self.get_lldp_neighbors(interfaces=interfaces_for_lldp)
 
                     # Store per-interface LLDP data for the interfaces we're deploying
                     baseline['lldp_interfaces'] = {}  # Per-interface LLDP data for deployed interfaces
@@ -3532,6 +3596,8 @@ class NAPALMDeviceManager:
                 logger.info(f"Phase 2: Committing with {timeout}s rollback timer (platform supports commit-confirm)...")
                 logs.append(f"  Method: Native commit-confirm (auto-rollback in {timeout}s)")
                 logs.append(f"  Committing configuration...")
+                # Store timeout in result for rollback logging
+                result['_deployment_timeout'] = timeout
                 
                 # Retry configuration for concurrent workflow conflicts
                 max_retries = 3
@@ -5502,6 +5568,31 @@ class NAPALMDeviceManager:
                 rollback_status, rollback_message = self._verify_rollback(driver_name)
                 result['rolled_back'] = rollback_status if rollback_status is not None else True
                 
+                # Log what command was used for initial auto-rollback
+                logs.append(f"")
+                logs.append(f"[Initial Auto-Rollback Information]")
+                if driver_name == 'cumulus':
+                    # For Cumulus, auto-rollback is handled by commit-confirm timer
+                    # The command executed was: nv config apply --confirm {timeout}s -y (via NAPALM commit_config(revert_in=timeout))
+                    # Get timeout from deployment result or default to 90
+                    timeout_used = result.get('_deployment_timeout', 90)
+                    revision_id = result.get('_cumulus_pending_revision_id', 'unknown')
+                    logs.append(f"  Method: Commit-confirm timer-based auto-rollback")
+                    logs.append(f"  Command that SHOULD have been executed: nv config apply --confirm {timeout_used}s -y")
+                    logs.append(f"  (Called via: NAPALM commit_config(revert_in={timeout_used}))")
+                    logs.append(f"  Expected behavior: Config should auto-rollback after {timeout_used}s if not confirmed")
+                    logs.append(f"  Revision ID: {revision_id}")
+                    if rollback_status is False:
+                        logs.append(f"  ⚠ Auto-rollback verification failed - possible reasons:")
+                        logs.append(f"     • NAPALM driver may not have executed 'nv config apply --confirm {timeout_used}s -y' correctly")
+                        logs.append(f"     • Commit-confirm session was not created properly by NAPALM driver")
+                        logs.append(f"     • Timer expired but rollback didn't execute automatically")
+                        logs.append(f"     • Pending revision {revision_id} still exists (needs manual cleanup)")
+                        logs.append(f"     • Check device logs: nv config history | grep {revision_id}")
+                else:
+                    logs.append(f"  Method: Platform-specific auto-rollback")
+                    logs.append(f"  Command: NAPALM commit_config(revert_in={result.get('_deployment_timeout', 'unknown')})")
+                
                 # POST-VERIFICATION-FAILURE CLEANUP: Ensure no pending commit remains
                 logs.append(f"")
                 logs.append(f"[Post-Rollback Cleanup] Checking for leftover pending commits...")
@@ -5651,7 +5742,11 @@ class NAPALMDeviceManager:
                                             result['message'] = f"Verification failed but surgical rollback succeeded"
                                         else:
                                             logs.append(f"  ⚠ Pending changes still exist after rollback:")
-                                            logs.append(f"    {verify_diff[:200]}")
+                                            # Show full diff output (no truncation) so user can see all pending changes including VLAN numbers and all interfaces
+                                            # Split into lines for better readability
+                                            for line in verify_diff.split('\n'):
+                                                if line.strip():
+                                                    logs.append(f"    {line}")
                                     else:
                                         # No changes - config already matches
                                         logs.append(f"  ℹ No pending changes detected")
@@ -5680,13 +5775,19 @@ class NAPALMDeviceManager:
                 logs.append(f"")
                 
                 # Add rollback information based on verification
+                # Use result['rolled_back'] if surgical rollback succeeded, otherwise use initial rollback_status
+                final_rollback_status = result.get('rolled_back', rollback_status)
                 logs.append(f"--- Rollback Information ---")
                 logs.append(f"Platform: {driver_name.upper()}")
-                if rollback_status is True:
+                if final_rollback_status is True:
                     logs.append(f"Auto-Rollback: VERIFIED - Changes have been automatically reverted due to verification failure")
-                    logs.append(f"  Status: {rollback_message}")
+                    if result.get('rolled_back') and rollback_status is False:
+                        # Surgical rollback succeeded after initial auto-rollback failed
+                        logs.append(f"  Status: Surgical rollback succeeded (initial auto-rollback failed)")
+                    else:
+                        logs.append(f"  Status: {rollback_message}")
                     # Don't show manual steps when rollback is verified successful
-                elif rollback_status is False:
+                elif final_rollback_status is False:
                     logs.append(f"Auto-Rollback: FAILED or INCOMPLETE - Manual intervention required")
                     logs.append(f"  Warning: {rollback_message}")
                     logs.append(f"")
