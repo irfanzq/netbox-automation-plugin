@@ -15,6 +15,7 @@ from nornir_napalm.plugins.tasks import napalm_get
 from nornir.core.plugins.connections import ConnectionPluginRegister
 import logging
 import time
+import sys
 
 if TYPE_CHECKING:
     from dcim.models import Device
@@ -1164,27 +1165,37 @@ class NornirDeviceManager:
             }
         """
         logger.info(f"[DEPLOY_VLAN ENTRY] Called with dry_run={dry_run}, preview_callback={'provided' if preview_callback else 'None'}, interface_list={interface_list[:3]}... ({len(interface_list)} total)")
+        print(f"[DEPLOY_VLAN ENTRY] Called with dry_run={dry_run}, preview_callback={'provided' if preview_callback else 'None'}, interface_list={interface_list[:3]}... ({len(interface_list)} total)", file=sys.stderr, flush=True)
         logger.info(f"[DEPLOY_VLAN] Step 1: Checking Nornir initialization...")
+        print(f"[DEPLOY_VLAN] Step 1: Checking Nornir initialization...", file=sys.stderr, flush=True)
 
         if not self.nr:
             logger.info(f"[DEPLOY_VLAN] Step 2: Nornir not initialized, calling initialize()...")
+            print(f"[DEPLOY_VLAN] Step 2: Nornir not initialized, calling initialize()...", file=sys.stderr, flush=True)
             self.nr = self.initialize()
             logger.info(f"[DEPLOY_VLAN] Step 2: Nornir initialization complete")
+            print(f"[DEPLOY_VLAN] Step 2: Nornir initialization complete", file=sys.stderr, flush=True)
         else:
             logger.info(f"[DEPLOY_VLAN] Step 2: Nornir already initialized, reusing existing instance")
+            print(f"[DEPLOY_VLAN] Step 2: Nornir already initialized, reusing existing instance", file=sys.stderr, flush=True)
 
         num_devices = len(self.nr.inventory.hosts)
         num_interfaces = len(interface_list)
         total_tasks = num_devices * num_interfaces
 
         logger.info(f"[DEPLOY_VLAN] Step 3: Nornir inventory has {num_devices} devices: {list(self.nr.inventory.hosts.keys())}")
+        print(f"[DEPLOY_VLAN] Step 3: Nornir inventory has {num_devices} devices: {list(self.nr.inventory.hosts.keys())}", file=sys.stderr, flush=True)
 
         mode_str = "DRY RUN preview" if dry_run else "deployment"
         logger.info(f"[DEPLOY_VLAN] Step 4: Starting VLAN {vlan_id} {mode_str} to {num_devices} devices, "
                    f"{num_interfaces} interfaces per device ({total_tasks} total tasks), "
                    f"platform: {platform}, max {self.num_workers} parallel workers")
+        print(f"[DEPLOY_VLAN] Step 4: Starting VLAN {vlan_id} {mode_str} to {num_devices} devices, "
+              f"{num_interfaces} interfaces per device ({total_tasks} total tasks), "
+              f"platform: {platform}, max {self.num_workers} parallel workers", file=sys.stderr, flush=True)
         logger.info(f"[DEPLOY_VLAN] Strategy: Devices in PARALLEL (up to {self.num_workers}), interfaces per device BATCHED")
         logger.info(f"[DEPLOY_VLAN] Step 5: About to start ThreadPoolExecutor with {self.num_workers} workers...")
+        print(f"[DEPLOY_VLAN] Step 5: About to start ThreadPoolExecutor with {self.num_workers} workers...", file=sys.stderr, flush=True)
         
         # Group by device: process interfaces sequentially per device, devices in parallel
         from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -1205,7 +1216,9 @@ class NornirDeviceManager:
             try:
                 mode_str = "preview" if dry_run else "deployment"
                 logger.info(f"[DEPLOY_START] Device {device_name}: Starting batched {mode_str} of {num_interfaces} interfaces in single session...")
+                print(f"[DEPLOY_START] Device {device_name}: Starting batched {mode_str} of {num_interfaces} interfaces in single session...", file=sys.stderr, flush=True)
                 logger.info(f"[DEPLOY_START] Device {device_name}: dry_run={dry_run}, preview_callback={'provided' if preview_callback else 'None'}")
+                print(f"[DEPLOY_START] Device {device_name}: dry_run={dry_run}, preview_callback={'provided' if preview_callback else 'None'}", file=sys.stderr, flush=True)
 
                 # Build config for all interfaces on this device
                 from netbox_automation_plugin.core.napalm_integration import NAPALMDeviceManager
@@ -1244,37 +1257,48 @@ class NornirDeviceManager:
 
                     # Connect to device ONCE and fetch all data
                     logger.info(f"Device {device_name}: Initializing NAPALMDeviceManager...")
+                    print(f"Device {device_name}: Initializing NAPALMDeviceManager...", file=sys.stderr, flush=True)
                     napalm_mgr = NAPALMDeviceManager(device)
                     connection_success = False
                     try:
                         logger.info(f"Device {device_name}: Attempting connection (this may take up to 60s)...")
+                        print(f"Device {device_name}: Attempting connection (this may take up to 60s)...", file=sys.stderr, flush=True)
                         connection_success = napalm_mgr.connect()
                         if connection_success:
                             logger.info(f"Device {device_name}: Connection successful!")
+                            print(f"Device {device_name}: Connection successful!", file=sys.stderr, flush=True)
                         else:
                             logger.warning(f"Device {device_name}: Connection returned False (failed)")
+                            print(f"Device {device_name}: Connection returned False (failed)", file=sys.stderr, flush=True)
                     except Exception as conn_err:
                         connection_error = str(conn_err)
                         logger.error(f"Device {device_name}: Connection exception: {connection_error}")
+                        print(f"Device {device_name}: Connection exception: {connection_error}", file=sys.stderr, flush=True)
                         import traceback
                         logger.error(f"Device {device_name}: Connection traceback: {traceback.format_exc()}")
+                        print(f"Device {device_name}: Connection traceback: {traceback.format_exc()}", file=sys.stderr, flush=True)
 
                     if connection_success:
                         try:
                             # 1. Collect LLDP neighbors (device-level, all interfaces)
                             logger.info(f"Device {device_name}: Collecting LLDP neighbors...")
+                            print(f"Device {device_name}: Collecting LLDP neighbors...", file=sys.stderr, flush=True)
                             try:
                                 device_lldp_data = napalm_mgr.get_lldp_neighbors()
                                 if device_lldp_data:
                                     total_neighbors = sum(len(neighbors) for neighbors in device_lldp_data.values())
                                     logger.info(f"Device {device_name}: Collected LLDP data for {len(device_lldp_data)} interfaces with {total_neighbors} total neighbors")
+                                    print(f"Device {device_name}: Collected LLDP data for {len(device_lldp_data)} interfaces with {total_neighbors} total neighbors", file=sys.stderr, flush=True)
                                 else:
                                     logger.warning(f"Device {device_name}: No LLDP data collected")
+                                    print(f"Device {device_name}: No LLDP data collected", file=sys.stderr, flush=True)
                             except Exception as e:
                                 logger.error(f"Device {device_name}: Failed to collect LLDP data: {e}")
+                                print(f"Device {device_name}: Failed to collect LLDP data: {e}", file=sys.stderr, flush=True)
 
                             # 2. Collect device config ONCE (for all interfaces)
                             logger.info(f"Device {device_name}: Collecting device configuration...")
+                            print(f"Device {device_name}: Collecting device configuration...", file=sys.stderr, flush=True)
                             try:
                                 connection = napalm_mgr.connection
 
@@ -1336,9 +1360,11 @@ class NornirDeviceManager:
                                         if not config_show_output and hasattr(connection, 'device') and hasattr(connection.device, 'send_command_timing'):
                                             try:
                                                 logger.info(f"Device {device_name}: Fetching config using send_command_timing('nv config show -o json') (timeout=90s, this may take a while)...")
+                                                print(f"Device {device_name}: Fetching config using send_command_timing('nv config show -o json') (timeout=90s, this may take a while)...", file=sys.stderr, flush=True)
                                                 debug_info.append("Method 2: send_command_timing('nv config show -o json')")
                                                 timing_result = connection.device.send_command_timing('nv config show -o json', read_timeout=90, delay_factor=2)
                                                 logger.info(f"Device {device_name}: Config fetch completed (output length: {len(str(timing_result)) if timing_result else 0})")
+                                                print(f"Device {device_name}: Config fetch completed (output length: {len(str(timing_result)) if timing_result else 0})", file=sys.stderr, flush=True)
                                                 logger.debug(f"Device {device_name}: send_command_timing() returned type: {type(timing_result)}, length: {len(str(timing_result)) if timing_result else 0}")
                                                 
                                                 if timing_result and str(timing_result).strip():
@@ -2097,31 +2123,41 @@ class NornirDeviceManager:
         # Each device processes its interfaces sequentially
         device_names = list(self.nr.inventory.hosts.keys())
         logger.info(f"[DEPLOY_VLAN] Step 6: Starting ThreadPoolExecutor with {min(len(device_names), self.num_workers)} workers for {len(device_names)} devices...")
+        print(f"[DEPLOY_VLAN] Step 6: Starting ThreadPoolExecutor with {min(len(device_names), self.num_workers)} workers for {len(device_names)} devices...", file=sys.stderr, flush=True)
         logger.info(f"[DEPLOY_VLAN] Device list: {device_names}")
+        print(f"[DEPLOY_VLAN] Device list: {device_names}", file=sys.stderr, flush=True)
         
         with ThreadPoolExecutor(max_workers=min(len(device_names), self.num_workers)) as executor:
             logger.info(f"[DEPLOY_VLAN] Step 7: Submitting {len(device_names)} tasks to executor...")
+            print(f"[DEPLOY_VLAN] Step 7: Submitting {len(device_names)} tasks to executor...", file=sys.stderr, flush=True)
             futures = {}
             for device in device_names:
                 logger.info(f"[DEPLOY_VLAN] Submitting task for device: {device}")
+                print(f"[DEPLOY_VLAN] Submitting task for device: {device}", file=sys.stderr, flush=True)
                 future = executor.submit(deploy_device_interfaces, device)
                 futures[future] = device
             
             logger.info(f"[DEPLOY_VLAN] Step 8: All tasks submitted, waiting for completion...")
+            print(f"[DEPLOY_VLAN] Step 8: All tasks submitted, waiting for completion...", file=sys.stderr, flush=True)
             completed = 0
             for future in as_completed(futures):
                 completed += 1
                 device_name = futures[future]
                 logger.info(f"[DEPLOY_VLAN] Device {device_name} task completed ({completed}/{num_devices}), getting result...")
+                print(f"[DEPLOY_VLAN] Device {device_name} task completed ({completed}/{num_devices}), getting result...", file=sys.stderr, flush=True)
                 try:
                     result = future.result()
                     logger.info(f"[DEPLOY_VLAN] Device {device_name} deployment completed successfully ({completed}/{num_devices})")
+                    print(f"[DEPLOY_VLAN] Device {device_name} deployment completed successfully ({completed}/{num_devices})", file=sys.stderr, flush=True)
                 except Exception as e:
                     logger.error(f"[DEPLOY_VLAN] Device {device_name} deployment raised exception: {e}")
+                    print(f"[DEPLOY_VLAN] Device {device_name} deployment raised exception: {e}", file=sys.stderr, flush=True)
                     import traceback
                     logger.error(f"[DEPLOY_VLAN] Device {device_name} exception traceback: {traceback.format_exc()}")
+                    print(f"[DEPLOY_VLAN] Device {device_name} exception traceback: {traceback.format_exc()}", file=sys.stderr, flush=True)
         
         logger.info(f"[DEPLOY_VLAN] Step 9: All tasks complete. VLAN deployment finished for {len(all_results)} devices, {num_interfaces} interfaces")
+        print(f"[DEPLOY_VLAN] Step 9: All tasks complete. VLAN deployment finished for {len(all_results)} devices, {num_interfaces} interfaces", file=sys.stderr, flush=True)
         
         return all_results
 
