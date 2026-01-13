@@ -901,6 +901,59 @@ class NAPALMDeviceManager:
                 'data': None
             }
     
+    def _parse_nvue_interface_range(self, range_str):
+        """
+        Parse NVUE interface range string (e.g., 'bond3-5') and return (prefix, start, end).
+        
+        Args:
+            range_str: Range string like 'bond3-5', 'swp1-48', etc.
+        
+        Returns:
+            tuple: (prefix, start, end) or None if not a range
+        """
+        import re
+        # Match patterns like 'bond3-5', 'swp1-48', etc.
+        match = re.match(r'^([a-zA-Z]+)(\d+)-(\d+)$', range_str)
+        if match:
+            prefix = match.group(1)
+            start = int(match.group(2))
+            end = int(match.group(3))
+            return (prefix, start, end)
+        return None
+    
+    def _is_interface_in_range(self, interface_name, range_str):
+        """
+        Check if an interface name is part of an NVUE range.
+        
+        Args:
+            interface_name: Interface name like 'bond3', 'swp5', etc.
+            range_str: Range string like 'bond3-5', 'swp1-48', etc.
+        
+        Returns:
+            bool: True if interface is part of the range, False otherwise
+        """
+        range_info = self._parse_nvue_interface_range(range_str)
+        if not range_info:
+            # Not a range, check exact match
+            return interface_name == range_str
+        
+        range_prefix, range_start, range_end = range_info
+        
+        # Parse interface name to extract prefix and number
+        import re
+        match = re.match(r'^([a-zA-Z]+)(\d+)$', interface_name)
+        if not match:
+            return False
+        
+        iface_prefix = match.group(1)
+        iface_num = int(match.group(2))
+        
+        # Check if prefix matches and number is in range
+        if iface_prefix == range_prefix and range_start <= iface_num <= range_end:
+            return True
+        
+        return False
+    
     def verify_vlan_deployment(self, interface_name, vlan_id, expected_mode='access', baseline=None):
         """
         Comprehensive verification for VLAN deployment with baseline comparison
@@ -1083,6 +1136,44 @@ class NAPALMDeviceManager:
                                 # Parse text output (usually just the VLAN ID number)
                                 if vlan_output_text and vlan_output_text.strip().isdigit():
                                     actual_vlan = int(vlan_output_text.strip())
+                        
+                        # FALLBACK: If individual interface query failed, check bridge domain config for ranges
+                        # NVUE may combine consecutive interfaces into ranges (e.g., bond3-5)
+                        if actual_vlan is None:
+                            try:
+                                # Query bridge domain configuration to see all interfaces
+                                bridge_config_output = self.connection.device.send_command(
+                                    'nv show bridge domain br_default interface -o json',
+                                    read_timeout=15
+                                )
+                                if bridge_config_output and bridge_config_output.strip():
+                                    import json
+                                    try:
+                                        bridge_config = json.loads(bridge_config_output.strip())
+                                        # Navigate through the JSON structure to find interfaces
+                                        # Structure is typically: {"interface": {"bond3-5": {"bridge": {"domain": {"br_default": {"access": 3051}}}}}}
+                                        interfaces_config = bridge_config.get('interface', {})
+                                        
+                                        # Check each interface/range in the config
+                                        for config_iface_name, config_iface_data in interfaces_config.items():
+                                            # Check if our interface matches or is part of this range
+                                            if self._is_interface_in_range(interface_name, config_iface_name):
+                                                # Found our interface (either exact match or part of range)
+                                                # Navigate to access VLAN
+                                                access_vlan_path = config_iface_data.get('bridge', {}).get('domain', {}).get('br_default', {}).get('access')
+                                                if access_vlan_path is not None:
+                                                    # Extract VLAN ID (could be int or nested dict)
+                                                    if isinstance(access_vlan_path, int):
+                                                        actual_vlan = access_vlan_path
+                                                    elif isinstance(access_vlan_path, dict):
+                                                        # Sometimes NVUE returns nested structure
+                                                        actual_vlan = access_vlan_path.get('value') or access_vlan_path.get('vlan') or list(access_vlan_path.values())[0] if access_vlan_path else None
+                                                    logger.info(f"Found interface {interface_name} in range {config_iface_name} with VLAN {actual_vlan}")
+                                                    break  # Found it, no need to check further
+                                    except (json.JSONDecodeError, ValueError, KeyError, AttributeError) as bridge_parse_error:
+                                        logger.debug(f"Could not parse bridge domain config for range check: {bridge_parse_error}")
+                            except Exception as bridge_query_error:
+                                logger.debug(f"Could not query bridge domain config for range check: {bridge_query_error}")
 
                         # Verify VLAN matches expected
                         if actual_vlan == vlan_id:
@@ -3634,11 +3725,15 @@ class NAPALMDeviceManager:
                                     else:
                                         logger.warning(f"diff_check returned empty/None")
                                         logs.append(f"  ⚠ Config diff returned empty")
+                                        # Track that diff was empty after commit - will be used in Phase 5
+                                        result['_config_diff_empty_after_commit'] = True
                             except Exception as diff_error:
                                 logger.error(f"Exception checking config diff after commit: {diff_error}")
                                 logs.append(f"  ⚠ Exception checking diff: {str(diff_error)}")
                                 import traceback
                                 logger.debug(f"Traceback: {traceback.format_exc()}")
+                                # If diff check failed, we can't be sure, but if it was empty before, it's likely still empty
+                                # Don't set the flag here - let Phase 5 handle it based on the flag from successful checks
                         
                         # Commit succeeded - mark success and break retry loop
                         commit_succeeded = True
@@ -4390,35 +4485,59 @@ class NAPALMDeviceManager:
                                 if hasattr(self.connection, 'device') and hasattr(self.connection.device, 'send_command'):
                                     # CRITICAL: Check if there's a diff before trying to confirm
                                     # NVUE cannot force-apply a no-diff candidate - if diff is empty, config is already applied
-                                    logger.info(f"Checking for config diff before confirming...")
-                                    logs.append(f"  [DEBUG] Checking for config diff before confirming...")
-                                    diff_output = None
-                                    has_diff = False
-                                    try:
-                                        diff_output = self.connection.device.send_command('nv config diff', read_timeout=10)
-                                        if diff_output and diff_output.strip():
-                                            # Check if diff shows actual changes (not just empty/whitespace)
-                                            diff_stripped = diff_output.strip()
-                                            # NVUE may return messages like "config apply executed with no config diff"
-                                            if 'no config diff' in diff_stripped.lower() or 'no changes' in diff_stripped.lower():
-                                                has_diff = False
-                                                logger.info(f"No config diff detected - config already applied to device")
-                                                logs.append(f"  [INFO] No config diff detected - config already applied to device")
+                                    
+                                    # First, check if we already know from Phase 2 that diff was empty
+                                    if result.get('_config_diff_empty_after_commit', False):
+                                        logger.info(f"Config diff was empty after commit - skipping diff check and confirm")
+                                        logs.append(f"  [INFO] Config diff was empty after commit (from Phase 2) - skipping confirm")
+                                        has_diff = False
+                                    else:
+                                        logger.info(f"Checking for config diff before confirming...")
+                                        logs.append(f"  [DEBUG] Checking for config diff before confirming...")
+                                        diff_output = None
+                                        has_diff = False
+                                        try:
+                                            # Try send_command first (more reliable if it works)
+                                            try:
+                                                diff_output = self.connection.device.send_command('nv config diff', read_timeout=10)
+                                            except Exception as send_cmd_error:
+                                                # If send_command fails (e.g., pattern detection error), try send_command_timing
+                                                logger.debug(f"send_command failed for diff check, trying send_command_timing: {send_cmd_error}")
+                                                if hasattr(self.connection.device, 'send_command_timing'):
+                                                    diff_output = self.connection.device.send_command_timing('nv config diff', delay_factor=2, max_loops=30)
+                                                else:
+                                                    raise send_cmd_error
+                                            
+                                            if diff_output and diff_output.strip():
+                                                # Check if diff shows actual changes (not just empty/whitespace)
+                                                diff_stripped = diff_output.strip()
+                                                # NVUE may return messages like "config apply executed with no config diff"
+                                                if 'no config diff' in diff_stripped.lower() or 'no changes' in diff_stripped.lower():
+                                                    has_diff = False
+                                                    logger.info(f"No config diff detected - config already applied to device")
+                                                    logs.append(f"  [INFO] No config diff detected - config already applied to device")
+                                                else:
+                                                    # Check if there are actual changes (not just empty output)
+                                                    # Diff should have some content indicating changes
+                                                    has_diff = True
+                                                    logger.info(f"Config diff detected - changes need to be confirmed")
+                                                    logs.append(f"  [INFO] Config diff detected - proceeding with confirm")
                                             else:
-                                                # Check if there are actual changes (not just empty output)
-                                                # Diff should have some content indicating changes
-                                                has_diff = True
-                                                logger.info(f"Config diff detected - changes need to be confirmed")
-                                                logs.append(f"  [INFO] Config diff detected - proceeding with confirm")
-                                        else:
-                                            has_diff = False
-                                            logger.info(f"No config diff (empty output) - config already applied to device")
-                                            logs.append(f"  [INFO] No config diff (empty output) - config already applied to device")
-                                    except Exception as diff_check_error:
+                                                has_diff = False
+                                                logger.info(f"No config diff (empty output) - config already applied to device")
+                                                logs.append(f"  [INFO] No config diff (empty output) - config already applied to device")
+                                        except Exception as diff_check_error:
                                         logger.warning(f"Could not check config diff: {diff_check_error}")
                                         logs.append(f"  ⚠ WARNING: Could not check config diff: {str(diff_check_error)[:100]}")
-                                        # Assume there's a diff and proceed with confirm (safer)
-                                        has_diff = True
+                                        # Check if we already know from Phase 2 that diff was empty
+                                        # If config diff was empty after commit, it's likely still empty now
+                                        if result.get('_config_diff_empty_after_commit', False):
+                                            logger.info(f"Config diff was empty after commit - assuming still empty, skipping confirm")
+                                            logs.append(f"  [INFO] Config diff was empty after commit - skipping confirm")
+                                            has_diff = False
+                                        else:
+                                            # Assume there's a diff and proceed with confirm (safer)
+                                            has_diff = True
                                     
                                     if not has_diff:
                                         # No diff - config is already applied, skip confirm and mark as successful
@@ -4578,6 +4697,26 @@ class NAPALMDeviceManager:
                                                         logger.info(f"Revision {actual_pending_revision} no longer in pending list - confirm succeeded")
                                                         logs.append(f"  [OK] Revision {actual_pending_revision} no longer pending - confirm succeeded")
                                                         pending_after_confirm = False
+                                                
+                                                # Also check revision history to verify if revision was actually committed
+                                                # Even if revision state still shows 'confirm', check history to see if it has Apply Date
+                                                if pending_after_confirm:
+                                                    try:
+                                                        history_json = self.connection.device.send_command('nv config history -o json', read_timeout=10)
+                                                        if history_json:
+                                                            import json
+                                                            history_data = json.loads(history_json)
+                                                            # Check if our revision exists in history with a date (meaning it was committed)
+                                                            if str(actual_pending_revision) in history_data:
+                                                                rev_history = history_data[str(actual_pending_revision)]
+                                                                if isinstance(rev_history, dict) and rev_history.get('date'):
+                                                                    # Revision has Apply Date - it was successfully committed
+                                                                    pending_after_confirm = False
+                                                                    logger.info(f"Revision {actual_pending_revision} found in history with Apply Date - commit was successful")
+                                                                    logs.append(f"  [OK] Revision {actual_pending_revision} found in history with Apply Date: {rev_history.get('date')}")
+                                                                    logs.append(f"  [OK] Commit was successful - revision was applied to device")
+                                                    except Exception as history_check_error:
+                                                        logger.debug(f"Could not check revision history: {history_check_error}")
                                                 
                                                 # Also check using _check_for_pending_commits for double verification
                                                 # Only override if we didn't already determine it's not pending
