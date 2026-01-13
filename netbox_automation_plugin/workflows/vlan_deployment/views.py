@@ -4706,7 +4706,9 @@ class VLANDeploymentView(View):
                     'untagged_vlan': config_info.get('untagged_vlan'),
                     'tagged_vlans': config_info.get('tagged_vlans', []),
                     'commands': config_info.get('commands', []),
-                    'target_interface': config_info.get('target_interface', interface.name)
+                    'target_interface': config_info.get('target_interface', interface.name),
+                    'vlans_already_in_bridge': config_info.get('vlans_already_in_bridge', []),  # For informational messages
+                    'vlans_to_add_to_bridge': config_info.get('vlans_to_add_to_bridge', [])  # For informational messages
                 }
                 logger.debug(f"[SYNC DEPLOYMENT] Built config for {interface_key}: {len(config_info.get('commands', []))} commands")
 
@@ -6093,7 +6095,7 @@ class VLANDeploymentView(View):
                                 # Also include ALL bond members that might not be in device_results
                                 # This handles cases where a bond member wasn't directly selected but should have VLANs removed
                                 try:
-                                    from dcim.models import Interface
+                                    # Interface is already imported at module level - don't re-import
                                     all_bond_names = set([k[0] for k in member_groups.keys()])
                                     for bond_name in all_bond_names:
                                         # Get all members of this bond from NetBox

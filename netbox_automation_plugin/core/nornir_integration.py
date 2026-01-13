@@ -1764,6 +1764,16 @@ class NornirDeviceManager:
                         # Sync mode: Use pre-generated commands from NetBox config
                         vlan_config = interface_vlan_map[interface_name]
                         commands = vlan_config.get('commands', [])
+                        tagged_vlans = vlan_config.get('tagged_vlans', [])
+                        vlans_already_in_bridge = vlan_config.get('vlans_already_in_bridge', [])
+                        
+                        # Add informational message about tagged VLANs already present (Cumulus only)
+                        if platform == 'cumulus' and tagged_vlans and vlans_already_in_bridge:
+                            # Filter to only tagged VLANs that are already in bridge
+                            tagged_already_present = [v for v in tagged_vlans if v in vlans_already_in_bridge]
+                            if tagged_already_present:
+                                vlan_list_str = ', '.join(map(str, sorted(tagged_already_present)))
+                                all_config_lines.append(f"# Tagged VLANs already present on device: {vlan_list_str}")
                         
                         # Replace interface names in commands with target_interface (bond if detected)
                         # Commands are like "nv set interface swp3 bridge domain br_default access 3000"
