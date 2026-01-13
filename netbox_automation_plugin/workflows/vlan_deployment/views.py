@@ -6054,7 +6054,8 @@ class VLANDeploymentView(View):
 
                         # Get NetBox state to extract current/proposed VLANs
                         try:
-                            netbox_state = self._get_netbox_current_state(device, actual_interface_name, primary_vlan_id, mode='normal')
+                            # Pass tagged_vlan_ids so proposed_tagged is set correctly
+                            netbox_state = self._get_netbox_current_state(device, actual_interface_name, primary_vlan_id, mode='normal', tagged_vlan_ids=tagged_vlan_ids)
                             current = netbox_state.get('current', {})
                             proposed = netbox_state.get('proposed', {})
 

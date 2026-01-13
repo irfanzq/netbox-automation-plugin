@@ -567,11 +567,15 @@ class NAPALMDeviceManager:
                                 logger.debug(f"Using provided interfaces from deployment: {interfaces}")
                                 
                                 # Extract member interfaces from bonds and filter to only member interfaces
+                                # For bonds (bond3, bond4, etc.), we need to get their member interfaces (swp3, swp4, etc.)
+                                # We skip checking LLDP on bonds directly - only check on member interfaces
                                 for iface in interfaces:
                                     # Skip bonds - we need to get their member interfaces
                                     if iface.startswith('bond'):
-                                        # Get bond members
+                                        # Get bond members using: nv show interface bond3 bond member -o json
+                                        # Expected structure: {"swp3": {}, "swp4": {}} or similar
                                         try:
+                                            logger.debug(f"Extracting member interfaces from bond {iface}...")
                                             bond_output = self.connection.device.send_command_timing(
                                                 f'nv show interface {iface} bond member -o json',
                                                 read_timeout=10
@@ -579,18 +583,31 @@ class NAPALMDeviceManager:
                                             if bond_output and bond_output.strip():
                                                 bond_json = self._safe_json_loads(bond_output, context=f"Bond {iface} members")
                                                 if bond_json and isinstance(bond_json, dict):
-                                                    # Extract member interface names (swp1, swp2, etc.)
+                                                    # Extract member interface names from JSON keys (swp3, swp4, etc.)
+                                                    member_interfaces_found = []
                                                     for member_iface in bond_json.keys():
                                                         # Only add member interfaces (swp*, eth*, etc.), not bonds
                                                         if not member_iface.startswith('bond'):
                                                             interfaces_to_check.append(member_iface)
-                                                            logger.debug(f"Added member interface {member_iface} from bond {iface}")
+                                                            member_interfaces_found.append(member_iface)
+                                                            logger.debug(f"  ✓ Extracted member interface {member_iface} from bond {iface}")
+                                                    
+                                                    if member_interfaces_found:
+                                                        logger.info(f"Bond {iface} has {len(member_interfaces_found)} member interface(s): {member_interfaces_found}")
+                                                    else:
+                                                        logger.warning(f"Bond {iface} has no member interfaces found in JSON keys")
+                                                else:
+                                                    logger.warning(f"Bond {iface} member query returned non-dict: {type(bond_json)}")
+                                            else:
+                                                logger.warning(f"Bond {iface} member query returned empty output")
                                         except Exception as bond_error:
-                                            logger.debug(f"Failed to get members for bond {iface}: {bond_error}")
+                                            logger.warning(f"Failed to get members for bond {iface}: {bond_error}")
                                     else:
-                                        # Direct member interface (swp*, eth*, etc.) - add it
+                                        # Direct member interface (swp*, eth*, etc.) - add it directly
+                                        # Skip if it's a bond (shouldn't happen, but safety check)
                                         if not iface.startswith('bond'):
                                             interfaces_to_check.append(iface)
+                                            logger.debug(f"  ✓ Added direct member interface {iface} (not a bond)")
                             else:
                                 # No interfaces provided - fall back to NAPALM method
                                 logger.warning(f"No interfaces provided, falling back to NAPALM method")
@@ -600,9 +617,15 @@ class NAPALMDeviceManager:
                                 logger.warning(f"No member interfaces to check, falling back to NAPALM method")
                                 return self._get_lldp_napalm_fallback()
                             
+                            # Summary: Show what we're checking
+                            logger.info(f"LLDP check summary:")
+                            logger.info(f"  • Deployment interfaces: {interfaces}")
+                            logger.info(f"  • Member interfaces to check LLDP: {interfaces_to_check}")
+                            logger.info(f"  • Bonds skipped (checking members instead): {[iface for iface in interfaces if iface.startswith('bond')]}")
                             logger.debug(f"Checking LLDP on {len(interfaces_to_check)} member interface(s): {interfaces_to_check}")
                             
                             # Query each member interface individually for LLDP data
+                            # NOTE: We are NOT checking LLDP on bonds - only on their member interfaces (swp3, swp4, etc.)
                             for iface_name in interfaces_to_check:
                                 try:
                                     logger.debug(f"Querying LLDP for interface {iface_name}...")
@@ -1272,8 +1295,9 @@ class NAPALMDeviceManager:
                 # }
                 # Note: Interfaces may be in ranges (bond3-5) or standalone (bond6)
                 try:
-                    if hasattr(self.connection, 'device') and hasattr(self.connection.device, 'send_command'):
+                        if hasattr(self.connection, 'device') and hasattr(self.connection.device, 'send_command'):
                         actual_vlan = None
+                        diagnostic_details = None  # Initialize for use in error messages
                         
                         # Single query to get full applied configuration (includes pending commit-confirm)
                         try:
@@ -1296,17 +1320,50 @@ class NAPALMDeviceManager:
                                 try:
                                     full_config = json.loads(full_config_output.strip())
                                     
+                                    # Handle case where full_config might be a list (NVUE sometimes returns array)
+                                    # Structure can be: [{"header": {...}}, {"interface": {...}}] or {"interface": {...}}
+                                    # The array format has header at [0] and config at [1]
+                                    if isinstance(full_config, list):
+                                        logger.debug(f"Config JSON is a list (length: {len(full_config)})")
+                                        if len(full_config) >= 2:
+                                            # Array format: [0] = header, [1] = config with interface
+                                            full_config = full_config[1]  # Take second element (config)
+                                            logger.debug(f"Extracted config from list[1], now type: {type(full_config).__name__}")
+                                        elif len(full_config) == 1:
+                                            # Single element array, might be config or header
+                                            full_config = full_config[0]
+                                            logger.debug(f"Extracted config from list[0], now type: {type(full_config).__name__}")
+                                            # Check if it's just header (no interface key)
+                                            if isinstance(full_config, dict) and 'interface' not in full_config:
+                                                logger.warning(f"First element appears to be header only, no interface section found")
+                                                interfaces_config = {}
+                                        else:
+                                            logger.warning(f"Config JSON is an empty list")
+                                            interfaces_config = {}
+                                            full_config = {}
+                                    
                                     # Navigate to interface section
-                                    # Handle case where interface might be a list or dict
-                                    interface_raw = full_config.get('interface', {})
-                                    if isinstance(interface_raw, list):
-                                        # Convert list to dict if needed (shouldn't happen but handle it)
-                                        logger.warning(f"Interface section is a list instead of dict, this is unexpected")
-                                        interfaces_config = {}
-                                    elif isinstance(interface_raw, dict):
-                                        interfaces_config = interface_raw
+                                    # Structure can be: {"interface": {...}} or {"set": {"interface": {...}}}
+                                    # NVUE returns config under "set" key when using -r applied
+                                    if isinstance(full_config, dict):
+                                        # Check if config is under "set" key (NVUE format)
+                                        if 'set' in full_config:
+                                            logger.debug(f"Config is under 'set' key, extracting...")
+                                            full_config = full_config['set']
+                                        
+                                        # Now get interface section
+                                        interface_raw = full_config.get('interface', {})
+                                        if isinstance(interface_raw, list):
+                                            # Convert list to dict if needed (shouldn't happen but handle it)
+                                            logger.warning(f"Interface section is a list instead of dict, this is unexpected")
+                                            interfaces_config = {}
+                                        elif isinstance(interface_raw, dict):
+                                            interfaces_config = interface_raw
+                                        else:
+                                            logger.warning(f"Interface section is neither list nor dict: {type(interface_raw)}")
+                                            interfaces_config = {}
                                     else:
-                                        logger.warning(f"Interface section is neither list nor dict: {type(interface_raw)}")
+                                        logger.warning(f"Full config is not a dict after processing: {type(full_config)}")
                                         interfaces_config = {}
                                     
                                     if not interfaces_config:
@@ -1317,6 +1374,15 @@ class NAPALMDeviceManager:
                                         
                                         # Check each interface/range in the config
                                         for config_iface_name, config_iface_data in interfaces_config.items():
+                                            # Handle case where config_iface_data might be a list instead of dict
+                                            if isinstance(config_iface_data, list):
+                                                logger.warning(f"Interface '{config_iface_name}' config is a list (unexpected), skipping...")
+                                                logger.debug(f"  List content: {config_iface_data}")
+                                                continue
+                                            elif not isinstance(config_iface_data, dict):
+                                                logger.warning(f"Interface '{config_iface_name}' config is neither dict nor list (type: {type(config_iface_data)}), skipping...")
+                                                continue
+                                            
                                             # Check if our interface matches or is part of this range
                                             if self._is_interface_in_range(interface_name, config_iface_name):
                                                 logger.debug(f"✓ Interface {interface_name} matches range/interface '{config_iface_name}'")
@@ -1369,23 +1435,67 @@ class NAPALMDeviceManager:
                                         
                                         # If still not found, log what interfaces/ranges we did find
                                         if actual_vlan is None:
-                                            logger.debug(f"Interface {interface_name} not found in any of the {len(interfaces_config)} interfaces/ranges")
+                                            logger.warning(f"Interface {interface_name} not found in any of the {len(interfaces_config)} interfaces/ranges")
                                             # Log some of the interface names for debugging
                                             sample_names = list(interfaces_config.keys())[:10]
-                                            logger.debug(f"Sample interface/range names found: {sample_names}")
+                                            logger.warning(f"Sample interface/range names found in config: {sample_names}")
+                                            
+                                            # Check if interface exists but without bridge config
+                                            matching_interfaces = []
+                                            for iface_name, iface_data in interfaces_config.items():
+                                                if isinstance(iface_data, dict) and self._is_interface_in_range(interface_name, iface_name):
+                                                    matching_interfaces.append((iface_name, iface_data))
+                                            
+                                            if matching_interfaces:
+                                                match_info = f"Found matching interface/range(s) for {interface_name}: {[name for name, _ in matching_interfaces]}"
+                                                logger.warning(match_info)
+                                                for match_name, match_data in matching_interfaces:
+                                                    struct_info = f"  {match_name} structure: {list(match_data.keys())}"
+                                                    logger.warning(struct_info)
+                                                    if 'bridge' in match_data:
+                                                        bridge_info = f"    bridge keys: {list(match_data['bridge'].keys())}"
+                                                        logger.warning(bridge_info)
+                                                    else:
+                                                        no_bridge_info = f"    No 'bridge' key in {match_name}"
+                                                        logger.warning(no_bridge_info)
                                             
                                             # Also log which interfaces have bridge domain config for debugging
                                             interfaces_with_bridge = []
                                             for iface_name, iface_data in interfaces_config.items():
-                                                if iface_data.get('bridge', {}).get('domain', {}).get('br_default', {}).get('access') is not None:
-                                                    interfaces_with_bridge.append(iface_name)
+                                                if isinstance(iface_data, dict):
+                                                    if iface_data.get('bridge', {}).get('domain', {}).get('br_default', {}).get('access') is not None:
+                                                        vlan_val = iface_data.get('bridge', {}).get('domain', {}).get('br_default', {}).get('access')
+                                                        interfaces_with_bridge.append((iface_name, vlan_val))
                                             if interfaces_with_bridge:
-                                                logger.debug(f"Interfaces/ranges with bridge domain access VLAN: {interfaces_with_bridge[:10]}")
+                                                vlan_info = f"Interfaces/ranges with bridge domain access VLAN: {interfaces_with_bridge[:10]}"
+                                                logger.warning(vlan_info)
+                                            else:
+                                                no_vlan_info = "No interfaces found with bridge domain access VLAN configured"
+                                                logger.warning(no_vlan_info)
+                                            
+                                            # Store diagnostic info in check result for NetBox UI
+                                            diagnostic_summary = []
+                                            if matching_interfaces:
+                                                diagnostic_summary.append(f"Found matching range(s): {[name for name, _ in matching_interfaces]}")
+                                            if interfaces_with_bridge:
+                                                diagnostic_summary.append(f"Interfaces with VLANs: {interfaces_with_bridge[:5]}")
+                                            else:
+                                                diagnostic_summary.append("No interfaces found with VLAN configured")
+                                            
+                                            # This will be included in the check result message below
+                                            diagnostic_details = " | ".join(diagnostic_summary)
                                             
                                 except (json.JSONDecodeError, ValueError, KeyError, AttributeError) as parse_error:
-                                    logger.warning(f"Could not parse full config JSON for interface {interface_name}: {parse_error}")
+                                    error_msg = f"Could not parse full config JSON for interface {interface_name}: {parse_error}"
+                                    logger.warning(error_msg)
                                     import traceback
                                     logger.debug(traceback.format_exc())
+                                    # Add to checks so it appears in NetBox UI
+                                    checks['vlan_config'] = {
+                                        'success': False,
+                                        'message': f"ERROR: Config parsing failed - {str(parse_error)}",
+                                        'data': {'expected': vlan_id, 'actual': None, 'error': str(parse_error)}
+                                    }
                             else:
                                 logger.warning(f"Full config query returned empty for interface {interface_name}")
                         except Exception as query_error:
@@ -1395,10 +1505,14 @@ class NAPALMDeviceManager:
 
                         # Log final result before verification
                         if actual_vlan is None:
-                            logger.warning(f"Could not determine VLAN for interface {interface_name} from full config query")
-                            logger.warning(f"This may indicate: (1) Interface not configured, (2) Query command failed, (3) Config not yet applied, or (4) Interface not in applied config")
+                            warning_msg = f"Could not determine VLAN for interface {interface_name} from full config query"
+                            logger.warning(warning_msg)
+                            diagnostic_msg = "This may indicate: (1) Interface not configured, (2) Query command failed, (3) Config not yet applied, or (4) Interface not in applied config"
+                            logger.warning(diagnostic_msg)
+                            # These warnings will appear in Django logs, and the check result below will show in NetBox UI
                         
                         # Verify VLAN matches expected
+                        # Note: diagnostic_details may be set above if actual_vlan is None
                         if actual_vlan == vlan_id:
                             vlan_verified = True
                             checks['vlan_config'] = {
@@ -1411,9 +1525,15 @@ class NAPALMDeviceManager:
                             logger.info(f"VLAN verification passed: interface {interface_name} has VLAN {actual_vlan}")
                         else:
                             # VLAN mismatch - CRITICAL FAILURE
+                            error_msg = f"ERROR: VLAN mismatch! Expected {vlan_id}, found {actual_vlan}"
+                            if actual_vlan is None:
+                                # Add diagnostic details if available (set above when actual_vlan is None)
+                                if diagnostic_details:
+                                    error_msg += f" | Diagnostics: {diagnostic_details}"
+                                error_msg += " | Check Django logs for detailed config structure"
                             checks['vlan_config'] = {
                                 'success': False,
-                                'message': f"ERROR: VLAN mismatch! Expected {vlan_id}, found {actual_vlan}",
+                                'message': error_msg,
                                 'data': {'expected': vlan_id, 'actual': actual_vlan, 'baseline': baseline_vlan}
                             }
                             all_passed = False
@@ -3402,18 +3522,8 @@ class NAPALMDeviceManager:
                                     if line.strip():
                                         logs.append(f"    {line.strip()}")
                                 
-                                # Also try direct nv config diff command
-                                try:
-                                    if hasattr(self.connection, 'device') and hasattr(self.connection.device, 'send_command'):
-                                        direct_diff = self.connection.device.send_command_timing('nv config diff', read_timeout=15)
-                                        logger.debug(f"Direct 'nv config diff' output:\n{direct_diff}")
-                                        logs.append(f"  [DEBUG] Direct 'nv config diff' output:")
-                                        if direct_diff:
-                                            for line in direct_diff.split('\n')[:30]:  # First 30 lines
-                                                if line.strip():
-                                                    logs.append(f"    {line.strip()}")
-                                except Exception as direct_diff_error:
-                                    logger.debug(f"Could not run direct nv config diff: {direct_diff_error}")
+                                # Note: We use compare_config() above, which internally uses 'nv config diff'
+                                # No need to run 'nv config diff' again here - it's redundant
                                 
                                 # Check if diff shows actual changes
                                 if 'no changes' in diff_output.lower() or (len(diff_output.strip()) < 10):
@@ -3621,11 +3731,15 @@ class NAPALMDeviceManager:
                     # which is not a commit-confirm session yet and will become one after commit_config()
                     
                     # Pre-commit check: Verify there are actual changes to commit
+                    # CRITICAL: Run 'nv config diff' BEFORE 'nv config apply' to check for changes
                     # Skip commit if diff is empty (config already matches desired state)
                     if driver_name == 'cumulus':
                         try:
                             if hasattr(self.connection, 'device') and hasattr(self.connection.device, 'send_command'):
                                 # Check diff before commit using send_command_timing() to avoid prompt detection issues
+                                # This runs BEFORE commit_config() (which executes 'nv config apply --confirm {timeout}s -y')
+                                logger.info(f"Pre-commit check: Running 'nv config diff' before commit...")
+                                logs.append(f"  [DEBUG] Pre-commit check: Running 'nv config diff' before 'nv config apply'...")
                                 pre_commit_diff = self.connection.device.send_command_timing('nv config diff', read_timeout=10)
                                 if pre_commit_diff and pre_commit_diff.strip():
                                     # Check if diff shows actual changes (not just whitespace or "no changes" message)
@@ -3639,7 +3753,8 @@ class NAPALMDeviceManager:
                                         commit_succeeded = True  # Mark as success (idempotent)
                                         break  # Exit retry loop
                                     else:
-                                        logger.debug(f"Pre-commit diff check: Changes detected ({len(pre_commit_diff)} chars)")
+                                        logger.info(f"Pre-commit diff check: Changes detected ({len(pre_commit_diff)} chars) - proceeding with commit")
+                                        logs.append(f"  ✓ Pre-commit diff check: Changes detected - proceeding with 'nv config apply'")
                                 elif not pre_commit_diff or not pre_commit_diff.strip():
                                     logger.warning(f"Pre-commit diff check returned empty - this may indicate config already applied or command failed")
                                     logs.append(f"  ⚠ Pre-commit diff check: Empty output")
@@ -3999,48 +4114,13 @@ class NAPALMDeviceManager:
                         # Check if there's actually a diff to apply (Cumulus won't create revision if no changes)
                         if driver_name == 'cumulus':
                             try:
-                                if hasattr(self.connection, 'device') and hasattr(self.connection.device, 'send_command'):
-                                    # Check if there are pending changes immediately after commit
-                                    # Use send_command_timing() to avoid prompt detection issues
-                                    # After commit, 'nv config diff' should show the pending commit-confirm session changes
-                                    time.sleep(1)  # Small delay to allow revision to be created and state to update
-                                    try:
-                                        diff_check = self.connection.device.send_command_timing('nv config diff', read_timeout=15)
-                                        logger.info(f"Config diff immediately after commit (length: {len(diff_check) if diff_check else 0}):")
-                                        if diff_check:
-                                            logger.info(f"{diff_check[:500]}")  # Log first 500 chars
-                                        logs.append(f"  [DEBUG] Config diff immediately after commit:")
-                                        if diff_check and diff_check.strip():
-                                            # Log first 20 lines of diff
-                                            for line in diff_check.split('\n')[:20]:
-                                                if line.strip():
-                                                    logs.append(f"    {line.strip()}")
-                                            
-                                            # Check if diff shows actual changes or "no changes" message
-                                            diff_lower = diff_check.lower()
-                                            if 'no changes' in diff_lower or 'no config diff' in diff_lower:
-                                                logger.info(f"No pending changes found - configuration already applied to device")
-                                                logs.append(f"  ℹ No pending changes detected - configuration already applied")
-                                                logs.append(f"  ℹ Device is already in desired state - no commit-confirm session needed")
-                                                # Mark that config is already applied
-                                                result['_config_already_applied'] = True
-                                            else:
-                                                logger.info(f"Pending changes detected after commit ({len(diff_check)} chars)")
-                                                logs.append(f"  SUCCESS: Pending changes detected")
-                                        else:
-                                            logger.warning(f"Config diff returned empty/None after commit")
-                                            logger.warning(f"This may indicate: (1) Command failed silently, (2) Config already applied, or (3) Timing issue")
-                                            logs.append(f"  ⚠ Config diff returned empty")
-                                            logs.append(f"  [DEBUG] This may indicate command failure or config already applied")
-                                            # Track that diff was empty after commit - will be used in Phase 5
-                                            result['_config_diff_empty_after_commit'] = True
-                                    except Exception as diff_check_exception:
-                                        logger.error(f"Exception checking config diff after commit: {diff_check_exception}")
-                                        logs.append(f"  ⚠ Exception checking diff: {str(diff_check_exception)}")
-                                        import traceback
-                                        logger.debug(f"Traceback: {traceback.format_exc()}")
-                                        # If diff check failed, we can't be sure, but if it was empty before, it's likely still empty
-                                        # Don't set the flag here - let Phase 5 handle it based on the flag from successful checks
+                            # Note: We already verified commit succeeded by checking revision state above
+                            # Checking 'nv config diff' after commit is redundant because:
+                            # - After commit_config(), config is in commit-confirm state (applied but pending)
+                            # - 'nv config diff' compares running vs candidate, but candidate has been committed
+                            # - So diff will be empty (expected) - changes are already applied, waiting for confirmation
+                            # - We already confirmed commit succeeded by checking revision state (state=confirm)
+                            # Removed redundant post-commit diff check to reduce unnecessary device queries
                             except Exception as diff_error:
                                 logger.error(f"Exception checking config diff after commit: {diff_error}")
                                 logs.append(f"  ⚠ Exception checking diff: {str(diff_error)}")
