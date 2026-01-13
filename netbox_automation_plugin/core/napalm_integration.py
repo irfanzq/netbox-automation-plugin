@@ -12,6 +12,7 @@ from ..models import AutomationJob, DeviceCompliance
 import logging
 import time
 import traceback
+import json
 
 logger = logging.getLogger(__name__)
 
@@ -261,16 +262,44 @@ class NAPALMDeviceManager:
     def get_facts(self):
         """
         Get device facts using NAPALM
+        
+        Handles cases where prompt detection fails (e.g., empty output from device)
         """
         if not self.connection:
             if not self.connect():
                 return None
         
+        # Check if connection is alive before attempting to get facts
+        try:
+            if hasattr(self.connection, 'is_alive') and not self.connection.is_alive():
+                logger.warning(f"Connection to {self.device.name} is not alive, reconnecting...")
+                if not self.connect():
+                    logger.error(f"Failed to reconnect to {self.device.name}")
+                    return None
+        except Exception as e:
+            logger.warning(f"Error checking connection status for {self.device.name}: {e}")
+        
         try:
             facts = self.connection.get_facts()
             return facts
         except Exception as e:
-            logger.error(f"Failed to get facts from {self.device.name}: {e}")
+            error_msg = str(e)
+            # Check for netmiko prompt detection errors
+            if "Pattern not detected" in error_msg or "prompt" in error_msg.lower():
+                logger.error(
+                    f"Failed to get facts from {self.device.name}: Prompt detection failed. "
+                    f"This usually indicates empty output or unexpected prompt format. Error: {e}"
+                )
+                # Try to get connection state info for debugging
+                if hasattr(self.connection, 'device') and self.connection.device:
+                    try:
+                        # Try to get a simple command to verify connection
+                        test_output = self.connection.device.send_command_timing('echo "test"', read_timeout=5)
+                        logger.debug(f"Connection test output: {test_output[:100] if test_output else 'Empty'}")
+                    except Exception as test_e:
+                        logger.debug(f"Connection test failed: {test_e}")
+            else:
+                logger.error(f"Failed to get facts from {self.device.name}: {e}")
             return None
     
     def get_interfaces(self):
@@ -524,9 +553,9 @@ class NAPALMDeviceManager:
                     # Use direct lldpctl command for Cumulus
                     if hasattr(self.connection, 'device') and hasattr(self.connection.device, 'send_command'):
                         try:
-                            # CRITICAL FIX: Use send_command_timing() instead of send_command()
-                            # send_command() waits for prompt pattern which may not match
-                            # send_command_timing() uses timing-based detection (more reliable)
+                            # Use send_command_timing() for reliable command execution
+                            # send_command_timing() uses timing-based detection instead of prompt pattern matching
+                            # This avoids "Pattern not detected" errors that occur with send_command()
                             logger.info(f"Fetching LLDP data from {self.device.name} using send_command_timing()...")
                             lldp_output = self.connection.device.send_command_timing('sudo lldpctl -f json', read_timeout=30)
 
@@ -569,7 +598,13 @@ class NAPALMDeviceManager:
                                 logger.info(f"Collected LLDP data from {self.device.name}: {len(lldp_data)} interfaces with neighbors")
                                 return lldp_data
                             else:
-                                logger.warning(f"Empty LLDP output from {self.device.name}")
+                                logger.warning(
+                                    f"Empty LLDP output from {self.device.name}. "
+                                    f"This may indicate: (1) LLDP is not enabled, (2) No neighbors detected, "
+                                    f"(3) Connection issue, or (4) Command execution problem. "
+                                    f"Output length: {len(lldp_output) if lldp_output else 0}"
+                                )
+                                # Return empty dict to indicate no LLDP neighbors found
                                 return {}
                         except Exception as cumulus_error:
                             logger.warning(f"Attempt {attempt}/{max_retries}: Failed to get LLDP from Cumulus device {self.device.name}: {cumulus_error}")
@@ -588,7 +623,7 @@ class NAPALMDeviceManager:
                     # Use direct show command for Arista EOS
                     if hasattr(self.connection, 'device') and hasattr(self.connection.device, 'send_command'):
                         try:
-                            lldp_output = self.connection.device.send_command('show lldp neighbors', read_timeout=30)
+                            lldp_output = self.connection.device.send_command_timing('show lldp neighbors', read_timeout=30)
 
                             if lldp_output:
                                 # Parse EOS LLDP output (text format)
@@ -599,7 +634,13 @@ class NAPALMDeviceManager:
                                 logger.info(f"Collected LLDP data from {self.device.name}: {len(lldp_data)} interfaces with neighbors")
                                 return lldp_data
                             else:
-                                logger.warning(f"Empty LLDP output from {self.device.name}")
+                                logger.warning(
+                                    f"Empty LLDP output from {self.device.name}. "
+                                    f"This may indicate: (1) LLDP is not enabled, (2) No neighbors detected, "
+                                    f"(3) Connection issue, or (4) Command execution problem. "
+                                    f"Output length: {len(lldp_output) if lldp_output else 0}"
+                                )
+                                # Return empty dict to indicate no LLDP neighbors found
                                 return {}
                         except Exception as eos_error:
                             logger.warning(f"Attempt {attempt}/{max_retries}: Failed to get LLDP from EOS device {self.device.name}: {eos_error}")
@@ -636,6 +677,46 @@ class NAPALMDeviceManager:
             return lldp_neighbors
         except Exception as e:
             logger.error(f"NAPALM LLDP fallback failed for {self.device.name}: {e}")
+            return None
+
+    def _safe_json_loads(self, json_string, context="JSON"):
+        """
+        Safely parse JSON string with comprehensive error handling
+        
+        Args:
+            json_string: String containing JSON data
+            context: Context description for error messages (e.g., "LLDP", "Interface")
+        
+        Returns:
+            Parsed JSON object (dict/list) or None if parsing fails
+        """
+        if not json_string:
+            logger.warning(f"{context}: Empty JSON string provided")
+            return None
+        
+        if not isinstance(json_string, str):
+            logger.warning(f"{context}: Expected string, got {type(json_string).__name__}")
+            return None
+        
+        # Strip whitespace
+        json_string = json_string.strip()
+        if not json_string:
+            logger.warning(f"{context}: JSON string is empty after stripping")
+            return None
+        
+        try:
+            return json.loads(json_string)
+        except json.JSONDecodeError as e:
+            logger.error(
+                f"{context}: JSON decode error for {self.device.name}: {e}. "
+                f"JSON preview (first 500 chars): {json_string[:500]}"
+            )
+            return None
+        except Exception as e:
+            logger.error(
+                f"{context}: Unexpected error parsing JSON for {self.device.name}: {e}. "
+                f"JSON preview (first 500 chars): {json_string[:500]}"
+            )
             return None
 
     def _parse_lldp_port_cumulus(self, port_data):
@@ -1105,76 +1186,155 @@ class NAPALMDeviceManager:
 
             if driver_name == 'cumulus':
                 # For Cumulus, query NVUE to verify VLAN configuration
+                # 
+                # CRITICAL: NVUE may combine consecutive interfaces into ranges (e.g., bond3-5)
+                # When interfaces bond3, bond4, bond5 are configured with the same VLAN,
+                # NVUE stores them as a range "bond3-5" instead of individual interfaces.
+                # 
+                # Verification strategy: Use single command to get full applied config, then parse JSON
+                # This is more efficient and reliable than per-interface queries
+                # Command: nv config show -r applied -o json
+                # Expected JSON structure:
+                # {
+                #   "interface": {
+                #     "bond3-5": {
+                #       "bridge": {
+                #         "domain": {
+                #           "br_default": {
+                #             "access": 3000
+                #           }
+                #         }
+                #       }
+                #     },
+                #     "bond6": {
+                #       "bridge": {
+                #         "domain": {
+                #           "br_default": {
+                #             "access": 3060
+                #           }
+                #         }
+                #       }
+                #     }
+                #   }
+                # }
+                # Note: Interfaces may be in ranges (bond3-5) or standalone (bond6)
                 try:
                     if hasattr(self.connection, 'device') and hasattr(self.connection.device, 'send_command'):
-                        # Query bridge domain access VLAN
-                        vlan_output = self.connection.device.send_command(
-                            f'nv show interface {interface_name} bridge domain br_default access -o json',
-                            read_timeout=10
-                        )
-                        if vlan_output and vlan_output.strip():
-                            import json
-                            try:
-                                # Validate JSON before parsing
-                                vlan_output_stripped = vlan_output.strip()
-                                if not vlan_output_stripped.startswith('{') and not vlan_output_stripped.startswith('[') and not vlan_output_stripped.isdigit():
-                                    # Not JSON format - try text output directly
-                                    raise ValueError("Output is not JSON format")
-                                vlan_data = json.loads(vlan_output_stripped)
-                                actual_vlan = vlan_data if isinstance(vlan_data, int) else None
-                            except (json.JSONDecodeError, ValueError) as json_err:
-                                # JSON parsing failed - log and try text output
-                                logger.debug(f"JSON parse failed for VLAN check (output: {vlan_output[:100]}): {json_err}")
-                                actual_vlan = None
-
-                            # If JSON parsing fails, try text output
-                            if actual_vlan is None:
-                                vlan_output_text = self.connection.device.send_command(
-                                    f'nv show interface {interface_name} bridge domain br_default access',
-                                    read_timeout=10
-                                )
-                                # Parse text output (usually just the VLAN ID number)
-                                if vlan_output_text and vlan_output_text.strip().isdigit():
-                                    actual_vlan = int(vlan_output_text.strip())
+                        actual_vlan = None
                         
-                        # FALLBACK: If individual interface query failed, check bridge domain config for ranges
-                        # NVUE may combine consecutive interfaces into ranges (e.g., bond3-5)
-                        if actual_vlan is None:
-                            try:
-                                # Query bridge domain configuration to see all interfaces
-                                bridge_config_output = self.connection.device.send_command(
-                                    'nv show bridge domain br_default interface -o json',
-                                    read_timeout=15
+                        # Single query to get full applied configuration (includes pending commit-confirm)
+                        try:
+                            logger.debug(f"Querying full applied config for interface {interface_name}...")
+                            # Query full config with -r applied to get applied config (includes pending commit-confirm)
+                            full_config_output = self.connection.device.send_command_timing(
+                                'nv config show -r applied -o json',
+                                read_timeout=20
+                            )
+                            # If that returns empty, try without -r applied (current/pending config)
+                            if not full_config_output or not full_config_output.strip():
+                                logger.debug(f"Applied config query returned empty, trying current config...")
+                                full_config_output = self.connection.device.send_command_timing(
+                                    'nv config show -o json',
+                                    read_timeout=20
                                 )
-                                if bridge_config_output and bridge_config_output.strip():
-                                    import json
-                                    try:
-                                        bridge_config = json.loads(bridge_config_output.strip())
-                                        # Navigate through the JSON structure to find interfaces
-                                        # Structure is typically: {"interface": {"bond3-5": {"bridge": {"domain": {"br_default": {"access": 3051}}}}}}
-                                        interfaces_config = bridge_config.get('interface', {})
+                            
+                            if full_config_output and full_config_output.strip():
+                                import json
+                                try:
+                                    full_config = json.loads(full_config_output.strip())
+                                    
+                                    # Navigate to interface section
+                                    interfaces_config = full_config.get('interface', {})
+                                    
+                                    if not interfaces_config:
+                                        logger.debug(f"No 'interface' section found in config JSON")
+                                    else:
+                                        logger.debug(f"Checking {len(interfaces_config)} interfaces/ranges in full config for {interface_name}...")
+                                        logger.debug(f"Available interfaces/ranges: {list(interfaces_config.keys())[:20]}")
                                         
                                         # Check each interface/range in the config
                                         for config_iface_name, config_iface_data in interfaces_config.items():
                                             # Check if our interface matches or is part of this range
                                             if self._is_interface_in_range(interface_name, config_iface_name):
+                                                logger.debug(f"✓ Interface {interface_name} matches range/interface '{config_iface_name}'")
                                                 # Found our interface (either exact match or part of range)
-                                                # Navigate to access VLAN
-                                                access_vlan_path = config_iface_data.get('bridge', {}).get('domain', {}).get('br_default', {}).get('access')
-                                                if access_vlan_path is not None:
-                                                    # Extract VLAN ID (could be int or nested dict)
-                                                    if isinstance(access_vlan_path, int):
-                                                        actual_vlan = access_vlan_path
-                                                    elif isinstance(access_vlan_path, dict):
-                                                        # Sometimes NVUE returns nested structure
-                                                        actual_vlan = access_vlan_path.get('value') or access_vlan_path.get('vlan') or list(access_vlan_path.values())[0] if access_vlan_path else None
-                                                    logger.info(f"Found interface {interface_name} in range {config_iface_name} with VLAN {actual_vlan}")
-                                                    break  # Found it, no need to check further
-                                    except (json.JSONDecodeError, ValueError, KeyError, AttributeError) as bridge_parse_error:
-                                        logger.debug(f"Could not parse bridge domain config for range check: {bridge_parse_error}")
-                            except Exception as bridge_query_error:
-                                logger.debug(f"Could not query bridge domain config for range check: {bridge_query_error}")
+                                                # Navigate to access VLAN: interface.{name}.bridge.domain.br_default.access
+                                                # Example structure:
+                                                #   "bond3-5": {"bridge": {"domain": {"br_default": {"access": 3000}}}}
+                                                #   "bond6": {"bridge": {"domain": {"br_default": {"access": 3060}}}}
+                                                
+                                                bridge_config = config_iface_data.get('bridge', {})
+                                                if bridge_config:
+                                                    domain_config = bridge_config.get('domain', {})
+                                                    if domain_config:
+                                                        br_default_config = domain_config.get('br_default', {})
+                                                        if br_default_config:
+                                                            access_vlan_path = br_default_config.get('access')
+                                                            logger.debug(f"  Access VLAN path value for {config_iface_name}: {access_vlan_path} (type: {type(access_vlan_path).__name__})")
+                                                            
+                                                            if access_vlan_path is not None:
+                                                                # Extract VLAN ID (could be int or nested dict)
+                                                                if isinstance(access_vlan_path, int):
+                                                                    actual_vlan = access_vlan_path
+                                                                    logger.debug(f"  ✓ Extracted VLAN as integer: {actual_vlan}")
+                                                                elif isinstance(access_vlan_path, dict):
+                                                                    # Sometimes NVUE returns nested structure
+                                                                    actual_vlan = access_vlan_path.get('value') or access_vlan_path.get('vlan') or (list(access_vlan_path.values())[0] if access_vlan_path else None)
+                                                                    logger.debug(f"  ✓ Extracted VLAN from dict: {actual_vlan}")
+                                                                else:
+                                                                    # Try to convert to int if it's a string representation
+                                                                    try:
+                                                                        actual_vlan = int(access_vlan_path)
+                                                                        logger.debug(f"  ✓ Converted VLAN from string: {actual_vlan}")
+                                                                    except (ValueError, TypeError):
+                                                                        actual_vlan = None
+                                                                        logger.debug(f"  ✗ Could not convert VLAN: {access_vlan_path}")
+                                                                
+                                                                if actual_vlan is not None:
+                                                                    logger.info(f"Found interface {interface_name} in range/interface '{config_iface_name}' with VLAN {actual_vlan} (from full config with -r applied)")
+                                                                    break  # Found it, no need to check further
+                                                                else:
+                                                                    logger.debug(f"Range/interface '{config_iface_name}' has access config but couldn't extract VLAN ID: {access_vlan_path}")
+                                                            else:
+                                                                logger.debug(f"Range/interface '{config_iface_name}' found but no access VLAN configured in br_default")
+                                                        else:
+                                                            logger.debug(f"Range/interface '{config_iface_name}' found but no br_default domain config")
+                                                    else:
+                                                        logger.debug(f"Range/interface '{config_iface_name}' found but no domain config")
+                                                else:
+                                                    logger.debug(f"Range/interface '{config_iface_name}' found but no bridge config")
+                                        
+                                        # If still not found, log what interfaces/ranges we did find
+                                        if actual_vlan is None:
+                                            logger.debug(f"Interface {interface_name} not found in any of the {len(interfaces_config)} interfaces/ranges")
+                                            # Log some of the interface names for debugging
+                                            sample_names = list(interfaces_config.keys())[:10]
+                                            logger.debug(f"Sample interface/range names found: {sample_names}")
+                                            
+                                            # Also log which interfaces have bridge domain config for debugging
+                                            interfaces_with_bridge = []
+                                            for iface_name, iface_data in interfaces_config.items():
+                                                if iface_data.get('bridge', {}).get('domain', {}).get('br_default', {}).get('access') is not None:
+                                                    interfaces_with_bridge.append(iface_name)
+                                            if interfaces_with_bridge:
+                                                logger.debug(f"Interfaces/ranges with bridge domain access VLAN: {interfaces_with_bridge[:10]}")
+                                            
+                                except (json.JSONDecodeError, ValueError, KeyError, AttributeError) as parse_error:
+                                    logger.warning(f"Could not parse full config JSON for interface {interface_name}: {parse_error}")
+                                    import traceback
+                                    logger.debug(traceback.format_exc())
+                            else:
+                                logger.warning(f"Full config query returned empty for interface {interface_name}")
+                        except Exception as query_error:
+                            logger.warning(f"Could not query full config for interface {interface_name}: {query_error}")
+                            import traceback
+                            logger.debug(traceback.format_exc())
 
+                        # Log final result before verification
+                        if actual_vlan is None:
+                            logger.warning(f"Could not determine VLAN for interface {interface_name} from full config query")
+                            logger.warning(f"This may indicate: (1) Interface not configured, (2) Query command failed, (3) Config not yet applied, or (4) Interface not in applied config")
+                        
                         # Verify VLAN matches expected
                         if actual_vlan == vlan_id:
                             vlan_verified = True
@@ -1212,7 +1372,7 @@ class NAPALMDeviceManager:
                 try:
                     if hasattr(self.connection, 'device') and hasattr(self.connection.device, 'send_command'):
                         # Query switchport status
-                        switchport_output = self.connection.device.send_command(
+                        switchport_output = self.connection.device.send_command_timing(
                             f'show interfaces {interface_name} switchport',
                             read_timeout=10
                         )
@@ -1532,7 +1692,7 @@ class NAPALMDeviceManager:
                         # For Cumulus, query stats directly using NVUE
                         try:
                             if hasattr(self.connection, 'device') and hasattr(self.connection.device, 'send_command'):
-                                stats_output = self.connection.device.send_command(
+                                stats_output = self.connection.device.send_command_timing(
                                     f'nv show interface {interface_name} counters -o json',
                                     read_timeout=10
                                 )
@@ -1641,7 +1801,7 @@ class NAPALMDeviceManager:
                     # Check if there's still a pending commit by checking config diff
                     # If diff is empty or shows no changes, rollback worked
                     try:
-                        diff_check = self.connection.device.send_command('nv config diff', read_timeout=10)
+                        diff_check = self.connection.device.send_command_timing('nv config diff', read_timeout=10)
                         if diff_check:
                             # If diff shows nothing or "No changes", rollback worked
                             if 'no changes' in diff_check.lower() or not diff_check.strip() or diff_check.strip() == '':
@@ -1654,7 +1814,7 @@ class NAPALMDeviceManager:
                     except Exception as diff_error:
                         # If diff command fails, try checking history for pending revision
                         try:
-                            history_check = self.connection.device.send_command('nv config history | head -5', read_timeout=10)
+                            history_check = self.connection.device.send_command_timing('nv config history | head -5', read_timeout=10)
                             if history_check:
                                 # Check if there's a pending revision (marked with *)
                                 if '*' in history_check and 'pending' in history_check.lower():
@@ -1673,7 +1833,7 @@ class NAPALMDeviceManager:
                         session_name = self._eos_session_name
                         netmiko_conn = self._eos_netmiko_conn
                         # Check if session still exists
-                        sessions_output = netmiko_conn.send_command('show configuration sessions', read_timeout=10)
+                        sessions_output = netmiko_conn.send_command_timing('show configuration sessions', read_timeout=10)
                         if session_name in sessions_output:
                             return False, f"Rollback may have failed: Session {session_name} still exists"
                         else:
@@ -1689,26 +1849,33 @@ class NAPALMDeviceManager:
     
     def _check_for_pending_commits(self, driver_name):
         """
-        Check if there are any pending commits on the device.
+        Check if there are any pending commit-confirm sessions on the device.
+        
+        Note: "Pending commit" means a commit-confirm session is active:
+        - Config IS applied and active on the device
+        - Session is in "confirm" state (waiting for confirmation)
+        - Will auto-rollback if not confirmed within timeout
         
         Args:
             driver_name: Platform driver name (cumulus, eos, etc.)
         
         Returns:
-            bool: True if pending commit exists, False otherwise
+            bool: True if pending commit-confirm session exists, False otherwise
         """
         try:
             if driver_name == 'cumulus':
                 if hasattr(self.connection, 'device') and hasattr(self.connection.device, 'send_command'):
                     # Method 1: Check via JSON (most reliable)
+                    # Use send_command_timing() to avoid prompt detection issues
                     try:
-                        revision_json = self.connection.device.send_command('nv config revision -o json', read_timeout=10)
-                        if revision_json:
+                        revision_json = self.connection.device.send_command_timing('nv config revision -o json', read_timeout=10)
+                        if revision_json and revision_json.strip():
                             import json
                             rev_data = json.loads(revision_json)
                             for rev_id, rev_info in rev_data.items():
                                 if isinstance(rev_info, dict) and rev_info.get('state') == 'confirm':
-                                    logger.info(f"Found pending commit via JSON: revision {rev_id}")
+                                    logger.info(f"Found commit-confirm session (pending confirmation) via JSON: revision {rev_id}")
+                                    logger.debug(f"Note: 'Pending' means commit-confirm session is active - config is applied, waiting for confirmation")
                                     return True
                     except Exception as json_error:
                         logger.debug(f"Could not check pending commits via JSON: {json_error}")
@@ -1717,16 +1884,17 @@ class NAPALMDeviceManager:
                     try:
                         has_pending = self.connection.has_pending_commit()
                         if has_pending:
-                            logger.info(f"Found pending commit via NAPALM has_pending_commit()")
+                            logger.info(f"Found commit-confirm session (pending confirmation) via NAPALM has_pending_commit()")
                             return True
                     except Exception as napalm_error:
                         logger.debug(f"Could not check pending commits via NAPALM: {napalm_error}")
                     
                     # Method 3: Check history text output (fallback)
+                    # Use send_command_timing() to avoid prompt detection issues
                     try:
-                        history_output = self.connection.device.send_command('nv config history | head -5', read_timeout=10)
+                        history_output = self.connection.device.send_command_timing('nv config history | head -5', read_timeout=10)
                         if history_output and ('Currently pending' in history_output or 'pending [rev_id:' in history_output.lower()):
-                            logger.info(f"Found pending commit via history text")
+                            logger.info(f"Found commit-confirm session (pending confirmation) via history text")
                             return True
                     except Exception as history_error:
                         logger.debug(f"Could not check pending commits via history: {history_error}")
@@ -1740,7 +1908,7 @@ class NAPALMDeviceManager:
                     try:
                         session_name = self._eos_session_name
                         netmiko_conn = self._eos_netmiko_conn
-                        sessions_output = netmiko_conn.send_command('show configuration sessions', read_timeout=10)
+                        sessions_output = netmiko_conn.send_command_timing('show configuration sessions', read_timeout=10)
                         if session_name in sessions_output:
                             logger.info(f"Found pending EOS session: {session_name}")
                             return True
@@ -1757,7 +1925,7 @@ class NAPALMDeviceManager:
     
     def _clear_pending_commit(self, driver_name, logs=None):
         """
-        Clear/abort any pending commit-confirm session on the device.
+        Clear/delete any pending commit-confirm session on the device using specific revision IDs.
         
         Args:
             driver_name: Platform driver name (cumulus, eos, etc.)
@@ -1774,40 +1942,74 @@ class NAPALMDeviceManager:
                 if hasattr(self.connection, 'device') and hasattr(self.connection.device, 'send_command'):
                     logger.info("Attempting to clear pending commit on Cumulus device...")
                     
-                    # Use nv config abort to abort pending commit-confirm session
+                    # Get pending revision IDs first, then delete each one specifically
+                    # Use send_command_timing() to avoid prompt detection issues
                     try:
-                        abort_output = self.connection.device.send_command('nv config abort', read_timeout=30)
-                        logger.info(f"Abort output: {abort_output}")
+                        # First, get all pending revision IDs
+                        revision_json = self.connection.device.send_command_timing('nv config revision -o json', read_timeout=10)
+                        if not revision_json or not revision_json.strip():
+                            logger.warning("Could not get revision list - no pending commits to clear")
+                            return True  # No pending commits
                         
-                        # Wait a moment for the abort to take effect
+                        import json
+                        rev_data = json.loads(revision_json)
+                        pending_rev_ids = []
+                        for rev_id, rev_info in rev_data.items():
+                            if isinstance(rev_info, dict) and rev_info.get('state') == 'confirm':
+                                pending_rev_ids.append(rev_id)
+                        
+                        if not pending_rev_ids:
+                            logger.info("No pending commits found - device is already clean")
+                            return True
+                        
+                        logger.info(f"Found {len(pending_rev_ids)} pending commit(s) to delete: {pending_rev_ids}")
+                        logs.append(f"  Found {len(pending_rev_ids)} pending commit(s): {pending_rev_ids}")
+                        
+                        # Delete each pending revision specifically
+                        for rev_id in pending_rev_ids:
+                            try:
+                                logger.info(f"Deleting pending commit revision {rev_id}...")
+                                logs.append(f"  Deleting revision {rev_id}...")
+                                delete_output = self.connection.device.send_command_timing(f'nv config delete {rev_id}', read_timeout=30)
+                                logger.info(f"Delete command output for revision {rev_id}: {delete_output[:500] if delete_output else 'Empty'}")
+                                
+                                # Check if delete command actually executed (look for error messages)
+                                if delete_output and ('error' in delete_output.lower() or 'failed' in delete_output.lower()):
+                                    logger.warning(f"Delete command may have failed for revision {rev_id}: {delete_output[:200]}")
+                                
+                                # Small delay between deletions if multiple
+                                if len(pending_rev_ids) > 1:
+                                    time.sleep(0.5)
+                            except Exception as delete_error:
+                                logger.error(f"Failed to delete revision {rev_id}: {delete_error}")
+                                logs.append(f"    ✗ Failed to delete revision {rev_id}: {str(delete_error)}")
+                        
+                        # Wait a moment for deletions to take effect
                         time.sleep(2)
                         
-                        # Verify it's gone
-                        still_pending = self._check_for_pending_commits(driver_name)
-                        if not still_pending:
-                            logger.info("Successfully cleared pending commit")
-                            return True
-                        else:
-                            logger.warning("Pending commit still exists after abort command")
-                            # Try nv config apply (confirm it) as fallback
-                            try:
-                                logger.info("Attempting to confirm pending commit instead...")
-                                apply_output = self.connection.device.send_command('nv config apply', read_timeout=30)
-                                logger.info(f"Apply output: {apply_output}")
+                        # Verify all pending commits are gone - try multiple times with increasing delays
+                        max_verify_attempts = 3
+                        still_pending = True
+                        for verify_attempt in range(1, max_verify_attempts + 1):
+                            still_pending = self._check_for_pending_commits(driver_name)
+                            if not still_pending:
+                                logger.info(f"Successfully cleared all pending commits (verified on attempt {verify_attempt})")
+                                logs.append(f"  SUCCESS: All pending commits cleared")
+                                return True
+                            if verify_attempt < max_verify_attempts:
+                                logger.debug(f"Pending commits still detected, waiting longer (attempt {verify_attempt}/{max_verify_attempts})...")
                                 time.sleep(2)
-                                
-                                still_pending_after_apply = self._check_for_pending_commits(driver_name)
-                                if not still_pending_after_apply:
-                                    logger.info("Successfully confirmed pending commit")
-                                    return True
-                                else:
-                                    logger.error("Could not clear pending commit via abort or apply")
-                                    return False
-                            except Exception as apply_error:
-                                logger.error(f"Failed to confirm pending commit: {apply_error}")
-                                return False
-                    except Exception as abort_error:
-                        logger.error(f"Failed to abort pending commit: {abort_error}")
+                        
+                        # Still pending after multiple checks
+                        logger.warning("Pending commits still exist after delete commands and multiple verification attempts")
+                        logger.warning("This may indicate: (1) Delete command didn't execute properly, (2) Revision IDs were incorrect, or (3) Device state issue")
+                        logs.append(f"  ⚠ WARNING: Some pending commits may still exist")
+                        return False
+                        
+                    except Exception as clear_error:
+                        logger.error(f"Failed to clear pending commits: {clear_error}")
+                        import traceback
+                        logger.debug(traceback.format_exc())
                         return False
                 else:
                     logger.warning("Cannot clear pending commit - no device connection")
@@ -1821,7 +2023,7 @@ class NAPALMDeviceManager:
                         netmiko_conn = self._eos_netmiko_conn
                         logger.info(f"Attempting to abort EOS session: {session_name}")
                         
-                        abort_output = netmiko_conn.send_command(f'configure session {session_name} abort', read_timeout=30)
+                        abort_output = netmiko_conn.send_command_timing(f'configure session {session_name} abort', read_timeout=30)
                         logger.info(f"Abort output: {abort_output}")
                         
                         # Verify it's gone
@@ -2016,7 +2218,7 @@ class NAPALMDeviceManager:
                 if hasattr(self.connection, 'device') and hasattr(self.connection.device, 'send_command'):
                     # 1. Get current revision history (JSON format for reliable parsing)
                     logger.info(f"Retrieving current NVUE revision...")
-                    revision_json_output = self.connection.device.send_command('nv config history -o json', read_timeout=10)
+                    revision_json_output = self.connection.device.send_command_timing('nv config history -o json', read_timeout=10)
                     
                     if revision_json_output:
                         import json
@@ -2056,11 +2258,11 @@ class NAPALMDeviceManager:
                     
                     logger.info(f"Exporting configuration to {snapshot_filename}...")
                     export_cmd = f"nv config show -r applied -o commands > {snapshot_filename}"
-                    self.connection.device.send_command(export_cmd, read_timeout=30)
+                    self.connection.device.send_command_timing(export_cmd, read_timeout=30)
                     
                     # Verify file was created
                     verify_cmd = f"ls -lh {snapshot_filename}"
-                    verify_output = self.connection.device.send_command(verify_cmd, read_timeout=5)
+                    verify_output = self.connection.device.send_command_timing(verify_cmd, read_timeout=5)
                     
                     if snapshot_filename in verify_output:
                         logger.info(f"Snapshot file created successfully: {snapshot_filename}")
@@ -2153,7 +2355,7 @@ class NAPALMDeviceManager:
                     
                     if driver_name == 'cumulus':
                         try:
-                            # Check if we can access device commands (either via device.send_command or cli())
+                            # Check if we can access device commands (either via device.send_command_timing or cli())
                             can_access_device = (
                                 (hasattr(self.connection, 'device') and self.connection.device is not None and hasattr(self.connection.device, 'send_command')) or
                                 hasattr(self.connection, 'cli')
@@ -2167,7 +2369,7 @@ class NAPALMDeviceManager:
                                 try:
                                     bond_members_command = 'nv show interface bond-members -o json'
                                     if hasattr(self.connection, 'device') and self.connection.device is not None:
-                                        bond_members_output = self.connection.device.send_command(bond_members_command, read_timeout=10)
+                                        bond_members_output = self.connection.device.send_command_timing(bond_members_command, read_timeout=10)
                                     elif hasattr(self.connection, 'cli'):
                                         cli_result = self.connection.cli([bond_members_command])
                                         if isinstance(cli_result, dict):
@@ -2211,9 +2413,9 @@ class NAPALMDeviceManager:
                                         # First check if connection.device is available, otherwise use cli() method
                                         stats_command = f'nv show interface {test_interface} link stats -o json'
                                         
-                                        # Try connection.device.send_command first (if available)
+                                        # Use connection.device.send_command_timing (if available)
                                         if hasattr(self.connection, 'device') and self.connection.device is not None:
-                                            stats_output = self.connection.device.send_command(stats_command, read_timeout=10)
+                                            stats_output = self.connection.device.send_command_timing(stats_command, read_timeout=10)
                                         elif hasattr(self.connection, 'cli'):
                                             # Fallback to NAPALM's cli() method
                                             cli_result = self.connection.cli([stats_command])
@@ -2248,7 +2450,7 @@ class NAPALMDeviceManager:
                                                 # Get interface link state
                                                 link_command = f'nv show interface {test_interface} link -o json'
                                                 if hasattr(self.connection, 'device') and self.connection.device is not None:
-                                                    link_output = self.connection.device.send_command(link_command, read_timeout=10)
+                                                    link_output = self.connection.device.send_command_timing(link_command, read_timeout=10)
                                                 elif hasattr(self.connection, 'cli'):
                                                     cli_result = self.connection.cli([link_command])
                                                     if isinstance(cli_result, dict):
@@ -2278,7 +2480,7 @@ class NAPALMDeviceManager:
                                                     try:
                                                         desc_command = f'nv show interface {test_interface} description -o json'
                                                         if hasattr(self.connection, 'device') and self.connection.device is not None:
-                                                            desc_output = self.connection.device.send_command(desc_command, read_timeout=10)
+                                                            desc_output = self.connection.device.send_command_timing(desc_command, read_timeout=10)
                                                         elif hasattr(self.connection, 'cli'):
                                                             cli_result = self.connection.cli([desc_command])
                                                             if isinstance(cli_result, dict):
@@ -2448,7 +2650,7 @@ class NAPALMDeviceManager:
                                     try:
                                         bond_members_command = 'nv show interface bond-members -o json'
                                         if hasattr(self.connection, 'device') and self.connection.device is not None and hasattr(self.connection.device, 'send_command'):
-                                            bond_members_output = self.connection.device.send_command(bond_members_command, read_timeout=10)
+                                            bond_members_output = self.connection.device.send_command_timing(bond_members_command, read_timeout=10)
                                         elif hasattr(self.connection, 'cli'):
                                             cli_result = self.connection.cli([bond_members_command])
                                             if isinstance(cli_result, dict):
@@ -2785,12 +2987,12 @@ class NAPALMDeviceManager:
         # Store driver_name for use in baseline collection (needed for bond membership check)
         self._driver_name_for_baseline = driver_name
         
-        # Track pending commits from BEFORE our deployment (to avoid aborting our own)
+        # Track pending commits from BEFORE our deployment (to avoid deleting our own)
         self._pending_revisions_before_deployment = []
         # Track our candidate revision ID (created by load_config) to exclude from Phase 2 checks
         self._candidate_revision_id = None
         
-        # PRE-PHASE 1: Check for and abort ANY existing pending commits from ANY user/previous deployment
+        # PRE-PHASE 1: Check for and delete ANY existing pending commits from ANY user/previous deployment
         # This ensures we have a clean state before loading our config
         # IMPORTANT: We check BEFORE load_config() so we know any pending commit is NOT ours
         # CRITICAL: We check for ALL pending commits from ALL users, not just our own
@@ -2803,7 +3005,7 @@ class NAPALMDeviceManager:
                 if hasattr(self.connection, 'device') and hasattr(self.connection.device, 'send_command'):
                     # Check for pending commits using JSON (most reliable - shows ALL pending commits from ALL users)
                     try:
-                        revision_json_before = self.connection.device.send_command('nv config revision -o json', read_timeout=10)
+                        revision_json_before = self.connection.device.send_command_timing('nv config revision -o json', read_timeout=10)
                         if revision_json_before:
                             import json
                             rev_data_before = json.loads(revision_json_before)
@@ -2833,7 +3035,7 @@ class NAPALMDeviceManager:
                     if not existing_pending_revisions:
                         try:
                             # Get ALL pending commits from history (not just first one)
-                            pending_before = self.connection.device.send_command('nv config history | grep -i "pending\\|confirm\\|\\*"', read_timeout=10)
+                            pending_before = self.connection.device.send_command_timing('nv config history | grep -i "pending\\|confirm\\|\\*"', read_timeout=10)
                             if pending_before:
                                 import re
                                 # Parse all pending commits from history output
@@ -2865,34 +3067,34 @@ class NAPALMDeviceManager:
                         except Exception as history_error:
                             logger.debug(f"Could not check history before Phase 1: {history_error}")
                     
-                    # If we found ANY existing pending commits, abort ALL of them
+                    # If we found ANY existing pending commits, delete ALL of them
                     if existing_pending_revisions:
                         logs.append(f"")
                         logs.append(f"  Found {len(existing_pending_revisions)} pending commit(s) from previous deployment(s)/user(s)")
-                        logs.append(f"  Will abort ALL of them to ensure clean state...")
+                        logs.append(f"  Will delete ALL of them to ensure clean state...")
                         
-                        # Abort all pending commits (nv config abort aborts the current pending commit)
-                        # We may need to call it multiple times if there are multiple pending commits
+                        # Delete all pending commits using specific revision IDs
+                        # Use nv config delete <rev_id> for each pending revision
                         for pending_rev in existing_pending_revisions:
                             rev_id = pending_rev['rev_id']
                             rev_user = pending_rev.get('user', 'unknown')
                             try:
-                                logger.info(f"[Pre-Phase 1] Aborting pending commit {rev_id} (user: {rev_user})...")
-                                logs.append(f"  Aborting pending commit {rev_id} (user: {rev_user})...")
-                                abort_output = self.connection.device.send_command('nv config abort', read_timeout=30)
-                                logger.info(f"[Pre-Phase 1] Abort output for revision {rev_id}: {abort_output}")
-                                logs.append(f"    Abort output: {abort_output[:200] if abort_output else 'No output'}")
+                                logger.info(f"[Pre-Phase 1] Deleting pending commit {rev_id} (user: {rev_user})...")
+                                logs.append(f"  Deleting pending commit {rev_id} (user: {rev_user})...")
+                                delete_output = self.connection.device.send_command_timing(f'nv config delete {rev_id}', read_timeout=30)
+                                logger.info(f"[Pre-Phase 1] Delete output for revision {rev_id}: {delete_output}")
+                                logs.append(f"    Delete output: {delete_output[:200] if delete_output else 'No output'}")
                                 
-                                # Small delay between aborts if multiple
+                                # Small delay between deletions if multiple
                                 if len(existing_pending_revisions) > 1:
                                     time.sleep(0.5)
-                            except Exception as abort_error:
-                                logger.error(f"[Pre-Phase 1] Failed to abort pending commit {rev_id}: {abort_error}")
-                                logs.append(f"    ✗ Failed to abort revision {rev_id}: {str(abort_error)}")
+                            except Exception as delete_error:
+                                logger.error(f"[Pre-Phase 1] Failed to delete pending commit {rev_id}: {delete_error}")
+                                logs.append(f"    ✗ Failed to delete revision {rev_id}: {str(delete_error)}")
                         
                         # Wait a moment and verify ALL pending commits are gone
                         time.sleep(1)
-                        recheck_json = self.connection.device.send_command('nv config revision -o json', read_timeout=10)
+                        recheck_json = self.connection.device.send_command_timing('nv config revision -o json', read_timeout=10)
                         if recheck_json:
                             import json
                             recheck_data = json.loads(recheck_json)
@@ -2902,12 +3104,12 @@ class NAPALMDeviceManager:
                                     still_pending_list.append(rev_id)
                             
                             if not still_pending_list:
-                                logger.info(f"[Pre-Phase 1] Successfully aborted ALL {len(existing_pending_revisions)} pending commit(s) - clean state achieved")
-                                logs.append(f"  SUCCESS: Successfully aborted ALL {len(existing_pending_revisions)} pending commit(s)")
+                                logger.info(f"[Pre-Phase 1] Successfully deleted ALL {len(existing_pending_revisions)} pending commit(s) - clean state achieved")
+                                logs.append(f"  SUCCESS: Successfully deleted ALL {len(existing_pending_revisions)} pending commit(s)")
                                 logs.append(f"  SUCCESS: Device is now in clean state - ready for new deployment")
                             else:
-                                logger.warning(f"[Pre-Phase 1] Abort may have failed - {len(still_pending_list)} pending commit(s) still exist: {still_pending_list}")
-                                logs.append(f"  ⚠ Abort may have failed - {len(still_pending_list)} pending commit(s) still exist:")
+                                logger.warning(f"[Pre-Phase 1] Delete may have failed - {len(still_pending_list)} pending commit(s) still exist: {still_pending_list}")
+                                logs.append(f"  ⚠ Delete may have failed - {len(still_pending_list)} pending commit(s) still exist:")
                                 for rev_id in still_pending_list:
                                     logs.append(f"    - Revision {rev_id}")
                                 logs.append(f"  Will proceed anyway - commit may fail with 'Pending commit confirm already in process'")
@@ -2951,7 +3153,7 @@ class NAPALMDeviceManager:
                 if driver_name == 'cumulus':
                     try:
                         if hasattr(self.connection, 'device') and hasattr(self.connection.device, 'send_command'):
-                            history_before_load = self.connection.device.send_command('nv config history | head -3', read_timeout=10)
+                            history_before_load = self.connection.device.send_command_timing('nv config history | head -3', read_timeout=10)
                             logger.debug(f"Config history BEFORE load_config:\n{history_before_load}")
                             logs.append(f"  [DEBUG] History before load (last 3 entries):")
                             for line in history_before_load.split('\n')[:3]:
@@ -3035,7 +3237,7 @@ class NAPALMDeviceManager:
                                 # 1. Config load failed (no candidate created)
                                 # 2. Candidate config already matches applied config (no changes needed)
                                 # So empty diff doesn't necessarily mean load failed
-                                error_check = self.connection.device.send_command('nv config diff', read_timeout=10)
+                                error_check = self.connection.device.send_command_timing('nv config diff', read_timeout=10)
                                 if error_check and error_check.strip():
                                     logger.debug(f"Config diff after failed load: {error_check}")
                                     logs.append(f"  [DEBUG] Config diff after failed load:")
@@ -3078,7 +3280,7 @@ class NAPALMDeviceManager:
                         if hasattr(self.connection, 'device') and hasattr(self.connection.device, 'send_command'):
                             # Check if we can show the candidate revision (if it fails, commands had errors)
                             try:
-                                candidate_check = self.connection.device.send_command(f'nv config show -r {candidate_revision} -o json', read_timeout=10)
+                                candidate_check = self.connection.device.send_command_timing(f'nv config show -r {candidate_revision} -o json', read_timeout=10)
                                 if candidate_check and ('error' in candidate_check.lower() or 'invalid' in candidate_check.lower()):
                                     error_msg = "Candidate config contains errors - commands may have failed during load"
                                     logger.error(f"Phase 1 validation failed: {error_msg}")
@@ -3098,7 +3300,7 @@ class NAPALMDeviceManager:
                             # Check history after load (for debugging - shows candidate revision, NOT commit-confirm session)
                             # NOTE: "Currently pending [rev_id: X]" in history after load_config() is just the CANDIDATE revision
                             # It becomes a commit-confirm session only after commit_config() is called
-                            history_after_load = self.connection.device.send_command('nv config history | head -3', read_timeout=10)
+                            history_after_load = self.connection.device.send_command_timing('nv config history | head -3', read_timeout=10)
                             logger.debug(f"Config history AFTER load_config (shows candidate revision, not commit-confirm):\n{history_after_load}")
                             logs.append(f"  [DEBUG] History after load (last 3 entries):")
                             logs.append(f"  [NOTE] 'Currently pending [rev_id: X]' shown here is the CANDIDATE revision (from load_config)")
@@ -3139,7 +3341,7 @@ class NAPALMDeviceManager:
                                 # Also try direct nv config diff command
                                 try:
                                     if hasattr(self.connection, 'device') and hasattr(self.connection.device, 'send_command'):
-                                        direct_diff = self.connection.device.send_command('nv config diff', read_timeout=15)
+                                        direct_diff = self.connection.device.send_command_timing('nv config diff', read_timeout=15)
                                         logger.debug(f"Direct 'nv config diff' output:\n{direct_diff}")
                                         logs.append(f"  [DEBUG] Direct 'nv config diff' output:")
                                         if direct_diff:
@@ -3178,7 +3380,7 @@ class NAPALMDeviceManager:
                         try:
                             if hasattr(self.connection, 'device') and hasattr(self.connection.device, 'send_command'):
                                 # Get the current revision number (pending/candidate)
-                                rev_output = self.connection.device.send_command('nv config history | head -1', read_timeout=10)
+                                rev_output = self.connection.device.send_command_timing('nv config history | head -1', read_timeout=10)
                                 if rev_output:
                                     import re
                                     # Extract revision number (format: "Revision: 270" or "270 * pending")
@@ -3189,7 +3391,7 @@ class NAPALMDeviceManager:
                                         rev_num = rev_match.group(1)
                                         # Execute diff command manually to get actual diff output
                                         diff_cmd = f'nv config diff {rev_num}'
-                                        diff_output = self.connection.device.send_command(diff_cmd, read_timeout=30)
+                                        diff_output = self.connection.device.send_command_timing(diff_cmd, read_timeout=30)
                                         if diff_output and diff_output.strip() and 'diff <' not in diff_output:
                                             # Got actual diff output, use it
                                             diff = diff_output
@@ -3197,7 +3399,7 @@ class NAPALMDeviceManager:
                                         else:
                                             # Still got command, try alternative: get applied revision and diff
                                             try:
-                                                applied_output = self.connection.device.send_command('nv config history | grep -i applied | head -1', read_timeout=10)
+                                                applied_output = self.connection.device.send_command_timing('nv config history | grep -i applied | head -1', read_timeout=10)
                                                 if applied_output:
                                                     applied_match = re.search(r'Revision:\s*(\d+)', applied_output)
                                                     if not applied_match:
@@ -3206,7 +3408,7 @@ class NAPALMDeviceManager:
                                                         applied_rev = applied_match.group(1)
                                                         # Get diff between applied and current
                                                         diff_cmd2 = f'nv config diff {applied_rev}'
-                                                        diff_output2 = self.connection.device.send_command(diff_cmd2, read_timeout=30)
+                                                        diff_output2 = self.connection.device.send_command_timing(diff_cmd2, read_timeout=30)
                                                         if diff_output2 and diff_output2.strip() and 'diff <' not in diff_output2:
                                                             diff = diff_output2
                                                             logger.info(f"Got diff output using applied revision: {len(diff)} chars")
@@ -3351,7 +3553,36 @@ class NAPALMDeviceManager:
                     # No need to check again here - we can proceed directly to commit
                     # The only "pending" revision at this point should be our candidate revision (from load_config),
                     # which is not a commit-confirm session yet and will become one after commit_config()
-                
+                    
+                    # Pre-commit check: Verify there are actual changes to commit
+                    # Skip commit if diff is empty (config already matches desired state)
+                    if driver_name == 'cumulus':
+                        try:
+                            if hasattr(self.connection, 'device') and hasattr(self.connection.device, 'send_command'):
+                                # Check diff before commit using send_command_timing() to avoid prompt detection issues
+                                pre_commit_diff = self.connection.device.send_command_timing('nv config diff', read_timeout=10)
+                                if pre_commit_diff and pre_commit_diff.strip():
+                                    # Check if diff shows actual changes (not just whitespace or "no changes" message)
+                                    diff_content = pre_commit_diff.strip().lower()
+                                    if 'no changes' in diff_content or 'no config diff' in diff_content or len(pre_commit_diff.strip()) < 10:
+                                        logger.info(f"Config diff is empty or shows no changes - skipping commit (config already applied)")
+                                        logs.append(f"  ℹ Pre-commit diff check: No changes detected")
+                                        logs.append(f"  ℹ Configuration already matches desired state - skipping commit")
+                                        result['_config_already_applied'] = True
+                                        result['_commit_skipped_no_diff'] = True
+                                        commit_succeeded = True  # Mark as success (idempotent)
+                                        break  # Exit retry loop
+                                    else:
+                                        logger.debug(f"Pre-commit diff check: Changes detected ({len(pre_commit_diff)} chars)")
+                                elif not pre_commit_diff or not pre_commit_diff.strip():
+                                    logger.warning(f"Pre-commit diff check returned empty - this may indicate config already applied or command failed")
+                                    logs.append(f"  ⚠ Pre-commit diff check: Empty output")
+                                    # Don't skip commit on empty diff check failure - let commit attempt proceed
+                                    # The diff check might have failed due to prompt detection, but commit might still work
+                        except Exception as pre_commit_diff_error:
+                            logger.debug(f"Pre-commit diff check failed: {pre_commit_diff_error}")
+                            # Don't skip commit on diff check failure - let commit attempt proceed
+                    
                     # Execute commit_config - this should execute: nv config apply --confirm {timeout}s -y
                     # 
                     # ============================================================================
@@ -3403,7 +3634,7 @@ class NAPALMDeviceManager:
                             try:
                                 if hasattr(self.connection, 'device') and hasattr(self.connection.device, 'send_command'):
                                     # Check current revision state before commit
-                                    rev_before = self.connection.device.send_command('nv config revision -o json', read_timeout=10)
+                                    rev_before = self.connection.device.send_command_timing('nv config revision -o json', read_timeout=10)
                                     logger.debug(f"[DEBUG] Revision state BEFORE commit_config(): {rev_before[:500] if rev_before else 'None'}")
                                     logs.append(f"  [DEBUG] Device state BEFORE commit_config():")
                                     if rev_before:
@@ -3435,7 +3666,7 @@ class NAPALMDeviceManager:
                                             logs.append(f"    Revision JSON: {rev_before[:200]}")
                                     
                                     # Check history to see current state
-                                    history_before = self.connection.device.send_command('nv config history | head -3', read_timeout=10)
+                                    history_before = self.connection.device.send_command_timing('nv config history | head -3', read_timeout=10)
                                     logger.debug(f"[DEBUG] History BEFORE commit_config():\n{history_before}")
                                     logs.append(f"    History (last 3): {history_before[:200] if history_before else 'None'}")
                             except Exception as debug_error:
@@ -3452,7 +3683,7 @@ class NAPALMDeviceManager:
                                 try:
                                     if hasattr(self.connection, 'device') and hasattr(self.connection.device, 'send_command'):
                                         # Check if we can see the last command in history
-                                        history_after_call = self.connection.device.send_command('nv config history | head -3', read_timeout=10)
+                                        history_after_call = self.connection.device.send_command_timing('nv config history | head -3', read_timeout=10)
                                         logger.debug(f"[DEBUG] History immediately after commit_config() call:\n{history_after_call}")
                                         logs.append(f"  [DEBUG] History immediately after commit_config() call:")
                                         if history_after_call:
@@ -3477,7 +3708,7 @@ class NAPALMDeviceManager:
                             # DEBUG: Check device state AFTER wait
                             try:
                                 if hasattr(self.connection, 'device') and hasattr(self.connection.device, 'send_command'):
-                                    rev_after = self.connection.device.send_command('nv config revision -o json', read_timeout=10)
+                                    rev_after = self.connection.device.send_command_timing('nv config revision -o json', read_timeout=10)
                                     logger.debug(f"[DEBUG] Revision state AFTER commit_config() + 5s wait: {rev_after[:500] if rev_after else 'None'}")
                                     logs.append(f"  [DEBUG] Device state AFTER commit_config() + 5s wait:")
                                     if rev_after:
@@ -3495,7 +3726,7 @@ class NAPALMDeviceManager:
                                             logs.append(f"    Revision JSON: {rev_after[:200]}")
                                     
                                     # Check history to see if commit-confirm session was created
-                                    history_after = self.connection.device.send_command('nv config history | head -5', read_timeout=10)
+                                    history_after = self.connection.device.send_command_timing('nv config history | head -5', read_timeout=10)
                                     logger.debug(f"[DEBUG] History AFTER commit_config() + 5s wait:\n{history_after}")
                                     logs.append(f"    History (last 5):")
                                     if history_after:
@@ -3545,7 +3776,7 @@ class NAPALMDeviceManager:
                                     # DEBUG: Also check directly via device command to compare
                                     try:
                                         if hasattr(self.connection, 'device') and hasattr(self.connection.device, 'send_command'):
-                                            rev_check = self.connection.device.send_command('nv config revision -o json', read_timeout=10)
+                                            rev_check = self.connection.device.send_command_timing('nv config revision -o json', read_timeout=10)
                                             if rev_check:
                                                 import json
                                                 rev_data_check = json.loads(rev_check)
@@ -3579,7 +3810,7 @@ class NAPALMDeviceManager:
                                             if hasattr(self.connection, 'device') and hasattr(self.connection.device, 'send_command'):
                                                 # Check if candidate revision still exists and its state
                                                 if self._candidate_revision_id:
-                                                    rev_full = self.connection.device.send_command('nv config revision -o json', read_timeout=10)
+                                                    rev_full = self.connection.device.send_command_timing('nv config revision -o json', read_timeout=10)
                                                     if rev_full:
                                                         import json
                                                         rev_data_full = json.loads(rev_full)
@@ -3638,7 +3869,7 @@ class NAPALMDeviceManager:
                                 logs.append(f"  [FALLBACK] Executing: {expected_cmd}")
                                 
                                 if hasattr(self.connection, 'device') and hasattr(self.connection.device, 'send_command'):
-                                    commit_output = self.connection.device.send_command(expected_cmd, read_timeout=60)
+                                    commit_output = self.connection.device.send_command_timing(expected_cmd, read_timeout=60)
                                     logger.info(f"Fallback command output: {commit_output}")
                                     logs.append(f"  [DEBUG] Command output: {commit_output[:300] if commit_output else '(no output)'}")
                                     commit_result = commit_output
@@ -3666,7 +3897,7 @@ class NAPALMDeviceManager:
                                                     logs.append(f"  ⚠ Fallback executed but no commit-confirm session created")
                                                     logs.append(f"  [DEBUG] Checking config diff to understand why...")
                                                     try:
-                                                        diff_after_fallback = self.connection.device.send_command('nv config diff', read_timeout=10)
+                                                        diff_after_fallback = self.connection.device.send_command_timing('nv config diff', read_timeout=10)
                                                         if diff_after_fallback:
                                                             if 'no changes' in diff_after_fallback.lower() or 'no config diff' in diff_after_fallback.lower():
                                                                 logger.info(f"Config diff shows no changes - configuration already applied")
@@ -3704,29 +3935,46 @@ class NAPALMDeviceManager:
                             try:
                                 if hasattr(self.connection, 'device') and hasattr(self.connection.device, 'send_command'):
                                     # Check if there are pending changes immediately after commit
-                                    time.sleep(0.5)  # Small delay to allow revision to be created
-                                    diff_check = self.connection.device.send_command('nv config diff', read_timeout=10)
-                                    logger.info(f"Config diff immediately after commit:\n{diff_check}")
-                                    logs.append(f"  [DEBUG] Config diff immediately after commit:")
-                                    if diff_check:
-                                        for line in diff_check.split('\n')[:20]:
-                                            if line.strip():
-                                                logs.append(f"    {line.strip()}")
-                                        
-                                        if 'no changes' in diff_check.lower() or 'no config diff' in diff_check.lower():
-                                            logger.info(f"No pending changes found - configuration already applied to device")
-                                            logs.append(f"  ℹ No pending changes detected - configuration already applied")
-                                            logs.append(f"  ℹ Device is already in desired state - no commit-confirm session needed")
-                                            # Mark that config is already applied
-                                            result['_config_already_applied'] = True
+                                    # Use send_command_timing() to avoid prompt detection issues
+                                    # After commit, 'nv config diff' should show the pending commit-confirm session changes
+                                    time.sleep(1)  # Small delay to allow revision to be created and state to update
+                                    try:
+                                        diff_check = self.connection.device.send_command_timing('nv config diff', read_timeout=15)
+                                        logger.info(f"Config diff immediately after commit (length: {len(diff_check) if diff_check else 0}):")
+                                        if diff_check:
+                                            logger.info(f"{diff_check[:500]}")  # Log first 500 chars
+                                        logs.append(f"  [DEBUG] Config diff immediately after commit:")
+                                        if diff_check and diff_check.strip():
+                                            # Log first 20 lines of diff
+                                            for line in diff_check.split('\n')[:20]:
+                                                if line.strip():
+                                                    logs.append(f"    {line.strip()}")
+                                            
+                                            # Check if diff shows actual changes or "no changes" message
+                                            diff_lower = diff_check.lower()
+                                            if 'no changes' in diff_lower or 'no config diff' in diff_lower:
+                                                logger.info(f"No pending changes found - configuration already applied to device")
+                                                logs.append(f"  ℹ No pending changes detected - configuration already applied")
+                                                logs.append(f"  ℹ Device is already in desired state - no commit-confirm session needed")
+                                                # Mark that config is already applied
+                                                result['_config_already_applied'] = True
+                                            else:
+                                                logger.info(f"Pending changes detected after commit ({len(diff_check)} chars)")
+                                                logs.append(f"  SUCCESS: Pending changes detected")
                                         else:
-                                            logger.info(f"Pending changes detected after commit")
-                                            logs.append(f"  SUCCESS: Pending changes detected")
-                                    else:
-                                        logger.warning(f"diff_check returned empty/None")
-                                        logs.append(f"  ⚠ Config diff returned empty")
-                                        # Track that diff was empty after commit - will be used in Phase 5
-                                        result['_config_diff_empty_after_commit'] = True
+                                            logger.warning(f"Config diff returned empty/None after commit")
+                                            logger.warning(f"This may indicate: (1) Command failed silently, (2) Config already applied, or (3) Timing issue")
+                                            logs.append(f"  ⚠ Config diff returned empty")
+                                            logs.append(f"  [DEBUG] This may indicate command failure or config already applied")
+                                            # Track that diff was empty after commit - will be used in Phase 5
+                                            result['_config_diff_empty_after_commit'] = True
+                                    except Exception as diff_check_exception:
+                                        logger.error(f"Exception checking config diff after commit: {diff_check_exception}")
+                                        logs.append(f"  ⚠ Exception checking diff: {str(diff_check_exception)}")
+                                        import traceback
+                                        logger.debug(f"Traceback: {traceback.format_exc()}")
+                                        # If diff check failed, we can't be sure, but if it was empty before, it's likely still empty
+                                        # Don't set the flag here - let Phase 5 handle it based on the flag from successful checks
                             except Exception as diff_error:
                                 logger.error(f"Exception checking config diff after commit: {diff_error}")
                                 logs.append(f"  ⚠ Exception checking diff: {str(diff_error)}")
@@ -3769,7 +4017,7 @@ class NAPALMDeviceManager:
                             try:
                                 if hasattr(self.connection, 'device') and hasattr(self.connection.device, 'send_command'):
                                     # Check revision JSON
-                                    rev_json = self.connection.device.send_command('nv config revision -o json', read_timeout=10)
+                                    rev_json = self.connection.device.send_command_timing('nv config revision -o json', read_timeout=10)
                                     if rev_json:
                                         import json
                                         rev_data = json.loads(rev_json)
@@ -3797,7 +4045,7 @@ class NAPALMDeviceManager:
                                 logs.append(f"")
                                 logs.append(f"  === RECOMMENDED ACTIONS ===")
                                 logs.append(f"  1. Check device manually: nv config history")
-                                logs.append(f"  2. Abort existing commit: nv config abort")
+                                logs.append(f"  2. Delete existing commit: nv config delete <revision_id>")
                                 logs.append(f"  3. Or wait for timeout (if commit-confirm is active)")
                                 logs.append(f"  4. Then retry the deployment")
                                 logs.append(f"")
@@ -3844,8 +4092,9 @@ class NAPALMDeviceManager:
                                     if pending_commits and len(pending_commits) > 0:
                                         # Get the most recent pending commit (first in list, or highest number)
                                         actual_pending_revision = str(pending_commits[0])
-                                        logger.info(f"Found pending commit using _get_pending_commits(): {actual_pending_revision}")
-                                        logs.append(f"  [DEBUG] Found pending commit via JSON API: {actual_pending_revision}")
+                                        logger.info(f"Found commit-confirm session (pending confirmation) using _get_pending_commits(): {actual_pending_revision}")
+                                        logs.append(f"  [DEBUG] Found commit-confirm session (pending confirmation) via JSON API: revision {actual_pending_revision}")
+                                        logs.append(f"  [INFO] Note: 'Pending' means commit-confirm session is active (config is applied, waiting for confirmation)")
                                 else:
                                     detailed_diagnostics.append(f"Method 1: NAPALM driver doesn't have _get_pending_commits()")
                             except Exception as json_error:
@@ -3860,7 +4109,7 @@ class NAPALMDeviceManager:
                             # nv config revision -o json for the ACTUAL current state (state == 'confirm' means pending)
                             if not actual_pending_revision:
                                 try:
-                                    history_json_output = self.connection.device.send_command('nv config history -o json', read_timeout=10)
+                                    history_json_output = self.connection.device.send_command_timing('nv config history -o json', read_timeout=10)
                                     detailed_diagnostics.append(f"Method 2 (nv config history -o json): {history_json_output[:200] if history_json_output else 'No output'}")
                                     if history_json_output:
                                         import json
@@ -3911,7 +4160,7 @@ class NAPALMDeviceManager:
                                             # Check revision CURRENT state using nv config revision -o json
                                             # This shows ONLY revisions that are currently pending (state == 'confirm')
                                             try:
-                                                revision_json_output = self.connection.device.send_command('nv config revision -o json', read_timeout=10)
+                                                revision_json_output = self.connection.device.send_command_timing('nv config revision -o json', read_timeout=10)
                                                 if revision_json_output:
                                                     revision_data = json.loads(revision_json_output)
                                                     detailed_diagnostics.append(f"Method 2: nv config revision -o json shows {len(revision_data)} revision(s) with current state")
@@ -3956,7 +4205,7 @@ class NAPALMDeviceManager:
                             # METHOD 3: Parse nv config history text output (fallback if JSON methods fail)
                             if not actual_pending_revision:
                                 try:
-                                    pending_rev_output = self.connection.device.send_command('nv config history | head -5', read_timeout=10)
+                                    pending_rev_output = self.connection.device.send_command_timing('nv config history | head -5', read_timeout=10)
                                     logger.debug(f"Full history output after commit:\n{pending_rev_output}")
                                     detailed_diagnostics.append(f"Method 3 (nv config history):")
                                     for line in pending_rev_output.split('\n')[:5] if pending_rev_output else []:
@@ -3998,7 +4247,7 @@ class NAPALMDeviceManager:
                                         # Also verify the found revision exists in nv config revision -o json
                                         if actual_pending_revision:
                                             try:
-                                                revision_json_output = self.connection.device.send_command('nv config revision -o json', read_timeout=10)
+                                                revision_json_output = self.connection.device.send_command_timing('nv config revision -o json', read_timeout=10)
                                                 if revision_json_output:
                                                     revision_data = json.loads(revision_json_output)
                                                     if actual_pending_revision in revision_data:
@@ -4028,8 +4277,9 @@ class NAPALMDeviceManager:
                                     if hasattr(self.connection, 'revision_id'):
                                         self.connection.revision_id = actual_pending_revision
                                     logger.info(f"Found OUR pending commit-confirm revision ID: {actual_pending_revision} (created during this deployment)")
-                                    logs.append(f"  SUCCESS: Pending revision ID captured: {actual_pending_revision}")
-                                    logs.append(f"  ℹ This is OUR revision (created during this deployment)")
+                                    logs.append(f"  SUCCESS: Commit-confirm session revision ID captured: {actual_pending_revision}")
+                                    logs.append(f"  ℹ This is OUR commit-confirm session (created during this deployment)")
+                                    logs.append(f"  ℹ Config is APPLIED and active, but session is PENDING confirmation (will auto-rollback if not confirmed)")
                                     detailed_diagnostics.append(f"Revision {actual_pending_revision} is OUR revision (created during this deployment)")
                                 else:
                                     logger.warning(f"Found pending revision {actual_pending_revision} but it was present BEFORE our deployment - this should not happen!")
@@ -4058,7 +4308,7 @@ class NAPALMDeviceManager:
                                 logs.append(f"")
                                 
                                 # Check if there's a diff (if no diff, no revision is created - this is NORMAL for idempotent configs)
-                                diff_check = self.connection.device.send_command('nv config diff', read_timeout=10)
+                                diff_check = self.connection.device.send_command_timing('nv config diff', read_timeout=10)
                                 detailed_diagnostics.append(f"nv config diff check: {diff_check[:200] if diff_check else 'No output'}")
                                 
                                 if diff_check and ('no changes' in diff_check.lower() or 'no config diff' in diff_check.lower()):
@@ -4094,7 +4344,7 @@ class NAPALMDeviceManager:
                                         logger.info(f"FALLBACK: Executing direct NVUE command: nv config apply --confirm {timeout}s -y")
                                         logs.append(f"  [FALLBACK] Executing: nv config apply --confirm {timeout}s -y")
                                         
-                                        fallback_output = self.connection.device.send_command(
+                                        fallback_output = self.connection.device.send_command_timing(
                                             f'nv config apply --confirm {timeout}s -y',
                                             read_timeout=120,
                                             expect_string=r'#'
@@ -4124,7 +4374,7 @@ class NAPALMDeviceManager:
                                             
                                             # Check again for pending revision
                                             try:
-                                                revision_json_check = self.connection.device.send_command('nv config revision -o json', read_timeout=10)
+                                                revision_json_check = self.connection.device.send_command_timing('nv config revision -o json', read_timeout=10)
                                                 if revision_json_check:
                                                     import json
                                                     rev_data_check = json.loads(revision_json_check)
@@ -4186,7 +4436,7 @@ class NAPALMDeviceManager:
                     logger.info(f"Creating EOS configure session: {session_name}")
                     logs.append(f"  Creating session...")
                     # Note: Prompt changes from "hostname#" to "hostname(config-s-session_name)#"
-                    output = netmiko_conn.send_command(
+                    output = netmiko_conn.send_command_timing(
                         f"configure session {session_name}",
                         expect_string=r'\(config-s-.*\)#',
                         read_timeout=30
@@ -4201,7 +4451,7 @@ class NAPALMDeviceManager:
                     config_lines = [line.strip() for line in config.split('\n') if line.strip()]
                     for cmd in config_lines:
                         # Send each command with appropriate expect pattern
-                        output = netmiko_conn.send_command(
+                        output = netmiko_conn.send_command_timing(
                             cmd,
                             expect_string=r'\(config.*\)#',
                             read_timeout=30
@@ -4215,7 +4465,7 @@ class NAPALMDeviceManager:
                             logs.append(f"  ✗ {error_msg}")
                             # Abort the session
                             try:
-                                netmiko_conn.send_command("abort", expect_string=r'#', read_timeout=10)
+                                netmiko_conn.send_command_timing("abort", expect_string=r'#', read_timeout=10)
                             except:
                                 pass
                             result['message'] = f"Configuration rejected by device: {output.strip()}"
@@ -4224,7 +4474,7 @@ class NAPALMDeviceManager:
 
                     # Step 3: Show pending diff (for logging)
                     try:
-                        diff_output = netmiko_conn.send_command(
+                        diff_output = netmiko_conn.send_command_timing(
                             "show session-config diffs",
                             expect_string=r'\(config-s-.*\)#',
                             read_timeout=30
@@ -4241,7 +4491,7 @@ class NAPALMDeviceManager:
                     logs.append(f"  Committing with {timer_minutes} minute timer...")
                     commit_cmd = f"commit timer {timer_minutes:02d}:00:00"
                     # After commit, we exit config mode back to privileged exec
-                    output = netmiko_conn.send_command(
+                    output = netmiko_conn.send_command_timing(
                         commit_cmd,
                         expect_string=r'#',
                         read_timeout=60
@@ -4274,7 +4524,7 @@ class NAPALMDeviceManager:
                     try:
                         if hasattr(self, '_eos_netmiko_conn') and not hasattr(self, '_eos_session_timer'):
                             # Session created but not committed yet - abort is valid
-                            self._eos_netmiko_conn.send_command("abort")
+                            self._eos_netmiko_conn.send_command_timing("abort")
                             logs.append(f"  SUCCESS: Session aborted (before commit timer)")
                     except Exception as abort_err:
                         logger.debug(f"Could not abort session: {abort_err}")
@@ -4497,12 +4747,12 @@ class NAPALMDeviceManager:
                                         diff_output = None
                                         has_diff = False
                                         try:
-                                            # Try send_command first (more reliable if it works)
+                                            # Use send_command_timing for diff check (more reliable than send_command)
                                             try:
-                                                diff_output = self.connection.device.send_command('nv config diff', read_timeout=10)
+                                                diff_output = self.connection.device.send_command_timing('nv config diff', read_timeout=10)
                                             except Exception as send_cmd_error:
-                                                # If send_command fails (e.g., pattern detection error), try send_command_timing
-                                                logger.debug(f"send_command failed for diff check, trying send_command_timing: {send_cmd_error}")
+                                                # If first attempt fails, retry with longer delay
+                                                logger.debug(f"send_command_timing failed for diff check, retrying with longer delay: {send_cmd_error}")
                                                 if hasattr(self.connection.device, 'send_command_timing'):
                                                     diff_output = self.connection.device.send_command_timing('nv config diff', delay_factor=2, max_loops=30)
                                                 else:
@@ -4552,7 +4802,7 @@ class NAPALMDeviceManager:
                                             delete_cmd = f"nv config delete {actual_pending_revision}"
                                             logger.info(f"Deleting pending revision {actual_pending_revision} (no diff - config already applied)")
                                             logs.append(f"  [DEBUG] Executing: {delete_cmd}")
-                                            delete_output = self.connection.device.send_command(delete_cmd, read_timeout=30)
+                                            delete_output = self.connection.device.send_command_timing(delete_cmd, read_timeout=30)
                                             logger.info(f"Delete revision output: {delete_output}")
                                             logs.append(f"  [OK] Pending revision {actual_pending_revision} deleted successfully")
                                             
@@ -4591,7 +4841,7 @@ class NAPALMDeviceManager:
                                         revision_state_before = None
                                         try:
                                             if hasattr(self.connection, 'device') and hasattr(self.connection.device, 'send_command'):
-                                                rev_json_before = self.connection.device.send_command('nv config revision -o json', read_timeout=10)
+                                                rev_json_before = self.connection.device.send_command_timing('nv config revision -o json', read_timeout=10)
                                                 if rev_json_before:
                                                     import json
                                                     rev_data_before = json.loads(rev_json_before)
@@ -4602,9 +4852,9 @@ class NAPALMDeviceManager:
                                         except Exception as state_check_error:
                                             logger.debug(f"Could not check revision state before confirm: {state_check_error}")
                                         
-                                        # Use send_command_timing() instead of send_command() for better reliability
-                                        # send_command() waits for prompt pattern which may not match during NVUE processing
-                                        # send_command_timing() uses timing-based detection (more reliable for NVUE commands)
+                                        # Use send_command_timing() for reliable command execution
+                                        # send_command_timing() uses timing-based detection instead of prompt pattern matching
+                                        # This avoids "Pattern not detected" errors during NVUE processing
                                         # Increase timeout to 90s - confirm command can take longer, especially with large configs
                                         confirm_output = None
                                         confirm_succeeded = False
@@ -4614,10 +4864,11 @@ class NAPALMDeviceManager:
                                                 logs.append(f"  [DEBUG] Using send_command_timing() method (more reliable for NVUE)")
                                                 confirm_output = self.connection.device.send_command_timing(confirm_cmd, read_timeout=90, delay_factor=2)
                                             else:
-                                                # Fallback to send_command if send_command_timing not available
-                                                logger.info(f"Using send_command() for confirm command (fallback)")
-                                                logs.append(f"  [DEBUG] Using send_command() method (fallback)")
-                                                confirm_output = self.connection.device.send_command(confirm_cmd, read_timeout=90)
+                                                # Fallback: send_command_timing should always be available, but handle gracefully
+                                                logger.warning(f"send_command_timing not available, this should not happen")
+                                                logs.append(f"  [WARN] send_command_timing not available (unexpected)")
+                                                # Still try send_command_timing as it should exist
+                                                confirm_output = self.connection.device.send_command_timing(confirm_cmd, read_timeout=90)
                                             
                                             logger.info(f"Confirm command completed, output length: {len(str(confirm_output)) if confirm_output else 0}")
                                             
@@ -4675,7 +4926,7 @@ class NAPALMDeviceManager:
                                         pending_after_confirm = True
                                         try:
                                             if hasattr(self.connection, 'device') and hasattr(self.connection.device, 'send_command'):
-                                                rev_json_after = self.connection.device.send_command('nv config revision -o json', read_timeout=10)
+                                                rev_json_after = self.connection.device.send_command_timing('nv config revision -o json', read_timeout=10)
                                                 if rev_json_after:
                                                     import json
                                                     rev_data_after = json.loads(rev_json_after)
@@ -4702,7 +4953,7 @@ class NAPALMDeviceManager:
                                                 # Even if revision state still shows 'confirm', check history to see if it has Apply Date
                                                 if pending_after_confirm:
                                                     try:
-                                                        history_json = self.connection.device.send_command('nv config history -o json', read_timeout=10)
+                                                        history_json = self.connection.device.send_command_timing('nv config history -o json', read_timeout=10)
                                                         if history_json:
                                                             import json
                                                             history_data = json.loads(history_json)
@@ -4737,15 +4988,15 @@ class NAPALMDeviceManager:
                                         logs.append(f"  ⚠ WARNING: Pending commit still exists after confirm command")
                                         logs.append(f"  [INFO] This means the confirm command did not succeed")
                                         logs.append(f"  [INFO] The pending commit will auto-rollback when the timer expires")
-                                        logs.append(f"  [INFO] Attempting to abort the pending commit now...")
-                                        # If confirm failed, abort the pending commit (it will rollback anyway, but abort is cleaner)
-                                        abort_success = self._clear_pending_commit(driver_name, logs)
-                                        if abort_success:
-                                            logs.append(f"  [OK] Pending commit aborted successfully")
-                                            logger.info("Pending commit aborted after failed confirm")
+                                        logs.append(f"  [INFO] Attempting to delete the pending commit now...")
+                                        # If confirm failed, delete the pending commit (it will rollback anyway, but deletion is cleaner)
+                                        delete_success = self._clear_pending_commit(driver_name, logs)
+                                        if delete_success:
+                                            logs.append(f"  [OK] Pending commit deleted successfully")
+                                            logger.info("Pending commit deleted after failed confirm")
                                         else:
                                             # Abort failed - but the commit will still auto-rollback when timer expires
-                                            logs.append(f"  ⚠ WARNING: Could not abort pending commit, but it will auto-rollback when timer expires")
+                                            logs.append(f"  ⚠ WARNING: Could not delete pending commit, but it will auto-rollback when timer expires")
                                             logger.warning("Could not abort pending commit, but it will auto-rollback when timer expires")
                                             raise Exception(f"Confirm command failed - pending commit still exists. It will auto-rollback when the timer expires.")
                                     else:
@@ -4755,7 +5006,7 @@ class NAPALMDeviceManager:
                                     # Also run nv config save to make it persistent
                                     logger.info(f"Saving config to persistent storage")
                                     logs.append(f"  [DEBUG] Executing: nv config save")
-                                    save_output = self.connection.device.send_command("nv config save", read_timeout=30)
+                                    save_output = self.connection.device.send_command_timing("nv config save", read_timeout=30)
                                     logger.info(f"Save output: {save_output}")
                                     logs.append(f"  [DEBUG] Save output: {save_output[:200] if save_output else '(no output)'}")
                                     
@@ -4785,7 +5036,7 @@ class NAPALMDeviceManager:
                                     # Try to get error from config diff or device
                                     if hasattr(self.connection, 'device') and hasattr(self.connection.device, 'send_command'):
                                         # Check 1: What does nv config diff show?
-                                        diff_output = self.connection.device.send_command('nv config diff', read_timeout=10)
+                                        diff_output = self.connection.device.send_command_timing('nv config diff', read_timeout=10)
                                         detailed_diagnostics.append(f"[DEBUG] nv config diff output:")
                                         if diff_output:
                                             detailed_diagnostics.append(f"  {diff_output[:500]}")
@@ -4801,7 +5052,7 @@ class NAPALMDeviceManager:
                                         # Check 2: What does nv config history show?
                                         # NOTE: "Currently pending [rev_id: X]" in history shows the CANDIDATE revision (from load_config)
                                         # It only becomes a commit-confirm session after commit_config() is called
-                                        history_output = self.connection.device.send_command('nv config history | head -10', read_timeout=10)
+                                        history_output = self.connection.device.send_command_timing('nv config history | head -10', read_timeout=10)
                                         detailed_diagnostics.append(f"[DEBUG] nv config history output:")
                                         detailed_diagnostics.append(f"[NOTE] 'Currently pending [rev_id: X]' is the CANDIDATE revision, not commit-confirm session")
                                         if history_output:
@@ -4816,7 +5067,7 @@ class NAPALMDeviceManager:
                                             detailed_diagnostics.append(f"[DEBUG] commit_config() return type: {type(commit_result)}")
                                         
                                         # Check 4: Check for pending commits now
-                                        pending_check = self.connection.device.send_command('nv config revision -o json', read_timeout=10)
+                                        pending_check = self.connection.device.send_command_timing('nv config revision -o json', read_timeout=10)
                                         detailed_diagnostics.append(f"[DEBUG] nv config revision -o json:")
                                         if pending_check:
                                             try:
@@ -4884,7 +5135,7 @@ class NAPALMDeviceManager:
                                     # Check current state to understand what happened
                                     try:
                                         if hasattr(self.connection, 'device') and hasattr(self.connection.device, 'send_command'):
-                                            diff_check = self.connection.device.send_command('nv config diff', read_timeout=10)
+                                            diff_check = self.connection.device.send_command_timing('nv config diff', read_timeout=10)
                                             
                                             if diff_check and 'no changes' not in diff_check.lower():
                                                 # CRITICAL: Changes exist but no commit-confirm session - this is BAD
@@ -4902,7 +5153,7 @@ class NAPALMDeviceManager:
                                                 logs.append(f"  1. Review commands for syntax errors")
                                                 logs.append(f"  2. Check device logs: show log syslog")
                                                 logs.append(f"  3. Manually verify config: nv config diff")
-                                                logs.append(f"  4. Abort pending changes: nv config abort")
+                                                logs.append(f"  4. Delete pending changes: nv config delete <revision_id>")
                                                 logs.append(f"")
                                                 result['success'] = False
                                                 result['committed'] = False
@@ -4942,7 +5193,7 @@ class NAPALMDeviceManager:
                                     try:
                                         if hasattr(self.connection, 'device') and hasattr(self.connection.device, 'send_command'):
                                             # Use nv config history instead of revision -o json (more reliable)
-                                            pending_rev_output = self.connection.device.send_command('nv config history | grep -i "pending\\|confirm" | head -1', read_timeout=10)
+                                            pending_rev_output = self.connection.device.send_command_timing('nv config history | grep -i "pending\\|confirm" | head -1', read_timeout=10)
                                             if pending_rev_output:
                                                 import re
                                                 rev_match = re.search(r'Revision:\s*(\d+)', pending_rev_output)
@@ -4951,8 +5202,8 @@ class NAPALMDeviceManager:
                                                 if rev_match:
                                                     actual_rev = rev_match.group(1)
                                                     logger.info(f"Found pending revision {actual_rev}, confirming manually...")
-                                                    self.connection.device.send_command(f"nv config apply {actual_rev} --confirm-yes", read_timeout=30)
-                                                    self.connection.device.send_command("nv config save", read_timeout=30)
+                                                    self.connection.device.send_command_timing(f"nv config apply {actual_rev} --confirm-yes", read_timeout=30)
+                                                    self.connection.device.send_command_timing("nv config save", read_timeout=30)
                                                     if hasattr(self.connection, 'revision_id'):
                                                         self.connection.revision_id = None
                                                 else:
@@ -5068,7 +5319,7 @@ class NAPALMDeviceManager:
                             logs.append(f"  [OK] Pending commit cleared successfully")
                         else:
                             logs.append(f"  [FAIL] Could not clear pending commit automatically")
-                            logs.append(f"  Manual cleanup required: nv config abort")
+                            logs.append(f"  Manual cleanup required: nv config delete <revision_id>")
                     else:
                         logs.append(f"  [OK] No pending commits - device is in stable state")
                     logs.append(f"")
@@ -5140,7 +5391,7 @@ class NAPALMDeviceManager:
                     
                     # Send 'commit' command to confirm the pending commit
                     # After commit confirmation, we stay in privileged exec mode
-                    output = netmiko_conn.send_command(
+                    output = netmiko_conn.send_command_timing(
                         "commit",
                         expect_string=r'#',
                         read_timeout=60
@@ -5268,7 +5519,7 @@ class NAPALMDeviceManager:
                     else:
                         logs.append(f"  [FAIL] Could not clear pending commit automatically")
                         logs.append(f"  WARNING: Device may be in unstable state with pending commit")
-                        logs.append(f"  Manual cleanup required: nv config abort")
+                        logs.append(f"  Manual cleanup required: nv config delete <revision_id>")
                 else:
                     logs.append(f"  [OK] No pending commits - device is in stable state")
                 logs.append(f"")
@@ -5309,7 +5560,7 @@ class NAPALMDeviceManager:
                                 timestamp = int(time_module.time())
                                 post_snapshot_file = f"/tmp/post_deploy_{timestamp}_failed.txt"
                                 export_cmd = f"nv config show -r applied -o commands > {post_snapshot_file}"
-                                self.connection.device.send_command(export_cmd, read_timeout=30)
+                                self.connection.device.send_command_timing(export_cmd, read_timeout=30)
                                 logs.append(f"  Post-deployment snapshot: {post_snapshot_file}")
                                 
                                 # Step 2: Read both snapshots
@@ -5318,8 +5569,8 @@ class NAPALMDeviceManager:
                                 pre_config_cmd = f"cat {pre_snapshot_file}"
                                 post_config_cmd = f"cat {post_snapshot_file}"
                                 
-                                pre_config = self.connection.device.send_command(pre_config_cmd, read_timeout=10)
-                                post_config = self.connection.device.send_command(post_config_cmd, read_timeout=10)
+                                pre_config = self.connection.device.send_command_timing(pre_config_cmd, read_timeout=10)
+                                post_config = self.connection.device.send_command_timing(post_config_cmd, read_timeout=10)
                                 
                                 # Step 3: Compare and find differences
                                 pre_lines = set(pre_config.strip().split('\n'))
@@ -5362,7 +5613,7 @@ class NAPALMDeviceManager:
                                     logs.append(f"  Executing rollback commands...")
                                     for cmd in rollback_commands:
                                         try:
-                                            output = self.connection.device.send_command(cmd, read_timeout=10)
+                                            output = self.connection.device.send_command_timing(cmd, read_timeout=10)
                                             if output and output.strip():
                                                 logger.debug(f"Rollback command output: {output}")
                                         except Exception as cmd_error:
@@ -5374,7 +5625,7 @@ class NAPALMDeviceManager:
                                     
                                     # Step 5: Check config diff
                                     logs.append(f"  Verifying rollback changes...")
-                                    diff_output = self.connection.device.send_command('nv config diff', read_timeout=10)
+                                    diff_output = self.connection.device.send_command_timing('nv config diff', read_timeout=10)
                                     
                                     if diff_output and diff_output.strip() and 'no changes' not in diff_output.lower():
                                         # Changes detected - need to apply
@@ -5386,12 +5637,12 @@ class NAPALMDeviceManager:
                                         
                                         # Step 6: Apply the rollback
                                         logs.append(f"  Applying rollback configuration...")
-                                        apply_output = self.connection.device.send_command('nv config apply', read_timeout=30)
+                                        apply_output = self.connection.device.send_command_timing('nv config apply', read_timeout=30)
                                         logs.append(f"  SUCCESS: Rollback configuration applied")
                                         
                                         # Step 7: Verify rollback succeeded
                                         time.sleep(2)
-                                        verify_diff = self.connection.device.send_command('nv config diff', read_timeout=10)
+                                        verify_diff = self.connection.device.send_command_timing('nv config diff', read_timeout=10)
                                         
                                         if not verify_diff or not verify_diff.strip() or 'no changes' in verify_diff.lower():
                                             logs.append(f"  SUCCESS: Rollback verification: No pending changes")

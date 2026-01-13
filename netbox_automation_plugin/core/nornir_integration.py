@@ -1432,7 +1432,7 @@ class NornirDeviceManager:
                                         if hasattr(connection, 'cli'):
                                             config_show_output = connection.cli(['show running-config'])
                                         elif hasattr(connection, 'device') and hasattr(connection.device, 'send_command'):
-                                            # CRITICAL FIX: Use send_command_timing() instead of send_command()
+                                            # Use send_command_timing() for reliable command execution (avoids prompt detection issues)
                                             logger.info(f"Device {device_name}: Fetching config using send_command_timing()...")
                                             config_show_output = connection.device.send_command_timing('show running-config')
                                         else:
@@ -1523,7 +1523,7 @@ class NornirDeviceManager:
                                 if hasattr(connection, 'cli'):
                                     config_show_output = connection.cli(['nv config show -o json'])
                                 elif hasattr(connection, 'device') and hasattr(connection.device, 'send_command'):
-                                    config_show_output = connection.device.send_command('nv config show -o json', read_timeout=60)
+                                    config_show_output = connection.device.send_command_timing('nv config show -o json', read_timeout=60)
                                 else:
                                     config_show_output = None
 
@@ -1703,7 +1703,7 @@ class NornirDeviceManager:
                                 if napalm_mgr.connection and hasattr(napalm_mgr.connection, 'device') and hasattr(napalm_mgr.connection.device, 'send_command'):
                                     # Query member interface for current VLAN config
                                     if platform == 'cumulus':
-                                        member_vlan_check = napalm_mgr.connection.device.send_command(
+                                        member_vlan_check = napalm_mgr.connection.device.send_command_timing(
                                             f'nv show interface {actual_interface_name} bridge domain br_default access -o json',
                                             read_timeout=10
                                         )
@@ -1717,7 +1717,7 @@ class NornirDeviceManager:
                                                     logger.info(f"Device {device_name}: Member interface {actual_interface_name} has VLAN config - will remove it")
                                             except (json.JSONDecodeError, ValueError):
                                                 # Try text output as fallback
-                                                member_vlan_text = napalm_mgr.connection.device.send_command(
+                                                member_vlan_text = napalm_mgr.connection.device.send_command_timing(
                                                     f'nv show interface {actual_interface_name} bridge domain br_default access',
                                                     read_timeout=10
                                                 )
@@ -1726,7 +1726,7 @@ class NornirDeviceManager:
                                                     logger.info(f"Device {device_name}: Member interface {actual_interface_name} has VLAN config (text check) - will remove it")
                                     elif platform == 'eos':
                                         # For EOS, check switchport config
-                                        member_switchport = napalm_mgr.connection.device.send_command(
+                                        member_switchport = napalm_mgr.connection.device.send_command_timing(
                                             f'show interfaces {actual_interface_name} switchport',
                                             read_timeout=10
                                         )

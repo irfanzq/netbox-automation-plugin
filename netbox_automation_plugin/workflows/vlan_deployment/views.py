@@ -2923,7 +2923,7 @@ class VLANDeploymentView(View):
             rollback_lines.append("Manual Rollback Options (only if auto-rollback fails or timer expires):")
             rollback_lines.append("")
             rollback_lines.append("  Option 2: Abort pending config (before timer expires):")
-            rollback_lines.append("    nv config abort")
+            rollback_lines.append("    nv config delete <revision_id>  # Replace <revision_id> with actual revision number")
             rollback_lines.append("")
             rollback_lines.append("  Option 3: Remove VLAN config and restore previous state:")
             # Extract previous config commands from current_config
