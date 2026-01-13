@@ -1164,21 +1164,27 @@ class NornirDeviceManager:
             }
         """
         logger.info(f"[DEPLOY_VLAN ENTRY] Called with dry_run={dry_run}, preview_callback={'provided' if preview_callback else 'None'}, interface_list={interface_list[:3]}... ({len(interface_list)} total)")
+        logger.info(f"[DEPLOY_VLAN] Step 1: Checking Nornir initialization...")
 
         if not self.nr:
+            logger.info(f"[DEPLOY_VLAN] Step 2: Nornir not initialized, calling initialize()...")
             self.nr = self.initialize()
+            logger.info(f"[DEPLOY_VLAN] Step 2: Nornir initialization complete")
+        else:
+            logger.info(f"[DEPLOY_VLAN] Step 2: Nornir already initialized, reusing existing instance")
 
         num_devices = len(self.nr.inventory.hosts)
         num_interfaces = len(interface_list)
         total_tasks = num_devices * num_interfaces
 
-        logger.info(f"[DEPLOY_VLAN] Nornir inventory has {num_devices} devices: {list(self.nr.inventory.hosts.keys())}")
+        logger.info(f"[DEPLOY_VLAN] Step 3: Nornir inventory has {num_devices} devices: {list(self.nr.inventory.hosts.keys())}")
 
         mode_str = "DRY RUN preview" if dry_run else "deployment"
-        logger.info(f"Starting VLAN {vlan_id} {mode_str} to {num_devices} devices, "
+        logger.info(f"[DEPLOY_VLAN] Step 4: Starting VLAN {vlan_id} {mode_str} to {num_devices} devices, "
                    f"{num_interfaces} interfaces per device ({total_tasks} total tasks), "
                    f"platform: {platform}, max {self.num_workers} parallel workers")
-        logger.info(f"Strategy: Devices in PARALLEL (up to {self.num_workers}), interfaces per device BATCHED")
+        logger.info(f"[DEPLOY_VLAN] Strategy: Devices in PARALLEL (up to {self.num_workers}), interfaces per device BATCHED")
+        logger.info(f"[DEPLOY_VLAN] Step 5: About to start ThreadPoolExecutor with {self.num_workers} workers...")
         
         # Group by device: process interfaces sequentially per device, devices in parallel
         from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -1198,8 +1204,8 @@ class NornirDeviceManager:
 
             try:
                 mode_str = "preview" if dry_run else "deployment"
-                logger.info(f"Device {device_name}: Starting batched {mode_str} of {num_interfaces} interfaces in single session...")
-                logger.info(f"Device {device_name}: dry_run={dry_run}, preview_callback={'provided' if preview_callback else 'None'}")
+                logger.info(f"[DEPLOY_START] Device {device_name}: Starting batched {mode_str} of {num_interfaces} interfaces in single session...")
+                logger.info(f"[DEPLOY_START] Device {device_name}: dry_run={dry_run}, preview_callback={'provided' if preview_callback else 'None'}")
 
                 # Build config for all interfaces on this device
                 from netbox_automation_plugin.core.napalm_integration import NAPALMDeviceManager
@@ -1237,13 +1243,21 @@ class NornirDeviceManager:
                     connection_error = None
 
                     # Connect to device ONCE and fetch all data
+                    logger.info(f"Device {device_name}: Initializing NAPALMDeviceManager...")
                     napalm_mgr = NAPALMDeviceManager(device)
                     connection_success = False
                     try:
+                        logger.info(f"Device {device_name}: Attempting connection (this may take up to 60s)...")
                         connection_success = napalm_mgr.connect()
+                        if connection_success:
+                            logger.info(f"Device {device_name}: Connection successful!")
+                        else:
+                            logger.warning(f"Device {device_name}: Connection returned False (failed)")
                     except Exception as conn_err:
                         connection_error = str(conn_err)
                         logger.error(f"Device {device_name}: Connection exception: {connection_error}")
+                        import traceback
+                        logger.error(f"Device {device_name}: Connection traceback: {traceback.format_exc()}")
 
                     if connection_success:
                         try:
@@ -1321,9 +1335,10 @@ class NornirDeviceManager:
                                         # If cli() returned None or failed, try send_command_timing() fallback
                                         if not config_show_output and hasattr(connection, 'device') and hasattr(connection.device, 'send_command_timing'):
                                             try:
-                                                logger.info(f"Device {device_name}: Fetching config using send_command_timing('nv config show -o json')...")
+                                                logger.info(f"Device {device_name}: Fetching config using send_command_timing('nv config show -o json') (timeout=90s, this may take a while)...")
                                                 debug_info.append("Method 2: send_command_timing('nv config show -o json')")
                                                 timing_result = connection.device.send_command_timing('nv config show -o json', read_timeout=90, delay_factor=2)
+                                                logger.info(f"Device {device_name}: Config fetch completed (output length: {len(str(timing_result)) if timing_result else 0})")
                                                 logger.debug(f"Device {device_name}: send_command_timing() returned type: {type(timing_result)}, length: {len(str(timing_result)) if timing_result else 0}")
                                                 
                                                 if timing_result and str(timing_result).strip():
@@ -2081,20 +2096,32 @@ class NornirDeviceManager:
         # Execute device deployments in parallel (limited by num_workers)
         # Each device processes its interfaces sequentially
         device_names = list(self.nr.inventory.hosts.keys())
+        logger.info(f"[DEPLOY_VLAN] Step 6: Starting ThreadPoolExecutor with {min(len(device_names), self.num_workers)} workers for {len(device_names)} devices...")
+        logger.info(f"[DEPLOY_VLAN] Device list: {device_names}")
+        
         with ThreadPoolExecutor(max_workers=min(len(device_names), self.num_workers)) as executor:
-            futures = {executor.submit(deploy_device_interfaces, device): device for device in device_names}
+            logger.info(f"[DEPLOY_VLAN] Step 7: Submitting {len(device_names)} tasks to executor...")
+            futures = {}
+            for device in device_names:
+                logger.info(f"[DEPLOY_VLAN] Submitting task for device: {device}")
+                future = executor.submit(deploy_device_interfaces, device)
+                futures[future] = device
             
+            logger.info(f"[DEPLOY_VLAN] Step 8: All tasks submitted, waiting for completion...")
             completed = 0
             for future in as_completed(futures):
                 completed += 1
                 device_name = futures[future]
+                logger.info(f"[DEPLOY_VLAN] Device {device_name} task completed ({completed}/{num_devices}), getting result...")
                 try:
-                    future.result()
-                    logger.debug(f"Device {device_name} deployment completed ({completed}/{num_devices})")
+                    result = future.result()
+                    logger.info(f"[DEPLOY_VLAN] Device {device_name} deployment completed successfully ({completed}/{num_devices})")
                 except Exception as e:
-                    logger.error(f"Device {device_name} deployment raised exception: {e}")
+                    logger.error(f"[DEPLOY_VLAN] Device {device_name} deployment raised exception: {e}")
+                    import traceback
+                    logger.error(f"[DEPLOY_VLAN] Device {device_name} exception traceback: {traceback.format_exc()}")
         
-        logger.info(f"VLAN deployment complete for {len(all_results)} devices, {num_interfaces} interfaces")
+        logger.info(f"[DEPLOY_VLAN] Step 9: All tasks complete. VLAN deployment finished for {len(all_results)} devices, {num_interfaces} interfaces")
         
         return all_results
 
