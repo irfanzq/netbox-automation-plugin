@@ -1684,38 +1684,38 @@ class NornirDeviceManager:
                             member_has_vlan = False
                             try:
                                 if napalm_mgr.connection and hasattr(napalm_mgr.connection, 'device') and hasattr(napalm_mgr.connection.device, 'send_command'):
-                                # Query member interface for current VLAN config
-                                if platform == 'cumulus':
-                                    member_vlan_check = napalm_mgr.connection.device.send_command(
-                                        f'nv show interface {actual_interface_name} bridge domain br_default access -o json',
-                                        read_timeout=10
-                                    )
-                                    if member_vlan_check and member_vlan_check.strip():
-                                        import json
-                                        try:
-                                            member_vlan_data = json.loads(member_vlan_check)
-                                            # If we get a VLAN ID (int) or non-empty dict, member has VLAN config
-                                            if isinstance(member_vlan_data, int) or (isinstance(member_vlan_data, dict) and member_vlan_data):
-                                                member_has_vlan = True
-                                                logger.info(f"Device {device_name}: Member interface {actual_interface_name} has VLAN config - will remove it")
-                                        except (json.JSONDecodeError, ValueError):
-                                            # Try text output as fallback
-                                            member_vlan_text = napalm_mgr.connection.device.send_command(
-                                                f'nv show interface {actual_interface_name} bridge domain br_default access',
-                                                read_timeout=10
-                                            )
-                                            if member_vlan_text and member_vlan_text.strip().isdigit():
-                                                member_has_vlan = True
-                                                logger.info(f"Device {device_name}: Member interface {actual_interface_name} has VLAN config (text check) - will remove it")
-                                elif platform == 'eos':
-                                    # For EOS, check switchport config
-                                    member_switchport = napalm_mgr.connection.device.send_command(
-                                        f'show interfaces {actual_interface_name} switchport',
-                                        read_timeout=10
-                                    )
-                                    if member_switchport and 'Access Mode VLAN:' in member_switchport:
-                                        member_has_vlan = True
-                                        logger.info(f"Device {device_name}: Member interface {actual_interface_name} has VLAN config (EOS) - will remove it")
+                                    # Query member interface for current VLAN config
+                                    if platform == 'cumulus':
+                                        member_vlan_check = napalm_mgr.connection.device.send_command(
+                                            f'nv show interface {actual_interface_name} bridge domain br_default access -o json',
+                                            read_timeout=10
+                                        )
+                                        if member_vlan_check and member_vlan_check.strip():
+                                            import json
+                                            try:
+                                                member_vlan_data = json.loads(member_vlan_check)
+                                                # If we get a VLAN ID (int) or non-empty dict, member has VLAN config
+                                                if isinstance(member_vlan_data, int) or (isinstance(member_vlan_data, dict) and member_vlan_data):
+                                                    member_has_vlan = True
+                                                    logger.info(f"Device {device_name}: Member interface {actual_interface_name} has VLAN config - will remove it")
+                                            except (json.JSONDecodeError, ValueError):
+                                                # Try text output as fallback
+                                                member_vlan_text = napalm_mgr.connection.device.send_command(
+                                                    f'nv show interface {actual_interface_name} bridge domain br_default access',
+                                                    read_timeout=10
+                                                )
+                                                if member_vlan_text and member_vlan_text.strip().isdigit():
+                                                    member_has_vlan = True
+                                                    logger.info(f"Device {device_name}: Member interface {actual_interface_name} has VLAN config (text check) - will remove it")
+                                    elif platform == 'eos':
+                                        # For EOS, check switchport config
+                                        member_switchport = napalm_mgr.connection.device.send_command(
+                                            f'show interfaces {actual_interface_name} switchport',
+                                            read_timeout=10
+                                        )
+                                        if member_switchport and 'Access Mode VLAN:' in member_switchport:
+                                            member_has_vlan = True
+                                            logger.info(f"Device {device_name}: Member interface {actual_interface_name} has VLAN config (EOS) - will remove it")
                             except Exception as member_check_error:
                                 logger.warning(f"Device {device_name}: Could not check member interface {actual_interface_name} for VLAN config: {member_check_error}")
                                 # Assume it might have VLAN config and add removal command anyway (idempotent)
