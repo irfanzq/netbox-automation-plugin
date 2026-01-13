@@ -1513,6 +1513,7 @@ class NornirDeviceManager:
                 # PERFORMANCE: Keep connection open - deploy_config_safe() will reuse it
                 bridge_vlans = []
                 bridge_vlan_needed = True
+                existing_vlan_ids = set()  # Store existing VLAN IDs for sync mode filtering
                 if platform == 'cumulus':
                     try:
                         if napalm_mgr.connect():
@@ -1564,8 +1565,9 @@ class NornirDeviceManager:
                                         # Check if VLAN already exists using same logic as views.py
                                         bridge_vlan_needed = True
                                         if bridge_vlans:
+                                            logger.debug(f"Device {device_name}: Found {len(bridge_vlans)} bridge VLAN entry/entries: {bridge_vlans}")
                                             # Parse all bridge VLANs into individual VLAN IDs
-                                            existing_vlan_ids = set()
+                                            existing_vlan_ids = set()  # Reset for this device
                                             for vlan_item in bridge_vlans:
                                                 if isinstance(vlan_item, int):
                                                     existing_vlan_ids.add(vlan_item)
@@ -1585,11 +1587,19 @@ class NornirDeviceManager:
                                                             except:
                                                                 pass
 
+                                            logger.debug(f"Device {device_name}: Parsed existing bridge VLAN IDs: {sorted(existing_vlan_ids)}")
                                             if vlan_id in existing_vlan_ids:
                                                 bridge_vlan_needed = False
                                                 logger.info(f"Device {device_name}: VLAN {vlan_id} already exists in bridge - will skip bridge VLAN command")
+                                            else:
+                                                logger.debug(f"Device {device_name}: VLAN {vlan_id} NOT found in existing bridge VLANs {sorted(existing_vlan_ids)} - will add bridge VLAN command")
+                                        else:
+                                            logger.debug(f"Device {device_name}: No bridge VLANs found in device config - will add bridge VLAN command")
                             except Exception as e:
                                 logger.warning(f"Could not get bridge VLANs from {device_name}: {e}")
+                                logger.warning(f"Will add bridge VLAN command anyway (idempotent - safe to add even if already exists)")
+                                import traceback
+                                logger.debug(f"Traceback: {traceback.format_exc()}")
                                 # Continue - will add command anyway (idempotent)
                             # PERFORMANCE FIX: Don't disconnect here - keep connection open
                             # deploy_config_safe() will reuse the existing connection (line 1795 in napalm_integration.py)
@@ -1601,6 +1611,7 @@ class NornirDeviceManager:
                 # Build combined config for all interfaces
                 all_config_lines = []
                 interface_mapping = {}  # {original_interface: target_interface} for NetBox updates
+                members_vlan_removed = set()  # Track member interfaces that already had VLAN removed (avoid duplicates)
 
                 # STEP 1: Add bond creation commands FIRST (Case 2: bonds in NetBox but not on device)
                 if bonds_to_create_on_device and device_name in bonds_to_create_on_device:
@@ -1661,6 +1672,74 @@ class NornirDeviceManager:
 
                     interface_mapping[actual_interface_name] = target_interface
                     
+                    # CRITICAL: If bond is detected, remove VLAN config from member interface FIRST
+                    # VLANs should NOT be configured on both bond and member interfaces simultaneously
+                    if actual_interface_name != target_interface:
+                        # Bond detected - need to remove VLAN config from member interface
+                        # Only process each member interface once (avoid duplicates if multiple members map to same bond)
+                        if actual_interface_name not in members_vlan_removed:
+                            logger.info(f"Device {device_name}: Bond detected ({actual_interface_name} → {target_interface}) - will remove VLAN config from member interface")
+                            
+                            # Check if member interface currently has VLAN config
+                            member_has_vlan = False
+                            try:
+                                if napalm_mgr.connection and hasattr(napalm_mgr.connection, 'device') and hasattr(napalm_mgr.connection.device, 'send_command'):
+                                # Query member interface for current VLAN config
+                                if platform == 'cumulus':
+                                    member_vlan_check = napalm_mgr.connection.device.send_command(
+                                        f'nv show interface {actual_interface_name} bridge domain br_default access -o json',
+                                        read_timeout=10
+                                    )
+                                    if member_vlan_check and member_vlan_check.strip():
+                                        import json
+                                        try:
+                                            member_vlan_data = json.loads(member_vlan_check)
+                                            # If we get a VLAN ID (int) or non-empty dict, member has VLAN config
+                                            if isinstance(member_vlan_data, int) or (isinstance(member_vlan_data, dict) and member_vlan_data):
+                                                member_has_vlan = True
+                                                logger.info(f"Device {device_name}: Member interface {actual_interface_name} has VLAN config - will remove it")
+                                        except (json.JSONDecodeError, ValueError):
+                                            # Try text output as fallback
+                                            member_vlan_text = napalm_mgr.connection.device.send_command(
+                                                f'nv show interface {actual_interface_name} bridge domain br_default access',
+                                                read_timeout=10
+                                            )
+                                            if member_vlan_text and member_vlan_text.strip().isdigit():
+                                                member_has_vlan = True
+                                                logger.info(f"Device {device_name}: Member interface {actual_interface_name} has VLAN config (text check) - will remove it")
+                                elif platform == 'eos':
+                                    # For EOS, check switchport config
+                                    member_switchport = napalm_mgr.connection.device.send_command(
+                                        f'show interfaces {actual_interface_name} switchport',
+                                        read_timeout=10
+                                    )
+                                    if member_switchport and 'Access Mode VLAN:' in member_switchport:
+                                        member_has_vlan = True
+                                        logger.info(f"Device {device_name}: Member interface {actual_interface_name} has VLAN config (EOS) - will remove it")
+                            except Exception as member_check_error:
+                                logger.warning(f"Device {device_name}: Could not check member interface {actual_interface_name} for VLAN config: {member_check_error}")
+                                # Assume it might have VLAN config and add removal command anyway (idempotent)
+                                member_has_vlan = True
+                            
+                            # Add command to remove VLAN config from member interface
+                            # For Cumulus, always add unset command (idempotent - safe even if no VLAN exists)
+                            # For EOS, only add if we detected VLAN or check failed
+                            if platform == 'cumulus' or member_has_vlan:
+                                if platform == 'cumulus':
+                                    unset_cmd = f"nv unset interface {actual_interface_name} bridge domain br_default access"
+                                    all_config_lines.append(f"# Remove VLAN config from member interface {actual_interface_name} (VLAN will be on bond {target_interface})")
+                                    all_config_lines.append(unset_cmd)
+                                    members_vlan_removed.add(actual_interface_name)
+                                    logger.info(f"Device {device_name}: Added command to remove VLAN from member {actual_interface_name}: {unset_cmd}")
+                                elif platform == 'eos':
+                                    # For EOS, remove switchport config from member interface
+                                    all_config_lines.append(f"# Remove VLAN config from member interface {actual_interface_name} (VLAN will be on bond {target_interface})")
+                                    all_config_lines.append(f"interface {actual_interface_name}")
+                                    all_config_lines.append(f"   no switchport access vlan")
+                                    all_config_lines.append(f"   no switchport mode")
+                                    members_vlan_removed.add(actual_interface_name)
+                                    logger.info(f"Device {device_name}: Added commands to remove VLAN from member {actual_interface_name}")
+                    
                     # Generate config for this interface
                     # In sync mode, use per-interface VLAN config from interface_vlan_map
                     # In normal mode, use vlan_id parameter
@@ -1673,6 +1752,19 @@ class NornirDeviceManager:
                         # Commands are like "nv set interface swp3 bridge domain br_default access 3000"
                         # Need to replace "swp3" with "bond3" if bond detected
                         for cmd in commands:
+                            # Skip bridge VLAN command if VLAN already exists in bridge
+                            # Check if this is a bridge VLAN command
+                            if 'nv set bridge domain br_default vlan' in cmd:
+                                # Extract VLAN ID from command (e.g., "nv set bridge domain br_default vlan 3040")
+                                import re
+                                vlan_match = re.search(r'vlan\s+(\d+)', cmd)
+                                if vlan_match:
+                                    cmd_vlan_id = int(vlan_match.group(1))
+                                    # Check if this VLAN already exists in bridge
+                                    if existing_vlan_ids and cmd_vlan_id in existing_vlan_ids:
+                                        logger.info(f"Device {device_name}: Skipping bridge VLAN command for VLAN {cmd_vlan_id} (already exists in bridge)")
+                                        continue  # Skip this command
+                            
                             if actual_interface_name != target_interface:
                                 # Replace actual_interface_name with target_interface in command
                                 # Handle both "nv set interface {name}" and "interface {name}" formats
@@ -1687,8 +1779,14 @@ class NornirDeviceManager:
                         # Normal mode: Use vlan_id parameter
                         if platform == 'cumulus':
                             # Bridge VLAN command (only add once, and only if needed)
-                            if bridge_vlan_needed and not any('nv set bridge domain br_default vlan' in line for line in all_config_lines):
-                                all_config_lines.append(f"nv set bridge domain br_default vlan {vlan_id}")
+                            if bridge_vlan_needed:
+                                if not any('nv set bridge domain br_default vlan' in line for line in all_config_lines):
+                                    logger.debug(f"Device {device_name}: Adding bridge VLAN command for VLAN {vlan_id} (bridge_vlan_needed={bridge_vlan_needed})")
+                                    all_config_lines.append(f"nv set bridge domain br_default vlan {vlan_id}")
+                                else:
+                                    logger.debug(f"Device {device_name}: Bridge VLAN command already in config list - skipping duplicate")
+                            else:
+                                logger.debug(f"Device {device_name}: Skipping bridge VLAN command for VLAN {vlan_id} (already exists in bridge)")
                             # Interface access command
                             all_config_lines.append(f"nv set interface {target_interface} bridge domain br_default access {vlan_id}")
                         elif platform == 'eos':
@@ -1757,10 +1855,15 @@ class NornirDeviceManager:
                         combined_logs.append(f"  {line}")
                     combined_logs.append("")
                     
-                    # Build list of target interfaces for baseline collection (use bonds if detected, otherwise member interfaces)
-                    # Deduplicate bonds since multiple members map to the same bond
-                    target_interfaces_for_baseline = []
+                    # Build list of target interfaces for baseline collection
+                    # IMPORTANT: For LLDP, use MEMBER interfaces (physical interfaces) because LLDP neighbors
+                    # are only shown on physical interfaces, not on bond interfaces
+                    # For interface state and traffic stats, use BOND interfaces if detected
+                    target_interfaces_for_baseline = []  # For interface state/traffic stats (bonds if detected)
+                    member_interfaces_for_lldp = []  # For LLDP checks (always member interfaces)
                     seen_targets = set()
+                    seen_members = set()
+                    
                     for interface_name in interface_list:
                         # Parse interface name if in "device:interface" format
                         actual_interface_name = interface_name
@@ -1773,20 +1876,30 @@ class NornirDeviceManager:
                         # Get target interface (bond if detected, otherwise member interface)
                         target_interface = interface_mapping.get(actual_interface_name, actual_interface_name)
                         
+                        # For interface state and traffic stats: use bond interfaces if detected
                         # Only add each target interface once (deduplicate bonds)
                         if target_interface not in seen_targets:
                             target_interfaces_for_baseline.append(target_interface)
                             seen_targets.add(target_interface)
                             if target_interface != actual_interface_name:
-                                logger.info(f"Device {device_name}: Baseline will collect for bond {target_interface} (not member {actual_interface_name})")
+                                logger.info(f"Device {device_name}: Baseline will collect interface state/traffic for bond {target_interface} (not member {actual_interface_name})")
+                        
+                        # For LLDP: ALWAYS use member interfaces (physical interfaces) because LLDP neighbors
+                        # are only shown on physical interfaces, not on bond interfaces
+                        if actual_interface_name not in seen_members:
+                            member_interfaces_for_lldp.append(actual_interface_name)
+                            seen_members.add(actual_interface_name)
+                            if target_interface != actual_interface_name:
+                                logger.info(f"Device {device_name}: LLDP will be checked on member {actual_interface_name} (bond {target_interface} has no LLDP neighbors)")
                     
                     # Deploy all interfaces in one commit-confirm session
-                    # Pass TARGET interfaces (bonds if detected) for interface-level pre-checks and post-checks
+                    # Pass MEMBER interfaces for LLDP checks, TARGET interfaces (bonds) for other checks
                     deploy_result = napalm_mgr.deploy_config_safe(
                         config=combined_config,
                         timeout=timeout,
                         replace=False,
-                        interface_names=target_interfaces_for_baseline,  # ✅ Use bond interfaces if bonds detected
+                        interface_names=target_interfaces_for_baseline,  # For interface state/traffic stats (bonds if detected)
+                        interface_names_for_lldp=member_interfaces_for_lldp,  # For LLDP checks (always member interfaces)
                         vlan_id=vlan_id
                     )
                     

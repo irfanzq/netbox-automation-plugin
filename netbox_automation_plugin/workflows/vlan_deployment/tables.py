@@ -2,6 +2,7 @@ import django_tables2 as tables
 from django.utils.translation import gettext_lazy as _
 from django.utils.html import format_html
 from django.utils.safestring import mark_safe
+from django.urls import reverse
 
 from dcim.models import Device, Interface
 from netbox.tables import NetBoxTable, columns
@@ -87,6 +88,24 @@ class VLANDeploymentResultTable(NetBoxTable):
         visible=False,
     )
 
+    def render_device(self, value, record):
+        """Render device column with linkify support, handling special cases like 'AUTO-TAG'."""
+        # Handle special string values that shouldn't be linkified
+        if isinstance(value, str) and value == 'AUTO-TAG':
+            return format_html('<span class="badge bg-info">{}</span>', value)
+        
+        # For Device objects, manually create the link (since custom render overrides linkify)
+        if isinstance(value, Device):
+            url = value.get_absolute_url()
+            return format_html('<a href="{}">{}</a>', url, value)
+        elif hasattr(value, 'get_absolute_url'):
+            # Handle other objects with get_absolute_url
+            url = value.get_absolute_url()
+            return format_html('<a href="{}">{}</a>', url, value)
+        else:
+            # Fallback for non-Device objects (strings, etc.)
+            return format_html('{}', value)
+    
     def render_vlan(self, record):
         """Render VLAN ID with smart summary for batched deployments."""
         vlan_id = record.get('vlan_id', 'N/A')

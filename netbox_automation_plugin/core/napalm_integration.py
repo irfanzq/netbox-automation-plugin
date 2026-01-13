@@ -1738,7 +1738,7 @@ class NAPALMDeviceManager:
     def deploy_config_safe(self, config, replace=True, timeout=60,
                           checks=['connectivity', 'interfaces', 'lldp'],
                           critical_interfaces=None, min_neighbors=0,
-                          vlan_id=None, interface_name=None, interface_names=None):
+                          vlan_id=None, interface_name=None, interface_names=None, interface_names_for_lldp=None):
         """
         Deploy configuration with Juniper-style commit-confirm failsafe
 
@@ -1758,7 +1758,9 @@ class NAPALMDeviceManager:
             min_neighbors: Minimum LLDP neighbors required (for LLDP check)
             vlan_id: VLAN ID being deployed (for VLAN-specific verification)
             interface_name: Single interface name (legacy, use interface_names instead)
-            interface_names: List of interface names to run interface-level checks on
+            interface_names: List of interface names to run interface-level checks on (for interface state/traffic stats)
+            interface_names_for_lldp: List of interface names for LLDP checks (defaults to interface_names if not provided)
+                                     Use member interfaces for bonds (LLDP neighbors are only on physical interfaces)
 
         Returns:
             dict: {
@@ -1821,6 +1823,18 @@ class NAPALMDeviceManager:
         else:
             # No interfaces specified - device-level checks only
             logger.info(f"No interfaces specified - device-level checks only (LLDP, connectivity, uptime)")
+        
+        # For LLDP checks, use interface_names_for_lldp if provided (member interfaces for bonds),
+        # otherwise fall back to interfaces_to_check
+        interfaces_for_lldp_check = []
+        if interface_names_for_lldp:
+            interfaces_for_lldp_check = interface_names_for_lldp if isinstance(interface_names_for_lldp, list) else [interface_names_for_lldp]
+            logger.info(f"LLDP checks will run on {len(interfaces_for_lldp_check)} member interface(s): {interfaces_for_lldp_check}")
+        else:
+            # Fall back to interfaces_to_check if interface_names_for_lldp not provided
+            interfaces_for_lldp_check = interfaces_to_check
+            if interfaces_for_lldp_check:
+                logger.info(f"LLDP checks will run on {len(interfaces_for_lldp_check)} interface(s): {interfaces_for_lldp_check}")
 
         result = {
             'success': False,
@@ -2446,10 +2460,11 @@ class NAPALMDeviceManager:
             if 'lldp' in checks:
                 try:
                     # Determine which interfaces to collect LLDP for
+                    # Use interfaces_for_lldp_check (member interfaces for bonds) instead of interfaces_to_check
                     interfaces_for_lldp = []
-                    if interfaces_to_check:
-                        interfaces_for_lldp = interfaces_to_check
-                        logs.append(f"  Collecting LLDP neighbors for {len(interfaces_for_lldp)} interface(s): {', '.join(interfaces_for_lldp)}")
+                    if interfaces_for_lldp_check:
+                        interfaces_for_lldp = interfaces_for_lldp_check
+                        logs.append(f"  Collecting LLDP neighbors for {len(interfaces_for_lldp)} member interface(s): {', '.join(interfaces_for_lldp)}")
                     elif interface_name:
                         interfaces_for_lldp = [interface_name]
                         logs.append(f"  Collecting LLDP neighbors for interface: {interface_name}")
@@ -2785,8 +2800,12 @@ class NAPALMDeviceManager:
 
                 logs.append(f"")
                 logs.append(f"[Phase 1] Configuration Loading")
-                logs.append(f"  Config to load: {config}")
                 logs.append(f"  Mode: {'Replace (full config)' if replace else 'Merge (incremental)'}")
+                logs.append(f"  Config to load ({len(config.splitlines())} lines):")
+                # Show config line by line for better readability
+                for line in config.split('\n'):
+                    if line.strip():
+                        logs.append(f"    {line.strip()}")
                 logs.append(f"  Loading configuration...")
                 
                 # DEBUG: Check connection state before load
@@ -4328,9 +4347,144 @@ class NAPALMDeviceManager:
                                     confirm_cmd = f"nv config apply {actual_pending_revision} --confirm-yes"
                                     logger.info(f"Bypassing NAPALM - directly executing: {confirm_cmd}")
                                     logs.append(f"  [DEBUG] Directly executing: {confirm_cmd}")
-                                    confirm_output = self.connection.device.send_command(confirm_cmd, read_timeout=30)
-                                    logger.info(f"Confirm output: {confirm_output}")
-                                    logs.append(f"  [DEBUG] Command output: {confirm_output[:200] if confirm_output else '(no output)'}")
+                                    
+                                    # Check revision state BEFORE confirm to verify it's in 'confirm' state
+                                    revision_state_before = None
+                                    try:
+                                        if hasattr(self.connection, 'device') and hasattr(self.connection.device, 'send_command'):
+                                            rev_json_before = self.connection.device.send_command('nv config revision -o json', read_timeout=10)
+                                            if rev_json_before:
+                                                import json
+                                                rev_data_before = json.loads(rev_json_before)
+                                                if actual_pending_revision in rev_data_before:
+                                                    revision_state_before = rev_data_before[actual_pending_revision].get('state') if isinstance(rev_data_before[actual_pending_revision], dict) else None
+                                                    logger.info(f"Revision {actual_pending_revision} state BEFORE confirm: {revision_state_before}")
+                                                    logs.append(f"  [DEBUG] Revision {actual_pending_revision} state BEFORE confirm: {revision_state_before}")
+                                    except Exception as state_check_error:
+                                        logger.debug(f"Could not check revision state before confirm: {state_check_error}")
+                                    
+                                    # Use send_command_timing() instead of send_command() for better reliability
+                                    # send_command() waits for prompt pattern which may not match during NVUE processing
+                                    # send_command_timing() uses timing-based detection (more reliable for NVUE commands)
+                                    # Increase timeout to 90s - confirm command can take longer, especially with large configs
+                                    confirm_output = None
+                                    confirm_succeeded = False
+                                    try:
+                                        if hasattr(self.connection.device, 'send_command_timing'):
+                                            logger.info(f"Using send_command_timing() for confirm command (more reliable for NVUE)")
+                                            logs.append(f"  [DEBUG] Using send_command_timing() method (more reliable for NVUE)")
+                                            confirm_output = self.connection.device.send_command_timing(confirm_cmd, read_timeout=90, delay_factor=2)
+                                        else:
+                                            # Fallback to send_command if send_command_timing not available
+                                            logger.info(f"Using send_command() for confirm command (fallback)")
+                                            logs.append(f"  [DEBUG] Using send_command() method (fallback)")
+                                            confirm_output = self.connection.device.send_command(confirm_cmd, read_timeout=90)
+                                        
+                                        logger.info(f"Confirm command completed, output length: {len(str(confirm_output)) if confirm_output else 0}")
+                                        
+                                        # Parse output to check for actual errors (ignore state messages like "rolling back")
+                                        if confirm_output:
+                                            output_str = str(confirm_output).lower()
+                                            # Check for actual errors (not just state messages)
+                                            if 'error:' in output_str and 'timeout' not in output_str:
+                                                # Real error (not timeout-related)
+                                                error_match = None
+                                                import re
+                                                error_patterns = [
+                                                    r'error:\s*([^\n]+)',
+                                                    r'failed:\s*([^\n]+)',
+                                                    r'cannot\s+([^\n]+)',
+                                                ]
+                                                for pattern in error_patterns:
+                                                    match = re.search(pattern, output_str, re.IGNORECASE)
+                                                    if match:
+                                                        error_match = match.group(1).strip()
+                                                        break
+                                                
+                                                if error_match and 'rolling back' not in error_match.lower():
+                                                    # This is a real error, not a state message
+                                                    logger.error(f"Confirm command failed with error: {error_match}")
+                                                    logs.append(f"  ✗ ERROR: Confirm command failed: {error_match}")
+                                                    raise Exception(f"Confirm command failed: {error_match}")
+                                            
+                                            # "Warning: Rolling back to rev_200_apply_1/start" is an internal NVUE state message
+                                            # that appears during processing, not an actual rollback
+                                            # NVUE shows this message when transitioning internal states during confirm processing
+                                            if 'warning: rolling back' in output_str or 'rolling back to' in output_str:
+                                                logger.info(f"Detected NVUE state message 'rolling back' - this is NORMAL during confirm processing")
+                                                logs.append(f"  [INFO] ⚠️  IMPORTANT: Detected NVUE state message 'rolling back'")
+                                                logs.append(f"  [INFO] This is an INTERNAL NVUE state transition message, NOT an actual rollback")
+                                                logs.append(f"  [INFO] NVUE shows this during confirm processing - the commit is still being confirmed")
+                                                logs.append(f"  [INFO] We will verify the actual commit status by checking device state below")
+                                        
+                                        confirm_succeeded = True
+                                    except Exception as confirm_timeout:
+                                        logger.warning(f"Confirm command timed out or raised exception: {confirm_timeout}")
+                                        logs.append(f"  ⚠ WARNING: Confirm command timed out or raised exception: {str(confirm_timeout)[:100]}")
+                                        logs.append(f"  Will verify if commit was actually confirmed by checking device state...")
+                                        # Continue - will verify below
+                                    
+                                    # Give device more time to process the confirm command
+                                    # NVUE may need time to transition from 'confirm' state to 'applied' state
+                                    logger.info(f"Waiting 5 seconds for NVUE to process confirm command...")
+                                    logs.append(f"  [INFO] Waiting 5 seconds for NVUE to process confirm...")
+                                    time.sleep(5)
+                                    
+                                    # Verify that the commit was actually confirmed by checking revision state
+                                    # Check if revision state changed from 'confirm' to 'applied' or if pending commit is gone
+                                    revision_state_after = None
+                                    pending_after_confirm = True
+                                    try:
+                                        if hasattr(self.connection, 'device') and hasattr(self.connection.device, 'send_command'):
+                                            rev_json_after = self.connection.device.send_command('nv config revision -o json', read_timeout=10)
+                                            if rev_json_after:
+                                                import json
+                                                rev_data_after = json.loads(rev_json_after)
+                                                if actual_pending_revision in rev_data_after:
+                                                    revision_state_after = rev_data_after[actual_pending_revision].get('state') if isinstance(rev_data_after[actual_pending_revision], dict) else None
+                                                    logger.info(f"Revision {actual_pending_revision} state AFTER confirm: {revision_state_after}")
+                                                    logs.append(f"  [DEBUG] Revision {actual_pending_revision} state AFTER confirm: {revision_state_after}")
+                                                    
+                                                    # If revision state changed from 'confirm' to something else (like 'applied'), confirm succeeded
+                                                    if revision_state_before == 'confirm' and revision_state_after != 'confirm':
+                                                        logger.info(f"Confirm successful - revision state changed from 'confirm' to '{revision_state_after}'")
+                                                        logs.append(f"  [OK] Confirm successful - revision state changed: {revision_state_before} → {revision_state_after}")
+                                                        pending_after_confirm = False
+                                                    elif revision_state_after == 'confirm':
+                                                        # Still in confirm state - check if it's still pending
+                                                        pending_after_confirm = True
+                                                else:
+                                                    # Revision not in pending list - confirm succeeded
+                                                    logger.info(f"Revision {actual_pending_revision} no longer in pending list - confirm succeeded")
+                                                    logs.append(f"  [OK] Revision {actual_pending_revision} no longer pending - confirm succeeded")
+                                                    pending_after_confirm = False
+                                            
+                                            # Also check using _check_for_pending_commits for double verification
+                                            # Only override if we didn't already determine it's not pending
+                                            if pending_after_confirm:
+                                                pending_check_result = self._check_for_pending_commits(driver_name)
+                                                if not pending_check_result:
+                                                    pending_after_confirm = False
+                                                    logger.info(f"Double verification: No pending commits found - confirm succeeded")
+                                                    logs.append(f"  [OK] Double verification: No pending commits found")
+                                    except Exception as verify_error:
+                                        logger.warning(f"Could not verify revision state after confirm: {verify_error}")
+                                        logs.append(f"  ⚠ WARNING: Could not verify revision state: {str(verify_error)[:100]}")
+                                        # Fall back to _check_for_pending_commits
+                                        pending_after_confirm = self._check_for_pending_commits(driver_name)
+                                    
+                                    if pending_after_confirm:
+                                        logger.warning(f"Pending commit still exists after confirm command - confirm may have failed")
+                                        logs.append(f"  ⚠ WARNING: Pending commit still exists - confirm may have failed")
+                                        # Try to clear it
+                                        clear_success = self._clear_pending_commit(driver_name, logs)
+                                        if clear_success:
+                                            logs.append(f"  [OK] Pending commit cleared")
+                                        else:
+                                            raise Exception(f"Confirm command failed - pending commit still exists and could not be cleared")
+                                    else:
+                                        logger.info(f"Confirm successful - no pending commits found")
+                                        logs.append(f"  [OK] Confirm successful - no pending commits found")
                                     
                                     # Also run nv config save to make it persistent
                                     logger.info(f"Saving config to persistent storage")

@@ -5217,8 +5217,10 @@ class VLANDeploymentView(View):
                     expected_vlan = interface_obj.untagged_vlan.vid if interface_obj.untagged_vlan else None
 
                     # 1. Verify VLAN Configuration (on target interface - bond or physical)
+                    # IMPORTANT: Use target_interface_for_checks (bond if detected) not actual_interface_name (member)
+                    # because VLAN config is applied to the bond interface, not the member interface
                     try:
-                        device_config_result = self._get_current_device_config(device, actual_interface_name, platform)
+                        device_config_result = self._get_current_device_config(device, target_interface_for_checks, platform)
                         current_config = device_config_result.get('current_config', '')
 
                         # Parse current VLAN from config
@@ -6982,8 +6984,10 @@ class VLANDeploymentView(View):
                     post_data = {}
 
                     # 1. Verify VLAN Configuration (on target interface - bond or physical)
+                    # IMPORTANT: Use target_interface_for_checks (bond if detected) not actual_interface_name (member)
+                    # because VLAN config is applied to the bond interface, not the member interface
                     try:
-                        device_config_result = self._get_current_device_config(device, actual_interface_name, platform)
+                        device_config_result = self._get_current_device_config(device, target_interface_for_checks, platform)
                         current_config = device_config_result.get('current_config', '')
 
                         # Parse current VLAN from config
@@ -8017,7 +8021,7 @@ class VLANDeploymentView(View):
             }
         """
         try:
-            from dcim.models import InterfaceTypeChoices
+            from dcim.choices import InterfaceTypeChoices
 
             with transaction.atomic():
                 # Check if bond interface already exists in NetBox
