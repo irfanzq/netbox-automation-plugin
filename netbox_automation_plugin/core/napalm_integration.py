@@ -1111,7 +1111,7 @@ class NAPALMDeviceManager:
         
         return False
     
-    def verify_vlan_deployment(self, interface_name, vlan_id, expected_mode='access', baseline=None):
+    def verify_vlan_deployment(self, interface_name, vlan_id, expected_mode='access', baseline=None, all_interfaces=None):
         """
         Comprehensive verification for VLAN deployment with baseline comparison
         
@@ -1127,6 +1127,8 @@ class NAPALMDeviceManager:
             vlan_id: VLAN ID that should be configured
             expected_mode: Expected switchport mode ('access' or 'trunk')
             baseline: Baseline state collected before config change (dict)
+            all_interfaces: Optional list of all interfaces being verified (for LLDP checks on bonds)
+                           If provided, member interfaces will be extracted from all bonds at once
         
         Returns:
             dict: {'success': bool, 'message': str, 'checks': dict}
@@ -1302,11 +1304,31 @@ class NAPALMDeviceManager:
                         # Single query to get full applied configuration (includes pending commit-confirm)
                         try:
                             logger.debug(f"Querying full applied config for interface {interface_name}...")
-                            # Query full config with -r applied to get applied config (includes pending commit-confirm)
-                            full_config_output = self.connection.device.send_command_timing(
-                                'nv config show -r applied -o json',
-                                read_timeout=20
-                            )
+                            
+                            # Try to use the specific revision ID if available (more accurate than -r applied)
+                            # This ensures we read the exact config that was just committed
+                            revision_id = None
+                            if hasattr(self, '_candidate_revision_id') and self._candidate_revision_id:
+                                revision_id = self._candidate_revision_id
+                                logger.debug(f"Using revision ID {revision_id} for config query (from commit)")
+                            
+                            if revision_id:
+                                # Query specific revision (most accurate - shows exactly what was committed)
+                                full_config_output = self.connection.device.send_command_timing(
+                                    f'nv config show -r {revision_id} -o json',
+                                    read_timeout=20
+                                )
+                                if not full_config_output or not full_config_output.strip():
+                                    logger.debug(f"Revision {revision_id} query returned empty, falling back to -r applied...")
+                                    revision_id = None  # Fall back to -r applied
+                            
+                            if not revision_id:
+                                # Query full config with -r applied to get applied config (includes pending commit-confirm)
+                                full_config_output = self.connection.device.send_command_timing(
+                                    'nv config show -r applied -o json',
+                                    read_timeout=20
+                                )
+                            
                             # If that returns empty, try without -r applied (current/pending config)
                             if not full_config_output or not full_config_output.strip():
                                 logger.debug(f"Applied config query returned empty, trying current config...")
@@ -1373,6 +1395,9 @@ class NAPALMDeviceManager:
                                         logger.debug(f"Available interfaces/ranges: {list(interfaces_config.keys())[:20]}")
                                         
                                         # Check each interface/range in the config
+                                        # Collect all matching ranges/interfaces first, then prefer exact match or most specific
+                                        matching_configs = []  # List of (config_name, vlan_value, is_exact_match)
+                                        
                                         for config_iface_name, config_iface_data in interfaces_config.items():
                                             # Handle case where config_iface_data might be a list instead of dict
                                             if isinstance(config_iface_data, list):
@@ -1403,35 +1428,52 @@ class NAPALMDeviceManager:
                                                             
                                                             if access_vlan_path is not None:
                                                                 # Extract VLAN ID (could be int or nested dict)
+                                                                extracted_vlan = None
                                                                 if isinstance(access_vlan_path, int):
-                                                                    actual_vlan = access_vlan_path
-                                                                    logger.debug(f"  ✓ Extracted VLAN as integer: {actual_vlan}")
+                                                                    extracted_vlan = access_vlan_path
+                                                                    logger.debug(f"  ✓ Extracted VLAN as integer: {extracted_vlan}")
                                                                 elif isinstance(access_vlan_path, dict):
                                                                     # Sometimes NVUE returns nested structure
-                                                                    actual_vlan = access_vlan_path.get('value') or access_vlan_path.get('vlan') or (list(access_vlan_path.values())[0] if access_vlan_path else None)
-                                                                    logger.debug(f"  ✓ Extracted VLAN from dict: {actual_vlan}")
+                                                                    extracted_vlan = access_vlan_path.get('value') or access_vlan_path.get('vlan') or (list(access_vlan_path.values())[0] if access_vlan_path else None)
+                                                                    logger.debug(f"  ✓ Extracted VLAN from dict: {extracted_vlan}")
                                                                 else:
                                                                     # Try to convert to int if it's a string representation
                                                                     try:
-                                                                        actual_vlan = int(access_vlan_path)
-                                                                        logger.debug(f"  ✓ Converted VLAN from string: {actual_vlan}")
+                                                                        extracted_vlan = int(access_vlan_path)
+                                                                        logger.debug(f"  ✓ Converted VLAN from string: {extracted_vlan}")
                                                                     except (ValueError, TypeError):
-                                                                        actual_vlan = None
                                                                         logger.debug(f"  ✗ Could not convert VLAN: {access_vlan_path}")
                                                                 
-                                                                if actual_vlan is not None:
-                                                                    logger.info(f"Found interface {interface_name} in range/interface '{config_iface_name}' with VLAN {actual_vlan} (from full config with -r applied)")
-                                                                    break  # Found it, no need to check further
-                                                                else:
-                                                                    logger.debug(f"Range/interface '{config_iface_name}' has access config but couldn't extract VLAN ID: {access_vlan_path}")
-                                                            else:
-                                                                logger.debug(f"Range/interface '{config_iface_name}' found but no access VLAN configured in br_default")
-                                                        else:
-                                                            logger.debug(f"Range/interface '{config_iface_name}' found but no br_default domain config")
-                                                    else:
-                                                        logger.debug(f"Range/interface '{config_iface_name}' found but no domain config")
-                                                else:
-                                                    logger.debug(f"Range/interface '{config_iface_name}' found but no bridge config")
+                                                                if extracted_vlan is not None:
+                                                                    # Check if this is an exact match (not a range)
+                                                                    is_exact = (config_iface_name == interface_name)
+                                                                    matching_configs.append((config_iface_name, extracted_vlan, is_exact))
+                                                                    logger.debug(f"  Found match: {config_iface_name} -> VLAN {extracted_vlan} (exact={is_exact})")
+                                        
+                                        # Now choose the best match:
+                                        # 1. Prefer exact match over range
+                                        # 2. If multiple ranges, prefer the one with expected VLAN (if provided)
+                                        # 3. Otherwise, use first match
+                                        if matching_configs:
+                                            # Sort: exact matches first, then by VLAN (prefer expected VLAN if provided)
+                                            def sort_key(item):
+                                                config_name, vlan_val, is_exact = item
+                                                # Exact match gets highest priority
+                                                exact_priority = 0 if is_exact else 1
+                                                # If we have expected VLAN, prefer matches with that VLAN
+                                                vlan_priority = 0 if (vlan_id and vlan_val == vlan_id) else 1
+                                                return (exact_priority, vlan_priority, config_name)
+                                            
+                                            matching_configs.sort(key=sort_key)
+                                            best_match_name, actual_vlan, is_exact = matching_configs[0]
+                                            
+                                            if len(matching_configs) > 1:
+                                                logger.warning(f"Found {len(matching_configs)} matching ranges/interfaces for {interface_name}, using: {best_match_name} (VLAN {actual_vlan})")
+                                                logger.debug(f"  All matches: {matching_configs}")
+                                            
+                                            logger.info(f"Found interface {interface_name} in range/interface '{best_match_name}' with VLAN {actual_vlan} (from full config with -r applied)")
+                                        else:
+                                            actual_vlan = None
                                         
                                         # If still not found, log what interfaces/ranges we did find
                                         if actual_vlan is None:
@@ -1637,7 +1679,11 @@ class NAPALMDeviceManager:
         
         if lldp_baseline_interfaces or (lldp_baseline_all is not None):
             try:
-                lldp_after = self.get_lldp_neighbors()
+                # Pass interfaces so get_lldp_neighbors can extract member interfaces from bonds
+                # For bonds, it will extract member interfaces (e.g., bond3 -> swp3) for LLDP checks
+                # Use all_interfaces if provided (for efficiency), otherwise just the current interface
+                interfaces_for_lldp = all_interfaces if all_interfaces else [interface_name]
+                lldp_after = self.get_lldp_neighbors(interfaces=interfaces_for_lldp)
 
                 # Build after state for all interfaces
                 lldp_after_all = {}
@@ -3643,10 +3689,41 @@ class NAPALMDeviceManager:
                         result['_removed_commands'] = removed_commands
                         result['_added_commands'] = added_commands
                         
-                        # Show only removed/added lines from diff (with - and + signs, but no headers)
+                        # Show actual commands that will be executed (in correct order: unset first, then set)
                         logs.append(f"")
-                        logs.append(f"    Configuration changes:")
-                        # Show diff lines with - and + signs, but filter out headers
+                        logs.append(f"    Configuration changes (commands in execution order):")
+                        
+                        # Convert removed commands to nv unset format
+                        unset_commands = []
+                        for cmd in removed_commands:
+                            if cmd.startswith('nv set'):
+                                # Convert "nv set interface X bridge domain br_default access Y" 
+                                # to "nv unset interface X bridge domain br_default access"
+                                unset_cmd = cmd.replace('nv set', 'nv unset')
+                                # Remove the value at the end (access VLAN number)
+                                # Pattern: "nv unset interface X bridge domain br_default access 3000"
+                                # Should be: "nv unset interface X bridge domain br_default access"
+                                import re
+                                unset_cmd = re.sub(r'\s+\d+$', '', unset_cmd)  # Remove trailing number
+                                unset_commands.append(unset_cmd)
+                            elif cmd.startswith('nv unset'):
+                                unset_commands.append(cmd)
+                        
+                        # Show unset commands first (removals)
+                        if unset_commands:
+                            logs.append(f"    Unset commands (removals):")
+                            for unset_cmd in unset_commands:
+                                logs.append(f"      {unset_cmd}")
+                        
+                        # Show set commands (additions)
+                        if added_commands:
+                            logs.append(f"    Set commands (additions):")
+                            for set_cmd in added_commands:
+                                logs.append(f"      {set_cmd}")
+                        
+                        # Also show diff format for reference
+                        logs.append(f"")
+                        logs.append(f"    Diff format (for reference):")
                         diff_shown = False
                         for line in diff_lines:
                             stripped = line.strip()
@@ -3657,10 +3734,10 @@ class NAPALMDeviceManager:
                                 continue
                             # Show lines with - or + (actual changes)
                             if stripped.startswith('-') or stripped.startswith('+'):
-                                logs.append(f"    {line}")
+                                logs.append(f"      {line}")
                                 diff_shown = True
                         
-                        if not diff_shown:
+                        if not diff_shown and not unset_commands and not added_commands:
                             logs.append(f"    (no changes detected - configuration already applied to device)")
                             logs.append(f"    ℹ Device is already in the desired state - no changes needed")
                     else:
@@ -4772,7 +4849,8 @@ class NAPALMDeviceManager:
                     if 'lldp_interfaces' not in iface_baseline_compat:
                         iface_baseline_compat['lldp_interfaces'] = baseline_data.get('lldp_interfaces', {})
 
-                vlan_check = self.verify_vlan_deployment(iface_name, vlan_id, baseline=iface_baseline_compat)
+                # Pass all interfaces being verified so LLDP check can extract member interfaces from all bonds at once
+                vlan_check = self.verify_vlan_deployment(iface_name, vlan_id, baseline=iface_baseline_compat, all_interfaces=interfaces_to_check)
                 result['verification_results'][iface_name] = vlan_check['checks']
 
                 # Log each verification check result for this interface
