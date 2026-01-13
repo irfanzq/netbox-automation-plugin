@@ -530,9 +530,19 @@ class NAPALMDeviceManager:
                             logger.info(f"Fetching LLDP data from {self.device.name} using send_command_timing()...")
                             lldp_output = self.connection.device.send_command_timing('sudo lldpctl -f json', read_timeout=30)
 
-                            if lldp_output:
+                            if lldp_output and lldp_output.strip():
                                 import json
-                                lldp_json = json.loads(lldp_output)
+                                try:
+                                    # Validate JSON before parsing
+                                    lldp_output_stripped = lldp_output.strip()
+                                    if not lldp_output_stripped.startswith('{') and not lldp_output_stripped.startswith('['):
+                                        # Not JSON format
+                                        raise ValueError("Output is not JSON format")
+                                    lldp_json = json.loads(lldp_output_stripped)
+                                except (json.JSONDecodeError, ValueError) as json_err:
+                                    # JSON parsing failed - log and raise to trigger retry
+                                    logger.debug(f"JSON parse failed for LLDP (output: {lldp_output[:200]}): {json_err}")
+                                    raise Exception(f"Invalid JSON from lldpctl: {json_err}")
 
                                 # Parse lldpctl JSON format
                                 # Format: {"lldp": {"interface": {"swp1": {"port": ...}, "swp2": {...}}}}
@@ -1055,10 +1065,20 @@ class NAPALMDeviceManager:
                             f'nv show interface {interface_name} bridge domain br_default access -o json',
                             read_timeout=10
                         )
-                        if vlan_output:
+                        if vlan_output and vlan_output.strip():
                             import json
-                            vlan_data = json.loads(vlan_output)
-                            actual_vlan = vlan_data if isinstance(vlan_data, int) else None
+                            try:
+                                # Validate JSON before parsing
+                                vlan_output_stripped = vlan_output.strip()
+                                if not vlan_output_stripped.startswith('{') and not vlan_output_stripped.startswith('[') and not vlan_output_stripped.isdigit():
+                                    # Not JSON format - try text output directly
+                                    raise ValueError("Output is not JSON format")
+                                vlan_data = json.loads(vlan_output_stripped)
+                                actual_vlan = vlan_data if isinstance(vlan_data, int) else None
+                            except (json.JSONDecodeError, ValueError) as json_err:
+                                # JSON parsing failed - log and try text output
+                                logger.debug(f"JSON parse failed for VLAN check (output: {vlan_output[:100]}): {json_err}")
+                                actual_vlan = None
 
                             # If JSON parsing fails, try text output
                             if actual_vlan is None:
@@ -1179,8 +1199,10 @@ class NAPALMDeviceManager:
             all_passed = False
             messages.append(f"WARNING: VLAN Config: Could not verify")
         
-        # Check 4: LLDP Neighbors (device-level check with interface exclusion)
-        logger.info(f"VLAN Verification Check 4/5: LLDP neighbors (device-level)...")
+        # Check 4: LLDP Neighbors (ALWAYS use member interfaces, never bond interfaces)
+        # CRITICAL: LLDP neighbors are only on physical member interfaces (swp3, swp4, swp5)
+        # NOT on bond interfaces (bond3, bond4, bond5)
+        logger.info(f"VLAN Verification Check 4/5: LLDP neighbors (interface-level on member interfaces)...")
         # Check for LLDP baseline - prefer per-interface data, fallback to device-level
         lldp_baseline_interfaces = baseline.get('lldp_interfaces', {})
         lldp_baseline_all = baseline.get('lldp_all_interfaces', {})
@@ -1304,17 +1326,14 @@ class NAPALMDeviceManager:
                         total_before = sum(lldp_before_all.values())
                         total_after = sum(lldp_after_all.values())
                         
-                        # Get specific interface status (if single interface deployment)
-                        if interface_name:
-                            iface_before = lldp_before_all.get(interface_name, 0)
-                            iface_after = lldp_after_all.get(interface_name, 0)
-                            iface_status = f"{interface_name}: {iface_before}→{iface_after}"
-                        else:
-                            iface_status = "N/A"
+                        # CRITICAL: Do NOT use interface_name here if it's a bond interface
+                        # LLDP is only on member interfaces, not bond interfaces
+                        # In device-level fallback, just show total (don't use bond interface name)
+                        iface_status = f"total: {total_before}→{total_after}"
                         
                         checks['lldp_neighbors'] = {
                             'success': True,
-                            'message': f"Device-level LLDP stable (total: {total_before}→{total_after}, {iface_status})",
+                            'message': f"Device-level LLDP stable ({iface_status})",
                             'data': {
                                 'total_before': total_before,
                                 'total_after': total_after,
@@ -1432,13 +1451,20 @@ class NAPALMDeviceManager:
                                     f'nv show interface {interface_name} counters -o json',
                                     read_timeout=10
                                 )
-                                if stats_output:
+                                if stats_output and stats_output.strip():
                                     import json
-                                    stats_data = json.loads(stats_output)
-                                    in_pkts_after = stats_data.get('in-pkts', 0)
-                                    out_pkts_after = stats_data.get('out-pkts', 0)
-                                    in_bytes_after = stats_data.get('in-bytes', 0)
-                                    out_bytes_after = stats_data.get('out-bytes', 0)
+                                    try:
+                                        stats_output_stripped = stats_output.strip()
+                                        if stats_output_stripped.startswith('{') or stats_output_stripped.startswith('['):
+                                            stats_data = json.loads(stats_output_stripped)
+                                            in_pkts_after = stats_data.get('in-pkts', 0)
+                                            out_pkts_after = stats_data.get('out-pkts', 0)
+                                            in_bytes_after = stats_data.get('in-bytes', 0)
+                                            out_bytes_after = stats_data.get('out-bytes', 0)
+                                        else:
+                                            logger.debug(f"Stats output is not JSON format: {stats_output[:100]}")
+                                    except (json.JSONDecodeError, ValueError) as json_err:
+                                        logger.debug(f"Could not parse Cumulus stats JSON: {json_err} (output: {stats_output[:100]})")
                         except Exception as stats_error:
                             logger.debug(f"Could not get Cumulus stats: {stats_error}")
                     else:
@@ -2116,7 +2142,10 @@ class NAPALMDeviceManager:
                                         if stats_output and stats_output.strip():
                                             import json
                                             try:
-                                                stats_data = json.loads(stats_output)
+                                                stats_output_stripped = stats_output.strip()
+                                                if not stats_output_stripped.startswith('{') and not stats_output_stripped.startswith('['):
+                                                    raise ValueError("Output is not JSON format")
+                                                stats_data = json.loads(stats_output_stripped)
                                                 # If we get stats, interface exists - use direct NVUE commands for baseline
                                                 logger.info(f"Using direct NVUE commands for Cumulus baseline collection on {test_interface}")
                                                 logs.append(f"  Collecting interface state for {test_interface} using NVUE...")
@@ -2145,7 +2174,15 @@ class NAPALMDeviceManager:
                                                     raise AttributeError("Neither connection.device.send_command nor connection.cli() is available")
                                             
                                                 if link_output and link_output.strip():
-                                                    link_data = json.loads(link_output)
+                                                    import json
+                                                    try:
+                                                        link_output_stripped = link_output.strip()
+                                                        if not link_output_stripped.startswith('{') and not link_output_stripped.startswith('['):
+                                                            raise ValueError("Output is not JSON format")
+                                                        link_data = json.loads(link_output_stripped)
+                                                    except (json.JSONDecodeError, ValueError) as link_json_err:
+                                                        baseline_error_details.append(f"JSON decode error for {test_interface} link: {link_json_err}")
+                                                        continue
                                                     # Link data is at top level, not nested under "link" key
                                                     # Structure: {"admin-status": "up", "oper-status": "up", ...}
                                                     is_up = link_data.get('oper-status') == 'up'
@@ -2165,8 +2202,16 @@ class NAPALMDeviceManager:
                                                                 desc_output = str(cli_result) if cli_result else ''
                                                         else:
                                                             desc_output = ''  # Description is optional, skip if can't access
-                                                        if desc_output:
-                                                            desc_data = json.loads(desc_output)
+                                                        if desc_output and desc_output.strip():
+                                                            import json
+                                                            try:
+                                                                desc_output_stripped = desc_output.strip()
+                                                                if not desc_output_stripped.startswith('{') and not desc_output_stripped.startswith('['):
+                                                                    raise ValueError("Output is not JSON format")
+                                                                desc_data = json.loads(desc_output_stripped)
+                                                            except (json.JSONDecodeError, ValueError) as desc_json_err:
+                                                                # Description is optional - continue with empty description
+                                                                desc_data = {}
                                                             # Description structure may vary - try both nested and top-level
                                                             if 'link' in desc_data and isinstance(desc_data['link'], dict):
                                                                 description = desc_data.get('link', {}).get('description', '')
@@ -4235,15 +4280,22 @@ class NAPALMDeviceManager:
                 interface_baseline = baseline_data.get('interfaces', {}).get(iface_name, {})
                 if interface_baseline:
                     # Create a baseline dict with the old structure for compatibility
+                    # CRITICAL: Include lldp_interfaces (member interfaces) for LLDP checks
+                    # LLDP is only on member interfaces, not bond interfaces
                     iface_baseline_compat = {
                         'interface': interface_baseline,
+                        'lldp_interfaces': baseline_data.get('lldp_interfaces', {}),  # Member interfaces for LLDP
                         'lldp_all_interfaces': baseline_data.get('lldp_all_interfaces', {}),
                         'uptime': baseline_data.get('uptime'),
                         'hostname': baseline_data.get('hostname')
                     }
                 else:
                     # No baseline for this interface - use device-level only
-                    iface_baseline_compat = baseline_data
+                    # Still include lldp_interfaces if available (member interfaces for LLDP checks)
+                    iface_baseline_compat = baseline_data.copy()
+                    # Ensure lldp_interfaces is included (member interfaces, not bond interfaces)
+                    if 'lldp_interfaces' not in iface_baseline_compat:
+                        iface_baseline_compat['lldp_interfaces'] = baseline_data.get('lldp_interfaces', {})
 
                 vlan_check = self.verify_vlan_deployment(iface_name, vlan_id, baseline=iface_baseline_compat)
                 result['verification_results'][iface_name] = vlan_check['checks']

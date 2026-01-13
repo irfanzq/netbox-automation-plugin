@@ -1657,13 +1657,30 @@ class NornirDeviceManager:
                             continue
                         logger.debug(f"[DEBUG] Device {device_name}: Parsed {interface_name} → {actual_interface_name}")
 
+                    # CRITICAL: Validate actual_interface_name - must be a single interface name, not comma-separated list
+                    # This can happen if interface names are incorrectly parsed from the form
+                    if ',' in actual_interface_name:
+                        logger.error(f"[ERROR] Device {device_name}: Interface name contains comma-separated values: '{actual_interface_name}'")
+                        logger.error(f"[ERROR] This is invalid - interface names cannot contain commas. Using first part only.")
+                        actual_interface_name = actual_interface_name.split(',')[0].strip()
+                        logger.error(f"[ERROR] Using sanitized interface name: '{actual_interface_name}'")
+                    
                     # Get bond interface name if available (use actual_interface_name for bond lookup)
                     target_interface = actual_interface_name
                     if bond_info_map and device_name in bond_info_map:
                         device_bond_map = bond_info_map[device_name]
                         if actual_interface_name in device_bond_map:
                             # bond_info_map structure: {device_name: {interface_name: {'bond_name': str, 'bond_id': str, 'source': str}}}
-                            target_interface = device_bond_map[actual_interface_name]['bond_name']
+                            bond_name = device_bond_map[actual_interface_name]['bond_name']
+                            
+                            # CRITICAL: Validate bond_name - must be a single interface name, not comma-separated list
+                            if ',' in bond_name:
+                                logger.error(f"[ERROR] Device {device_name}: Bond name contains comma-separated values: '{bond_name}'")
+                                logger.error(f"[ERROR] This is invalid - bond names cannot contain commas. Using first part only.")
+                                bond_name = bond_name.split(',')[0].strip()
+                                logger.error(f"[ERROR] Using sanitized bond name: '{bond_name}'")
+                            
+                            target_interface = bond_name
                             logger.info(f"[DEBUG] SUCCESS: BOND REDIRECT: Device {device_name}: Interface {actual_interface_name} → Bond {target_interface}")
                         else:
                             logger.debug(f"[DEBUG] Device {device_name}: Interface {actual_interface_name} not in bond map - using directly")

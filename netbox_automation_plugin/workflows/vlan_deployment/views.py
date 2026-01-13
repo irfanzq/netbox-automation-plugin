@@ -2584,17 +2584,55 @@ class VLANDeploymentView(View):
                     diff_lines.append("      Deployment will NOT proceed for interfaces with IP/VRF.")
                     diff_lines.append("")
 
+                # Parse proposed config to check if we're just changing the access VLAN on the same interface
+                proposed_lines = [line.strip() for line in proposed_config.split('\n') if line.strip()]
+                proposed_access_vlan_configs = []
+                for line in proposed_lines:
+                    if line.startswith('nv set') and 'bridge domain' in line and 'access' in line:
+                        proposed_access_vlan_configs.append(line)
+                
+                # Check if we're migrating from member interface to bond interface
+                # If current config is on a different interface than proposed, show the removal
+                # If current and proposed are on the same interface (just VLAN change), don't show removal
+                should_show_removal = False
+                if current_vlan_configs and proposed_access_vlan_configs:
+                    # Extract interface names from current and proposed configs
+                    current_interface = None
+                    proposed_interface = None
+                    
+                    for current_item in current_vlan_configs:
+                        # Parse: "nv set interface swp3 bridge domain br_default access 3000"
+                        parts = current_item.split()
+                        if len(parts) >= 3 and parts[0] == 'nv' and parts[1] == 'set' and parts[2] == 'interface':
+                            current_interface = parts[3]
+                            break
+                    
+                    for proposed_item in proposed_access_vlan_configs:
+                        # Parse: "nv set interface bond3 bridge domain br_default access 3000"
+                        parts = proposed_item.split()
+                        if len(parts) >= 3 and parts[0] == 'nv' and parts[1] == 'set' and parts[2] == 'interface':
+                            proposed_interface = parts[3]
+                            break
+                    
+                    # Only show removal if interfaces are different (migration from member to bond)
+                    # If same interface, new access VLAN command automatically replaces old one
+                    if current_interface and proposed_interface and current_interface != proposed_interface:
+                        should_show_removal = True
+                
                 # Show current VLAN configs with "-" signs (what will be removed/replaced)
-                if current_vlan_configs:
+                # Only show if we're migrating from member interface to bond interface
+                if current_vlan_configs and should_show_removal:
                     for item in current_vlan_configs:
                         diff_lines.append(f"  - {item}")
+                elif current_vlan_configs and not should_show_removal:
+                    # Same interface, just VLAN change - don't show removal (new command replaces old)
+                    pass
                 else:
                     # No current VLAN configs to remove
                     diff_lines.append("  (no current VLAN configuration to remove)")
                 diff_lines.append("")
 
                 # Show proposed configs with "+" signs (what will be added)
-                proposed_lines = [line.strip() for line in proposed_config.split('\n') if line.strip()]
                 for line in proposed_lines:
                     diff_lines.append(f"  + {line}")
                 # Note: Bridge VLAN commands are already included in proposed_config if needed
@@ -3396,6 +3434,16 @@ class VLANDeploymentView(View):
             # IMPORTANT: In Cumulus NVUE, interfaces ONLY use 'access' mode
             # Tagged VLANs are ONLY configured on the bridge domain (done above)
             # There is NO 'tagged' or 'untagged' command for interfaces
+            
+            # CRITICAL: Validate target_interface - must be a single interface name, not comma-separated list
+            # This can happen if interface.name or lag.name contains invalid data
+            if ',' in target_interface:
+                logger.error(f"[NETBOX CONFIG] ERROR: target_interface contains comma-separated values: '{target_interface}'")
+                logger.error(f"[NETBOX CONFIG] Original interface.name: '{interface.name}', lag.name: '{interface.lag.name if hasattr(interface, 'lag') and interface.lag else None}'")
+                # Take only the first part before comma
+                target_interface = target_interface.split(',')[0].strip()
+                logger.error(f"[NETBOX CONFIG] Using first part only: '{target_interface}'")
+            
             logger.error(f"[NETBOX CONFIG] {device.name}:{interface.name} - About to check untagged_vlan: {untagged_vlan}, type: {type(untagged_vlan)}")
             if untagged_vlan:
                 # Set interface to access mode with untagged VLAN
@@ -3462,11 +3510,19 @@ class VLANDeploymentView(View):
         has_untagged = interface.untagged_vlan is not None
         has_tagged = interface.tagged_vlans.exists()
 
-        # Determine tag based on VLAN config only (no mode check)
-        if has_tagged:
+        # Determine tag based on VLAN config:
+        # - If interface has BOTH tagged AND untagged VLANs → vlan-mode:tagged
+        # - If interface has ONLY untagged VLAN (no tagged) → vlan-mode:access
+        # - If interface has ONLY tagged VLANs (no untagged) → vlan-mode:tagged
+        if has_tagged and has_untagged:
+            # Both tagged and untagged VLANs → tagged mode
             tag_name = "vlan-mode:tagged"
         elif has_untagged:
+            # Only untagged VLAN → access mode
             tag_name = "vlan-mode:access"
+        elif has_tagged:
+            # Only tagged VLANs (unusual but possible) → tagged mode
+            tag_name = "vlan-mode:tagged"
         else:
             # No VLAN config - shouldn't happen, but skip
             logger.warning(f"Interface {interface.name} has no VLAN config, skipping auto-tag")
@@ -4287,96 +4343,18 @@ class VLANDeploymentView(View):
                 device_logs.append("")
 
                 if all_current_configs and all_proposed_configs:
-                    device_logs.append("Current Device Configuration:")
-                    device_logs.append("-" * 80)
-
-                    # Add bridge configuration at the top (Cumulus only)
-                    if platform == 'cumulus' and bridge_vlans and len(bridge_vlans) > 0:
-                        vlan_list_str = self._format_vlan_list(bridge_vlans)
-                        device_logs.append(f"# Bridge Domain br_default - Current VLANs: {vlan_list_str}")
-                        # Show actual NVUE command with the formatted list
-                        device_logs.append(f"nv set bridge domain br_default vlan {vlan_list_str}")
-                        device_logs.append("")
-
-                    for line in all_current_configs:
-                        device_logs.append(line)
-                    device_logs.append("")
-                    device_logs.append("Proposed Device Configuration:")
-                    device_logs.append("-" * 80)
-
-                    # BOND CREATION COMMANDS (Case 2: bonds in NetBox but not on device)
-                    if device.name in bonds_to_create_on_device:
-                        device_logs.append("# BOND CREATION - Bonds exist in NetBox but NOT on device")
-                        device_logs.append("#" + "=" * 78)
-                        device_logs.append("")
-
-                        for bond_name, bond_data in bonds_to_create_on_device[device.name].items():
-                            members = bond_data['members']
-                            bond_interface = bond_data['bond_interface']
-
-                            device_logs.append(f"# Creating bond {bond_name} on device (from NetBox)")
-                            device_logs.append(f"# Members: {', '.join(members)}")
-                            device_logs.append(f"nv set interface {bond_name} type bond")
-
-                            # Add all members
-                            for member in members:
-                                device_logs.append(f"nv set interface {bond_name} bond member {member}")
-
-                            # LACP settings
-                            device_logs.append(f"nv set interface {bond_name} bond lacp-rate fast")
-                            device_logs.append(f"nv set interface {bond_name} bond lacp-bypass on")
-
-                            # Add bond to bridge domain
-                            device_logs.append(f"nv set interface {bond_name} bridge domain br_default")
-
-                            # If bond has VLANs in NetBox, they will be applied in the VLAN commands below
-                            if bond_interface.untagged_vlan:
-                                device_logs.append(f"# Bond will have untagged VLAN {bond_interface.untagged_vlan.vid} (configured below)")
-                            if bond_interface.tagged_vlans.exists():
-                                tagged_vids = list(bond_interface.tagged_vlans.values_list('vid', flat=True))
-                                device_logs.append(f"# Bond will have tagged VLANs {tagged_vids} (configured below)")
-
-                            device_logs.append("")
-
-                        device_logs.append("#" + "=" * 78)
-                        device_logs.append("")
-
-                    # ISSUE #2 FIX: Consolidate bridge VLAN commands from all interfaces
-                    if platform == 'cumulus':
-                        # Extract all bridge VLAN commands and collect unique VLANs
-                        bridge_vlan_commands = []
-                        non_bridge_lines = []
-                        all_vlans_to_add = set()
-
-                        for line in all_proposed_configs:
-                            if line.startswith('nv set bridge domain br_default vlan '):
-                                # Extract VLAN ID from command
-                                vlan_part = line.replace('nv set bridge domain br_default vlan ', '').strip()
-                                try:
-                                    vlan_id = int(vlan_part)
-                                    all_vlans_to_add.add(vlan_id)
-                                except ValueError:
-                                    # If not a simple int, keep the command as-is
-                                    bridge_vlan_commands.append(line)
-                            else:
-                                non_bridge_lines.append(line)
-
-                        # Show consolidated bridge VLAN command at the top if we have VLANs
-                        if all_vlans_to_add:
-                            sorted_vlans = sorted(list(all_vlans_to_add))
-                            vlan_list_str = self._format_vlan_list(sorted_vlans)
-                            device_logs.append(f"# Bridge Domain br_default - Adding VLANs: {vlan_list_str}")
-                            device_logs.append(f"nv set bridge domain br_default vlan {vlan_list_str}")
-                            device_logs.append("")
-
-                        # Show non-bridge commands
-                        for line in non_bridge_lines:
-                            device_logs.append(line)
+                    # Use _generate_config_diff for consistent diff format (same as normal mode)
+                    # This includes the smart logic to not show removals when same interface, just VLAN change
+                    current_config_text = '\n'.join(all_current_configs) if all_current_configs else "(no current configuration)"
+                    proposed_config_text = '\n'.join(all_proposed_configs) if all_proposed_configs else "(no proposed configuration)"
+                    
+                    config_diff = self._generate_config_diff(current_config_text, proposed_config_text, platform, device=device, interface_name="ALL_INTERFACES", bridge_vlans=bridge_vlans if 'bridge_vlans' in locals() else [])
+                    if config_diff:
+                        for line in config_diff.split('\n'):
+                            if line.strip():
+                                device_logs.append(line)
                     else:
-                        # Non-Cumulus platforms: just show all lines as-is
-                        for line in all_proposed_configs:
-                            device_logs.append(line)
-
+                        device_logs.append("(no configuration changes)")
                     device_logs.append("")
                 else:
                     device_logs.append("(no device configuration changes)")
@@ -5105,7 +5083,10 @@ class VLANDeploymentView(View):
                     vlan_name = str(e)
 
                 # Group by status, VLAN, and target interface (bond or physical)
-                group_key = (status, vlan_id, target_interface)
+                # CRITICAL: Use a sentinel value for None vlan_id to avoid TypeError when sorting tuples
+                # Python can't compare None with int when sorting, so use 0 as sentinel
+                vlan_id_for_key = vlan_id if vlan_id is not None else 0
+                group_key = (status, vlan_id_for_key, target_interface)
                 if group_key not in interface_groups:
                     interface_groups[group_key] = []
                 interface_groups[group_key].append(actual_interface_name)
@@ -5349,18 +5330,58 @@ class VLANDeploymentView(View):
             logger.info(f"[SYNC DEPLOYMENT] Auto-tagging {len(interfaces_to_auto_tag)} interfaces")
             for interface in interfaces_to_auto_tag:
                 try:
-                    # Add vlan-mode tag
+                    # Refresh interface to get latest VLAN config
+                    interface.refresh_from_db()
+                    
+                    # Determine correct tag based on VLAN config
+                    has_untagged = interface.untagged_vlan is not None
+                    has_tagged = interface.tagged_vlans.exists()
+                    
+                    # Use same logic as _auto_tag_interface_after_deployment:
+                    # - If interface has BOTH tagged AND untagged VLANs → vlan-mode:tagged
+                    # - If interface has ONLY untagged VLAN (no tagged) → vlan-mode:access
+                    # - If interface has ONLY tagged VLANs (no untagged) → vlan-mode:tagged
+                    if has_tagged and has_untagged:
+                        tag_name = "vlan-mode:tagged"
+                    elif has_untagged:
+                        tag_name = "vlan-mode:access"
+                    elif has_tagged:
+                        tag_name = "vlan-mode:tagged"
+                    else:
+                        # No VLAN config - skip
+                        logger.warning(f"Interface {interface.device.name}:{interface.name} has no VLAN config, skipping auto-tag")
+                        auto_tag_results.append({
+                            'interface': f"{interface.device.name}:{interface.name}",
+                            'success': False,
+                            'message': 'No VLAN config - skipped'
+                        })
+                        continue
+                    
+                    # Get or create the tag
                     vlan_mode_tag, _ = Tag.objects.get_or_create(
-                        name='vlan-mode',
-                        defaults={'slug': 'vlan-mode', 'color': '4caf50'}
+                        name=tag_name,
+                        defaults={'slug': tag_name.replace(':', '-'), 'color': '4caf50'}
                     )
+                    
+                    # Remove any existing vlan-mode:access or vlan-mode:tagged tags first
+                    existing_vlan_mode_tags = [
+                        tag for tag in interface.tags.all()
+                        if tag.name.startswith('vlan-mode:access') or tag.name.startswith('vlan-mode:tagged')
+                    ]
+                    if existing_vlan_mode_tags:
+                        for old_tag in existing_vlan_mode_tags:
+                            interface.tags.remove(old_tag)
+                    
+                    # Add the correct tag
                     interface.tags.add(vlan_mode_tag)
+                    interface.save()
+                    
                     auto_tag_results.append({
                         'interface': f"{interface.device.name}:{interface.name}",
                         'success': True,
-                        'message': 'Tagged with vlan-mode'
+                        'message': f'Tagged with {tag_name}'
                     })
-                    logger.info(f"Auto-tagged {interface.device.name}:{interface.name} with 'vlan-mode'")
+                    logger.info(f"Auto-tagged {interface.device.name}:{interface.name} with '{tag_name}'")
                 except Exception as e:
                     auto_tag_results.append({
                         'interface': f"{interface.device.name}:{interface.name}",
@@ -6001,55 +6022,138 @@ class VLANDeploymentView(View):
 
                     # Display grouped NetBox changes
                     if netbox_groups:
-                        # First show member interface changes (VLANs being removed)
-                        member_groups = {k: v for k, v in netbox_groups.items() if k[1] == 'member_clear'}
-                        if member_groups:
-                            device_logs.append("Member Interfaces (VLANs will be REMOVED and migrated to bond):")
+                        # Check if bonds are being created in NetBox (bonds exist on device but not in NetBox)
+                        # In this case, show bond interfaces directly, not member interfaces
+                        # Note: bonds_to_create_in_netbox means bonds exist on device but not in NetBox
+                        # So bonds already exist on device - we just need to create them in NetBox
+                        # bonds_to_create_in_netbox is defined in the outer scope of _run_vlan_deployment
+                        bonds_being_created_in_netbox = device.name in bonds_to_create_in_netbox if bonds_to_create_in_netbox else False
+                        
+                        if bonds_being_created_in_netbox:
+                            # Bonds are being created in NetBox - show bond interfaces directly
+                            device_logs.append("Bond Interfaces (will be CREATED in NetBox with VLANs):")
                             device_logs.append("")
-                            for (bond_name, change_type), interfaces in sorted(member_groups.items()):
-                                for item in interfaces:
-                                    iface = item['interface']
-                                    curr_untag = item['current_untagged']
-                                    prop_untag = item['proposed_untagged']
-                                    curr_tag = item['current_tagged']
-                                    prop_tag = item['proposed_tagged']
+                            
+                            # Get bond groups (VLANs being added to bonds)
+                            bond_groups = {k: v for k, v in netbox_groups.items() if k[1] == 'bond_add'}
+                            if bond_groups:
+                                for (bond_name, change_type), interfaces in sorted(bond_groups.items()):
+                                    for item in interfaces:
+                                        iface = item['interface']
+                                        curr_untag = item['current_untagged']
+                                        prop_untag = item['proposed_untagged']
+                                        curr_tag = item['current_tagged']
+                                        prop_tag = item['proposed_tagged']
 
-                                    changes = []
-                                    if curr_untag != prop_untag:
-                                        changes.append(f"Untagged VLAN {curr_untag} → {prop_untag}")
-                                    if curr_tag != prop_tag:
-                                        curr_tag_str = f"[{', '.join(map(str, curr_tag))}]" if curr_tag else "[]"
-                                        prop_tag_str = f"[{', '.join(map(str, prop_tag))}]" if prop_tag else "[]"
-                                        changes.append(f"Tagged VLANs {curr_tag_str} → {prop_tag_str}")
+                                        changes = []
+                                        if curr_untag != prop_untag:
+                                            changes.append(f"Untagged VLAN {curr_untag} → {prop_untag}")
+                                        if curr_tag != prop_tag:
+                                            curr_tag_str = f"[{', '.join(map(str, curr_tag))}]" if curr_tag else "[]"
+                                            prop_tag_str = f"[{', '.join(map(str, prop_tag))}]" if prop_tag else "[]"
+                                            changes.append(f"Tagged VLANs {curr_tag_str} → {prop_tag_str}")
 
-                                    if changes:
-                                        device_logs.append(f"  {iface}: {', '.join(changes)}")
+                                        if changes:
+                                            device_logs.append(f"  {iface}: {', '.join(changes)}")
+                            
                             device_logs.append("")
-
-                        # Then show bond interface changes (VLANs being added)
-                        bond_groups = {k: v for k, v in netbox_groups.items() if k[1] == 'bond_add'}
-                        if bond_groups:
-                            device_logs.append("Bond Interfaces (VLANs will be ADDED):")
+                            device_logs.append("  Note: Bond interfaces will be created in NetBox and VLANs will be migrated from member interfaces.")
                             device_logs.append("")
-                            for (bond_name, change_type), interfaces in sorted(bond_groups.items()):
-                                for item in interfaces:
-                                    iface = item['interface']
-                                    curr_untag = item['current_untagged']
-                                    prop_untag = item['proposed_untagged']
-                                    curr_tag = item['current_tagged']
-                                    prop_tag = item['proposed_tagged']
+                        else:
+                            # Bonds already exist in NetBox - show member interfaces being cleared and bonds being updated
+                            # First show member interface changes (VLANs being removed)
+                            member_groups = {k: v for k, v in netbox_groups.items() if k[1] == 'member_clear'}
+                            if member_groups:
+                                device_logs.append("Member Interfaces (VLANs will be REMOVED and migrated to bond):")
+                                device_logs.append("")
+                                for (bond_name, change_type), interfaces in sorted(member_groups.items()):
+                                    for item in interfaces:
+                                        iface = item['interface']
+                                        curr_untag = item['current_untagged']
+                                        prop_untag = item['proposed_untagged']
+                                        curr_tag = item['current_tagged']
+                                        prop_tag = item['proposed_tagged']
 
-                                    changes = []
-                                    if curr_untag != prop_untag:
-                                        changes.append(f"Untagged VLAN {curr_untag} → {prop_untag}")
-                                    if curr_tag != prop_tag:
-                                        curr_tag_str = f"[{', '.join(map(str, curr_tag))}]" if curr_tag else "[]"
-                                        prop_tag_str = f"[{', '.join(map(str, prop_tag))}]" if prop_tag else "[]"
-                                        changes.append(f"Tagged VLANs {curr_tag_str} → {prop_tag_str}")
+                                        changes = []
+                                        if curr_untag != prop_untag:
+                                            changes.append(f"Untagged VLAN {curr_untag} → {prop_untag}")
+                                        if curr_tag != prop_tag:
+                                            curr_tag_str = f"[{', '.join(map(str, curr_tag))}]" if curr_tag else "[]"
+                                            prop_tag_str = f"[{', '.join(map(str, prop_tag))}]" if prop_tag else "[]"
+                                            changes.append(f"Tagged VLANs {curr_tag_str} → {prop_tag_str}")
 
-                                    if changes:
-                                        device_logs.append(f"  {iface}: {', '.join(changes)}")
-                            device_logs.append("")
+                                        if changes:
+                                            device_logs.append(f"  {iface}: {', '.join(changes)}")
+                                
+                                # Also include ALL bond members that might not be in device_results
+                                # This handles cases where a bond member wasn't directly selected but should have VLANs removed
+                                try:
+                                    from dcim.models import Interface
+                                    all_bond_names = set([k[0] for k in member_groups.keys()])
+                                    for bond_name in all_bond_names:
+                                        # Get all members of this bond from NetBox
+                                        try:
+                                            bond_interface = Interface.objects.get(device=device, name=bond_name)
+                                            bond_members = Interface.objects.filter(device=device, lag=bond_interface)
+                                            
+                                            # Check each member to see if it's already in the list
+                                            for member in bond_members:
+                                                member_name = member.name
+                                                # Skip if already in the list
+                                                already_listed = any(
+                                                    item['interface'] == member_name 
+                                                    for interfaces in member_groups.values() 
+                                                    for item in interfaces
+                                                )
+                                                
+                                                if not already_listed:
+                                                    # Get current VLAN config for this member
+                                                    curr_untag = member.untagged_vlan.vid if member.untagged_vlan else None
+                                                    curr_tag = list(member.tagged_vlans.values_list('vid', flat=True))
+                                                    
+                                                    # Member interfaces will have VLANs cleared (set to None/empty)
+                                                    if curr_untag or curr_tag:
+                                                        changes = []
+                                                        if curr_untag:
+                                                            changes.append(f"Untagged VLAN {curr_untag} → None")
+                                                        if curr_tag:
+                                                            curr_tag_str = f"[{', '.join(map(str, curr_tag))}]"
+                                                            changes.append(f"Tagged VLANs {curr_tag_str} → []")
+                                                        
+                                                        if changes:
+                                                            device_logs.append(f"  {member_name}: {', '.join(changes)}")
+                                        except Interface.DoesNotExist:
+                                            # Bond doesn't exist in NetBox yet - skip
+                                            continue
+                                except Exception as e:
+                                    logger.debug(f"Could not fetch all bond members for display: {e}")
+                                
+                                device_logs.append("")
+
+                            # Then show bond interface changes (VLANs being added)
+                            bond_groups = {k: v for k, v in netbox_groups.items() if k[1] == 'bond_add'}
+                            if bond_groups:
+                                device_logs.append("Bond Interfaces (VLANs will be ADDED):")
+                                device_logs.append("")
+                                for (bond_name, change_type), interfaces in sorted(bond_groups.items()):
+                                    for item in interfaces:
+                                        iface = item['interface']
+                                        curr_untag = item['current_untagged']
+                                        prop_untag = item['proposed_untagged']
+                                        curr_tag = item['current_tagged']
+                                        prop_tag = item['proposed_tagged']
+
+                                        changes = []
+                                        if curr_untag != prop_untag:
+                                            changes.append(f"Untagged VLAN {curr_untag} → {prop_untag}")
+                                        if curr_tag != prop_tag:
+                                            curr_tag_str = f"[{', '.join(map(str, curr_tag))}]" if curr_tag else "[]"
+                                            prop_tag_str = f"[{', '.join(map(str, prop_tag))}]" if prop_tag else "[]"
+                                            changes.append(f"Tagged VLANs {curr_tag_str} → {prop_tag_str}")
+
+                                        if changes:
+                                            device_logs.append(f"  {iface}: {', '.join(changes)}")
+                                device_logs.append("")
 
                         # Finally show standalone interface changes
                         standalone_groups = {k: v for k, v in netbox_groups.items() if k[1] == 'update'}
@@ -6327,12 +6431,24 @@ class VLANDeploymentView(View):
                         logger.warning(f"[DEPLOYMENT] Could not check bond for {device.name}:{actual_interface_name}: {e}")
 
                 # Step 2: Check for bonds in NetBox but NOT on device (Case 2)
+                # NOTE: Bond detection should check BOTH NetBox AND device config
+                # This is correct - we need to detect bonds from either source
                 netbox_bonds = {}  # {bond_name: [member_interfaces]}
                 for actual_interface_name in device_interfaces:
                     try:
                         interface_obj = Interface.objects.get(device=device, name=actual_interface_name)
                         if hasattr(interface_obj, 'lag') and interface_obj.lag:
                             bond_name = interface_obj.lag.name
+                            
+                            # CRITICAL: Validate bond name from NetBox - must be a single interface name
+                            # Bond detection from both NetBox and device config is correct and needed
+                            # However, config generation in normal mode uses ONLY form input (vlan_id), NOT NetBox VLAN data
+                            # Skip invalid bond names that contain commas (data corruption)
+                            if ',' in bond_name:
+                                logger.warning(f"[DEPLOYMENT] NetBox has invalid bond name '{bond_name}' for interface {actual_interface_name} - contains comma")
+                                logger.warning(f"[DEPLOYMENT] Skipping this NetBox bond entry - will use device config only")
+                                continue  # Skip this invalid NetBox bond entry
+                            
                             if bond_name not in netbox_bonds:
                                 netbox_bonds[bond_name] = []
                             netbox_bonds[bond_name].append(actual_interface_name)
@@ -8105,6 +8221,51 @@ class VLANDeploymentView(View):
                         bond_interface.mode = None
 
                     bond_interface.save()
+                    
+                    # Auto-tag bond interface based on VLAN configuration
+                    # Use same logic as _auto_tag_interface_after_deployment:
+                    # - If bond has BOTH tagged AND untagged VLANs → vlan-mode:tagged
+                    # - If bond has ONLY untagged VLAN (no tagged) → vlan-mode:access
+                    # - If bond has ONLY tagged VLANs (no untagged) → vlan-mode:tagged
+                    bond_interface.refresh_from_db()
+                    has_untagged = bond_interface.untagged_vlan is not None
+                    has_tagged = bond_interface.tagged_vlans.exists()
+                    
+                    if has_tagged and has_untagged:
+                        # Both tagged and untagged VLANs → tagged mode
+                        tag_name = "vlan-mode:tagged"
+                    elif has_untagged:
+                        # Only untagged VLAN → access mode
+                        tag_name = "vlan-mode:access"
+                    elif has_tagged:
+                        # Only tagged VLANs → tagged mode
+                        tag_name = "vlan-mode:tagged"
+                    else:
+                        # No VLAN config - skip tagging
+                        tag_name = None
+                    
+                    if tag_name:
+                        try:
+                            from extras.models import Tag
+                            # Get or create the tag
+                            tag, created = Tag.objects.get_or_create(
+                                name=tag_name,
+                                defaults={'slug': tag_name.replace(':', '-')}
+                            )
+                            
+                            # Remove any existing vlan-mode:access or vlan-mode:tagged tags first
+                            existing_vlan_mode_tags = [
+                                t for t in bond_interface.tags.all()
+                                if t.name.startswith('vlan-mode:access') or t.name.startswith('vlan-mode:tagged')
+                            ]
+                            if existing_vlan_mode_tags:
+                                bond_interface.tags.remove(*existing_vlan_mode_tags)
+                            
+                            # Add the new tag
+                            bond_interface.tags.add(tag)
+                            logger.info(f"Applied tag '{tag_name}' to bond {bond_name} on {device.name}")
+                        except Exception as e:
+                            logger.warning(f"Failed to apply tag '{tag_name}' to bond {bond_name} on {device.name}: {e}")
 
                     # Clear VLANs from ALL member interfaces
                     for member_name in member_interfaces:
