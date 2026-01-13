@@ -1379,7 +1379,8 @@ class VLANDeploymentView(View):
                                 except Exception as e_uptime:
                                     logger.debug(f"Could not get uptime for {device.name}: {e_uptime}")
 
-                                # Primary: Use nv config show -o json (more reliable than YAML parsing)
+                                # Primary: Use nv config show -r applied -o json (shows applied config, not pending)
+                                # This matches the verification method to ensure consistency
                                 # Retry up to 3 times with 1 second delay between retries
                                 # Initialize config_json_str before loop to ensure it's always in scope
                                 config_show_output = None
@@ -1387,13 +1388,15 @@ class VLANDeploymentView(View):
                                 max_retries = 3
                                 for attempt in range(max_retries):
                                     try:
-                                        config_show_output = connection.cli(['nv config show -o json'])
+                                        # Use -r applied to get the applied config (same as verification)
+                                        config_show_output = connection.cli(['nv config show -r applied -o json'])
 
                                         # If cli() returns None, try Netmiko fallback (Cumulus driver may not implement cli() properly)
                                         if config_show_output is None and hasattr(connection, 'device') and hasattr(connection.device, 'send_command'):
                                             logger.debug(f"cli() returned None, falling back to Netmiko send_command() for {device.name}")
                                             try:
-                                                config_show_output = connection.device.send_command('nv config show -o json', read_timeout=60)
+                                                # Use -r applied to get the applied config (same as verification)
+                                                config_show_output = connection.device.send_command('nv config show -r applied -o json', read_timeout=60)
                                             except Exception as netmiko_error:
                                                 logger.debug(f"Netmiko fallback also failed: {netmiko_error}")
                                                 config_show_output = None
@@ -1401,7 +1404,10 @@ class VLANDeploymentView(View):
                                         if config_show_output:
                                             # Extract output (might be keyed by command)
                                             if isinstance(config_show_output, dict):
-                                                if 'nv config show -o json' in config_show_output:
+                                                # Try both -r applied and regular command keys
+                                                if 'nv config show -r applied -o json' in config_show_output:
+                                                    config_json_str = config_show_output['nv config show -r applied -o json']
+                                                elif 'nv config show -o json' in config_show_output:
                                                     config_json_str = config_show_output['nv config show -o json']
                                                 elif 'nv config show' in config_show_output:
                                                     config_json_str = config_show_output['nv config show']
@@ -5192,6 +5198,12 @@ class VLANDeploymentView(View):
             device_logs.append("=" * 80)
             device_logs.append("")
 
+            # Clear config cache to ensure we get fresh data after deployment
+            # (cache might contain pre-deployment config)
+            if hasattr(self, '_device_config_cache'):
+                logger.debug(f"Clearing device config cache before post-deployment checks for {device.name}")
+                self._device_config_cache.clear()
+
             # Collect post-deployment data for all interfaces
             post_deployment_data_sync = {}
             for actual_interface_name in device_interface_names:
@@ -7168,6 +7180,12 @@ class VLANDeploymentView(View):
                 device_logs.append("INTERFACE-LEVEL POST-DEPLOYMENT CHECKS")
                 device_logs.append("=" * 80)
                 device_logs.append("")
+
+                # Clear config cache to ensure we get fresh data after deployment
+                # (cache might contain pre-deployment config)
+                if hasattr(self, '_device_config_cache'):
+                    logger.debug(f"Clearing device config cache before post-deployment checks for {device.name}")
+                    self._device_config_cache.clear()
 
                 # Collect post-deployment data for all interfaces
                 post_deployment_data = {}
