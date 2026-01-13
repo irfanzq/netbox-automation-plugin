@@ -1125,7 +1125,7 @@ class NornirDeviceManager:
         
         return results
 
-    def deploy_vlan(self, interface_list: List[str], vlan_id: int, platform: str, timeout: int = 90, bond_info_map: Optional[Dict[str, Dict[str, str]]] = None, bonds_to_create_on_device: Optional[Dict[str, Dict[str, Any]]] = None, dry_run: bool = False, preview_callback: Optional[Callable] = None) -> Dict[str, Any]:
+    def deploy_vlan(self, interface_list: List[str], vlan_id: int, platform: str, timeout: int = 90, bond_info_map: Optional[Dict[str, Dict[str, str]]] = None, bonds_to_create_on_device: Optional[Dict[str, Dict[str, Any]]] = None, dry_run: bool = False, preview_callback: Optional[Callable] = None, interface_vlan_map: Optional[Dict[str, Dict[str, Any]]] = None) -> Dict[str, Any]:
         """
         Deploy VLAN configuration to multiple interfaces across all devices in parallel.
 
@@ -1139,8 +1139,8 @@ class NornirDeviceManager:
         Interfaces per device are processed SEQUENTIALLY.
 
         Args:
-            interface_list: List of interface names (e.g., ['swp7', 'swp8'])
-            vlan_id: VLAN ID to configure (1-4094)
+            interface_list: List of interface names (e.g., ['swp7', 'swp8'] or ['device:swp7', 'device:swp8'] for sync mode)
+            vlan_id: VLAN ID to configure (1-4094). Ignored if interface_vlan_map is provided (sync mode).
             platform: Platform type ('cumulus' or 'eos')
             timeout: Rollback timeout in seconds (default: 90)
             bond_info_map: Optional dict mapping device_name -> {interface_name: bond_name}
@@ -1150,6 +1150,8 @@ class NornirDeviceManager:
             dry_run: If True, preview changes without deploying (default: False)
             preview_callback: Optional callback function for dry run preview generation
                             Signature: callback(device, interface_list_for_device, platform, vlan_id) -> dict
+            interface_vlan_map: Optional dict mapping "device:interface" -> {'untagged_vlan': int, 'tagged_vlans': [int], 'commands': [str]}
+                              Used in sync mode to provide per-interface VLAN config from NetBox
 
         Returns:
             Dictionary mapping device names to deployment results per interface
@@ -1660,16 +1662,39 @@ class NornirDeviceManager:
                     interface_mapping[actual_interface_name] = target_interface
                     
                     # Generate config for this interface
-                    if platform == 'cumulus':
-                        # Bridge VLAN command (only add once, and only if needed)
-                        if bridge_vlan_needed and not any('nv set bridge domain br_default vlan' in line for line in all_config_lines):
-                            all_config_lines.append(f"nv set bridge domain br_default vlan {vlan_id}")
-                        # Interface access command
-                        all_config_lines.append(f"nv set interface {target_interface} bridge domain br_default access {vlan_id}")
-                    elif platform == 'eos':
-                        all_config_lines.append(f"interface {target_interface}")
-                        all_config_lines.append(f"   switchport mode access")
-                        all_config_lines.append(f"   switchport access vlan {vlan_id}")
+                    # In sync mode, use per-interface VLAN config from interface_vlan_map
+                    # In normal mode, use vlan_id parameter
+                    if interface_vlan_map and interface_name in interface_vlan_map:
+                        # Sync mode: Use pre-generated commands from NetBox config
+                        vlan_config = interface_vlan_map[interface_name]
+                        commands = vlan_config.get('commands', [])
+                        
+                        # Replace interface names in commands with target_interface (bond if detected)
+                        # Commands are like "nv set interface swp3 bridge domain br_default access 3000"
+                        # Need to replace "swp3" with "bond3" if bond detected
+                        for cmd in commands:
+                            if actual_interface_name != target_interface:
+                                # Replace actual_interface_name with target_interface in command
+                                # Handle both "nv set interface {name}" and "interface {name}" formats
+                                if f"interface {actual_interface_name}" in cmd:
+                                    cmd = cmd.replace(f"interface {actual_interface_name}", f"interface {target_interface}")
+                                elif f"nv set interface {actual_interface_name}" in cmd:
+                                    cmd = cmd.replace(f"nv set interface {actual_interface_name}", f"nv set interface {target_interface}")
+                            all_config_lines.append(cmd)
+                        
+                        logger.debug(f"Device {device_name}: Using sync mode config for {interface_name} → {target_interface}: {len(commands)} commands")
+                    else:
+                        # Normal mode: Use vlan_id parameter
+                        if platform == 'cumulus':
+                            # Bridge VLAN command (only add once, and only if needed)
+                            if bridge_vlan_needed and not any('nv set bridge domain br_default vlan' in line for line in all_config_lines):
+                                all_config_lines.append(f"nv set bridge domain br_default vlan {vlan_id}")
+                            # Interface access command
+                            all_config_lines.append(f"nv set interface {target_interface} bridge domain br_default access {vlan_id}")
+                        elif platform == 'eos':
+                            all_config_lines.append(f"interface {target_interface}")
+                            all_config_lines.append(f"   switchport mode access")
+                            all_config_lines.append(f"   switchport access vlan {vlan_id}")
                 
                 # Combine all configs into single string
                 combined_config = '\n'.join(all_config_lines)
@@ -1732,19 +1757,102 @@ class NornirDeviceManager:
                         combined_logs.append(f"  {line}")
                     combined_logs.append("")
                     
+                    # Build list of target interfaces for baseline collection (use bonds if detected, otherwise member interfaces)
+                    # Deduplicate bonds since multiple members map to the same bond
+                    target_interfaces_for_baseline = []
+                    seen_targets = set()
+                    for interface_name in interface_list:
+                        # Parse interface name if in "device:interface" format
+                        actual_interface_name = interface_name
+                        if ':' in interface_name:
+                            iface_device_name, actual_interface_name = interface_name.split(':', 1)
+                            # Skip if this interface doesn't belong to current device
+                            if iface_device_name != device_name:
+                                continue
+                        
+                        # Get target interface (bond if detected, otherwise member interface)
+                        target_interface = interface_mapping.get(actual_interface_name, actual_interface_name)
+                        
+                        # Only add each target interface once (deduplicate bonds)
+                        if target_interface not in seen_targets:
+                            target_interfaces_for_baseline.append(target_interface)
+                            seen_targets.add(target_interface)
+                            if target_interface != actual_interface_name:
+                                logger.info(f"Device {device_name}: Baseline will collect for bond {target_interface} (not member {actual_interface_name})")
+                    
                     # Deploy all interfaces in one commit-confirm session
-                    # Pass ALL interfaces for interface-level pre-checks and post-checks
+                    # Pass TARGET interfaces (bonds if detected) for interface-level pre-checks and post-checks
                     deploy_result = napalm_mgr.deploy_config_safe(
                         config=combined_config,
                         timeout=timeout,
                         replace=False,
-                        interface_names=interface_list,  # ✅ ALL interfaces for interface-level checks
+                        interface_names=target_interfaces_for_baseline,  # ✅ Use bond interfaces if bonds detected
                         vlan_id=vlan_id
                     )
                     
                     # Prepend batched deployment header to logs
                     if deploy_result.get('logs'):
                         deploy_result['logs'] = combined_logs + deploy_result['logs']
+                    
+                    # Collect all interface mappings for the batched deployment message
+                    interface_mappings = []  # List of (member_interface, bond_interface) tuples
+                    for interface_name in interface_list:
+                        # Parse interface name if in "device:interface" format
+                        actual_interface_name = interface_name
+                        if ':' in interface_name:
+                            iface_device_name, actual_interface_name = interface_name.split(':', 1)
+                            # Skip if this interface doesn't belong to current device
+                            if iface_device_name != device_name:
+                                continue
+                        
+                        # Look up target interface using actual_interface_name
+                        target_interface = interface_mapping.get(actual_interface_name, actual_interface_name)
+                        interface_mappings.append((actual_interface_name, target_interface))
+                    
+                    # Generate a single comprehensive batched deployment message
+                    note_lines = []
+                    note_lines.append("")
+                    note_lines.append("--- Batched Deployment Information ---")
+                    
+                    # Group interfaces by type (bonds vs regular)
+                    bond_interfaces = []  # (member, bond) tuples
+                    regular_interfaces = []  # interface names
+                    
+                    for member_iface, target_iface in interface_mappings:
+                        if target_iface != member_iface:
+                            bond_interfaces.append((member_iface, target_iface))
+                        else:
+                            regular_interfaces.append(member_iface)
+                    
+                    # Build the message
+                    if bond_interfaces:
+                        # List all bond mappings
+                        bond_lines = []
+                        for member, bond in bond_interfaces:
+                            bond_lines.append(f"'{member}' (member) → '{bond}' (bond)")
+                        
+                        note_lines.append(f"Interface(s) {', '.join(bond_lines)} were deployed as part of a batched session")
+                        note_lines.append(f"with {num_interfaces} interface(s) on device {device_name} in a single commit-confirm session.")
+                        
+                        # List all unique bond interfaces
+                        unique_bonds = sorted(set(bond for _, bond in bond_interfaces))
+                        unique_members = sorted(set(member for member, _ in bond_interfaces))
+                        note_lines.append(f"Configuration was applied to bond interface(s): {', '.join(unique_bonds)}")
+                        note_lines.append(f"(not member interface(s): {', '.join(unique_members)}).")
+                    elif regular_interfaces:
+                        # Regular interfaces (no bonds)
+                        if len(regular_interfaces) == 1:
+                            note_lines.append(f"Interface '{regular_interfaces[0]}' was deployed as part of a batched session")
+                        else:
+                            interface_list_str = ', '.join(f"'{iface}'" for iface in sorted(regular_interfaces))
+                            note_lines.append(f"Interface(s) {interface_list_str} were deployed as part of a batched session")
+                        note_lines.append(f"with {num_interfaces} interface(s) on device {device_name} in a single commit-confirm session.")
+                    else:
+                        # Fallback (shouldn't happen)
+                        note_lines.append(f"{num_interfaces} interface(s) were deployed as part of a batched session")
+                        note_lines.append(f"on device {device_name} in a single commit-confirm session.")
+                    
+                    note_lines.append("")
                     
                     # Create result for each interface (all share same deployment result)
                     for interface_name in interface_list:
@@ -1763,7 +1871,7 @@ class NornirDeviceManager:
                         interface_result['target_interface'] = target_interface
                         interface_result['logs'] = deploy_result.get('logs', []).copy()  # Copy to avoid modifying shared list
 
-                        # Add interface-specific note about batched deployment BEFORE the completion message
+                        # Add the batched deployment note BEFORE the completion message
                         # Find where "=== Deployment Completed ===" appears and insert note before it
                         if interface_result['logs']:
                             completion_idx = None
@@ -1771,21 +1879,6 @@ class NornirDeviceManager:
                                 if "=== Deployment Completed ===" in log_line:
                                     completion_idx = i
                                     break
-
-                            # Prepare note lines
-                            note_lines = []
-                            note_lines.append("")
-                            note_lines.append("--- Batched Deployment Information ---")
-                            if target_interface != actual_interface_name:
-                                # Bond detected - show both interfaces clearly
-                                note_lines.append(f"Interface '{actual_interface_name}' (member) → '{target_interface}' (bond) was deployed as part of a batched session")
-                                note_lines.append(f"with {num_interfaces} interface(s) on device {device_name} in a single commit-confirm session.")
-                                note_lines.append(f"Configuration was applied to bond interface '{target_interface}' (not member interface '{actual_interface_name}').")
-                            else:
-                                # No bond - just show the interface
-                                note_lines.append(f"Interface '{actual_interface_name}' was deployed as part of a batched session")
-                                note_lines.append(f"with {num_interfaces} interface(s) on device {device_name} in a single commit-confirm session.")
-                            note_lines.append("")
 
                             # Insert note before completion message, or at the end if not found
                             if completion_idx is not None:

@@ -1181,7 +1181,11 @@ class NAPALMDeviceManager:
         
         # Check 4: LLDP Neighbors (device-level check with interface exclusion)
         logger.info(f"VLAN Verification Check 4/5: LLDP neighbors (device-level)...")
-        if baseline and baseline.get('lldp_all_interfaces') is not None:
+        # Check for LLDP baseline - prefer per-interface data, fallback to device-level
+        lldp_baseline_interfaces = baseline.get('lldp_interfaces', {})
+        lldp_baseline_all = baseline.get('lldp_all_interfaces', {})
+        
+        if lldp_baseline_interfaces or (lldp_baseline_all is not None):
             try:
                 lldp_after = self.get_lldp_neighbors()
 
@@ -1191,71 +1195,136 @@ class NAPALMDeviceManager:
                     for iface, neighbors in lldp_after.items():
                         lldp_after_all[iface] = len(neighbors) if neighbors else 0
 
-                lldp_before_all = baseline.get('lldp_all_interfaces', {})
-
-                # Check for lost LLDP neighbors on ALL interfaces (including the one being configured)
-                # ANY lost neighbor is a CRITICAL failure that triggers rollback
-                lost_neighbors = []
-                lost_details = []
-
-                for iface, count_before in lldp_before_all.items():
-                    count_after = lldp_after_all.get(iface, 0)
-
-                    # CRITICAL: Lost ALL neighbors on any interface
-                    if count_before > 0 and count_after == 0:
-                        lost_neighbors.append(iface)
-                        lost_details.append(f"{iface} (lost ALL {count_before} neighbors)")
-                        logger.error(f"CRITICAL: Lost all LLDP neighbors on {iface}! (had {count_before}, now 0)")
-                    # WARNING: Lost SOME neighbors on any interface
-                    elif count_before > count_after:
-                        lost_neighbors.append(iface)
-                        lost_details.append(f"{iface} (lost {count_before - count_after} of {count_before} neighbors)")
-                        logger.error(f"CRITICAL: Lost LLDP neighbors on {iface}: {count_before}→{count_after}")
-
-                # If we lost neighbors on ANY interface, FAIL and trigger rollback
-                if lost_neighbors:
-                    checks['lldp_neighbors'] = {
-                        'success': False,
-                        'message': f"ERROR: Lost LLDP neighbors on {len(lost_neighbors)} interface(s): {', '.join(lost_details)}",
-                        'data': {
-                            'lost_on': lost_neighbors,
-                            'details': lost_details,
-                            'before': lldp_before_all,
-                            'after': lldp_after_all
+                # Use per-interface baseline if available (new format), otherwise fallback to device-level
+                if lldp_baseline_interfaces:
+                    # Per-interface LLDP verification (for deployed interfaces only)
+                    lldp_before_interfaces = {}
+                    for iface, iface_data in lldp_baseline_interfaces.items():
+                        lldp_before_interfaces[iface] = iface_data.get('count', 0)
+                    
+                    # Check for lost LLDP neighbors on deployed interfaces only
+                    lost_neighbors = []
+                    lost_details = []
+                    
+                    for iface, count_before in lldp_before_interfaces.items():
+                        count_after = lldp_after_all.get(iface, 0)
+                        
+                        # CRITICAL: Lost ALL neighbors on deployed interface
+                        if count_before > 0 and count_after == 0:
+                            lost_neighbors.append(iface)
+                            lost_details.append(f"{iface} (lost ALL {count_before} neighbors)")
+                            logger.error(f"CRITICAL: Lost all LLDP neighbors on {iface}! (had {count_before}, now 0)")
+                        # WARNING: Lost SOME neighbors on deployed interface
+                        elif count_before > count_after:
+                            lost_neighbors.append(iface)
+                            lost_details.append(f"{iface} (lost {count_before - count_after} of {count_before} neighbors)")
+                            logger.error(f"CRITICAL: Lost LLDP neighbors on {iface}: {count_before}→{count_after}")
+                    
+                    # If we lost neighbors on ANY deployed interface, FAIL and trigger rollback
+                    if lost_neighbors:
+                        checks['lldp_neighbors'] = {
+                            'success': False,
+                            'message': f"ERROR: Lost LLDP neighbors on {len(lost_neighbors)} interface(s): {', '.join(lost_details)}",
+                            'data': {
+                                'lost_on': lost_neighbors,
+                                'details': lost_details,
+                                'before': lldp_before_interfaces,
+                                'after': {iface: lldp_after_all.get(iface, 0) for iface in lldp_before_interfaces.keys()}
+                            }
                         }
-                    }
-                    all_passed = False
-                    messages.append(f"ERROR: LLDP: Lost neighbors on {len(lost_neighbors)} interface(s)")
-                    logger.error(f"CRITICAL: VLAN deployment caused LLDP neighbor loss - TRIGGERING ROLLBACK")
-                    logger.error(f"Lost neighbors: {', '.join(lost_details)}")
-
-                # GOOD: No neighbors lost on any interface
-                else:
-                    # Calculate totals for summary
-                    total_before = sum(lldp_before_all.values())
-                    total_after = sum(lldp_after_all.values())
-
-                    # Get specific interface status (if single interface deployment)
-                    if interface_name:
-                        iface_before = lldp_before_all.get(interface_name, 0)
-                        iface_after = lldp_after_all.get(interface_name, 0)
-                        iface_status = f"{interface_name}: {iface_before}→{iface_after}"
+                        all_passed = False
+                        messages.append(f"ERROR: LLDP: Lost neighbors on {len(lost_neighbors)} interface(s)")
+                        logger.error(f"CRITICAL: VLAN deployment caused LLDP neighbor loss - TRIGGERING ROLLBACK")
+                        logger.error(f"Lost neighbors: {', '.join(lost_details)}")
                     else:
-                        iface_status = "N/A"
-
-                    checks['lldp_neighbors'] = {
-                        'success': True,
-                        'message': f"Device-level LLDP stable (total: {total_before}→{total_after}, {iface_status})",
-                        'data': {
-                            'total_before': total_before,
-                            'total_after': total_after,
-                            'interface_status': iface_status,
-                            'before': lldp_before_all,
-                            'after': lldp_after_all
+                        # GOOD: No neighbors lost on deployed interfaces
+                        total_before = sum(lldp_before_interfaces.values())
+                        total_after = sum(lldp_after_all.get(iface, 0) for iface in lldp_before_interfaces.keys())
+                        
+                        # Build interface status summary
+                        iface_statuses = []
+                        for iface in sorted(lldp_before_interfaces.keys()):
+                            count_before = lldp_before_interfaces[iface]
+                            count_after = lldp_after_all.get(iface, 0)
+                            iface_statuses.append(f"{iface}: {count_before}→{count_after}")
+                        
+                        checks['lldp_neighbors'] = {
+                            'success': True,
+                            'message': f"Interface-level LLDP stable ({len(lldp_before_interfaces)} interface(s): {total_before}→{total_after})",
+                            'data': {
+                                'total_before': total_before,
+                                'total_after': total_after,
+                                'interface_statuses': iface_statuses,
+                                'before': lldp_before_interfaces,
+                                'after': {iface: lldp_after_all.get(iface, 0) for iface in lldp_before_interfaces.keys()}
+                            }
                         }
-                    }
-                    messages.append(f"SUCCESS: LLDP: Device-level stable ({total_after} total)")
-                    logger.info(f"LLDP check passed: Device has {total_after} total neighbors (was {total_before})")
+                        messages.append(f"SUCCESS: LLDP: Interface-level stable ({len(lldp_before_interfaces)} interface(s), {total_after} total)")
+                        logger.info(f"LLDP check passed: {len(lldp_before_interfaces)} interface(s) stable ({total_after} total neighbors, was {total_before})")
+                else:
+                    # Fallback to device-level verification (old format)
+                    lldp_before_all = lldp_baseline_all
+                    
+                    # Check for lost LLDP neighbors on ALL interfaces
+                    lost_neighbors = []
+                    lost_details = []
+                    
+                    for iface, count_before in lldp_before_all.items():
+                        count_after = lldp_after_all.get(iface, 0)
+                        
+                        # CRITICAL: Lost ALL neighbors on any interface
+                        if count_before > 0 and count_after == 0:
+                            lost_neighbors.append(iface)
+                            lost_details.append(f"{iface} (lost ALL {count_before} neighbors)")
+                            logger.error(f"CRITICAL: Lost all LLDP neighbors on {iface}! (had {count_before}, now 0)")
+                        # WARNING: Lost SOME neighbors on any interface
+                        elif count_before > count_after:
+                            lost_neighbors.append(iface)
+                            lost_details.append(f"{iface} (lost {count_before - count_after} of {count_before} neighbors)")
+                            logger.error(f"CRITICAL: Lost LLDP neighbors on {iface}: {count_before}→{count_after}")
+                    
+                    # If we lost neighbors on ANY interface, FAIL and trigger rollback
+                    if lost_neighbors:
+                        checks['lldp_neighbors'] = {
+                            'success': False,
+                            'message': f"ERROR: Lost LLDP neighbors on {len(lost_neighbors)} interface(s): {', '.join(lost_details)}",
+                            'data': {
+                                'lost_on': lost_neighbors,
+                                'details': lost_details,
+                                'before': lldp_before_all,
+                                'after': lldp_after_all
+                            }
+                        }
+                        all_passed = False
+                        messages.append(f"ERROR: LLDP: Lost neighbors on {len(lost_neighbors)} interface(s)")
+                        logger.error(f"CRITICAL: VLAN deployment caused LLDP neighbor loss - TRIGGERING ROLLBACK")
+                        logger.error(f"Lost neighbors: {', '.join(lost_details)}")
+                    else:
+                        # GOOD: No neighbors lost on any interface
+                        total_before = sum(lldp_before_all.values())
+                        total_after = sum(lldp_after_all.values())
+                        
+                        # Get specific interface status (if single interface deployment)
+                        if interface_name:
+                            iface_before = lldp_before_all.get(interface_name, 0)
+                            iface_after = lldp_after_all.get(interface_name, 0)
+                            iface_status = f"{interface_name}: {iface_before}→{iface_after}"
+                        else:
+                            iface_status = "N/A"
+                        
+                        checks['lldp_neighbors'] = {
+                            'success': True,
+                            'message': f"Device-level LLDP stable (total: {total_before}→{total_after}, {iface_status})",
+                            'data': {
+                                'total_before': total_before,
+                                'total_after': total_after,
+                                'interface_status': iface_status,
+                                'before': lldp_before_all,
+                                'after': lldp_after_all
+                            }
+                        }
+                        messages.append(f"SUCCESS: LLDP: Device-level stable ({total_after} total)")
+                        logger.info(f"LLDP check passed: Device has {total_after} total neighbors (was {total_before})")
 
             except Exception as e:
                 logger.error(f"Could not verify LLDP neighbors: {e}")
@@ -1934,72 +2003,83 @@ class NAPALMDeviceManager:
                 logs.append(f"  Collecting interface-level baseline for {len(interfaces_to_check)} interface(s)...")
 
                 for iface_idx, interface_name in enumerate(interfaces_to_check, 1):
+                    # CRITICAL FIX: Parse interface name if it's in "device:interface" format
+                    # This can happen in sync mode where interface names might not be fully parsed
+                    actual_interface_name = interface_name
+                    if ':' in interface_name:
+                        # Extract just the interface name (remove device prefix)
+                        _, actual_interface_name = interface_name.split(':', 1)
+                        logger.warning(f"  Parsing interface name '{interface_name}' → '{actual_interface_name}' (removed device prefix)")
+                        interface_name = actual_interface_name  # Use parsed name for rest of loop
+                    
                     logger.info(f"  [{iface_idx}/{len(interfaces_to_check)}] Collecting baseline for interface: {interface_name}")
+                    # Note: When bonds are detected, interface_name will be the bond interface (e.g., bond3)
+                    # not the member interface (e.g., swp3), since VLAN config is applied to the bond
                     logs.append(f"  [{iface_idx}/{len(interfaces_to_check)}] Interface: {interface_name}")
 
                     # Initialize baseline for this interface
                     interface_baseline = {}
-                baseline_interface_name = interface_name  # Default to interface_name (could be bond)
-                
-                # For Cumulus devices, use direct NVUE command instead of NAPALM's get_interfaces()
-                # This is more reliable for bond members which may not appear in get_interfaces()
-                baseline_collected = False
-                baseline_error_details = []
-                
-                if driver_name == 'cumulus':
-                    try:
-                        # Check if we can access device commands (either via device.send_command or cli())
-                        can_access_device = (
-                            (hasattr(self.connection, 'device') and self.connection.device is not None and hasattr(self.connection.device, 'send_command')) or
-                            hasattr(self.connection, 'cli')
-                        )
-                        
-                        if can_access_device:
-                            # Try multiple interface names: interface_name (could be bond or member), and bond if member
-                            interfaces_to_try = [interface_name]
+                    baseline_interface_name = interface_name  # Default to interface_name (could be bond)
+                    
+                    # For Cumulus devices, use direct NVUE command instead of NAPALM's get_interfaces()
+                    # This is more reliable for bond members which may not appear in get_interfaces()
+                    baseline_collected = False
+                    baseline_error_details = []
+                    
+                    if driver_name == 'cumulus':
+                        try:
+                            # Check if we can access device commands (either via device.send_command or cli())
+                            can_access_device = (
+                                (hasattr(self.connection, 'device') and self.connection.device is not None and hasattr(self.connection.device, 'send_command')) or
+                                hasattr(self.connection, 'cli')
+                            )
                             
-                            # Check if interface_name is a bond member and add bond to list
-                            try:
-                                bond_members_command = 'nv show interface bond-members -o json'
-                                if hasattr(self.connection, 'device') and self.connection.device is not None:
-                                    bond_members_output = self.connection.device.send_command(bond_members_command, read_timeout=10)
-                                elif hasattr(self.connection, 'cli'):
-                                    cli_result = self.connection.cli([bond_members_command])
-                                    if isinstance(cli_result, dict):
-                                        bond_members_output = cli_result.get(bond_members_command, '')
-                                    else:
-                                        bond_members_output = str(cli_result) if cli_result else ''
-                                else:
-                                    bond_members_output = None
-                                if bond_members_output:
-                                    import json
-                                    bond_members = json.loads(bond_members_output)
-                                    # Check if interface_name is a bond member
-                                    if isinstance(bond_members, dict) and interface_name in bond_members:
-                                        member_info = bond_members[interface_name]
-                                        if isinstance(member_info, dict):
-                                            bond_name = member_info.get('parent') or member_info.get('bond')
-                                        elif isinstance(member_info, str):
-                                            bond_name = member_info
+                            if can_access_device:
+                                # Try multiple interface names: interface_name (could be bond or member), and bond if member
+                                interfaces_to_try = [interface_name]
+                                
+                                # Check if interface_name is a bond member and add bond to list
+                                try:
+                                    bond_members_command = 'nv show interface bond-members -o json'
+                                    if hasattr(self.connection, 'device') and self.connection.device is not None:
+                                        bond_members_output = self.connection.device.send_command(bond_members_command, read_timeout=10)
+                                    elif hasattr(self.connection, 'cli'):
+                                        cli_result = self.connection.cli([bond_members_command])
+                                        if isinstance(cli_result, dict):
+                                            bond_members_output = cli_result.get(bond_members_command, '')
                                         else:
-                                            bond_name = None
-                                        
-                                        if bond_name and bond_name not in interfaces_to_try:
-                                            interfaces_to_try.append(bond_name)
-                                            logger.info(f"Interface {interface_name} is a bond member, will also try bond {bond_name}")
-                                    # Also check if interface_name itself is a bond (check reverse lookup)
-                                    # Look for any member that points to interface_name as parent
-                                    for member, info in bond_members.items():
-                                        if isinstance(info, dict) and (info.get('parent') == interface_name or info.get('bond') == interface_name):
-                                            if member not in interfaces_to_try:
-                                                interfaces_to_try.append(member)
-                                                logger.info(f"Interface {interface_name} is a bond, will also try member {member}")
-                                            break
-                            except Exception as bond_check:
-                                logger.debug(f"Could not check bond membership for baseline: {bond_check}")
-                            
-                            # Try each interface name until one works
-                            for test_interface in interfaces_to_try:
+                                            bond_members_output = str(cli_result) if cli_result else ''
+                                    else:
+                                        bond_members_output = None
+                                    if bond_members_output:
+                                        import json
+                                        bond_members = json.loads(bond_members_output)
+                                        # Check if interface_name is a bond member
+                                        if isinstance(bond_members, dict) and interface_name in bond_members:
+                                            member_info = bond_members[interface_name]
+                                            if isinstance(member_info, dict):
+                                                bond_name = member_info.get('parent') or member_info.get('bond')
+                                            elif isinstance(member_info, str):
+                                                bond_name = member_info
+                                            else:
+                                                bond_name = None
+                                            
+                                            if bond_name and bond_name not in interfaces_to_try:
+                                                interfaces_to_try.append(bond_name)
+                                                logger.info(f"Interface {interface_name} is a bond member, will also try bond {bond_name}")
+                                        # Also check if interface_name itself is a bond (check reverse lookup)
+                                        # Look for any member that points to interface_name as parent
+                                        for member, info in bond_members.items():
+                                            if isinstance(info, dict) and (info.get('parent') == interface_name or info.get('bond') == interface_name):
+                                                if member not in interfaces_to_try:
+                                                    interfaces_to_try.append(member)
+                                                    logger.info(f"Interface {interface_name} is a bond, will also try member {member}")
+                                                break
+                                except Exception as bond_check:
+                                    logger.debug(f"Could not check bond membership for baseline: {bond_check}")
+                                
+                                # Try each interface name until one works
+                                for test_interface in interfaces_to_try:
                                 try:
                                     # Try to get interface stats directly using NVUE command
                                     # This works for both bond interfaces and member interfaces
@@ -2117,50 +2197,57 @@ class NAPALMDeviceManager:
                                         baseline_error_details.append(f"Stats command returned empty for {test_interface}")
                                 except Exception as test_err:
                                     baseline_error_details.append(f"Error testing {test_interface}: {str(test_err)[:100]}")
-                            
-                            if not baseline_collected:
-                                # All attempts failed - provide detailed error
-                                error_msg = f"Failed to collect baseline for interface {interface_name}. Tried: {', '.join(interfaces_to_try)}"
+                                
+                                if not baseline_collected:
+                                    # All attempts failed - log error but continue for other interfaces
+                                    error_msg = f"Failed to collect baseline for interface {interface_name}. Tried: {', '.join(interfaces_to_try)}"
+                                    logger.error(f"CRITICAL: {error_msg}")
+                                    logs.append(f"  ✗ Baseline collection FAILED for {interface_name}")
+                                    logs.append(f"  Tried interfaces: {', '.join(interfaces_to_try)}")
+                                    for detail in baseline_error_details:
+                                        logs.append(f"    - {detail}")
+                                    # Store error in baseline but continue processing other interfaces
+                                    baseline['interfaces'][interface_name] = {
+                                        'name': interface_name,
+                                        'is_up': None,
+                                        'is_enabled': None,
+                                        'error': error_msg,
+                                        'baseline_error_details': baseline_error_details
+                                    }
+                                    # Don't return - continue to next interface
+                                    continue
+                            else:
+                                # ISSUE 8 FIX: Add detailed diagnostic checks
+                                error_details = []
+                                if not self.connection:
+                                    error_details.append("Connection object is None")
+                                elif not hasattr(self.connection, 'device'):
+                                    error_details.append(f"Connection object has no 'device' attribute (connection type: {type(self.connection)})")
+                                elif self.connection.device is None:
+                                    error_details.append("Connection.device is None (device object not initialized)")
+                                elif not hasattr(self.connection.device, 'send_command'):
+                                    error_details.append(f"Connection.device has no 'send_command' method (device type: {type(self.connection.device)})")
+                                else:
+                                    error_details.append("Unknown error - connection.device.send_command check failed")
+                                
+                                error_msg = "Cannot access device.send_command for baseline collection"
                                 logger.error(f"CRITICAL: {error_msg}")
-                                logs.append(f"  ✗ Baseline collection FAILED for {interface_name}")
-                                logs.append(f"  Tried interfaces: {', '.join(interfaces_to_try)}")
-                                for detail in baseline_error_details:
+                                logger.error(f"  Diagnostic details: {error_details}")
+                                logs.append(f"  ✗ {error_msg}")
+                                logs.append(f"  [DEBUG] Connection diagnostics:")
+                                for detail in error_details:
                                     logs.append(f"    - {detail}")
-                                result['message'] = f"Baseline collection failed: {error_msg}. Errors: {'; '.join(baseline_error_details[:3])}"
+                                if hasattr(self, 'connection') and self.connection:
+                                    logs.append(f"    - Connection object exists: {self.connection is not None}")
+                                    logs.append(f"    - Connection type: {type(self.connection)}")
+                                    if hasattr(self.connection, 'device'):
+                                        logs.append(f"    - Connection.device exists: {self.connection.device is not None}")
+                                        if self.connection.device:
+                                            logs.append(f"    - Connection.device type: {type(self.connection.device)}")
+                                            logs.append(f"    - Connection.device has send_command: {hasattr(self.connection.device, 'send_command')}")
+                                result['message'] = f"{error_msg}. Details: {'; '.join(error_details)}"
                                 result['logs'] = logs
                                 return result
-                        else:
-                            # ISSUE 8 FIX: Add detailed diagnostic checks
-                            error_details = []
-                            if not self.connection:
-                                error_details.append("Connection object is None")
-                            elif not hasattr(self.connection, 'device'):
-                                error_details.append(f"Connection object has no 'device' attribute (connection type: {type(self.connection)})")
-                            elif self.connection.device is None:
-                                error_details.append("Connection.device is None (device object not initialized)")
-                            elif not hasattr(self.connection.device, 'send_command'):
-                                error_details.append(f"Connection.device has no 'send_command' method (device type: {type(self.connection.device)})")
-                            else:
-                                error_details.append("Unknown error - connection.device.send_command check failed")
-                            
-                            error_msg = "Cannot access device.send_command for baseline collection"
-                            logger.error(f"CRITICAL: {error_msg}")
-                            logger.error(f"  Diagnostic details: {error_details}")
-                            logs.append(f"  ✗ {error_msg}")
-                            logs.append(f"  [DEBUG] Connection diagnostics:")
-                            for detail in error_details:
-                                logs.append(f"    - {detail}")
-                            if hasattr(self, 'connection') and self.connection:
-                                logs.append(f"    - Connection object exists: {self.connection is not None}")
-                                logs.append(f"    - Connection type: {type(self.connection)}")
-                                if hasattr(self.connection, 'device'):
-                                    logs.append(f"    - Connection.device exists: {self.connection.device is not None}")
-                                    if self.connection.device:
-                                        logs.append(f"    - Connection.device type: {type(self.connection.device)}")
-                                        logs.append(f"    - Connection.device has send_command: {hasattr(self.connection.device, 'send_command')}")
-                            result['message'] = f"{error_msg}. Details: {'; '.join(error_details)}"
-                            result['logs'] = logs
-                            return result
                     except Exception as nvue_error:
                         error_msg = f"Direct NVUE baseline collection failed: {str(nvue_error)}"
                         logger.error(f"CRITICAL: {error_msg}")
@@ -2168,66 +2255,65 @@ class NAPALMDeviceManager:
                         result['message'] = error_msg
                         result['logs'] = logs
                         return result
-                else:
-                    # Non-Cumulus platforms - will use get_interfaces() fallback below
-                    baseline_collected = False
-                
-                # Fallback to NAPALM's get_interfaces() for non-Cumulus platforms
-                # For Cumulus, we already tried direct NVUE above, so skip this if baseline was collected
-                if driver_name != 'cumulus' or not baseline_collected:
-                    try:
-                        interfaces_before = self.get_interfaces()
-                        if not interfaces_before:
-                            error_msg = f"Cannot get interfaces from device {self.device.name}"
+                    else:
+                        # Non-Cumulus platforms - will use get_interfaces() fallback below
+                        baseline_collected = False
+                    
+                    # Fallback to NAPALM's get_interfaces() for non-Cumulus platforms
+                    # For Cumulus, we already tried direct NVUE above, so skip this if baseline was collected
+                    if driver_name != 'cumulus' or not baseline_collected:
+                        try:
+                            interfaces_before = self.get_interfaces()
+                            if not interfaces_before:
+                                error_msg = f"Cannot get interfaces from device {self.device.name}"
+                                logger.error(f"CRITICAL: {error_msg}")
+                                logs.append(f"  ✗ Cannot get interfaces from device")
+                                result['message'] = f"Baseline collection failed: {error_msg}"
+                                result['logs'] = logs
+                                return result
+                            else:
+                                # For non-Cumulus, we need to find the interface in interfaces_before
+                                # This will be handled in the code below
+                                baseline_collected = False  # Will be set to True if interface found
+                        except Exception as get_interfaces_error:
+                            error_msg = f"Failed to get interfaces from device {self.device.name}: {get_interfaces_error}"
                             logger.error(f"CRITICAL: {error_msg}")
-                            logs.append(f"  ✗ Cannot get interfaces from device")
+                            logs.append(f"  ✗ Cannot get interfaces from device: {get_interfaces_error}")
                             result['message'] = f"Baseline collection failed: {error_msg}"
                             result['logs'] = logs
                             return result
+                        
+                        # Check if interface_name exists (could be bond interface)
+                        # IMPORTANT: interfaces_before might be None if get_interfaces() failed
+                        if interfaces_before and interface_name in interfaces_before:
+                            baseline_interface_name = interface_name
+                            logs.append(f"  Collecting interface state for {interface_name}...")
                         else:
-                            # For non-Cumulus, we need to find the interface in interfaces_before
-                            # This will be handled in the code below
-                            baseline_collected = False  # Will be set to True if interface found
-                    except Exception as get_interfaces_error:
-                        error_msg = f"Failed to get interfaces from device {self.device.name}: {get_interfaces_error}"
-                        logger.error(f"CRITICAL: {error_msg}")
-                        logs.append(f"  ✗ Cannot get interfaces from device: {get_interfaces_error}")
-                        result['message'] = f"Baseline collection failed: {error_msg}"
-                        result['logs'] = logs
-                        return result
-                    
-                    # Check if interface_name exists (could be bond interface)
-                    # IMPORTANT: interfaces_before might be None if get_interfaces() failed
-                    if interfaces_before and interface_name in interfaces_before:
-                        baseline_interface_name = interface_name
-                        logs.append(f"  Collecting interface state for {interface_name}...")
-                    else:
-                        # Interface_name not found - might be bond member case
-                        # Check if original_interface_name was provided and exists
-                        original_interface = getattr(self, '_original_interface_name_for_baseline', None)
-                        if original_interface and interfaces_before and original_interface in interfaces_before:
-                            # Original interface exists - use it for baseline
-                            baseline_interface_name = original_interface
-                            logs.append(f"  Collecting interface state for {original_interface} (member interface)...")
-                        else:
-                            # Neither found - try to find bond interface for member
-                            # For Cumulus, check if it's a bond member by looking at bond-members
-                            # Use driver_name from above (got it early for this check)
-                            if driver_name == 'cumulus':
-                                try:
-                                    bond_members_command = 'nv show interface bond-members -o json'
-                                    if hasattr(self.connection, 'device') and self.connection.device is not None and hasattr(self.connection.device, 'send_command'):
-                                        bond_members_output = self.connection.device.send_command(bond_members_command, read_timeout=10)
-                                    elif hasattr(self.connection, 'cli'):
-                                        cli_result = self.connection.cli([bond_members_command])
-                                        if isinstance(cli_result, dict):
-                                            bond_members_output = cli_result.get(bond_members_command, '')
+                            # Interface_name not found - might be bond member case
+                            # Check if original_interface_name was provided and exists
+                            original_interface = getattr(self, '_original_interface_name_for_baseline', None)
+                            if original_interface and interfaces_before and original_interface in interfaces_before:
+                                # Original interface exists - use it for baseline
+                                baseline_interface_name = original_interface
+                                logs.append(f"  Collecting interface state for {original_interface} (member interface)...")
+                            else:
+                                # Neither found - try to find bond interface for member
+                                # For Cumulus, check if it's a bond member by looking at bond-members
+                                # Use driver_name from above (got it early for this check)
+                                if driver_name == 'cumulus':
+                                    try:
+                                        bond_members_command = 'nv show interface bond-members -o json'
+                                        if hasattr(self.connection, 'device') and self.connection.device is not None and hasattr(self.connection.device, 'send_command'):
+                                            bond_members_output = self.connection.device.send_command(bond_members_command, read_timeout=10)
+                                        elif hasattr(self.connection, 'cli'):
+                                            cli_result = self.connection.cli([bond_members_command])
+                                            if isinstance(cli_result, dict):
+                                                bond_members_output = cli_result.get(bond_members_command, '')
+                                            else:
+                                                bond_members_output = str(cli_result) if cli_result else ''
                                         else:
-                                            bond_members_output = str(cli_result) if cli_result else ''
-                                    else:
-                                        bond_members_output = None
-                                    
-                                    if bond_members_output:
+                                            bond_members_output = None
+                                        
                                         if bond_members_output:
                                             import json
                                             try:
@@ -2304,98 +2390,156 @@ class NAPALMDeviceManager:
                                             result['message'] = f"Baseline collection failed: {error_msg}"
                                             result['logs'] = logs
                                             return result
-                                    else:
-                                        # Can't check bond membership - fail baseline collection
-                                        error_msg = f"device.send_command not available for baseline collection"
+                                    except Exception as bond_check_error:
+                                        error_msg = f"Could not check bond membership: {bond_check_error}"
                                         logger.error(f"CRITICAL: {error_msg}")
                                         logs.append(f"  ✗ Baseline collection failed: {error_msg}")
                                         result['message'] = f"Baseline collection failed: {error_msg}"
                                         result['logs'] = logs
                                         return result
-                                except Exception as bond_check_error:
-                                    error_msg = f"Could not check bond membership: {bond_check_error}"
+                                else:
+                                    # Not Cumulus, interface doesn't exist - fail baseline collection
+                                    error_msg = f"Interface {interface_name} does not exist on device {self.device.name}"
                                     logger.error(f"CRITICAL: {error_msg}")
-                                    logs.append(f"  ✗ Baseline collection failed: {error_msg}")
+                                    logs.append(f"  ✗ Interface {interface_name}: Does not exist on device!")
                                     result['message'] = f"Baseline collection failed: {error_msg}"
                                     result['logs'] = logs
                                     return result
+                        
+                        # Now we have a valid baseline_interface_name, collect baseline
+                        # For non-Cumulus or if Cumulus direct NVUE failed, use NAPALM's get_interfaces()
+                        if not baseline_collected and 'interfaces_before' in locals() and interfaces_before and baseline_interface_name in interfaces_before:
+                            interface_baseline = {
+                                'name': baseline_interface_name,
+                                'is_up': interfaces_before[baseline_interface_name].get('is_up', False),
+                                'is_enabled': interfaces_before[baseline_interface_name].get('is_enabled', True),
+                                'description': interfaces_before[baseline_interface_name].get('description', ''),
+                            }
+                            baseline['interfaces'][interface_name] = interface_baseline
+                            logger.info(f"  Baseline: {baseline_interface_name} is_up={interface_baseline['is_up']}, is_enabled={interface_baseline['is_enabled']}")
+                            logs.append(f"    SUCCESS: UP={interface_baseline['is_up']}, Enabled={interface_baseline['is_enabled']}")
+                            # Note if we used bond instead of member
+                            if baseline_interface_name != interface_name:
+                                logs.append(f"    Note: Using bond interface {baseline_interface_name} for baseline (member {interface_name})")
+                            baseline_collected = True  # Mark as collected
+                        elif not baseline_collected:
+                            # Baseline collection failed - this is now mandatory
+                            error_msg = f"Baseline collection failed: Could not collect baseline for interface {interface_name}"
+                            if baseline_interface_name != interface_name:
+                                error_msg += f" (tried {baseline_interface_name} as fallback)"
+                            logger.error(f"CRITICAL: {error_msg}")
+                            logs.append(f"  ✗ Baseline collection FAILED")
+                            logs.append(f"  Interface {interface_name} or {baseline_interface_name} not found in device interfaces")
+                            if 'interfaces_before' in locals() and interfaces_before:
+                                available_interfaces = list(interfaces_before.keys())[:10]  # Show first 10
+                                logs.append(f"  Available interfaces on device: {', '.join(available_interfaces)}")
                             else:
-                                # Not Cumulus, interface doesn't exist - fail baseline collection
-                                error_msg = f"Interface {interface_name} does not exist on device {self.device.name}"
-                                logger.error(f"CRITICAL: {error_msg}")
-                                logs.append(f"  ✗ Interface {interface_name}: Does not exist on device!")
-                                result['message'] = f"Baseline collection failed: {error_msg}"
-                                result['logs'] = logs
-                                return result
-                
-                # Now we have a valid baseline_interface_name, collect baseline
-                # For non-Cumulus or if Cumulus direct NVUE failed, use NAPALM's get_interfaces()
-                if not baseline_collected and interfaces_before and baseline_interface_name in interfaces_before:
-                    interface_baseline = {
-                        'name': baseline_interface_name,
-                        'is_up': interfaces_before[baseline_interface_name].get('is_up', False),
-                        'is_enabled': interfaces_before[baseline_interface_name].get('is_enabled', True),
-                        'description': interfaces_before[baseline_interface_name].get('description', ''),
-                    }
-                    baseline['interfaces'][interface_name] = interface_baseline
-                    logger.info(f"  Baseline: {baseline_interface_name} is_up={interface_baseline['is_up']}, is_enabled={interface_baseline['is_enabled']}")
-                    logs.append(f"    SUCCESS: UP={interface_baseline['is_up']}, Enabled={interface_baseline['is_enabled']}")
-                    # Note if we used bond instead of member
-                    if baseline_interface_name != interface_name:
-                        logs.append(f"    Note: Using bond interface {baseline_interface_name} for baseline (member {interface_name})")
-                    baseline_collected = True  # Mark as collected
-                elif not baseline_collected:
-                    # Baseline collection failed - this is now mandatory
-                    error_msg = f"Baseline collection failed: Could not collect baseline for interface {interface_name}"
-                    if baseline_interface_name != interface_name:
-                        error_msg += f" (tried {baseline_interface_name} as fallback)"
-                    logger.error(f"CRITICAL: {error_msg}")
-                    logs.append(f"  ✗ Baseline collection FAILED")
-                    logs.append(f"  Interface {interface_name} or {baseline_interface_name} not found in device interfaces")
-                    if interfaces_before:
-                        available_interfaces = list(interfaces_before.keys())[:10]  # Show first 10
-                        logs.append(f"  Available interfaces on device: {', '.join(available_interfaces)}")
-                    else:
-                        logs.append(f"  Could not retrieve interface list from device")
-                    result['message'] = error_msg
-                    result['logs'] = logs
-                    return result
+                                logs.append(f"  Could not retrieve interface list from device")
+                            result['message'] = error_msg
+                            result['logs'] = logs
+                            return result
 
                 # End of per-interface baseline collection loop
                 logger.info(f"Completed baseline collection for {len(baseline['interfaces'])} interface(s)")
 
-            # Collect LLDP neighbors baseline (if checking) - DEVICE-LEVEL
+            # Collect LLDP neighbors baseline (if checking) - INTERFACE-LEVEL for deployed interfaces
             if 'lldp' in checks:
                 try:
-                    logs.append(f"  Collecting LLDP neighbors (device-level)...")
+                    # Determine which interfaces to collect LLDP for
+                    interfaces_for_lldp = []
+                    if interfaces_to_check:
+                        interfaces_for_lldp = interfaces_to_check
+                        logs.append(f"  Collecting LLDP neighbors for {len(interfaces_for_lldp)} interface(s): {', '.join(interfaces_for_lldp)}")
+                    elif interface_name:
+                        interfaces_for_lldp = [interface_name]
+                        logs.append(f"  Collecting LLDP neighbors for interface: {interface_name}")
+                    else:
+                        # No specific interfaces - collect device-level (fallback)
+                        logs.append(f"  Collecting LLDP neighbors (device-level, no specific interfaces)...")
+                        interfaces_for_lldp = None
+                    
+                    # Collect LLDP data (device-level collection, then filter to our interfaces)
                     lldp_before = self.get_lldp_neighbors()
 
-                    # Store ALL interface LLDP data (device-level check)
-                    baseline['lldp_all_interfaces'] = {}
+                    # Store per-interface LLDP data for the interfaces we're deploying
+                    baseline['lldp_interfaces'] = {}  # Per-interface LLDP data for deployed interfaces
+                    baseline['lldp_all_interfaces'] = {}  # All interfaces (for backward compatibility)
                     total_neighbors = 0
+                    deployed_interfaces_neighbors = 0
+                    
                     if lldp_before:
+                        # Store all interfaces (for backward compatibility)
                         for iface, neighbors in lldp_before.items():
                             neighbor_count = len(neighbors) if neighbors else 0
                             baseline['lldp_all_interfaces'][iface] = neighbor_count
                             total_neighbors += neighbor_count
+                        
+                        # Store per-interface data for deployed interfaces
+                        if interfaces_for_lldp:
+                            for iface in interfaces_for_lldp:
+                                if iface in lldp_before:
+                                    neighbors = lldp_before[iface]
+                                    neighbor_count = len(neighbors) if neighbors else 0
+                                    baseline['lldp_interfaces'][iface] = {
+                                        'neighbors': neighbors,  # Full neighbor data
+                                        'count': neighbor_count
+                                    }
+                                    deployed_interfaces_neighbors += neighbor_count
+                                    logger.info(f"  Baseline: Interface {iface} has {neighbor_count} LLDP neighbors")
+                                    logs.append(f"  SUCCESS: Interface {iface}: {neighbor_count} neighbor(s)")
+                                else:
+                                    baseline['lldp_interfaces'][iface] = {
+                                        'neighbors': [],
+                                        'count': 0
+                                    }
+                                    logger.info(f"  Baseline: Interface {iface} has no LLDP neighbors")
+                                    logs.append(f"  SUCCESS: Interface {iface}: 0 neighbors")
+                        elif interface_name:
+                            # Single interface mode
+                            if interface_name in lldp_before:
+                                neighbors = lldp_before[interface_name]
+                                neighbor_count = len(neighbors) if neighbors else 0
+                                baseline['lldp_interfaces'][interface_name] = {
+                                    'neighbors': neighbors,
+                                    'count': neighbor_count
+                                }
+                                baseline['lldp_neighbors'] = neighbor_count  # Backward compatibility
+                                deployed_interfaces_neighbors = neighbor_count
+                                logger.info(f"  Baseline: Interface {interface_name} has {neighbor_count} LLDP neighbors")
+                                logs.append(f"  SUCCESS: Interface {interface_name}: {neighbor_count} neighbor(s)")
+                            else:
+                                baseline['lldp_interfaces'][interface_name] = {
+                                    'neighbors': [],
+                                    'count': 0
+                                }
+                                baseline['lldp_neighbors'] = 0  # Backward compatibility
+                                logger.info(f"  Baseline: Interface {interface_name} has no LLDP neighbors")
+                                logs.append(f"  SUCCESS: Interface {interface_name}: 0 neighbors")
+                    else:
+                        # No LLDP data collected
+                        if interfaces_for_lldp:
+                            for iface in interfaces_for_lldp:
+                                baseline['lldp_interfaces'][iface] = {
+                                    'neighbors': [],
+                                    'count': 0
+                                }
+                        elif interface_name:
+                            baseline['lldp_interfaces'][interface_name] = {
+                                'neighbors': [],
+                                'count': 0
+                            }
+                        logs.append(f"  ⚠ LLDP neighbors: No data collected")
 
-                    # Also store the specific interface we're configuring
-                    if interface_name:
-                        if lldp_before and interface_name in lldp_before:
-                            baseline['lldp_neighbors'] = len(lldp_before[interface_name])
-                            logger.info(f"  Baseline: {interface_name} has {baseline['lldp_neighbors']} LLDP neighbors")
-                        else:
-                            baseline['lldp_neighbors'] = 0
-                            logger.info(f"  Baseline: {interface_name} has no LLDP neighbors")
-
-                    logger.info(f"  Baseline: Device has {total_neighbors} total LLDP neighbors across {len(baseline['lldp_all_interfaces'])} interfaces")
-                    logs.append(f"  SUCCESS: LLDP neighbors: {total_neighbors} total across {len(baseline['lldp_all_interfaces'])} interfaces")
-                    if interface_name:
-                        logs.append(f"  SUCCESS: Interface {interface_name}: {baseline.get('lldp_neighbors', 0)} neighbors")
+                    # Summary log
+                    if interfaces_for_lldp:
+                        logger.info(f"  Baseline: Collected LLDP for {len(interfaces_for_lldp)} interface(s): {deployed_interfaces_neighbors} total neighbors")
+                    else:
+                        logger.info(f"  Baseline: Device has {total_neighbors} total LLDP neighbors across {len(baseline['lldp_all_interfaces'])} interfaces")
 
                 except Exception as e:
                     logger.debug(f"Could not get LLDP baseline: {e}")
                     baseline['lldp_neighbors'] = None
+                    baseline['lldp_interfaces'] = {}
                     baseline['lldp_all_interfaces'] = None
                     logs.append(f"  ⚠ LLDP neighbors: Could not collect ({str(e)[:50]})")
 
@@ -2419,10 +2563,51 @@ class NAPALMDeviceManager:
                 logs.append(f"  ⚠ System facts: Error ({str(e)[:50]})")
 
             # Verify baseline was collected (mandatory)
-            if interface_name and 'interface' not in baseline:
+            # Handle both single interface (baseline['interface']) and multiple interfaces (baseline['interfaces'])
+            baseline_collected = False
+            if 'interface' in baseline:
+                baseline_collected = True
+            elif 'interfaces' in baseline and baseline['interfaces']:
+                baseline_collected = True
+                # For backward compatibility with verification code that expects baseline['interface'],
+                # create it from the first interface in baseline['interfaces']
+                if interface_name and interface_name in baseline['interfaces']:
+                    baseline['interface'] = baseline['interfaces'][interface_name]
+                elif baseline['interfaces']:
+                    # Use first interface if interface_name not found
+                    first_iface_name = next(iter(baseline['interfaces']))
+                    baseline['interface'] = baseline['interfaces'][first_iface_name]
+                    logger.info(f"Using first interface '{first_iface_name}' for baseline['interface'] compatibility")
+            
+            # Check if we collected baseline for at least some interfaces
+            # In sync mode with multiple interfaces, some may fail but others may succeed
+            if interfaces_to_check:
+                successful_baselines = sum(1 for iface in interfaces_to_check if iface in baseline.get('interfaces', {}) and 'error' not in baseline['interfaces'][iface])
+                failed_baselines = len(interfaces_to_check) - successful_baselines
+                
+                if successful_baselines == 0:
+                    # All interfaces failed
+                    error_msg = f"Baseline collection incomplete: No baseline collected for any of {len(interfaces_to_check)} interface(s)"
+                    logger.error(f"CRITICAL: {error_msg}")
+                    logs.append(f"  ✗ Baseline collection FAILED: No baseline data collected for any interface")
+                    result['success'] = False
+                    result['error'] = error_msg
+                    result['message'] = error_msg
+                elif failed_baselines > 0:
+                    # Some interfaces failed, but some succeeded
+                    logger.warning(f"Baseline collection partially successful: {successful_baselines} succeeded, {failed_baselines} failed")
+                    logs.append(f"  ⚠ Baseline collection: {successful_baselines} succeeded, {failed_baselines} failed")
+                    # Don't mark as failed - continue with successful baselines
+                else:
+                    # All interfaces succeeded
+                    logger.info(f"Baseline collection successful for all {successful_baselines} interface(s)")
+            elif interface_name and not baseline_collected:
+                # Single interface mode - must succeed
                 error_msg = f"Baseline collection incomplete: Interface baseline not collected for {interface_name}"
                 logger.error(f"CRITICAL: {error_msg}")
                 logs.append(f"  ✗ Baseline collection FAILED: Interface baseline missing")
+                result['success'] = False
+                result['error'] = error_msg
                 result['message'] = error_msg
                 result['logs'] = logs
                 return result
