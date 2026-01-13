@@ -1295,7 +1295,7 @@ class NAPALMDeviceManager:
                 # }
                 # Note: Interfaces may be in ranges (bond3-5) or standalone (bond6)
                 try:
-                        if hasattr(self.connection, 'device') and hasattr(self.connection.device, 'send_command'):
+                    if hasattr(self.connection, 'device') and hasattr(self.connection.device, 'send_command'):
                         actual_vlan = None
                         diagnostic_details = None  # Initialize for use in error messages
                         
@@ -4111,23 +4111,13 @@ class NAPALMDeviceManager:
                         result['_commit_result'] = commit_result
                         result['_config_commands'] = config
                         
-                        # Check if there's actually a diff to apply (Cumulus won't create revision if no changes)
-                        if driver_name == 'cumulus':
-                            try:
-                            # Note: We already verified commit succeeded by checking revision state above
-                            # Checking 'nv config diff' after commit is redundant because:
-                            # - After commit_config(), config is in commit-confirm state (applied but pending)
-                            # - 'nv config diff' compares running vs candidate, but candidate has been committed
-                            # - So diff will be empty (expected) - changes are already applied, waiting for confirmation
-                            # - We already confirmed commit succeeded by checking revision state (state=confirm)
-                            # Removed redundant post-commit diff check to reduce unnecessary device queries
-                            except Exception as diff_error:
-                                logger.error(f"Exception checking config diff after commit: {diff_error}")
-                                logs.append(f"  ⚠ Exception checking diff: {str(diff_error)}")
-                                import traceback
-                                logger.debug(f"Traceback: {traceback.format_exc()}")
-                                # If diff check failed, we can't be sure, but if it was empty before, it's likely still empty
-                                # Don't set the flag here - let Phase 5 handle it based on the flag from successful checks
+                        # Note: We already verified commit succeeded by checking revision state above
+                        # Checking 'nv config diff' after commit is redundant because:
+                        # - After commit_config(), config is in commit-confirm state (applied but pending)
+                        # - 'nv config diff' compares running vs candidate, but candidate has been committed
+                        # - So diff will be empty (expected) - changes are already applied, waiting for confirmation
+                        # - We already confirmed commit succeeded by checking revision state (state=confirm)
+                        # Removed redundant post-commit diff check to reduce unnecessary device queries
                         
                         # Commit succeeded - mark success and break retry loop
                         commit_succeeded = True
