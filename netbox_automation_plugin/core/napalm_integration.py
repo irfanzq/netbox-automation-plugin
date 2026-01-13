@@ -4527,17 +4527,17 @@ class NAPALMDeviceManager:
                                                 logger.info(f"No config diff (empty output) - config already applied to device")
                                                 logs.append(f"  [INFO] No config diff (empty output) - config already applied to device")
                                         except Exception as diff_check_error:
-                                        logger.warning(f"Could not check config diff: {diff_check_error}")
-                                        logs.append(f"  ⚠ WARNING: Could not check config diff: {str(diff_check_error)[:100]}")
-                                        # Check if we already know from Phase 2 that diff was empty
-                                        # If config diff was empty after commit, it's likely still empty now
-                                        if result.get('_config_diff_empty_after_commit', False):
-                                            logger.info(f"Config diff was empty after commit - assuming still empty, skipping confirm")
-                                            logs.append(f"  [INFO] Config diff was empty after commit - skipping confirm")
-                                            has_diff = False
-                                        else:
-                                            # Assume there's a diff and proceed with confirm (safer)
-                                            has_diff = True
+                                            logger.warning(f"Could not check config diff: {diff_check_error}")
+                                            logs.append(f"  ⚠ WARNING: Could not check config diff: {str(diff_check_error)[:100]}")
+                                            # Check if we already know from Phase 2 that diff was empty
+                                            # If config diff was empty after commit, it's likely still empty now
+                                            if result.get('_config_diff_empty_after_commit', False):
+                                                logger.info(f"Config diff was empty after commit - assuming still empty, skipping confirm")
+                                                logs.append(f"  [INFO] Config diff was empty after commit - skipping confirm")
+                                                has_diff = False
+                                            else:
+                                                # Assume there's a diff and proceed with confirm (safer)
+                                                has_diff = True
                                     
                                     if not has_diff:
                                         # No diff - config is already applied, skip confirm and mark as successful

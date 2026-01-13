@@ -104,7 +104,6 @@ class VLANDeploymentView(View):
             if isinstance(device_config_data, dict):
                 if '_connection_error' in device_config_data:
                     connection_error_msg = device_config_data['_connection_error']
-                    logger.error(f"[DRY RUN PREVIEW] Device {device.name}: Connection error: {connection_error_msg}")
                     # Create error entries for all interfaces
                     for actual_interface_name in interface_list:
                         device_config_cache[actual_interface_name] = {
@@ -119,7 +118,6 @@ class VLANDeploymentView(View):
                         }
                 elif '_config_error' in device_config_data:
                     config_error_msg = device_config_data['_config_error']
-                    logger.error(f"[DRY RUN PREVIEW] Device {device.name}: Config collection error: {config_error_msg}")
                     # Create error entries for all interfaces
                     for actual_interface_name in interface_list:
                         device_config_cache[actual_interface_name] = {
@@ -404,7 +402,6 @@ class VLANDeploymentView(View):
                 logger.debug(f"[DRY RUN PREVIEW] Device {device.name}, Interface {actual_interface_name}: Preview generated successfully")
 
             except Exception as e:
-                logger.error(f"[DRY RUN PREVIEW] Device {device.name}, Interface {actual_interface_name}: Error generating preview: {e}")
                 import traceback
                 logger.error(traceback.format_exc())
 
@@ -3352,15 +3349,9 @@ class VLANDeploymentView(View):
                 'is_bond_member': bool (True if interface is bond member)
             }
         """
-        # DEBUG: Log entry to this method (using ERROR level to ensure it shows)
-        logger.error(f"[DEBUG ENTRY] _generate_config_from_netbox called for {device.name}:{interface.name}")
-
         mode = getattr(interface, 'mode', None)
         untagged_vlan = interface.untagged_vlan.vid if interface.untagged_vlan else None
         tagged_vlans = list(interface.tagged_vlans.values_list('vid', flat=True))
-
-        # DEBUG: Log what NetBox has for this interface (using ERROR level to ensure it shows)
-        logger.error(f"[NETBOX CONFIG] {device.name}:{interface.name} - Mode: {mode}, Untagged: {untagged_vlan}, Tagged: {tagged_vlans}")
 
         # Check if interface is a bond member - if so, use bond interface
         # Priority: 1) NetBox lag attribute, 2) bond_info_map, 3) device config
@@ -3462,19 +3453,13 @@ class VLANDeploymentView(View):
             # CRITICAL: Validate target_interface - must be a single interface name, not comma-separated list
             # This can happen if interface.name or lag.name contains invalid data
             if ',' in target_interface:
-                logger.error(f"[NETBOX CONFIG] ERROR: target_interface contains comma-separated values: '{target_interface}'")
-                logger.error(f"[NETBOX CONFIG] Original interface.name: '{interface.name}', lag.name: '{interface.lag.name if hasattr(interface, 'lag') and interface.lag else None}'")
                 # Take only the first part before comma
                 target_interface = target_interface.split(',')[0].strip()
-                logger.error(f"[NETBOX CONFIG] Using first part only: '{target_interface}'")
             
-            logger.error(f"[NETBOX CONFIG] {device.name}:{interface.name} - About to check untagged_vlan: {untagged_vlan}, type: {type(untagged_vlan)}")
             if untagged_vlan:
                 # Set interface to access mode with untagged VLAN
                 access_cmd = f"nv set interface {target_interface} bridge domain br_default access {untagged_vlan}"
                 commands.append(access_cmd)
-                logger.error(f"[NETBOX CONFIG] Generated access command for {target_interface}: {access_cmd}")
-                logger.error(f"[NETBOX CONFIG] Commands list now has {len(commands)} items")
             elif tagged_vlans and not untagged_vlan:
                 # Interface has only tagged VLANs (no untagged VLAN)
                 # In Cumulus NVUE, tagged VLANs don't require explicit interface commands
@@ -3485,14 +3470,11 @@ class VLANDeploymentView(View):
                     # Device has an access VLAN but NetBox has None - need to unset it (sync mode only)
                     unset_cmd = f"nv unset interface {target_interface} bridge domain br_default access"
                     commands.append(unset_cmd)
-                    logger.error(f"[NETBOX CONFIG] Interface {target_interface} has access VLAN {device_current_access_vlan} on device but NetBox has None - adding unset command")
                 elif not commands:
                     # Only add comment if no other commands were generated and no unset needed
                     commands.append(f"# Interface {target_interface} configured for tagged VLANs: {', '.join(map(str, sorted(tagged_vlans)))}")
                     commands.append(f"# Note: No explicit commands needed - tagged VLANs are automatically available if they're in bridge domain")
                     commands.append(f"# Bridge VLANs already present: {', '.join(map(str, sorted(vlans_already_in_bridge)))}")
-                    logger.error(f"[NETBOX CONFIG] Interface {target_interface} has only tagged VLANs - added informational comment")
-                logger.error(f"[NETBOX CONFIG] No untagged VLAN for {interface.name} (target: {target_interface}) - interface has only tagged VLANs")
             elif not untagged_vlan and not tagged_vlans:
                 # Interface has no VLANs in NetBox (neither untagged nor tagged)
                 # SYNC MODE ONLY: If device has an access VLAN, we need to unset it to sync with NetBox
@@ -3500,11 +3482,6 @@ class VLANDeploymentView(View):
                     # Device has an access VLAN but NetBox has None - need to unset it (sync mode only)
                     unset_cmd = f"nv unset interface {target_interface} bridge domain br_default access"
                     commands.append(unset_cmd)
-                    logger.error(f"[NETBOX CONFIG] Interface {target_interface} has access VLAN {device_current_access_vlan} on device but NetBox has no VLANs - adding unset command")
-                else:
-                    logger.error(f"[NETBOX CONFIG] No untagged VLAN for {interface.name} (target: {target_interface}) - skipping access command")
-            else:
-                logger.error(f"[NETBOX CONFIG] No untagged VLAN for {interface.name} (target: {target_interface}) - skipping access command")
 
             # Note: "nv config apply" is handled by the deployment method, don't include here
 
@@ -3535,9 +3512,6 @@ class VLANDeploymentView(View):
             'vlans_to_add_to_bridge': vlans_to_add if platform == 'cumulus' else [],
             'vlans_already_in_bridge': vlans_already_in_bridge if platform == 'cumulus' else [],
         }
-
-        # DEBUG: Log the final result (using ERROR level to ensure it shows)
-        logger.error(f"[NETBOX CONFIG] {device.name}:{interface.name} → Returning {len(commands)} commands: {commands}")
 
         return result
 
@@ -3700,7 +3674,6 @@ class VLANDeploymentView(View):
 
                 # Step 1: Check all interfaces for bond membership from NetBox
                 all_device_interfaces = list(tagged_interfaces_by_device.get(device.name, [])) + list(untagged_interfaces_by_device.get(device.name, []))
-                logger.error(f"[SYNC DRY RUN] Checking {len(all_device_interfaces)} interfaces on {device.name} for bond membership")
                 for interface in all_device_interfaces:
                     # Check bond membership from NetBox
                     try:
@@ -3715,7 +3688,6 @@ class VLANDeploymentView(View):
                                 'bond_id': str(interface.id),
                                 'source': 'netbox'
                             }
-                            logger.error(f"[SYNC DRY RUN] {device.name}:{interface.name} - Interface is a bond (LAG type) in NetBox")
                         elif hasattr(interface, 'lag') and interface.lag:
                             # Interface is a member of a bond
                             device_bond_map[interface.name] = {
@@ -3723,33 +3695,25 @@ class VLANDeploymentView(View):
                                 'bond_id': str(interface.lag.id),
                                 'source': 'netbox'
                             }
-                            logger.error(f"[SYNC DRY RUN] {device.name}:{interface.name} - Found LAG in NetBox: {interface.lag.name}")
-                        else:
-                            logger.error(f"[SYNC DRY RUN] {device.name}:{interface.name} - No LAG in NetBox (standalone interface)")
                     except Exception as e:
-                        logger.error(f"[SYNC DRY RUN] Error checking bond membership for {interface.name}: {e}")
+                        pass
 
                 # Step 2: Check device config for bonds that might not be in NetBox
                 # Use _get_current_device_config() which is cached and returns bond_member_of directly
-                logger.error(f"[SYNC DRY RUN] Step 2: Checking device config for bonds not in NetBox")
                 for interface in all_device_interfaces:
                     # Skip if already found in NetBox
                     if interface.name in device_bond_map:
-                        logger.error(f"[SYNC DRY RUN] {device.name}:{interface.name} - Skipping (already in device_bond_map)")
                         continue
 
                     # Check device config for bond membership using cached method
-                    logger.error(f"[SYNC DRY RUN] {device.name}:{interface.name} - Calling _get_current_device_config()")
                     try:
                         device_config_result = self._get_current_device_config(device, interface.name, platform)
                         bond_member_of = device_config_result.get('bond_member_of', None)
-                        logger.error(f"[SYNC DRY RUN] {device.name}:{interface.name} - bond_member_of from device config: {bond_member_of}")
 
                         if bond_member_of:
                             # Check if this bond exists in NetBox
                             from dcim.models import Interface as InterfaceModel
                             bond_exists_in_netbox = InterfaceModel.objects.filter(device=device, name=bond_member_of).exists()
-                            logger.error(f"[SYNC DRY RUN] {device.name}:{interface.name} - Bond {bond_member_of} exists in NetBox: {bond_exists_in_netbox}")
 
                             if not bond_exists_in_netbox:
                                 # Bond exists on device but not in NetBox - track it
@@ -3773,8 +3737,6 @@ class VLANDeploymentView(View):
                                     'tagged': list(interface.tagged_vlans.values_list('vid', flat=True))
                                 }
                                 device_bonds_to_create[bond_member_of]['vlans_to_migrate'][interface.name] = vlans_info
-
-                                logger.error(f"[SYNC DRY RUN] Detected bond {bond_member_of} on device {device.name} (not in NetBox) - member: {interface.name}, VLANs: {vlans_info}")
                             else:
                                 # Bond exists in both device and NetBox - just track it
                                 device_bond_map[interface.name] = {
@@ -3782,14 +3744,12 @@ class VLANDeploymentView(View):
                                     'bond_id': None,
                                     'source': 'device'
                                 }
-                                logger.error(f"[SYNC DRY RUN] {device.name}:{interface.name} - Bond {bond_member_of} exists in both device and NetBox")
                     except Exception as e:
-                        logger.error(f"[SYNC DRY RUN] Error checking device config for {device.name}:{interface.name}: {e}")
+                        pass
 
                 # Step 3: Check for bonds in NetBox but NOT on device (Case 2)
                 # Track bonds that need to be created on the device
                 device_bonds_to_create_on_device = {}  # {bond_name: {'members': [], 'bond_interface': Interface}}
-                logger.error(f"[SYNC DRY RUN] Step 3: Checking for bonds in NetBox but not on device")
 
                 # Build a map of NetBox bonds and their members
                 netbox_bonds = {}  # {bond_name: [member_interfaces]}
@@ -3802,7 +3762,6 @@ class VLANDeploymentView(View):
 
                 # For each NetBox bond, check if it exists on the device
                 for bond_name, member_names in netbox_bonds.items():
-                    logger.error(f"[SYNC DRY RUN] Checking NetBox bond {bond_name} with members {member_names}")
 
                     # Check if ANY member of this bond has the bond configured on the device
                     bond_exists_on_device = False
@@ -3812,14 +3771,12 @@ class VLANDeploymentView(View):
                             device_bond_name = device_config_result.get('bond_member_of', None)
                             if device_bond_name == bond_name:
                                 bond_exists_on_device = True
-                                logger.error(f"[SYNC DRY RUN] Bond {bond_name} exists on device (member {member_name} has bond_member_of={device_bond_name})")
                                 break
                         except Exception as e:
-                            logger.error(f"[SYNC DRY RUN] Error checking device config for {member_name}: {e}")
+                            pass
 
                     if not bond_exists_on_device:
                         # Bond exists in NetBox but NOT on device - need to create it on device
-                        logger.error(f"[SYNC DRY RUN] Bond {bond_name} exists in NetBox but NOT on device - will create on device")
 
                         # Get the bond interface object from NetBox
                         from dcim.models import Interface as InterfaceModel
@@ -3830,7 +3787,7 @@ class VLANDeploymentView(View):
                                 'bond_interface': bond_interface
                             }
                         except InterfaceModel.DoesNotExist:
-                            logger.error(f"[SYNC DRY RUN] Bond interface {bond_name} not found in NetBox (should not happen)")
+                            pass
 
                 if device_bond_map:
                     bond_info_map[device.name] = device_bond_map
@@ -3945,7 +3902,6 @@ class VLANDeploymentView(View):
                                 'status_message': 'Preview failed',
                             }
                     except Exception as e:
-                        logger.error(f"[SYNC DRY RUN] Preview generation failed for {device.name}:{actual_interface_name}: {e}")
                         device_results[actual_interface_name] = {
                             'interface_name': actual_interface_name,
                             'error': str(e),
@@ -4624,7 +4580,7 @@ class VLANDeploymentView(View):
                             }
                             logger.info(f"[SYNC DEPLOYMENT] {device.name}:{interface.name} - Bond {bond_member_of} exists in both device and NetBox")
                 except Exception as e:
-                    logger.error(f"[SYNC DEPLOYMENT] Error checking device config for {device.name}:{interface.name}: {e}")
+                    pass
 
                     # Track this bond for creation in NetBox
                     if bond_name not in device_bonds_to_create:
@@ -4734,14 +4690,14 @@ class VLANDeploymentView(View):
                                         connection.cli([cmd])
                                         logger.info(f"[SYNC DEPLOYMENT] Executed: {cmd}")
                                     except Exception as e:
-                                        logger.error(f"[SYNC DEPLOYMENT] Failed to execute '{cmd}': {e}")
+                                        pass
 
                                 # Apply configuration
                                 try:
                                     connection.cli(['nv config apply'])
                                     logger.info(f"[SYNC DEPLOYMENT] Bond {bond_name} created on device {device.name}")
                                 except Exception as e:
-                                    logger.error(f"[SYNC DEPLOYMENT] Failed to apply bond config for {bond_name}: {e}")
+                                    pass
 
                     except Exception as e:
                         logger.error(f"[SYNC DEPLOYMENT] Error creating bonds on device {device.name}: {e}")
