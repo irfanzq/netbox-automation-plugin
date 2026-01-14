@@ -1111,7 +1111,7 @@ class NAPALMDeviceManager:
         
         return False
     
-    def verify_vlan_deployment(self, interface_name, vlan_id, expected_mode='access', baseline=None, all_interfaces=None):
+    def verify_vlan_deployment(self, interface_name, vlan_id, expected_mode='access', baseline=None, all_interfaces=None, cached_config=None, cached_interfaces=None):
         """
         Comprehensive verification for VLAN deployment with baseline comparison
         
@@ -1129,6 +1129,10 @@ class NAPALMDeviceManager:
             baseline: Baseline state collected before config change (dict)
             all_interfaces: Optional list of all interfaces being verified (for LLDP checks on bonds)
                            If provided, member interfaces will be extracted from all bonds at once
+            cached_config: Optional cached config dict (from nv config show) to avoid repeated fetches
+                          If None, will fetch config for this interface
+            cached_interfaces: Optional cached interfaces dict (from get_interfaces()) to avoid repeated fetches
+                             If None, will call get_interfaces() for this interface
         
         Returns:
             dict: {'success': bool, 'message': str, 'checks': dict}
@@ -1156,7 +1160,12 @@ class NAPALMDeviceManager:
         # Check 2: Interface Status (with baseline comparison)
         logger.info(f"VLAN Verification Check 2/5: Interface status...")
         try:
-            interfaces = self.get_interfaces()
+            # PERFORMANCE: Use cached interfaces if available (avoids repeated get_interfaces() calls)
+            if cached_interfaces is not None:
+                logger.debug(f"Using cached interfaces for interface {interface_name} (performance optimization)")
+                interfaces = cached_interfaces
+            else:
+                interfaces = self.get_interfaces()
             if interfaces and interface_name in interfaces:
                 iface_data = interfaces[interface_name]
                 iface_up_after = iface_data.get('is_up', False)
@@ -1297,120 +1306,126 @@ class NAPALMDeviceManager:
                 # }
                 # Note: Interfaces may be in ranges (bond3-5) or standalone (bond6)
                 try:
-                    if hasattr(self.connection, 'device') and hasattr(self.connection.device, 'send_command'):
-                        actual_vlan = None
-                        diagnostic_details = None  # Initialize for use in error messages
-                        
-                        # Single query to get full applied configuration (includes pending commit-confirm)
-                        try:
-                            logger.debug(f"Querying full applied config for interface {interface_name}...")
-                            
-                            # Try to use the specific revision ID if available (more accurate than -r applied)
-                            # This ensures we read the exact config that was just committed
-                            revision_id = None
-                            if hasattr(self, '_candidate_revision_id') and self._candidate_revision_id:
-                                revision_id = self._candidate_revision_id
-                                logger.debug(f"Using revision ID {revision_id} for config query (from commit)")
-                            
-                            if revision_id:
-                                # Query specific revision (most accurate - shows exactly what was committed)
-                                full_config_output = self.connection.device.send_command_timing(
-                                    f'nv config show -r {revision_id} -o json',
-                                    read_timeout=20
-                                )
+                    actual_vlan = None
+                    diagnostic_details = None  # Initialize for use in error messages
+                    
+                    # PERFORMANCE: Use cached config if provided (avoids repeated fetches)
+                    if cached_config:
+                        logger.debug(f"Using cached config for interface {interface_name} (performance optimization)")
+                        interfaces_config = cached_config
+                    else:
+                        # Fetch config for this interface (fallback for single interface or cache miss)
+                        if hasattr(self.connection, 'device') and hasattr(self.connection.device, 'send_command'):
+                            # Single query to get full applied configuration (includes pending commit-confirm)
+                            try:
+                                logger.debug(f"Querying full applied config for interface {interface_name}...")
+                                
+                                # Try to use the specific revision ID if available (more accurate than -r applied)
+                                # This ensures we read the exact config that was just committed
+                                revision_id = None
+                                if hasattr(self, '_candidate_revision_id') and self._candidate_revision_id:
+                                    revision_id = self._candidate_revision_id
+                                    logger.debug(f"Using revision ID {revision_id} for config query (from commit)")
+                                
+                                if revision_id:
+                                    # Query specific revision (most accurate - shows exactly what was committed)
+                                    full_config_output = self.connection.device.send_command_timing(
+                                        f'nv config show -r {revision_id} -o json',
+                                        read_timeout=20
+                                    )
+                                    if not full_config_output or not full_config_output.strip():
+                                        logger.debug(f"Revision {revision_id} query returned empty, falling back to -r applied...")
+                                        revision_id = None  # Fall back to -r applied
+                                
+                                if not revision_id:
+                                    # Query full config with -r applied to get applied config (includes pending commit-confirm)
+                                    full_config_output = self.connection.device.send_command_timing(
+                                        'nv config show -r applied -o json',
+                                        read_timeout=20
+                                    )
+                                
+                                # If that returns empty, try without -r applied (current/pending config)
                                 if not full_config_output or not full_config_output.strip():
-                                    logger.debug(f"Revision {revision_id} query returned empty, falling back to -r applied...")
-                                    revision_id = None  # Fall back to -r applied
-                            
-                            if not revision_id:
-                                # Query full config with -r applied to get applied config (includes pending commit-confirm)
-                                full_config_output = self.connection.device.send_command_timing(
-                                    'nv config show -r applied -o json',
-                                    read_timeout=20
-                                )
-                            
-                            # If that returns empty, try without -r applied (current/pending config)
-                            if not full_config_output or not full_config_output.strip():
-                                logger.debug(f"Applied config query returned empty, trying current config...")
-                                full_config_output = self.connection.device.send_command_timing(
-                                    'nv config show -o json',
-                                    read_timeout=20
-                                )
-                            
-                            if full_config_output and full_config_output.strip():
-                                import json
-                                try:
-                                    full_config = json.loads(full_config_output.strip())
-                                    
-                                    # Handle case where full_config might be a list (NVUE sometimes returns array)
-                                    # Structure can be: [{"header": {...}}, {"interface": {...}}] or {"interface": {...}}
-                                    # The array format has header at [0] and config at [1]
-                                    if isinstance(full_config, list):
-                                        logger.debug(f"Config JSON is a list (length: {len(full_config)})")
-                                        if len(full_config) >= 2:
-                                            # Array format: [0] = header, [1] = config with interface
-                                            full_config = full_config[1]  # Take second element (config)
-                                            logger.debug(f"Extracted config from list[1], now type: {type(full_config).__name__}")
-                                        elif len(full_config) == 1:
-                                            # Single element array, might be config or header
-                                            full_config = full_config[0]
-                                            logger.debug(f"Extracted config from list[0], now type: {type(full_config).__name__}")
-                                            # Check if it's just header (no interface key)
-                                            if isinstance(full_config, dict) and 'interface' not in full_config:
-                                                logger.warning(f"First element appears to be header only, no interface section found")
+                                    logger.debug(f"Applied config query returned empty, trying current config...")
+                                    full_config_output = self.connection.device.send_command_timing(
+                                        'nv config show -o json',
+                                        read_timeout=20
+                                    )
+                                
+                                if full_config_output and full_config_output.strip():
+                                    import json
+                                    try:
+                                        full_config = json.loads(full_config_output.strip())
+                                        
+                                        # Handle case where full_config might be a list (NVUE sometimes returns array)
+                                        # Structure can be: [{"header": {...}}, {"interface": {...}}] or {"interface": {...}}
+                                        # The array format has header at [0] and config at [1]
+                                        if isinstance(full_config, list):
+                                            logger.debug(f"Config JSON is a list (length: {len(full_config)})")
+                                            if len(full_config) >= 2:
+                                                # Array format: [0] = header, [1] = config with interface
+                                                full_config = full_config[1]  # Take second element (config)
+                                                logger.debug(f"Extracted config from list[1], now type: {type(full_config).__name__}")
+                                            elif len(full_config) == 1:
+                                                # Single element array, might be config or header
+                                                full_config = full_config[0]
+                                                logger.debug(f"Extracted config from list[0], now type: {type(full_config).__name__}")
+                                                # Check if it's just header (no interface key)
+                                                if isinstance(full_config, dict) and 'interface' not in full_config:
+                                                    logger.warning(f"First element appears to be header only, no interface section found")
+                                                    interfaces_config = {}
+                                            else:
+                                                logger.warning(f"Config JSON is an empty list")
+                                                interfaces_config = {}
+                                                full_config = {}
+                                        
+                                        # Navigate to interface section
+                                        # Structure can be: {"interface": {...}} or {"set": {"interface": {...}}}
+                                        # NVUE returns config under "set" key when using -r applied
+                                        if isinstance(full_config, dict):
+                                            # Check if config is under "set" key (NVUE format)
+                                            if 'set' in full_config:
+                                                logger.debug(f"Config is under 'set' key, extracting...")
+                                                full_config = full_config['set']
+                                            
+                                            # Now get interface section
+                                            interface_raw = full_config.get('interface', {})
+                                            if isinstance(interface_raw, list):
+                                                # Convert list to dict if needed (shouldn't happen but handle it)
+                                                logger.warning(f"Interface section is a list instead of dict, this is unexpected")
+                                                interfaces_config = {}
+                                            elif isinstance(interface_raw, dict):
+                                                interfaces_config = interface_raw
+                                            else:
+                                                logger.warning(f"Interface section is neither list nor dict: {type(interface_raw)}")
                                                 interfaces_config = {}
                                         else:
-                                            logger.warning(f"Config JSON is an empty list")
+                                            logger.warning(f"Full config is not a dict after processing: {type(full_config)}")
                                             interfaces_config = {}
-                                            full_config = {}
-                                    
-                                    # Navigate to interface section
-                                    # Structure can be: {"interface": {...}} or {"set": {"interface": {...}}}
-                                    # NVUE returns config under "set" key when using -r applied
-                                    if isinstance(full_config, dict):
-                                        # Check if config is under "set" key (NVUE format)
-                                        if 'set' in full_config:
-                                            logger.debug(f"Config is under 'set' key, extracting...")
-                                            full_config = full_config['set']
                                         
-                                        # Now get interface section
-                                        interface_raw = full_config.get('interface', {})
-                                        if isinstance(interface_raw, list):
-                                            # Convert list to dict if needed (shouldn't happen but handle it)
-                                            logger.warning(f"Interface section is a list instead of dict, this is unexpected")
-                                            interfaces_config = {}
-                                        elif isinstance(interface_raw, dict):
-                                            interfaces_config = interface_raw
+                                        if not interfaces_config:
+                                            logger.debug(f"No 'interface' section found in config JSON")
                                         else:
-                                            logger.warning(f"Interface section is neither list nor dict: {type(interface_raw)}")
-                                            interfaces_config = {}
-                                    else:
-                                        logger.warning(f"Full config is not a dict after processing: {type(full_config)}")
-                                        interfaces_config = {}
-                                    
-                                    if not interfaces_config:
-                                        logger.debug(f"No 'interface' section found in config JSON")
-                                    else:
-                                        logger.debug(f"Checking {len(interfaces_config)} interfaces/ranges in full config for {interface_name}...")
-                                        logger.debug(f"Available interfaces/ranges: {list(interfaces_config.keys())[:20]}")
-                                        
-                                        # Check each interface/range in the config
-                                        # Collect all matching ranges/interfaces first, then prefer exact match or most specific
-                                        matching_configs = []  # List of (config_name, vlan_value, is_exact_match)
-                                        
-                                        for config_iface_name, config_iface_data in interfaces_config.items():
-                                            # Handle case where config_iface_data might be a list instead of dict
-                                            if isinstance(config_iface_data, list):
-                                                logger.warning(f"Interface '{config_iface_name}' config is a list (unexpected), skipping...")
-                                                logger.debug(f"  List content: {config_iface_data}")
-                                                continue
-                                            elif not isinstance(config_iface_data, dict):
-                                                logger.warning(f"Interface '{config_iface_name}' config is neither dict nor list (type: {type(config_iface_data)}), skipping...")
-                                                continue
+                                            logger.debug(f"Checking {len(interfaces_config)} interfaces/ranges in full config for {interface_name}...")
+                                            logger.debug(f"Available interfaces/ranges: {list(interfaces_config.keys())[:20]}")
                                             
-                                            # Check if our interface matches or is part of this range
-                                            if self._is_interface_in_range(interface_name, config_iface_name):
-                                                logger.debug(f"✓ Interface {interface_name} matches range/interface '{config_iface_name}'")
+                                            # Check each interface/range in the config
+                                            # Collect all matching ranges/interfaces first, then prefer exact match or most specific
+                                            matching_configs = []  # List of (config_name, vlan_value, is_exact_match)
+                                            
+                                            for config_iface_name, config_iface_data in interfaces_config.items():
+                                                # Handle case where config_iface_data might be a list instead of dict
+                                                if isinstance(config_iface_data, list):
+                                                    logger.warning(f"Interface '{config_iface_name}' config is a list (unexpected), skipping...")
+                                                    logger.debug(f"  List content: {config_iface_data}")
+                                                    continue
+                                                elif not isinstance(config_iface_data, dict):
+                                                    logger.warning(f"Interface '{config_iface_name}' config is neither dict nor list (type: {type(config_iface_data)}), skipping...")
+                                                    continue
+                                                
+                                                # Check if our interface matches or is part of this range
+                                                if self._is_interface_in_range(interface_name, config_iface_name):
+                                                    logger.debug(f"✓ Interface {interface_name} matches range/interface '{config_iface_name}'")
                                                 # Found our interface (either exact match or part of range)
                                                 # Navigate to access VLAN: interface.{name}.bridge.domain.br_default.access
                                                 # Example structure:
@@ -1526,24 +1541,23 @@ class NAPALMDeviceManager:
                                             
                                             # This will be included in the check result message below
                                             diagnostic_details = " | ".join(diagnostic_summary)
-                                            
-                                except (json.JSONDecodeError, ValueError, KeyError, AttributeError) as parse_error:
-                                    error_msg = f"Could not parse full config JSON for interface {interface_name}: {parse_error}"
-                                    logger.warning(error_msg)
-                                    import traceback
-                                    logger.debug(traceback.format_exc())
-                                    # Add to checks so it appears in NetBox UI
-                                    checks['vlan_config'] = {
-                                        'success': False,
-                                        'message': f"ERROR: Config parsing failed - {str(parse_error)}",
-                                        'data': {'expected': vlan_id, 'actual': None, 'error': str(parse_error)}
-                                    }
-                            else:
-                                logger.warning(f"Full config query returned empty for interface {interface_name}")
-                        except Exception as query_error:
-                            logger.warning(f"Could not query full config for interface {interface_name}: {query_error}")
-                            import traceback
-                            logger.debug(traceback.format_exc())
+                                    except (json.JSONDecodeError, ValueError, KeyError, AttributeError) as parse_error:
+                                        error_msg = f"Could not parse full config JSON for interface {interface_name}: {parse_error}"
+                                        logger.warning(error_msg)
+                                        import traceback
+                                        logger.debug(traceback.format_exc())
+                                        # Add to checks so it appears in NetBox UI
+                                        checks['vlan_config'] = {
+                                            'success': False,
+                                            'message': f"ERROR: Config parsing failed - {str(parse_error)}",
+                                            'data': {'expected': vlan_id, 'actual': None, 'error': str(parse_error)}
+                                        }
+                                else:
+                                    logger.warning(f"Full config query returned empty for interface {interface_name}")
+                            except Exception as query_error:
+                                logger.warning(f"Could not query full config for interface {interface_name}: {query_error}")
+                                import traceback
+                                logger.debug(traceback.format_exc())
 
                         # Log final result before verification
                         if actual_vlan is None:
@@ -4842,6 +4856,83 @@ class NAPALMDeviceManager:
             baseline_data = result.get('baseline', {})
             result['verification_results'] = {}
 
+            # PERFORMANCE: Fetch data ONCE for all interfaces (not per-interface)
+            # This saves significant time - instead of 12 config fetches (20s each = 4 minutes),
+            # and 12 get_interfaces() calls, we do 1 config fetch + 1 get_interfaces() call
+            cached_full_config = None
+            cached_interfaces_config = None
+            cached_interfaces = None  # Cache get_interfaces() result
+            if interfaces_to_check and len(interfaces_to_check) > 1:
+                # Only cache if multiple interfaces (single interface doesn't benefit)
+                driver_name = self.get_driver_name()
+                if driver_name == 'cumulus':
+                    try:
+                        logger.info(f"Fetching config once for {len(interfaces_to_check)} interface(s) (performance optimization)...")
+                        if hasattr(self.connection, 'device') and hasattr(self.connection.device, 'send_command'):
+                            # Try revision ID first (most accurate)
+                            revision_id = None
+                            if hasattr(self, '_candidate_revision_id') and self._candidate_revision_id:
+                                revision_id = self._candidate_revision_id
+                            
+                            if revision_id:
+                                full_config_output = self.connection.device.send_command_timing(
+                                    f'nv config show -r {revision_id} -o json',
+                                    read_timeout=20
+                                )
+                                if not full_config_output or not full_config_output.strip():
+                                    revision_id = None
+                            
+                            if not revision_id:
+                                full_config_output = self.connection.device.send_command_timing(
+                                    'nv config show -r applied -o json',
+                                    read_timeout=20
+                                )
+                            
+                            if not full_config_output or not full_config_output.strip():
+                                full_config_output = self.connection.device.send_command_timing(
+                                    'nv config show -o json',
+                                    read_timeout=20
+                                )
+                            
+                            if full_config_output and full_config_output.strip():
+                                import json
+                                try:
+                                    cached_full_config = json.loads(full_config_output.strip())
+                                    
+                                    # Parse config structure (same logic as verify_vlan_deployment)
+                                    if isinstance(cached_full_config, list):
+                                        if len(cached_full_config) >= 2:
+                                            cached_full_config = cached_full_config[1]
+                                        elif len(cached_full_config) == 1:
+                                            cached_full_config = cached_full_config[0]
+                                    
+                                    if isinstance(cached_full_config, dict):
+                                        if 'set' in cached_full_config:
+                                            cached_full_config = cached_full_config['set']
+                                        interface_raw = cached_full_config.get('interface', {})
+                                        if isinstance(interface_raw, dict):
+                                            cached_interfaces_config = interface_raw
+                                    
+                                    if cached_interfaces_config:
+                                        logger.info(f"Successfully cached config for {len(cached_interfaces_config)} interface(s)/range(s)")
+                                    else:
+                                        logger.warning(f"Could not extract interface config from cached config")
+                                except json.JSONDecodeError as e:
+                                    logger.warning(f"Could not parse cached config JSON: {e}")
+                    except Exception as cache_err:
+                        logger.warning(f"Could not cache config (will fetch per-interface): {cache_err}")
+                    
+                    # PERFORMANCE: Also cache get_interfaces() result (used by interface status check)
+                    try:
+                        logger.info(f"Fetching interfaces once for {len(interfaces_to_check)} interface(s) (performance optimization)...")
+                        cached_interfaces = self.get_interfaces()
+                        if cached_interfaces:
+                            logger.info(f"Successfully cached interfaces data for {len(cached_interfaces)} interface(s)")
+                        else:
+                            logger.warning(f"get_interfaces() returned empty result")
+                    except Exception as interfaces_err:
+                        logger.warning(f"Could not cache interfaces (will fetch per-interface): {interfaces_err}")
+
             # Verify EACH interface
             for iface_idx, iface_name in enumerate(interfaces_to_check, 1):
                 logger.info(f"  [{iface_idx}/{len(interfaces_to_check)}] Verifying interface: {iface_name}")
@@ -4893,7 +4984,15 @@ class NAPALMDeviceManager:
                         iface_baseline_compat['lldp_interfaces'] = baseline_data.get('lldp_interfaces', {})
 
                 # Pass all interfaces being verified so LLDP check can extract member interfaces from all bonds at once
-                vlan_check = self.verify_vlan_deployment(iface_name, iface_vlan_id, baseline=iface_baseline_compat, all_interfaces=interfaces_to_check)
+                # Pass cached config to avoid repeated fetches (performance optimization)
+                vlan_check = self.verify_vlan_deployment(
+                    iface_name, 
+                    iface_vlan_id, 
+                    baseline=iface_baseline_compat, 
+                    all_interfaces=interfaces_to_check,
+                    cached_config=cached_interfaces_config if cached_interfaces_config else None,
+                    cached_interfaces=cached_interfaces if cached_interfaces else None
+                )
                 result['verification_results'][iface_name] = vlan_check['checks']
 
                 # Log each verification check result for this interface (pretty format matching normal mode)
