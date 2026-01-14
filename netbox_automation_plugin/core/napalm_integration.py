@@ -2590,6 +2590,27 @@ class NAPALMDeviceManager:
             if interfaces_to_check:
                 logs.append(f"  Collecting interface-level baseline for {len(interfaces_to_check)} interface(s)...")
 
+                # PERFORMANCE: For Cumulus, fetch ALL interface data at once instead of per-interface
+                # This saves significant time - instead of 12 × 3 commands (10s each = 6 minutes),
+                # we do 1 command to get all interfaces (~10-20s total)
+                all_interfaces_data = None
+                if driver_name == 'cumulus' and len(interfaces_to_check) > 1:
+                    try:
+                        logger.info(f"Fetching all interface data at once for {len(interfaces_to_check)} interface(s) (performance optimization)...")
+                        if hasattr(self.connection, 'device') and self.connection.device is not None:
+                            # Fetch all interfaces at once: nv show interface -o json
+                            all_ifaces_command = 'nv show interface -o json'
+                            all_ifaces_output = self.connection.device.send_command_timing(all_ifaces_command, read_timeout=20)
+                            if all_ifaces_output and all_ifaces_output.strip():
+                                import json
+                                try:
+                                    all_interfaces_data = json.loads(all_ifaces_output.strip())
+                                    logger.info(f"Successfully fetched data for {len(all_interfaces_data) if isinstance(all_interfaces_data, dict) else 'all'} interface(s)")
+                                except json.JSONDecodeError as e:
+                                    logger.warning(f"Could not parse all interfaces JSON: {e}")
+                    except Exception as batch_err:
+                        logger.warning(f"Could not batch fetch interfaces (will fetch per-interface): {batch_err}")
+
                 for iface_idx, interface_name in enumerate(interfaces_to_check, 1):
                     # CRITICAL FIX: Parse interface name if it's in "device:interface" format
                     # This can happen in sync mode where interface names might not be fully parsed
@@ -2623,187 +2644,259 @@ class NAPALMDeviceManager:
                             )
                             
                             if can_access_device:
-                                # Try multiple interface names: interface_name (could be bond or member), and bond if member
-                                interfaces_to_try = [interface_name]
-                                
-                                # Check if interface_name is a bond member and add bond to list
-                                try:
-                                    bond_members_command = 'nv show interface bond-members -o json'
-                                    if hasattr(self.connection, 'device') and self.connection.device is not None:
-                                        bond_members_output = self.connection.device.send_command_timing(bond_members_command, read_timeout=10)
-                                    elif hasattr(self.connection, 'cli'):
-                                        cli_result = self.connection.cli([bond_members_command])
-                                        if isinstance(cli_result, dict):
-                                            bond_members_output = cli_result.get(bond_members_command, '')
-                                        else:
-                                            bond_members_output = str(cli_result) if cli_result else ''
+                                # PERFORMANCE: Use batched interface data if available (avoids per-interface commands)
+                                if all_interfaces_data and isinstance(all_interfaces_data, dict):
+                                    logger.debug(f"Using batched interface data for {interface_name} (performance optimization)")
+                                    # Try to find interface in batched data
+                                    test_interface = None
+                                    interfaces_to_try = [interface_name]
+                                    
+                                    # Check if interface_name is in batched data
+                                    if interface_name in all_interfaces_data:
+                                        test_interface = interface_name
                                     else:
-                                        bond_members_output = None
-                                    if bond_members_output:
-                                        import json
-                                        bond_members = json.loads(bond_members_output)
-                                        # Check if interface_name is a bond member
-                                        if isinstance(bond_members, dict) and interface_name in bond_members:
-                                            member_info = bond_members[interface_name]
-                                            if isinstance(member_info, dict):
-                                                bond_name = member_info.get('parent') or member_info.get('bond')
-                                            elif isinstance(member_info, str):
-                                                bond_name = member_info
-                                            else:
-                                                bond_name = None
+                                        # Try to find bond members or bonds
+                                        # Check bond-members structure in batched data
+                                        if 'bond-members' in all_interfaces_data:
+                                            bond_members = all_interfaces_data['bond-members']
+                                            if isinstance(bond_members, dict) and interface_name in bond_members:
+                                                member_info = bond_members[interface_name]
+                                                if isinstance(member_info, dict):
+                                                    bond_name = member_info.get('parent') or member_info.get('bond')
+                                                elif isinstance(member_info, str):
+                                                    bond_name = member_info
+                                                else:
+                                                    bond_name = None
+                                                
+                                                if bond_name and bond_name in all_interfaces_data:
+                                                    test_interface = bond_name
+                                                    interfaces_to_try.append(bond_name)
+                                    
+                                    if test_interface and test_interface in all_interfaces_data:
+                                        iface_data = all_interfaces_data[test_interface]
+                                        if isinstance(iface_data, dict):
+                                            # Extract data from batched structure
+                                            # Structure: {interface_name: {"link": {...}, "link": {"stats": {...}}, ...}}
+                                            link_data = iface_data.get('link', {})
+                                            stats_data = link_data.get('stats', {}) if isinstance(link_data, dict) else {}
                                             
-                                            if bond_name and bond_name not in interfaces_to_try:
-                                                interfaces_to_try.append(bond_name)
-                                                logger.info(f"Interface {interface_name} is a bond member, will also try bond {bond_name}")
-                                        # Also check if interface_name itself is a bond (check reverse lookup)
-                                        # Look for any member that points to interface_name as parent
-                                        for member, info in bond_members.items():
-                                            if isinstance(info, dict) and (info.get('parent') == interface_name or info.get('bond') == interface_name):
-                                                if member not in interfaces_to_try:
-                                                    interfaces_to_try.append(member)
-                                                    logger.info(f"Interface {interface_name} is a bond, will also try member {member}")
-                                                break
-                                except Exception as bond_check:
-                                    logger.debug(f"Could not check bond membership for baseline: {bond_check}")
+                                            # Extract values
+                                            is_up = link_data.get('oper-status') == 'up' if isinstance(link_data, dict) else False
+                                            is_enabled = link_data.get('admin-status') == 'up' if isinstance(link_data, dict) else False
+                                            description = link_data.get('description', '') if isinstance(link_data, dict) else ''
+                                            
+                                            in_pkts = stats_data.get('in-pkts', 0) if isinstance(stats_data, dict) else 0
+                                            out_pkts = stats_data.get('out-pkts', 0) if isinstance(stats_data, dict) else 0
+                                            in_bytes = stats_data.get('in-bytes', 0) if isinstance(stats_data, dict) else 0
+                                            out_bytes = stats_data.get('out-bytes', 0) if isinstance(stats_data, dict) else 0
+                                            in_drops = stats_data.get('in-drops', 0) if isinstance(stats_data, dict) else 0
+                                            out_drops = stats_data.get('out-drops', 0) if isinstance(stats_data, dict) else 0
+                                            in_errors = stats_data.get('in-errors', 0) if isinstance(stats_data, dict) else 0
+                                            out_errors = stats_data.get('out-errors', 0) if isinstance(stats_data, dict) else 0
+                                            
+                                            # Store baseline
+                                            interface_baseline = {
+                                                'name': test_interface,
+                                                'is_up': is_up,
+                                                'is_enabled': is_enabled,
+                                                'description': description,
+                                                'in_pkts': in_pkts,
+                                                'out_pkts': out_pkts,
+                                                'in_bytes': in_bytes,
+                                                'out_bytes': out_bytes,
+                                                'in_drops': in_drops,
+                                                'out_drops': out_drops,
+                                                'in_errors': in_errors,
+                                                'out_errors': out_errors,
+                                            }
+                                            baseline['interfaces'][interface_name] = interface_baseline
+                                            logger.info(f"  Baseline (batched): {test_interface} is_up={is_up}, is_enabled={is_enabled}, in_pkts={in_pkts}, out_pkts={out_pkts}")
+                                            logs.append(f"    SUCCESS: UP={is_up}, Enabled={is_enabled}, In-Pkts={in_pkts}, Out-Pkts={out_pkts} (from batched data)")
+                                            baseline_collected = True
                                 
-                                # Try each interface name until one works
-                                for test_interface in interfaces_to_try:
+                                # Fallback to per-interface commands if batched data not available or interface not found
+                                if not baseline_collected:
+                                    # Try multiple interface names: interface_name (could be bond or member), and bond if member
+                                    interfaces_to_try = [interface_name]
+                                    
+                                    # Check if interface_name is a bond member and add bond to list
                                     try:
-                                        # Try to get interface stats directly using NVUE command
-                                        # This works for both bond interfaces and member interfaces
-                                        # First check if connection.device is available, otherwise use cli() method
-                                        stats_command = f'nv show interface {test_interface} link stats -o json'
-                                        
-                                        # Use connection.device.send_command_timing (if available)
+                                        bond_members_command = 'nv show interface bond-members -o json'
                                         if hasattr(self.connection, 'device') and self.connection.device is not None:
-                                            stats_output = self.connection.device.send_command_timing(stats_command, read_timeout=10)
+                                            bond_members_output = self.connection.device.send_command_timing(bond_members_command, read_timeout=10)
                                         elif hasattr(self.connection, 'cli'):
-                                            # Fallback to NAPALM's cli() method
-                                            cli_result = self.connection.cli([stats_command])
+                                            cli_result = self.connection.cli([bond_members_command])
                                             if isinstance(cli_result, dict):
-                                                stats_output = cli_result.get(stats_command, '')
+                                                bond_members_output = cli_result.get(bond_members_command, '')
                                             else:
-                                                stats_output = str(cli_result) if cli_result else ''
+                                                bond_members_output = str(cli_result) if cli_result else ''
                                         else:
-                                            raise AttributeError("Neither connection.device.send_command nor connection.cli() is available")
-                                        
-                                        if stats_output and stats_output.strip():
+                                            bond_members_output = None
+                                        if bond_members_output:
                                             import json
-                                            try:
-                                                stats_output_stripped = stats_output.strip()
-                                                if not stats_output_stripped.startswith('{') and not stats_output_stripped.startswith('['):
-                                                    raise ValueError("Output is not JSON format")
-                                                stats_data = json.loads(stats_output_stripped)
-                                                # If we get stats, interface exists - use direct NVUE commands for baseline
-                                                logger.info(f"Using direct NVUE commands for Cumulus baseline collection on {test_interface}")
-                                                logs.append(f"  Collecting interface state for {test_interface} using NVUE...")
-                                                
-                                                # Extract packet counters from stats
-                                                in_pkts = stats_data.get('in-pkts', 0)
-                                                out_pkts = stats_data.get('out-pkts', 0)
-                                                in_bytes = stats_data.get('in-bytes', 0)
-                                                out_bytes = stats_data.get('out-bytes', 0)
-                                                in_drops = stats_data.get('in-drops', 0)
-                                                out_drops = stats_data.get('out-drops', 0)
-                                                in_errors = stats_data.get('in-errors', 0)
-                                                out_errors = stats_data.get('out-errors', 0)
-                                                
-                                                # Get interface link state
-                                                link_command = f'nv show interface {test_interface} link -o json'
-                                                if hasattr(self.connection, 'device') and self.connection.device is not None:
-                                                    link_output = self.connection.device.send_command_timing(link_command, read_timeout=10)
-                                                elif hasattr(self.connection, 'cli'):
-                                                    cli_result = self.connection.cli([link_command])
-                                                    if isinstance(cli_result, dict):
-                                                        link_output = cli_result.get(link_command, '')
-                                                    else:
-                                                        link_output = str(cli_result) if cli_result else ''
+                                            bond_members = json.loads(bond_members_output)
+                                            # Check if interface_name is a bond member
+                                            if isinstance(bond_members, dict) and interface_name in bond_members:
+                                                member_info = bond_members[interface_name]
+                                                if isinstance(member_info, dict):
+                                                    bond_name = member_info.get('parent') or member_info.get('bond')
+                                                elif isinstance(member_info, str):
+                                                    bond_name = member_info
                                                 else:
-                                                    raise AttributeError("Neither connection.device.send_command nor connection.cli() is available")
+                                                    bond_name = None
+                                                
+                                                if bond_name and bond_name not in interfaces_to_try:
+                                                    interfaces_to_try.append(bond_name)
+                                                    logger.info(f"Interface {interface_name} is a bond member, will also try bond {bond_name}")
+                                            # Also check if interface_name itself is a bond (check reverse lookup)
+                                            # Look for any member that points to interface_name as parent
+                                            for member, info in bond_members.items():
+                                                if isinstance(info, dict) and (info.get('parent') == interface_name or info.get('bond') == interface_name):
+                                                    if member not in interfaces_to_try:
+                                                        interfaces_to_try.append(member)
+                                                        logger.info(f"Interface {interface_name} is a bond, will also try member {member}")
+                                                    break
+                                    except Exception as bond_check:
+                                        logger.debug(f"Could not check bond membership for baseline: {bond_check}")
+                                    
+                                    # Try each interface name until one works
+                                    for test_interface in interfaces_to_try:
+                                        try:
+                                            # Try to get interface stats directly using NVUE command
+                                            # This works for both bond interfaces and member interfaces
+                                            # First check if connection.device is available, otherwise use cli() method
+                                            stats_command = f'nv show interface {test_interface} link stats -o json'
                                             
-                                                if link_output and link_output.strip():
-                                                    import json
-                                                    try:
-                                                        link_output_stripped = link_output.strip()
-                                                        if not link_output_stripped.startswith('{') and not link_output_stripped.startswith('['):
-                                                            raise ValueError("Output is not JSON format")
-                                                        link_data = json.loads(link_output_stripped)
-                                                    except (json.JSONDecodeError, ValueError) as link_json_err:
-                                                        baseline_error_details.append(f"JSON decode error for {test_interface} link: {link_json_err}")
-                                                        continue
-                                                    # Link data is at top level, not nested under "link" key
-                                                    # Structure: {"admin-status": "up", "oper-status": "up", ...}
-                                                    is_up = link_data.get('oper-status') == 'up'
-                                                    is_enabled = link_data.get('admin-status') == 'up'
-                                                    
-                                                    # Get description if available
-                                                    description = ''
-                                                    try:
-                                                        desc_command = f'nv show interface {test_interface} description -o json'
-                                                        if hasattr(self.connection, 'device') and self.connection.device is not None:
-                                                            desc_output = self.connection.device.send_command_timing(desc_command, read_timeout=10)
-                                                        elif hasattr(self.connection, 'cli'):
-                                                            cli_result = self.connection.cli([desc_command])
-                                                            if isinstance(cli_result, dict):
-                                                                desc_output = cli_result.get(desc_command, '')
-                                                            else:
-                                                                desc_output = str(cli_result) if cli_result else ''
-                                                        else:
-                                                            desc_output = ''  # Description is optional, skip if can't access
-                                                        if desc_output and desc_output.strip():
-                                                            import json
-                                                            try:
-                                                                desc_output_stripped = desc_output.strip()
-                                                                if not desc_output_stripped.startswith('{') and not desc_output_stripped.startswith('['):
-                                                                    raise ValueError("Output is not JSON format")
-                                                                desc_data = json.loads(desc_output_stripped)
-                                                            except (json.JSONDecodeError, ValueError) as desc_json_err:
-                                                                # Description is optional - continue with empty description
-                                                                desc_data = {}
-                                                            # Description structure may vary - try both nested and top-level
-                                                            if 'link' in desc_data and isinstance(desc_data['link'], dict):
-                                                                description = desc_data.get('link', {}).get('description', '')
-                                                            else:
-                                                                description = desc_data.get('description', '')
-                                                    except:
-                                                        pass  # Description is optional
-                                                    
-                                                    # Store baseline for this specific interface
-                                                    interface_baseline = {
-                                                        'name': test_interface,
-                                                        'is_up': is_up,
-                                                        'is_enabled': is_enabled,
-                                                        'description': description,
-                                                        # Include packet counters for traffic flow detection
-                                                        'in_pkts': in_pkts,
-                                                        'out_pkts': out_pkts,
-                                                        'in_bytes': in_bytes,
-                                                        'out_bytes': out_bytes,
-                                                        'in_drops': in_drops,
-                                                        'out_drops': out_drops,
-                                                        'in_errors': in_errors,
-                                                        'out_errors': out_errors,
-                                                    }
-                                                    baseline['interfaces'][interface_name] = interface_baseline
-                                                    logger.info(f"  Baseline: {test_interface} is_up={is_up}, is_enabled={is_enabled}, in_pkts={in_pkts}, out_pkts={out_pkts}")
-                                                    logs.append(f"    SUCCESS: UP={is_up}, Enabled={is_enabled}, In-Pkts={in_pkts}, Out-Pkts={out_pkts}")
-
-                                                    if test_interface != interface_name:
-                                                        logs.append(f"    Note: Collected baseline for {test_interface} (requested {interface_name})")
-
-                                                    # Success - baseline collected
-                                                    baseline_collected = True
-                                                    break  # Found working interface, stop trying
+                                            # Use connection.device.send_command_timing (if available)
+                                            if hasattr(self.connection, 'device') and self.connection.device is not None:
+                                                stats_output = self.connection.device.send_command_timing(stats_command, read_timeout=10)
+                                            elif hasattr(self.connection, 'cli'):
+                                                # Fallback to NAPALM's cli() method
+                                                cli_result = self.connection.cli([stats_command])
+                                                if isinstance(cli_result, dict):
+                                                    stats_output = cli_result.get(stats_command, '')
                                                 else:
-                                                    baseline_error_details.append(f"Link command returned empty for {test_interface}")
-                                            except json.JSONDecodeError as json_err:
-                                                baseline_error_details.append(f"JSON decode error for {test_interface} stats: {json_err}")
-                                            except Exception as parse_err:
-                                                baseline_error_details.append(f"Parse error for {test_interface}: {parse_err}")
-                                        else:
-                                            baseline_error_details.append(f"Stats command returned empty for {test_interface}")
-                                    except Exception as test_err:
-                                        baseline_error_details.append(f"Error testing {test_interface}: {str(test_err)[:100]}")
+                                                    stats_output = str(cli_result) if cli_result else ''
+                                            else:
+                                                raise AttributeError("Neither connection.device.send_command nor connection.cli() is available")
+                                            
+                                            if stats_output and stats_output.strip():
+                                                import json
+                                                try:
+                                                    stats_output_stripped = stats_output.strip()
+                                                    if not stats_output_stripped.startswith('{') and not stats_output_stripped.startswith('['):
+                                                        raise ValueError("Output is not JSON format")
+                                                    stats_data = json.loads(stats_output_stripped)
+                                                    # If we get stats, interface exists - use direct NVUE commands for baseline
+                                                    logger.info(f"Using direct NVUE commands for Cumulus baseline collection on {test_interface}")
+                                                    logs.append(f"  Collecting interface state for {test_interface} using NVUE...")
+                                                    
+                                                    # Extract packet counters from stats
+                                                    in_pkts = stats_data.get('in-pkts', 0)
+                                                    out_pkts = stats_data.get('out-pkts', 0)
+                                                    in_bytes = stats_data.get('in-bytes', 0)
+                                                    out_bytes = stats_data.get('out-bytes', 0)
+                                                    in_drops = stats_data.get('in-drops', 0)
+                                                    out_drops = stats_data.get('out-drops', 0)
+                                                    in_errors = stats_data.get('in-errors', 0)
+                                                    out_errors = stats_data.get('out-errors', 0)
+                                                    
+                                                    # Get interface link state
+                                                    link_command = f'nv show interface {test_interface} link -o json'
+                                                    if hasattr(self.connection, 'device') and self.connection.device is not None:
+                                                        link_output = self.connection.device.send_command_timing(link_command, read_timeout=10)
+                                                    elif hasattr(self.connection, 'cli'):
+                                                        cli_result = self.connection.cli([link_command])
+                                                        if isinstance(cli_result, dict):
+                                                            link_output = cli_result.get(link_command, '')
+                                                        else:
+                                                            link_output = str(cli_result) if cli_result else ''
+                                                    else:
+                                                        raise AttributeError("Neither connection.device.send_command nor connection.cli() is available")
+                                                
+                                                    if link_output and link_output.strip():
+                                                        import json
+                                                        try:
+                                                            link_output_stripped = link_output.strip()
+                                                            if not link_output_stripped.startswith('{') and not link_output_stripped.startswith('['):
+                                                                raise ValueError("Output is not JSON format")
+                                                            link_data = json.loads(link_output_stripped)
+                                                        except (json.JSONDecodeError, ValueError) as link_json_err:
+                                                            baseline_error_details.append(f"JSON decode error for {test_interface} link: {link_json_err}")
+                                                            continue
+                                                        # Link data is at top level, not nested under "link" key
+                                                        # Structure: {"admin-status": "up", "oper-status": "up", ...}
+                                                        is_up = link_data.get('oper-status') == 'up'
+                                                        is_enabled = link_data.get('admin-status') == 'up'
+                                                        
+                                                        # Get description if available
+                                                        description = ''
+                                                        try:
+                                                            desc_command = f'nv show interface {test_interface} description -o json'
+                                                            if hasattr(self.connection, 'device') and self.connection.device is not None:
+                                                                desc_output = self.connection.device.send_command_timing(desc_command, read_timeout=10)
+                                                            elif hasattr(self.connection, 'cli'):
+                                                                cli_result = self.connection.cli([desc_command])
+                                                                if isinstance(cli_result, dict):
+                                                                    desc_output = cli_result.get(desc_command, '')
+                                                                else:
+                                                                    desc_output = str(cli_result) if cli_result else ''
+                                                            else:
+                                                                desc_output = ''  # Description is optional, skip if can't access
+                                                            if desc_output and desc_output.strip():
+                                                                import json
+                                                                try:
+                                                                    desc_output_stripped = desc_output.strip()
+                                                                    if not desc_output_stripped.startswith('{') and not desc_output_stripped.startswith('['):
+                                                                        raise ValueError("Output is not JSON format")
+                                                                    desc_data = json.loads(desc_output_stripped)
+                                                                except (json.JSONDecodeError, ValueError) as desc_json_err:
+                                                                    # Description is optional - continue with empty description
+                                                                    desc_data = {}
+                                                                # Description structure may vary - try both nested and top-level
+                                                                if 'link' in desc_data and isinstance(desc_data['link'], dict):
+                                                                    description = desc_data.get('link', {}).get('description', '')
+                                                                else:
+                                                                    description = desc_data.get('description', '')
+                                                        except:
+                                                            pass  # Description is optional
+                                                        
+                                                        # Store baseline for this specific interface
+                                                        interface_baseline = {
+                                                            'name': test_interface,
+                                                            'is_up': is_up,
+                                                            'is_enabled': is_enabled,
+                                                            'description': description,
+                                                            # Include packet counters for traffic flow detection
+                                                            'in_pkts': in_pkts,
+                                                            'out_pkts': out_pkts,
+                                                            'in_bytes': in_bytes,
+                                                            'out_bytes': out_bytes,
+                                                            'in_drops': in_drops,
+                                                            'out_drops': out_drops,
+                                                            'in_errors': in_errors,
+                                                            'out_errors': out_errors,
+                                                        }
+                                                        baseline['interfaces'][interface_name] = interface_baseline
+                                                        logger.info(f"  Baseline: {test_interface} is_up={is_up}, is_enabled={is_enabled}, in_pkts={in_pkts}, out_pkts={out_pkts}")
+                                                        logs.append(f"    SUCCESS: UP={is_up}, Enabled={is_enabled}, In-Pkts={in_pkts}, Out-Pkts={out_pkts}")
+
+                                                        if test_interface != interface_name:
+                                                            logs.append(f"    Note: Collected baseline for {test_interface} (requested {interface_name})")
+
+                                                        # Success - baseline collected
+                                                        baseline_collected = True
+                                                        break  # Found working interface, stop trying
+                                                    else:
+                                                        baseline_error_details.append(f"Link command returned empty for {test_interface}")
+                                                except json.JSONDecodeError as json_err:
+                                                    baseline_error_details.append(f"JSON decode error for {test_interface} stats: {json_err}")
+                                                except Exception as parse_err:
+                                                    baseline_error_details.append(f"Parse error for {test_interface}: {parse_err}")
+                                            else:
+                                                baseline_error_details.append(f"Stats command returned empty for {test_interface}")
+                                        except Exception as test_err:
+                                            baseline_error_details.append(f"Error testing {test_interface}: {str(test_err)[:100]}")
                                 
                                 if not baseline_collected:
                                     # All attempts failed - log error but continue for other interfaces
