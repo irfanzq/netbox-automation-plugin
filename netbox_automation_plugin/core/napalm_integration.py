@@ -1111,7 +1111,7 @@ class NAPALMDeviceManager:
         
         return False
     
-    def verify_vlan_deployment(self, interface_name, vlan_id, expected_mode='access', baseline=None, all_interfaces=None, cached_config=None, cached_interfaces=None):
+    def verify_vlan_deployment(self, interface_name, vlan_id, expected_mode='access', baseline=None, all_interfaces=None, cached_config=None, cached_interfaces=None, cached_lldp=None, cached_connectivity=None):
         """
         Comprehensive verification for VLAN deployment with baseline comparison
         
@@ -1133,6 +1133,10 @@ class NAPALMDeviceManager:
                           If None, will fetch config for this interface
             cached_interfaces: Optional cached interfaces dict (from get_interfaces()) to avoid repeated fetches
                              If None, will call get_interfaces() for this interface
+            cached_lldp: Optional cached LLDP dict (from get_lldp_neighbors()) to avoid repeated fetches
+                        If None, will call get_lldp_neighbors() for this interface
+            cached_connectivity: Optional cached connectivity result (from verify_connectivity()) to avoid repeated checks
+                               If None, will call verify_connectivity() for this interface
         
         Returns:
             dict: {'success': bool, 'message': str, 'checks': dict}
@@ -1143,7 +1147,12 @@ class NAPALMDeviceManager:
         
         # Check 1: Device Connectivity (CRITICAL)
         logger.info(f"VLAN Verification Check 1/4: Device connectivity...")
-        connectivity_result = self.verify_connectivity()
+        # PERFORMANCE: Use cached connectivity if available (avoids repeated checks)
+        if cached_connectivity is not None:
+            logger.debug(f"Using cached connectivity for interface {interface_name} (performance optimization)")
+            connectivity_result = cached_connectivity
+        else:
+            connectivity_result = self.verify_connectivity()
         checks['connectivity'] = connectivity_result
         if not connectivity_result['success']:
             all_passed = False
@@ -1695,9 +1704,14 @@ class NAPALMDeviceManager:
             try:
                 # Pass interfaces so get_lldp_neighbors can extract member interfaces from bonds
                 # For bonds, it will extract member interfaces (e.g., bond3 -> swp3) for LLDP checks
-                # Use all_interfaces if provided (for efficiency), otherwise just the current interface
-                interfaces_for_lldp = all_interfaces if all_interfaces else [interface_name]
-                lldp_after = self.get_lldp_neighbors(interfaces=interfaces_for_lldp)
+                # PERFORMANCE: Use cached LLDP if available (avoids repeated fetches)
+                if cached_lldp is not None:
+                    logger.debug(f"Using cached LLDP for interface {interface_name} (performance optimization)")
+                    lldp_after = cached_lldp
+                else:
+                    # Use all_interfaces if provided (for efficiency), otherwise just the current interface
+                    interfaces_for_lldp = all_interfaces if all_interfaces else [interface_name]
+                    lldp_after = self.get_lldp_neighbors(interfaces=interfaces_for_lldp)
 
                 # Build after state for all interfaces
                 lldp_after_all = {}
@@ -4862,6 +4876,8 @@ class NAPALMDeviceManager:
             cached_full_config = None
             cached_interfaces_config = None
             cached_interfaces = None  # Cache get_interfaces() result
+            cached_lldp = None  # Cache get_lldp_neighbors() result
+            cached_connectivity = None  # Cache verify_connectivity() result
             if interfaces_to_check and len(interfaces_to_check) > 1:
                 # Only cache if multiple interfaces (single interface doesn't benefit)
                 driver_name = self.get_driver_name()
@@ -4932,6 +4948,27 @@ class NAPALMDeviceManager:
                             logger.warning(f"get_interfaces() returned empty result")
                     except Exception as interfaces_err:
                         logger.warning(f"Could not cache interfaces (will fetch per-interface): {interfaces_err}")
+                
+                # PERFORMANCE: Also cache LLDP and connectivity results (used by verification)
+                try:
+                    logger.info(f"Fetching LLDP once for {len(interfaces_to_check)} interface(s) (performance optimization)...")
+                    cached_lldp = self.get_lldp_neighbors(interfaces=interfaces_to_check)
+                    if cached_lldp:
+                        total_neighbors = sum(len(neighbors) for neighbors in cached_lldp.values())
+                        logger.info(f"Successfully cached LLDP data for {len(cached_lldp)} interface(s) with {total_neighbors} total neighbors")
+                    else:
+                        logger.warning(f"get_lldp_neighbors() returned empty result")
+                except Exception as lldp_err:
+                    logger.warning(f"Could not cache LLDP (will fetch per-interface): {lldp_err}")
+                
+                # PERFORMANCE: Cache connectivity check (fast but avoid repeated calls)
+                try:
+                    logger.debug(f"Checking connectivity once (performance optimization)...")
+                    cached_connectivity = self.verify_connectivity()
+                    if cached_connectivity:
+                        logger.debug(f"Connectivity check cached: {cached_connectivity.get('success', False)}")
+                except Exception as conn_err:
+                    logger.warning(f"Could not cache connectivity (will check per-interface): {conn_err}")
 
             # Verify EACH interface
             for iface_idx, iface_name in enumerate(interfaces_to_check, 1):
@@ -4991,7 +5028,9 @@ class NAPALMDeviceManager:
                     baseline=iface_baseline_compat, 
                     all_interfaces=interfaces_to_check,
                     cached_config=cached_interfaces_config if cached_interfaces_config else None,
-                    cached_interfaces=cached_interfaces if cached_interfaces else None
+                    cached_interfaces=cached_interfaces if cached_interfaces else None,
+                    cached_lldp=cached_lldp if cached_lldp else None,
+                    cached_connectivity=cached_connectivity if cached_connectivity else None
                 )
                 result['verification_results'][iface_name] = vlan_check['checks']
 
