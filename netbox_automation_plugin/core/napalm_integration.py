@@ -2281,7 +2281,8 @@ class NAPALMDeviceManager:
     def deploy_config_safe(self, config, replace=True, timeout=60,
                           checks=['connectivity', 'interfaces', 'lldp'],
                           critical_interfaces=None, min_neighbors=0,
-                          vlan_id=None, interface_name=None, interface_names=None, interface_names_for_lldp=None):
+                          vlan_id=None, interface_name=None, interface_names=None, interface_names_for_lldp=None,
+                          interface_vlan_map=None):
         """
         Deploy configuration with Juniper-style commit-confirm failsafe
 
@@ -2299,11 +2300,13 @@ class NAPALMDeviceManager:
             checks: List of verification checks to perform ['connectivity', 'interfaces', 'lldp']
             critical_interfaces: List of interface names that must be up (for interface check)
             min_neighbors: Minimum LLDP neighbors required (for LLDP check)
-            vlan_id: VLAN ID being deployed (for VLAN-specific verification)
+            vlan_id: VLAN ID being deployed (for VLAN-specific verification in normal mode)
             interface_name: Single interface name (legacy, use interface_names instead)
             interface_names: List of interface names to run interface-level checks on (for interface state/traffic stats)
             interface_names_for_lldp: List of interface names for LLDP checks (defaults to interface_names if not provided)
                                      Use member interfaces for bonds (LLDP neighbors are only on physical interfaces)
+            interface_vlan_map: Optional dict mapping "device:interface" -> {'untagged_vlan': int, 'tagged_vlans': [int], 'commands': [str]}
+                              Used in sync mode to provide per-interface VLAN config from NetBox for comprehensive verification
 
         Returns:
             dict: {
@@ -4814,10 +4817,27 @@ class NAPALMDeviceManager:
 
         # If this is a VLAN deployment, use comprehensive VLAN verification with baseline
         # Run interface-level checks for ALL interfaces in interfaces_to_check
-        if vlan_id and interfaces_to_check:
-            logger.info(f"Running comprehensive VLAN verification for {len(interfaces_to_check)} interface(s), VLAN {vlan_id}...")
-            logs.append(f"  Running comprehensive VLAN verification for {len(interfaces_to_check)} interface(s)...")
-            logs.append(f"  VLAN ID: {vlan_id}")
+        # Support both normal mode (vlan_id) and sync mode (interface_vlan_map)
+        use_comprehensive_verification = False
+        if interfaces_to_check:
+            if vlan_id:
+                # Normal mode: single VLAN ID for all interfaces
+                use_comprehensive_verification = True
+                verification_vlan_id = vlan_id
+            elif interface_vlan_map:
+                # Sync mode: per-interface VLAN mapping
+                use_comprehensive_verification = True
+                verification_vlan_id = None  # Will be extracted per-interface
+        
+        if use_comprehensive_verification:
+            if vlan_id:
+                logger.info(f"Running comprehensive VLAN verification for {len(interfaces_to_check)} interface(s), VLAN {vlan_id}...")
+                logs.append(f"  Running comprehensive VLAN verification for {len(interfaces_to_check)} interface(s)...")
+                logs.append(f"  VLAN ID: {vlan_id}")
+            else:
+                logger.info(f"Running comprehensive VLAN verification for {len(interfaces_to_check)} interface(s) (sync mode)...")
+                logs.append(f"  Running comprehensive VLAN verification for {len(interfaces_to_check)} interface(s)...")
+                logs.append(f"  Mode: Sync (per-interface VLANs from NetBox)")
 
             baseline_data = result.get('baseline', {})
             result['verification_results'] = {}
@@ -4827,6 +4847,29 @@ class NAPALMDeviceManager:
                 logger.info(f"  [{iface_idx}/{len(interfaces_to_check)}] Verifying interface: {iface_name}")
                 logs.append(f"")
                 logs.append(f"  [{iface_idx}/{len(interfaces_to_check)}] Interface: {iface_name}")
+
+                # Get VLAN ID for this interface
+                # In sync mode, extract from interface_vlan_map; in normal mode, use vlan_id
+                iface_vlan_id = verification_vlan_id
+                if not iface_vlan_id and interface_vlan_map:
+                    # Sync mode: extract VLAN from interface_vlan_map
+                    # interface_vlan_map keys are target_interface names (bonds if detected)
+                    vlan_config = interface_vlan_map.get(iface_name)
+                    
+                    if vlan_config:
+                        # Prefer untagged_vlan, fallback to first tagged_vlan
+                        iface_vlan_id = vlan_config.get('untagged_vlan')
+                        if not iface_vlan_id and vlan_config.get('tagged_vlans'):
+                            iface_vlan_id = vlan_config['tagged_vlans'][0]
+                        logger.debug(f"Extracted VLAN ID {iface_vlan_id} for interface {iface_name} from interface_vlan_map")
+                    else:
+                        logger.debug(f"Could not find VLAN config for interface {iface_name} in interface_vlan_map (keys: {list(interface_vlan_map.keys())})")
+                
+                if not iface_vlan_id:
+                    logger.warning(f"  [{iface_idx}/{len(interfaces_to_check)}] Could not determine VLAN ID for {iface_name} - skipping VLAN verification")
+                    logs.append(f"    [WARN] Could not determine VLAN ID for interface - skipping VLAN verification")
+                    # Still do other checks (connectivity, interface status, LLDP)
+                    continue
 
                 # Get baseline for this specific interface
                 interface_baseline = baseline_data.get('interfaces', {}).get(iface_name, {})
@@ -4850,10 +4893,10 @@ class NAPALMDeviceManager:
                         iface_baseline_compat['lldp_interfaces'] = baseline_data.get('lldp_interfaces', {})
 
                 # Pass all interfaces being verified so LLDP check can extract member interfaces from all bonds at once
-                vlan_check = self.verify_vlan_deployment(iface_name, vlan_id, baseline=iface_baseline_compat, all_interfaces=interfaces_to_check)
+                vlan_check = self.verify_vlan_deployment(iface_name, iface_vlan_id, baseline=iface_baseline_compat, all_interfaces=interfaces_to_check)
                 result['verification_results'][iface_name] = vlan_check['checks']
 
-                # Log each verification check result for this interface
+                # Log each verification check result for this interface (pretty format matching normal mode)
                 for check_name, check_data in vlan_check['checks'].items():
                     if check_data.get('success'):
                         logs.append(f"    ✓ {check_name}: {check_data.get('message', 'OK')}")

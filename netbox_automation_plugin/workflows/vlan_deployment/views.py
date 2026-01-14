@@ -2444,9 +2444,16 @@ class VLANDeploymentView(View):
             else:
                 # Normal mode: use tagged VLANs from form input
                 if tagged_vlan_ids:
-                    proposed_tagged = list(tagged_vlan_ids) if isinstance(tagged_vlan_ids, (list, tuple)) else [tagged_vlan_ids]
+                    # Handle both list/tuple and single value
+                    if isinstance(tagged_vlan_ids, (list, tuple)):
+                        proposed_tagged = list(tagged_vlan_ids)
+                    else:
+                        # Single value - convert to list
+                        proposed_tagged = [tagged_vlan_ids]
+                    logger.debug(f"[_get_netbox_current_state] Interface {interface_name}: mode=normal, tagged_vlan_ids={tagged_vlan_ids}, proposed_tagged={proposed_tagged}")
                 else:
                     proposed_tagged = []  # No tagged VLANs specified in form
+                    logger.debug(f"[_get_netbox_current_state] Interface {interface_name}: mode=normal, tagged_vlan_ids=None/empty, proposed_tagged=[]")
 
             proposed_ip_addresses = []  # Remove IP addresses (routed → bridged)
             proposed_vrf = None  # Remove VRF (routed → bridged)
@@ -4939,46 +4946,64 @@ class VLANDeploymentView(View):
                 device_logs.append(f"   [INFO] Uptime data not available")
             device_logs.append("")
 
-            # 2. Interface State (from baseline)
-            # Handle both baseline['interface'] (single) and baseline['interfaces'] (multiple)
+            # 2. Interface State (from baseline) - Show ALL interfaces in deployment
             device_logs.append("2. Interface State:")
-            interface_baseline = baseline_data.get('interface', {})
-            if not interface_baseline and 'interfaces' in baseline_data and baseline_data['interfaces']:
-                # Use first successful interface from baseline['interfaces'] (skip ones with errors)
-                for iface_name, iface_data in baseline_data['interfaces'].items():
-                    if 'error' not in iface_data:
-                        interface_baseline = iface_data
-                        logger.debug(f"Using baseline data from interface {iface_name}")
-                        break
-                # If all have errors, use first one anyway for display
-                if not interface_baseline and baseline_data['interfaces']:
-                    first_iface_name = next(iter(baseline_data['interfaces']))
-                    interface_baseline = baseline_data['interfaces'][first_iface_name]
+            interfaces_with_data = 0
+            for interface_name in sorted(device_interface_names):
+                interface_result = device_results.get(interface_name, {})
+                interface_baseline_data = interface_result.get('baseline', {})
+                
+                # Try to get interface state from baseline
+                interface_baseline = interface_baseline_data.get('interface', {})
+                if not interface_baseline and 'interfaces' in interface_baseline_data:
+                    # Check if this specific interface is in the interfaces dict
+                    if interface_name in interface_baseline_data['interfaces']:
+                        interface_baseline = interface_baseline_data['interfaces'][interface_name]
+                
+                if interface_baseline and 'error' not in interface_baseline:
+                    is_up = interface_baseline.get('is_up', False)
+                    is_enabled = interface_baseline.get('is_enabled', False)
+                    status = "UP" if is_up else "DOWN"
+                    admin_status = "Enabled" if is_enabled else "Disabled"
+                    device_logs.append(f"   {interface_name}: {status} (Admin: {admin_status})")
+                    interfaces_with_data += 1
+                else:
+                    device_logs.append(f"   {interface_name}: [INFO] State data not available")
             
-            if interface_baseline and 'error' not in interface_baseline:
-                is_up = interface_baseline.get('is_up', False)
-                is_enabled = interface_baseline.get('is_enabled', False)
-                status = "UP" if is_up else "DOWN"
-                admin_status = "Enabled" if is_enabled else "Disabled"
-                device_logs.append(f"   Status: {status} (Admin: {admin_status})")
-            else:
-                device_logs.append(f"   [INFO] Interface state data not available")
+            if interfaces_with_data == 0:
+                device_logs.append(f"   [INFO] No interface state data available for any interface")
             device_logs.append("")
 
-            # 3. Traffic Statistics (from baseline)
+            # 3. Traffic Statistics (from baseline) - Show ALL interfaces in deployment
             device_logs.append("3. Traffic Statistics:")
-            if interface_baseline and 'error' not in interface_baseline:
-                in_pkts = interface_baseline.get('in_pkts', 0)
-                out_pkts = interface_baseline.get('out_pkts', 0)
-                in_bytes = interface_baseline.get('in_bytes', 0)
-                out_bytes = interface_baseline.get('out_bytes', 0)
-                if in_pkts or out_pkts or in_bytes or out_bytes:
-                    device_logs.append(f"   RX: {in_pkts:,} pkts ({in_bytes:,} bytes)")
-                    device_logs.append(f"   TX: {out_pkts:,} pkts ({out_bytes:,} bytes)")
+            interfaces_with_traffic_data = 0
+            for interface_name in sorted(device_interface_names):
+                interface_result = device_results.get(interface_name, {})
+                interface_baseline_data = interface_result.get('baseline', {})
+                
+                # Try to get interface state from baseline
+                interface_baseline = interface_baseline_data.get('interface', {})
+                if not interface_baseline and 'interfaces' in interface_baseline_data:
+                    # Check if this specific interface is in the interfaces dict
+                    if interface_name in interface_baseline_data['interfaces']:
+                        interface_baseline = interface_baseline_data['interfaces'][interface_name]
+                
+                if interface_baseline and 'error' not in interface_baseline:
+                    in_pkts = interface_baseline.get('in_pkts', 0)
+                    out_pkts = interface_baseline.get('out_pkts', 0)
+                    in_bytes = interface_baseline.get('in_bytes', 0)
+                    out_bytes = interface_baseline.get('out_bytes', 0)
+                    if in_pkts or out_pkts or in_bytes or out_bytes:
+                        device_logs.append(f"   {interface_name}: RX: {in_pkts:,} pkts ({in_bytes:,} bytes), TX: {out_pkts:,} pkts ({out_bytes:,} bytes)")
+                        interfaces_with_traffic_data += 1
+                    else:
+                        device_logs.append(f"   {interface_name}: [INFO] No traffic detected (all counters are 0)")
+                        interfaces_with_traffic_data += 1
                 else:
-                    device_logs.append(f"   [INFO] No traffic detected (all counters are 0)")
-            else:
-                device_logs.append(f"   [INFO] Traffic statistics not available")
+                    device_logs.append(f"   {interface_name}: [INFO] Traffic statistics not available")
+            
+            if interfaces_with_traffic_data == 0:
+                device_logs.append(f"   [INFO] No traffic statistics available for any interface")
             device_logs.append("")
 
             device_logs.append("=" * 80)
@@ -6006,6 +6031,7 @@ class VLANDeploymentView(View):
                     # ISSUE #2 FIX: Consolidate bridge VLAN commands from all interfaces
                     if platform == 'cumulus':
                         # Extract all bridge VLAN commands and collect unique VLANs
+                        # CRITICAL: Only add VLANs that are NOT already in the bridge
                         bridge_vlan_commands = []
                         non_bridge_lines = []
                         all_vlans_to_add = set()
@@ -6016,19 +6042,28 @@ class VLANDeploymentView(View):
                                 vlan_part = line.replace('nv set bridge domain br_default vlan ', '').strip()
                                 try:
                                     vlan_id = int(vlan_part)
-                                    all_vlans_to_add.add(vlan_id)
+                                    # Only add VLAN if it's NOT already in the bridge
+                                    if bridge_vlans and not self._is_vlan_in_bridge_vlans(vlan_id, bridge_vlans):
+                                        all_vlans_to_add.add(vlan_id)
+                                        logger.debug(f"VLAN {vlan_id} not in bridge - will add to consolidated command")
+                                    else:
+                                        logger.debug(f"VLAN {vlan_id} already in bridge - skipping from consolidated command")
                                 except ValueError:
-                                    # If not a simple int, keep the command as-is
+                                    # If not a simple int, keep the command as-is (might be a range)
                                     bridge_vlan_commands.append(line)
                             else:
                                 non_bridge_lines.append(line)
 
-                        # Show consolidated bridge VLAN command at the top if we have VLANs
+                        # Show consolidated bridge VLAN command at the top if we have VLANs to add
                         if all_vlans_to_add:
                             sorted_vlans = sorted(list(all_vlans_to_add))
                             vlan_list_str = self._format_vlan_list(sorted_vlans)
                             device_logs.append(f"# Bridge Domain br_default - Adding VLANs: {vlan_list_str}")
                             device_logs.append(f"nv set bridge domain br_default vlan {vlan_list_str}")
+                            device_logs.append("")
+                        elif bridge_vlans:
+                            # All VLANs are already in bridge - show info message
+                            device_logs.append(f"# Bridge Domain br_default - All required VLANs already present")
                             device_logs.append("")
 
                         # Show non-bridge commands
@@ -6067,9 +6102,13 @@ class VLANDeploymentView(View):
                         # Get NetBox state to extract current/proposed VLANs
                         try:
                             # Pass tagged_vlan_ids so proposed_tagged is set correctly
+                            # Debug: Log tagged_vlan_ids to verify it's being passed correctly
+                            logger.debug(f"[NETBOX_CHANGES] Interface {actual_interface_name}: tagged_vlan_ids={tagged_vlan_ids}")
                             netbox_state = self._get_netbox_current_state(device, actual_interface_name, primary_vlan_id, mode='normal', tagged_vlan_ids=tagged_vlan_ids)
                             current = netbox_state.get('current', {})
                             proposed = netbox_state.get('proposed', {})
+                            # Debug: Log what was returned
+                            logger.debug(f"[NETBOX_CHANGES] Interface {actual_interface_name}: proposed_tagged={proposed.get('tagged_vlans', [])}")
 
                             # Extract VLAN changes
                             current_untagged = current.get('untagged_vlan')
@@ -6255,13 +6294,43 @@ class VLANDeploymentView(View):
                                             device_logs.append(f"  {iface}: {', '.join(changes)}")
                                 device_logs.append("")
 
-                        # Finally show standalone interface changes
+                        # Finally show standalone interface changes (interfaces that are not bond members)
                         standalone_groups = {k: v for k, v in netbox_groups.items() if k[1] == 'update'}
                         if standalone_groups:
-                            device_logs.append("Standalone Interfaces (VLAN updates):")
-                            device_logs.append("")
-                            for (group_name, change_type), interfaces in sorted(standalone_groups.items()):
+                            # Detect if these are bond interfaces or physical interfaces
+                            bond_interfaces = []
+                            physical_interfaces = []
+                            for (group_name, change_type), interfaces in standalone_groups.items():
                                 for item in interfaces:
+                                    iface_name = item['interface']
+                                    try:
+                                        interface_obj = Interface.objects.get(device=device, name=iface_name)
+                                        # Check if it's a bond/LAG interface (has members or type indicates bond)
+                                        is_bond = False
+                                        if hasattr(interface_obj, 'type'):
+                                            # Common bond/LAG interface types
+                                            if interface_obj.type and 'lag' in str(interface_obj.type).lower():
+                                                is_bond = True
+                                        # Also check by name pattern (bond*, port-channel*, etc.)
+                                        if not is_bond and (iface_name.startswith('bond') or iface_name.startswith('port-channel') or iface_name.startswith('po')):
+                                            is_bond = True
+                                        
+                                        if is_bond:
+                                            bond_interfaces.append(item)
+                                        else:
+                                            physical_interfaces.append(item)
+                                    except Interface.DoesNotExist:
+                                        # If interface doesn't exist in NetBox yet, check by name pattern
+                                        if iface_name.startswith('bond') or iface_name.startswith('port-channel') or iface_name.startswith('po'):
+                                            bond_interfaces.append(item)
+                                        else:
+                                            physical_interfaces.append(item)
+                            
+                            # Show bond interfaces first (if any)
+                            if bond_interfaces:
+                                device_logs.append("Bond Interfaces (VLAN updates):")
+                                device_logs.append("")
+                                for item in bond_interfaces:
                                     iface = item['interface']
                                     curr_untag = item['current_untagged']
                                     prop_untag = item['proposed_untagged']
@@ -6278,7 +6347,30 @@ class VLANDeploymentView(View):
 
                                     if changes:
                                         device_logs.append(f"  {iface}: {', '.join(changes)}")
-                            device_logs.append("")
+                                device_logs.append("")
+                            
+                            # Show physical interfaces (if any)
+                            if physical_interfaces:
+                                device_logs.append("Physical Interfaces (VLAN updates):")
+                                device_logs.append("")
+                                for item in physical_interfaces:
+                                    iface = item['interface']
+                                    curr_untag = item['current_untagged']
+                                    prop_untag = item['proposed_untagged']
+                                    curr_tag = item['current_tagged']
+                                    prop_tag = item['proposed_tagged']
+
+                                    changes = []
+                                    if curr_untag != prop_untag:
+                                        changes.append(f"Untagged VLAN {curr_untag} → {prop_untag}")
+                                    if curr_tag != prop_tag:
+                                        curr_tag_str = f"[{', '.join(map(str, curr_tag))}]" if curr_tag else "[]"
+                                        prop_tag_str = f"[{', '.join(map(str, prop_tag))}]" if prop_tag else "[]"
+                                        changes.append(f"Tagged VLANs {curr_tag_str} → {prop_tag_str}")
+
+                                    if changes:
+                                        device_logs.append(f"  {iface}: {', '.join(changes)}")
+                                device_logs.append("")
                     else:
                         device_logs.append("(no NetBox changes)")
                         device_logs.append("")
@@ -6852,13 +6944,43 @@ class VLANDeploymentView(View):
                                     device_logs.append(f"  {iface}: {', '.join(changes)}")
                         device_logs.append("")
 
-                    # Finally show standalone interface changes
+                    # Finally show standalone interface changes (interfaces that are not bond members)
                     standalone_groups = {k: v for k, v in netbox_groups.items() if k[1] == 'update'}
                     if standalone_groups:
-                        device_logs.append("Standalone Interfaces (VLAN updates):")
-                        device_logs.append("")
-                        for (group_name, change_type), interfaces in sorted(standalone_groups.items()):
+                        # Detect if these are bond interfaces or physical interfaces
+                        bond_interfaces = []
+                        physical_interfaces = []
+                        for (group_name, change_type), interfaces in standalone_groups.items():
                             for item in interfaces:
+                                iface_name = item['interface']
+                                try:
+                                    interface_obj = Interface.objects.get(device=device, name=iface_name)
+                                    # Check if it's a bond/LAG interface (has members or type indicates bond)
+                                    is_bond = False
+                                    if hasattr(interface_obj, 'type'):
+                                        # Common bond/LAG interface types
+                                        if interface_obj.type and 'lag' in str(interface_obj.type).lower():
+                                            is_bond = True
+                                    # Also check by name pattern (bond*, port-channel*, etc.)
+                                    if not is_bond and (iface_name.startswith('bond') or iface_name.startswith('port-channel') or iface_name.startswith('po')):
+                                        is_bond = True
+                                    
+                                    if is_bond:
+                                        bond_interfaces.append(item)
+                                    else:
+                                        physical_interfaces.append(item)
+                                except Interface.DoesNotExist:
+                                    # If interface doesn't exist in NetBox yet, check by name pattern
+                                    if iface_name.startswith('bond') or iface_name.startswith('port-channel') or iface_name.startswith('po'):
+                                        bond_interfaces.append(item)
+                                    else:
+                                        physical_interfaces.append(item)
+                        
+                        # Show bond interfaces first (if any)
+                        if bond_interfaces:
+                            device_logs.append("Bond Interfaces (VLAN updates):")
+                            device_logs.append("")
+                            for item in bond_interfaces:
                                 iface = item['interface']
                                 curr_untag = item['current_untagged']
                                 prop_untag = item['proposed_untagged']
@@ -6875,7 +6997,30 @@ class VLANDeploymentView(View):
 
                                 if changes:
                                     device_logs.append(f"  {iface}: {', '.join(changes)}")
-                        device_logs.append("")
+                            device_logs.append("")
+                        
+                        # Show physical interfaces (if any)
+                        if physical_interfaces:
+                            device_logs.append("Physical Interfaces (VLAN updates):")
+                            device_logs.append("")
+                            for item in physical_interfaces:
+                                iface = item['interface']
+                                curr_untag = item['current_untagged']
+                                prop_untag = item['proposed_untagged']
+                                curr_tag = item['current_tagged']
+                                prop_tag = item['proposed_tagged']
+
+                                changes = []
+                                if curr_untag != prop_untag:
+                                    changes.append(f"Untagged VLAN {curr_untag} → {prop_untag}")
+                                if curr_tag != prop_tag:
+                                    curr_tag_str = f"[{', '.join(map(str, curr_tag))}]" if curr_tag else "[]"
+                                    prop_tag_str = f"[{', '.join(map(str, prop_tag))}]" if prop_tag else "[]"
+                                    changes.append(f"Tagged VLANs {curr_tag_str} → {prop_tag_str}")
+
+                                if changes:
+                                    device_logs.append(f"  {iface}: {', '.join(changes)}")
+                            device_logs.append("")
                 else:
                     device_logs.append("(no NetBox changes)")
                 device_logs.append("")
@@ -6921,46 +7066,64 @@ class VLANDeploymentView(View):
                     device_logs.append(f"   [INFO] Uptime data not available")
                 device_logs.append("")
 
-                # 2. Interface State (from baseline)
-                # Handle both baseline['interface'] (single) and baseline['interfaces'] (multiple)
+                # 2. Interface State (from baseline) - Show ALL interfaces in deployment
                 device_logs.append("2. Interface State:")
-                interface_baseline = baseline_data.get('interface', {})
-                if not interface_baseline and 'interfaces' in baseline_data and baseline_data['interfaces']:
-                    # Use first successful interface from baseline['interfaces'] (skip ones with errors)
-                    for iface_name, iface_data in baseline_data['interfaces'].items():
-                        if 'error' not in iface_data:
-                            interface_baseline = iface_data
-                            logger.debug(f"Using baseline data from interface {iface_name}")
-                            break
-                    # If all have errors, use first one anyway for display
-                    if not interface_baseline and baseline_data['interfaces']:
-                        first_iface_name = next(iter(baseline_data['interfaces']))
-                        interface_baseline = baseline_data['interfaces'][first_iface_name]
+                interfaces_with_data = 0
+                for interface_name in sorted(device_interfaces):
+                    interface_result = device_results.get(interface_name, {})
+                    interface_baseline_data = interface_result.get('baseline', {})
+                    
+                    # Try to get interface state from baseline
+                    interface_baseline = interface_baseline_data.get('interface', {})
+                    if not interface_baseline and 'interfaces' in interface_baseline_data:
+                        # Check if this specific interface is in the interfaces dict
+                        if interface_name in interface_baseline_data['interfaces']:
+                            interface_baseline = interface_baseline_data['interfaces'][interface_name]
+                    
+                    if interface_baseline and 'error' not in interface_baseline:
+                        is_up = interface_baseline.get('is_up', False)
+                        is_enabled = interface_baseline.get('is_enabled', False)
+                        status = "UP" if is_up else "DOWN"
+                        admin_status = "Enabled" if is_enabled else "Disabled"
+                        device_logs.append(f"   {interface_name}: {status} (Admin: {admin_status})")
+                        interfaces_with_data += 1
+                    else:
+                        device_logs.append(f"   {interface_name}: [INFO] State data not available")
                 
-                if interface_baseline and 'error' not in interface_baseline:
-                    is_up = interface_baseline.get('is_up', False)
-                    is_enabled = interface_baseline.get('is_enabled', False)
-                    status = "UP" if is_up else "DOWN"
-                    admin_status = "Enabled" if is_enabled else "Disabled"
-                    device_logs.append(f"   Status: {status} (Admin: {admin_status})")
-                else:
-                    device_logs.append(f"   [INFO] Interface state data not available")
+                if interfaces_with_data == 0:
+                    device_logs.append(f"   [INFO] No interface state data available for any interface")
                 device_logs.append("")
 
-                # 3. Traffic Statistics (from baseline)
+                # 3. Traffic Statistics (from baseline) - Show ALL interfaces in deployment
                 device_logs.append("3. Traffic Statistics:")
-                if interface_baseline and 'error' not in interface_baseline:
-                    in_pkts = interface_baseline.get('in_pkts', 0)
-                    out_pkts = interface_baseline.get('out_pkts', 0)
-                    in_bytes = interface_baseline.get('in_bytes', 0)
-                    out_bytes = interface_baseline.get('out_bytes', 0)
-                    if in_pkts or out_pkts or in_bytes or out_bytes:
-                        device_logs.append(f"   RX: {in_pkts:,} pkts ({in_bytes:,} bytes)")
-                        device_logs.append(f"   TX: {out_pkts:,} pkts ({out_bytes:,} bytes)")
+                interfaces_with_traffic_data = 0
+                for interface_name in sorted(device_interfaces):
+                    interface_result = device_results.get(interface_name, {})
+                    interface_baseline_data = interface_result.get('baseline', {})
+                    
+                    # Try to get interface state from baseline
+                    interface_baseline = interface_baseline_data.get('interface', {})
+                    if not interface_baseline and 'interfaces' in interface_baseline_data:
+                        # Check if this specific interface is in the interfaces dict
+                        if interface_name in interface_baseline_data['interfaces']:
+                            interface_baseline = interface_baseline_data['interfaces'][interface_name]
+                    
+                    if interface_baseline and 'error' not in interface_baseline:
+                        in_pkts = interface_baseline.get('in_pkts', 0)
+                        out_pkts = interface_baseline.get('out_pkts', 0)
+                        in_bytes = interface_baseline.get('in_bytes', 0)
+                        out_bytes = interface_baseline.get('out_bytes', 0)
+                        if in_pkts or out_pkts or in_bytes or out_bytes:
+                            device_logs.append(f"   {interface_name}: RX: {in_pkts:,} pkts ({in_bytes:,} bytes), TX: {out_pkts:,} pkts ({out_bytes:,} bytes)")
+                            interfaces_with_traffic_data += 1
+                        else:
+                            device_logs.append(f"   {interface_name}: [INFO] No traffic detected (all counters are 0)")
+                            interfaces_with_traffic_data += 1
                     else:
-                        device_logs.append(f"   [INFO] No traffic detected (all counters are 0)")
-                else:
-                    device_logs.append(f"   [INFO] Traffic statistics not available")
+                        device_logs.append(f"   {interface_name}: [INFO] Traffic statistics not available")
+                
+                if interfaces_with_traffic_data == 0:
+                    device_logs.append(f"   [INFO] No traffic statistics available for any interface")
                 device_logs.append("")
 
                 device_logs.append("=" * 80)

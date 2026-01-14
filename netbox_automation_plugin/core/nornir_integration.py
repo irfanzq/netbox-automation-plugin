@@ -1932,6 +1932,10 @@ class NornirDeviceManager:
                     seen_targets = set()
                     seen_members = set()
                     
+                    # Build interface_vlan_map for verification (maps target_interface -> vlan_config)
+                    # This is used in sync mode for comprehensive per-interface verification
+                    verification_vlan_map = {}  # Maps target_interface -> vlan_config
+                    
                     for interface_name in interface_list:
                         # Parse interface name if in "device:interface" format
                         actual_interface_name = interface_name
@@ -1951,6 +1955,15 @@ class NornirDeviceManager:
                             seen_targets.add(target_interface)
                             if target_interface != actual_interface_name:
                                 logger.info(f"Device {device_name}: Baseline will collect interface state/traffic for bond {target_interface} (not member {actual_interface_name})")
+                            
+                            # Build verification_vlan_map: map target_interface -> vlan_config
+                            # In sync mode, get vlan_config from interface_vlan_map
+                            if interface_vlan_map and interface_name in interface_vlan_map:
+                                vlan_config = interface_vlan_map[interface_name]
+                                # Only add once per target_interface (if multiple members map to same bond)
+                                if target_interface not in verification_vlan_map:
+                                    verification_vlan_map[target_interface] = vlan_config
+                                    logger.debug(f"Device {device_name}: Added verification VLAN map for {target_interface}: untagged={vlan_config.get('untagged_vlan')}, tagged={vlan_config.get('tagged_vlans')}")
                         
                         # For LLDP: ALWAYS use member interfaces (physical interfaces) because LLDP neighbors
                         # are only shown on physical interfaces, not on bond interfaces
@@ -1962,13 +1975,15 @@ class NornirDeviceManager:
                     
                     # Deploy all interfaces in one commit-confirm session
                     # Pass MEMBER interfaces for LLDP checks, TARGET interfaces (bonds) for other checks
+                    # Pass verification_vlan_map for comprehensive per-interface verification in sync mode
                     deploy_result = napalm_mgr.deploy_config_safe(
                         config=combined_config,
                         timeout=timeout,
                         replace=False,
                         interface_names=target_interfaces_for_baseline,  # For interface state/traffic stats (bonds if detected)
                         interface_names_for_lldp=member_interfaces_for_lldp,  # For LLDP checks (always member interfaces)
-                        vlan_id=vlan_id
+                        vlan_id=vlan_id,
+                        interface_vlan_map=verification_vlan_map if verification_vlan_map else None  # For comprehensive verification in sync mode
                     )
                     
                     # Prepend batched deployment header to logs
