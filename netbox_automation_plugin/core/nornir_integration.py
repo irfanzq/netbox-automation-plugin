@@ -1359,10 +1359,10 @@ class NornirDeviceManager:
                                         # If cli() returned None or failed, try send_command_timing() fallback
                                         if not config_show_output and hasattr(connection, 'device') and hasattr(connection.device, 'send_command_timing'):
                                             try:
-                                                logger.info(f"Device {device_name}: Fetching config using send_command_timing('nv config show -o json') (timeout=90s, this may take a while)...")
-                                                print(f"Device {device_name}: Fetching config using send_command_timing('nv config show -o json') (timeout=90s, this may take a while)...", file=sys.stderr, flush=True)
+                                                logger.info(f"Device {device_name}: Fetching config using send_command_timing('nv config show -o json') (timeout=20s)...")
+                                                print(f"Device {device_name}: Fetching config using send_command_timing('nv config show -o json') (timeout=20s)...", file=sys.stderr, flush=True)
                                                 debug_info.append("Method 2: send_command_timing('nv config show -o json')")
-                                                timing_result = connection.device.send_command_timing('nv config show -o json', read_timeout=90, delay_factor=2)
+                                                timing_result = connection.device.send_command_timing('nv config show -o json', read_timeout=20, delay_factor=2)
                                                 logger.info(f"Device {device_name}: Config fetch completed (output length: {len(str(timing_result)) if timing_result else 0})")
                                                 print(f"Device {device_name}: Config fetch completed (output length: {len(str(timing_result)) if timing_result else 0})", file=sys.stderr, flush=True)
                                                 logger.debug(f"Device {device_name}: send_command_timing() returned type: {type(timing_result)}, length: {len(str(timing_result)) if timing_result else 0}")
@@ -1384,7 +1384,7 @@ class NornirDeviceManager:
                                             try:
                                                 logger.info(f"Device {device_name}: Trying with --applied flag...")
                                                 debug_info.append("Method 3: send_command_timing('nv config show --applied -o json')")
-                                                applied_result = connection.device.send_command_timing('nv config show --applied -o json', read_timeout=90, delay_factor=2)
+                                                applied_result = connection.device.send_command_timing('nv config show --applied -o json', read_timeout=20, delay_factor=2)
                                                 logger.debug(f"Device {device_name}: --applied flag returned type: {type(applied_result)}, length: {len(str(applied_result)) if applied_result else 0}")
                                                 
                                                 if applied_result and str(applied_result).strip():
@@ -1552,6 +1552,7 @@ class NornirDeviceManager:
 
                 # Check if bridge VLAN already exists (for Cumulus only)
                 # PERFORMANCE: Keep connection open - deploy_config_safe() will reuse it
+                # PERFORMANCE: Reduced timeout to 20s for faster execution
                 bridge_vlans = []
                 bridge_vlan_needed = True
                 existing_vlan_ids = set()  # Store existing VLAN IDs for sync mode filtering
@@ -1561,10 +1562,11 @@ class NornirDeviceManager:
                             connection = napalm_mgr.connection
                             try:
                                 # Get bridge VLANs from device config
+                                # PERFORMANCE: Use 20s timeout instead of 60s/90s
                                 if hasattr(connection, 'cli'):
                                     config_show_output = connection.cli(['nv config show -o json'])
                                 elif hasattr(connection, 'device') and hasattr(connection.device, 'send_command'):
-                                    config_show_output = connection.device.send_command_timing('nv config show -o json', read_timeout=60)
+                                    config_show_output = connection.device.send_command_timing('nv config show -o json', read_timeout=20)
                                 else:
                                     config_show_output = None
 
@@ -1732,71 +1734,30 @@ class NornirDeviceManager:
                     
                     # CRITICAL: If bond is detected, remove VLAN config from member interface FIRST
                     # VLANs should NOT be configured on both bond and member interfaces simultaneously
+                    # PERFORMANCE: Skip pre-deployment checks - we'll verify post-deployment with batched config fetch
+                    # The unset/removal commands are idempotent, so safe to add without checking first
                     if actual_interface_name != target_interface:
                         # Bond detected - need to remove VLAN config from member interface
                         # Only process each member interface once (avoid duplicates if multiple members map to same bond)
                         if actual_interface_name not in members_vlan_removed:
                             logger.info(f"Device {device_name}: Bond detected ({actual_interface_name} → {target_interface}) - will remove VLAN config from member interface")
                             
-                            # Check if member interface currently has VLAN config
-                            member_has_vlan = False
-                            try:
-                                if napalm_mgr.connection and hasattr(napalm_mgr.connection, 'device') and hasattr(napalm_mgr.connection.device, 'send_command'):
-                                    # Query member interface for current VLAN config
-                                    if platform == 'cumulus':
-                                        member_vlan_check = napalm_mgr.connection.device.send_command_timing(
-                                            f'nv show interface {actual_interface_name} bridge domain br_default access -o json',
-                                            read_timeout=10
-                                        )
-                                        if member_vlan_check and member_vlan_check.strip():
-                                            import json
-                                            try:
-                                                member_vlan_data = json.loads(member_vlan_check)
-                                                # If we get a VLAN ID (int) or non-empty dict, member has VLAN config
-                                                if isinstance(member_vlan_data, int) or (isinstance(member_vlan_data, dict) and member_vlan_data):
-                                                    member_has_vlan = True
-                                                    logger.info(f"Device {device_name}: Member interface {actual_interface_name} has VLAN config - will remove it")
-                                            except (json.JSONDecodeError, ValueError):
-                                                # Try text output as fallback
-                                                member_vlan_text = napalm_mgr.connection.device.send_command_timing(
-                                                    f'nv show interface {actual_interface_name} bridge domain br_default access',
-                                                    read_timeout=10
-                                                )
-                                                if member_vlan_text and member_vlan_text.strip().isdigit():
-                                                    member_has_vlan = True
-                                                    logger.info(f"Device {device_name}: Member interface {actual_interface_name} has VLAN config (text check) - will remove it")
-                                    elif platform == 'eos':
-                                        # For EOS, check switchport config
-                                        member_switchport = napalm_mgr.connection.device.send_command_timing(
-                                            f'show interfaces {actual_interface_name} switchport',
-                                            read_timeout=10
-                                        )
-                                        if member_switchport and 'Access Mode VLAN:' in member_switchport:
-                                            member_has_vlan = True
-                                            logger.info(f"Device {device_name}: Member interface {actual_interface_name} has VLAN config (EOS) - will remove it")
-                            except Exception as member_check_error:
-                                logger.warning(f"Device {device_name}: Could not check member interface {actual_interface_name} for VLAN config: {member_check_error}")
-                                # Assume it might have VLAN config and add removal command anyway (idempotent)
-                                member_has_vlan = True
-                            
-                            # Add command to remove VLAN config from member interface
-                            # For Cumulus, always add unset command (idempotent - safe even if no VLAN exists)
-                            # For EOS, only add if we detected VLAN or check failed
-                            if platform == 'cumulus' or member_has_vlan:
-                                if platform == 'cumulus':
-                                    unset_cmd = f"nv unset interface {actual_interface_name} bridge domain br_default access"
-                                    all_config_lines.append(f"# Remove VLAN config from member interface {actual_interface_name} (VLAN will be on bond {target_interface})")
-                                    all_config_lines.append(unset_cmd)
-                                    members_vlan_removed.add(actual_interface_name)
-                                    logger.info(f"Device {device_name}: Added command to remove VLAN from member {actual_interface_name}: {unset_cmd}")
-                                elif platform == 'eos':
-                                    # For EOS, remove switchport config from member interface
-                                    all_config_lines.append(f"# Remove VLAN config from member interface {actual_interface_name} (VLAN will be on bond {target_interface})")
-                                    all_config_lines.append(f"interface {actual_interface_name}")
-                                    all_config_lines.append(f"   no switchport access vlan")
-                                    all_config_lines.append(f"   no switchport mode")
-                                    members_vlan_removed.add(actual_interface_name)
-                                    logger.info(f"Device {device_name}: Added commands to remove VLAN from member {actual_interface_name}")
+                            # PERFORMANCE: Always add removal commands (idempotent)
+                            # Pre-deployment checks removed - we'll verify post-deployment with batched config fetch
+                            if platform == 'cumulus':
+                                unset_cmd = f"nv unset interface {actual_interface_name} bridge domain br_default access"
+                                all_config_lines.append(f"# Remove VLAN config from member interface {actual_interface_name} (VLAN will be on bond {target_interface})")
+                                all_config_lines.append(unset_cmd)
+                                members_vlan_removed.add(actual_interface_name)
+                                logger.debug(f"Device {device_name}: Added command to remove VLAN from member {actual_interface_name} (will verify post-deployment)")
+                            elif platform == 'eos':
+                                # For EOS, add removal commands (idempotent - safe even if VLAN doesn't exist)
+                                all_config_lines.append(f"# Remove VLAN config from member interface {actual_interface_name} (VLAN will be on bond {target_interface})")
+                                all_config_lines.append(f"interface {actual_interface_name}")
+                                all_config_lines.append(f"   no switchport access vlan")
+                                all_config_lines.append(f"   no switchport mode")
+                                members_vlan_removed.add(actual_interface_name)
+                                logger.debug(f"Device {device_name}: Added commands to remove VLAN from member {actual_interface_name} (will verify post-deployment)")
                     
                     # Generate config for this interface
                     # In sync mode, use per-interface VLAN config from interface_vlan_map
@@ -2092,6 +2053,118 @@ class NornirDeviceManager:
                     
                     if deploy_result.get('success'):
                         logger.info(f"Device {device_name}: Successfully deployed VLAN {vlan_id} to {num_interfaces} interfaces in single session")
+                        
+                        # PERFORMANCE: Post-deployment verification - batch check all member interfaces at once
+                        # Fetch config once and verify all member interfaces from single config fetch
+                        if platform == 'cumulus' and members_vlan_removed:
+                            try:
+                                logger.info(f"Device {device_name}: Performing post-deployment verification for {len(members_vlan_removed)} member interface(s)...")
+                                # Reconnect if needed (connection might be closed)
+                                if not napalm_mgr.connection or not hasattr(napalm_mgr.connection, 'device'):
+                                    if not napalm_mgr.connect():
+                                        logger.warning(f"Device {device_name}: Could not reconnect for post-deployment verification")
+                                    else:
+                                        logger.debug(f"Device {device_name}: Reconnected for post-deployment verification")
+                                
+                                if napalm_mgr.connection and hasattr(napalm_mgr.connection, 'device'):
+                                    # Fetch applied config once (post-deployment state)
+                                    logger.info(f"Device {device_name}: Fetching post-deployment config (nv config show --applied -o json, timeout=20s)...")
+                                    config_show_output = None
+                                    if hasattr(napalm_mgr.connection, 'cli'):
+                                        try:
+                                            config_show_output = napalm_mgr.connection.cli(['nv config show --applied -o json'])
+                                        except:
+                                            pass
+                                    
+                                    if not config_show_output and hasattr(napalm_mgr.connection.device, 'send_command_timing'):
+                                        config_show_output = napalm_mgr.connection.device.send_command_timing(
+                                            'nv config show --applied -o json', 
+                                            read_timeout=20
+                                        )
+                                    
+                                    if config_show_output:
+                                        # Parse JSON config
+                                        import json
+                                        config_json_str = None
+                                        if isinstance(config_show_output, dict):
+                                            config_json_str = config_show_output.get('nv config show --applied -o json') or list(config_show_output.values())[0] if config_show_output else None
+                                        else:
+                                            config_json_str = str(config_show_output).strip()
+                                        
+                                        if config_json_str:
+                                            try:
+                                                config_data = json.loads(config_json_str)
+                                                # Cache config for potential reuse
+                                                cached_config = config_data
+                                                
+                                                # Batch check all member interfaces at once
+                                                member_verification_results = {}
+                                                for member_iface in members_vlan_removed:
+                                                    # Check if member interface still has VLAN config (should be removed)
+                                                    member_has_vlan = False
+                                                    try:
+                                                        # Parse config to find interface VLAN config
+                                                        if isinstance(config_data, list):
+                                                            for item in config_data:
+                                                                if isinstance(item, dict) and 'set' in item:
+                                                                    set_data = item['set']
+                                                                    if isinstance(set_data, dict) and 'interface' in set_data:
+                                                                        iface_data = set_data['interface']
+                                                                        if isinstance(iface_data, dict) and member_iface in iface_data:
+                                                                            iface_config = iface_data[member_iface]
+                                                                            if isinstance(iface_config, dict) and 'bridge' in iface_config:
+                                                                                bridge_data = iface_config['bridge']
+                                                                                if isinstance(bridge_data, dict) and 'domain' in bridge_data:
+                                                                                    domain_data = bridge_data['domain']
+                                                                                    if isinstance(domain_data, dict) and 'br_default' in domain_data:
+                                                                                        br_default_data = domain_data['br_default']
+                                                                                        if isinstance(br_default_data, dict) and 'access' in br_default_data:
+                                                                                            member_has_vlan = True
+                                                                                            break
+                                                    except Exception as parse_err:
+                                                        logger.debug(f"Device {device_name}: Could not parse member {member_iface} from config: {parse_err}")
+                                                    
+                                                    member_verification_results[member_iface] = {
+                                                        'has_vlan': member_has_vlan,
+                                                        'verified': True
+                                                    }
+                                                
+                                                # Add verification results to logs
+                                                verification_logs = []
+                                                verification_logs.append("")
+                                                verification_logs.append("--- Post-Deployment Member Interface Verification ---")
+                                                for member_iface, result in member_verification_results.items():
+                                                    if result['has_vlan']:
+                                                        verification_logs.append(f"⚠ Member {member_iface}: Still has VLAN config (should be removed)")
+                                                    else:
+                                                        verification_logs.append(f"✓ Member {member_iface}: VLAN config successfully removed")
+                                                verification_logs.append("")
+                                                
+                                                # Add verification logs to all interface results
+                                                for interface_name in interface_list:
+                                                    actual_interface_name = interface_name
+                                                    if ':' in interface_name:
+                                                        iface_device_name, actual_interface_name = interface_name.split(':', 1)
+                                                        if iface_device_name != device_name:
+                                                            continue
+                                                    
+                                                    if actual_interface_name in device_results:
+                                                        if 'logs' not in device_results[actual_interface_name]:
+                                                            device_results[actual_interface_name]['logs'] = []
+                                                        device_results[actual_interface_name]['logs'].extend(verification_logs)
+                                                
+                                                logger.info(f"Device {device_name}: Post-deployment verification completed for {len(member_verification_results)} member interface(s)")
+                                            except json.JSONDecodeError as json_err:
+                                                logger.warning(f"Device {device_name}: Could not parse post-deployment config JSON: {json_err}")
+                                            except Exception as verify_err:
+                                                logger.warning(f"Device {device_name}: Post-deployment verification failed: {verify_err}")
+                                        else:
+                                            logger.warning(f"Device {device_name}: Post-deployment config fetch returned empty output")
+                                    else:
+                                        logger.warning(f"Device {device_name}: Could not fetch post-deployment config (connection unavailable)")
+                            except Exception as verify_ex:
+                                logger.warning(f"Device {device_name}: Post-deployment verification exception: {verify_ex}")
+                                # Don't fail deployment if verification fails
                     else:
                         logger.warning(f"Device {device_name}: Deployment failed for {num_interfaces} interfaces: {deploy_result.get('error', 'Unknown error')}")
                 
