@@ -301,7 +301,7 @@ class VLANDeploymentView(View):
                 risk_assessment = self._generate_risk_assessment(device_validation, interface_validation, current_vlan, primary_vlan_id)
 
                 # Generate rollback info
-                rollback_info = self._generate_rollback_info(device, actual_interface_name, primary_vlan_id, platform, timeout=90, current_config=current_device_config)
+                rollback_info = self._generate_rollback_info(device, actual_interface_name, primary_vlan_id, platform, timeout=150, current_config=current_device_config)
 
                 # Determine overall status
                 is_blocked = (device_validation.get('status') == 'block' or interface_validation.get('status') == 'block')
@@ -2868,7 +2868,7 @@ class VLANDeploymentView(View):
                 'port_channel_member': False,
             }
 
-    def _generate_rollback_info(self, device, interface_name, vlan_id, platform, timeout=90, current_config=None):
+    def _generate_rollback_info(self, device, interface_name, vlan_id, platform, timeout=150, current_config=None):
         """
         Generate comprehensive rollback information for both Cumulus and EOS.
         Includes previous running config for manual rollback if auto-rollback fails.
@@ -3948,7 +3948,7 @@ class VLANDeploymentView(View):
                 interface_list=interface_list,
                 vlan_id=0,  # Dummy VLAN ID (not used in sync mode)
                 platform=platform,
-                timeout=90,
+                timeout=150,
                 bond_info_map=bond_info_map if bond_info_map else None,
                 dry_run=True,
                 preview_callback=sync_preview_callback
@@ -4771,7 +4771,7 @@ class VLANDeploymentView(View):
             interface_list=interface_list,
             vlan_id=0,  # Dummy VLAN ID (ignored when interface_vlan_map is provided)
             platform=platform,
-            timeout=90,
+            timeout=150,
             bond_info_map=bond_info_map if bond_info_map else None,
             bonds_to_create_on_device=bonds_to_create_on_device if bonds_to_create_on_device else None,
             dry_run=False,
@@ -5791,7 +5791,7 @@ class VLANDeploymentView(View):
                 interface_list=interface_list,
                 vlan_id=primary_vlan_id,
                 platform=platform,
-                timeout=90,
+                timeout=150,
                 bond_info_map=bond_info_map if bond_info_map else None,
                 bonds_to_create_on_device=bonds_to_create_on_device if bonds_to_create_on_device else None,
                 dry_run=True,
@@ -6811,7 +6811,7 @@ class VLANDeploymentView(View):
                 interface_list=interface_list,
                 vlan_id=primary_vlan_id,
                 platform=platform,
-                timeout=90,
+                timeout=150,
                 bond_info_map=bond_info_map if bond_info_map else None,
                 bonds_to_create_on_device=bonds_to_create_on_device if bonds_to_create_on_device else None,
                 interface_vlan_map=interface_vlan_map if interface_vlan_map else None

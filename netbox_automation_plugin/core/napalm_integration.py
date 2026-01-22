@@ -2428,7 +2428,7 @@ class NAPALMDeviceManager:
             logger.error(f"Error clearing pending commit: {e}")
             return False
     
-    def deploy_config_safe(self, config, replace=True, timeout=60,
+    def deploy_config_safe(self, config, replace=True, timeout=150,
                           checks=['connectivity', 'interfaces', 'lldp'],
                           critical_interfaces=None, min_neighbors=0,
                           vlan_id=None, interface_name=None, interface_names=None, interface_names_for_lldp=None,
@@ -2446,7 +2446,7 @@ class NAPALMDeviceManager:
         Args:
             config: Configuration string to deploy
             replace: If True, replace entire config. If False, merge incrementally
-            timeout: Rollback timer in seconds (60-120 recommended)
+            timeout: Rollback timer in seconds (60-150 recommended, default 150)
             checks: List of verification checks to perform ['connectivity', 'interfaces', 'lldp']
             critical_interfaces: List of interface names that must be up (for interface check)
             min_neighbors: Minimum LLDP neighbors required (for LLDP check)
@@ -4976,9 +4976,9 @@ class NAPALMDeviceManager:
         
         # Phase 3: Verification window (let config settle)
         # Reduced wait time to avoid commit-confirm timeout
-        # We have 90s total timeout, need time for verification + confirmation
-        # 5s settle + ~10-20s verification + confirmation = ~25-35s, leaving ~55-65s buffer
-        settle_time = 5  # seconds - reduced from 30s to avoid timeout issues
+        # We have 150s total timeout, need time for verification + confirmation
+        # 10s settle + ~10-20s verification + confirmation = ~30-40s, leaving ~110-120s buffer
+        settle_time = 10  # seconds - balanced for config propagation and timeout window
         logger.info(f"Phase 3: Waiting {settle_time} seconds for config to settle...")
         logs.append(f"")
         logs.append(f"[Phase 3] Configuration Settling")
@@ -5493,74 +5493,56 @@ class NAPALMDeviceManager:
                                             logs.append(f"  Will verify if commit was actually confirmed by checking device state...")
                                             # Continue - will verify below
                                         
-                                        # Give device more time to process the confirm command
-                                        # NVUE may need time to transition from 'confirm' state to 'applied' state
-                                        logger.info(f"Waiting 5 seconds for NVUE to process confirm command...")
-                                        logs.append(f"  [INFO] Waiting 5 seconds for NVUE to process confirm...")
-                                        time.sleep(5)
+                                        # Give NVUE time to process confirm. State must leave 'confirm' before we declare success.
+                                        # CRITICAL: If state stays 'confirm', the rollback timer is STILL running. We must NOT
+                                        # declare success (history "Apply Date" / _check_for_pending) — we'd close, timer fires, revert.
+                                        post_confirm_wait = 15  # seconds
+                                        retry_interval = 5
+                                        max_retries = 3
+                                        logger.info(f"Waiting {post_confirm_wait}s for NVUE to process confirm...")
+                                        logs.append(f"  [INFO] Waiting {post_confirm_wait}s for NVUE to process confirm...")
+                                        time.sleep(post_confirm_wait)
                                         
-                                        # Verify that the commit was actually confirmed by checking revision state
-                                        # Check if revision state changed from 'confirm' to 'applied' or if pending commit is gone
                                         revision_state_after = None
                                         pending_after_confirm = True
                                         try:
-                                            if hasattr(self.connection, 'device') and hasattr(self.connection.device, 'send_command'):
-                                                rev_json_after = self.connection.device.send_command_timing('nv config revision -o json', read_timeout=10)
-                                                if rev_json_after:
-                                                    import json
-                                                    rev_data_after = json.loads(rev_json_after)
-                                                    if actual_pending_revision in rev_data_after:
-                                                        revision_state_after = rev_data_after[actual_pending_revision].get('state') if isinstance(rev_data_after[actual_pending_revision], dict) else None
-                                                        logger.info(f"Revision {actual_pending_revision} state AFTER confirm: {revision_state_after}")
-                                                        logs.append(f"  [DEBUG] Revision {actual_pending_revision} state AFTER confirm: {revision_state_after}")
-                                                        
-                                                        # If revision state changed from 'confirm' to something else (like 'applied'), confirm succeeded
-                                                        if revision_state_before == 'confirm' and revision_state_after != 'confirm':
-                                                            logger.info(f"Confirm successful - revision state changed from 'confirm' to '{revision_state_after}'")
-                                                            logs.append(f"  [OK] Confirm successful - revision state changed: {revision_state_before} → {revision_state_after}")
+                                            for attempt in range(max_retries):
+                                                if hasattr(self.connection, 'device') and hasattr(self.connection.device, 'send_command'):
+                                                    rev_json_after = self.connection.device.send_command_timing('nv config revision -o json', read_timeout=10)
+                                                    if rev_json_after:
+                                                        import json
+                                                        rev_data_after = json.loads(rev_json_after)
+                                                        if actual_pending_revision in rev_data_after:
+                                                            revision_state_after = rev_data_after[actual_pending_revision].get('state') if isinstance(rev_data_after[actual_pending_revision], dict) else None
+                                                            logger.info(f"Revision {actual_pending_revision} state AFTER confirm (attempt {attempt+1}/{max_retries}): {revision_state_after}")
+                                                            logs.append(f"  [DEBUG] Revision {actual_pending_revision} state: {revision_state_after}")
+                                                            if revision_state_after != 'confirm':
+                                                                # State left 'confirm' — timer cancelled, confirm succeeded
+                                                                logger.info(f"Confirm successful - state is '{revision_state_after}' (no longer 'confirm')")
+                                                                logs.append(f"  [OK] Confirm successful - state: {revision_state_before or '?'} → {revision_state_after}")
+                                                                pending_after_confirm = False
+                                                                break
+                                                            if revision_state_after == 'confirm':
+                                                                # Timer still running. Do NOT use history/_check to clear. Retry or fail.
+                                                                pending_after_confirm = True
+                                                                if attempt < max_retries - 1:
+                                                                    logger.info(f"State still 'confirm', waiting {retry_interval}s before recheck...")
+                                                                    logs.append(f"  [INFO] State still 'confirm' — waiting {retry_interval}s (attempt {attempt+1}/{max_retries})")
+                                                                    time.sleep(retry_interval)
+                                                                else:
+                                                                    logs.append(f"  [WARN] State still 'confirm' after {max_retries} checks — confirm did not complete; timer will rollback")
+                                                                continue
+                                                        else:
+                                                            logger.info(f"Revision {actual_pending_revision} no longer in pending list - confirm succeeded")
+                                                            logs.append(f"  [OK] Revision {actual_pending_revision} no longer pending - confirm succeeded")
                                                             pending_after_confirm = False
-                                                        elif revision_state_after == 'confirm':
-                                                            # Still in confirm state - check if it's still pending
-                                                            pending_after_confirm = True
-                                                    else:
-                                                        # Revision not in pending list - confirm succeeded
-                                                        logger.info(f"Revision {actual_pending_revision} no longer in pending list - confirm succeeded")
-                                                        logs.append(f"  [OK] Revision {actual_pending_revision} no longer pending - confirm succeeded")
-                                                        pending_after_confirm = False
-                                                
-                                                # Also check revision history to verify if revision was actually committed
-                                                # Even if revision state still shows 'confirm', check history to see if it has Apply Date
-                                                if pending_after_confirm:
-                                                    try:
-                                                        history_json = self.connection.device.send_command_timing('nv config history -o json', read_timeout=10)
-                                                        if history_json:
-                                                            import json
-                                                            history_data = json.loads(history_json)
-                                                            # Check if our revision exists in history with a date (meaning it was committed)
-                                                            if str(actual_pending_revision) in history_data:
-                                                                rev_history = history_data[str(actual_pending_revision)]
-                                                                if isinstance(rev_history, dict) and rev_history.get('date'):
-                                                                    # Revision has Apply Date - it was successfully committed
-                                                                    pending_after_confirm = False
-                                                                    logger.info(f"Revision {actual_pending_revision} found in history with Apply Date - commit was successful")
-                                                                    logs.append(f"  [OK] Revision {actual_pending_revision} found in history with Apply Date: {rev_history.get('date')}")
-                                                                    logs.append(f"  [OK] Commit was successful - revision was applied to device")
-                                                    except Exception as history_check_error:
-                                                        logger.debug(f"Could not check revision history: {history_check_error}")
-                                                
-                                                # Also check using _check_for_pending_commits for double verification
-                                                # Only override if we didn't already determine it's not pending
-                                                if pending_after_confirm:
-                                                    pending_check_result = self._check_for_pending_commits(driver_name)
-                                                    if not pending_check_result:
-                                                        pending_after_confirm = False
-                                                        logger.info(f"Double verification: No pending commits found - confirm succeeded")
-                                                        logs.append(f"  [OK] Double verification: No pending commits found")
+                                                            break
+                                                if not pending_after_confirm:
+                                                    break
                                         except Exception as verify_error:
                                             logger.warning(f"Could not verify revision state after confirm: {verify_error}")
                                             logs.append(f"  ⚠ WARNING: Could not verify revision state: {str(verify_error)[:100]}")
-                                            # Fall back to _check_for_pending_commits
-                                            pending_after_confirm = self._check_for_pending_commits(driver_name)
+                                            pending_after_confirm = True
                                     
                                     if pending_after_confirm:
                                         logger.warning(f"Pending commit still exists after confirm command - confirm may have failed")
@@ -5579,6 +5561,13 @@ class NAPALMDeviceManager:
                                     save_output = self.connection.device.send_command_timing("nv config save", read_timeout=30)
                                     logger.info(f"Save output: {save_output}")
                                     logs.append(f"  [DEBUG] Save output: {save_output[:200] if save_output else '(no output)'}")
+                                    
+                                    # Brief settle after save so NVUE can persist before we close
+                                    settle_after_save = 5
+                                    logger.info(f"Waiting {settle_after_save}s for config to persist...")
+                                    logs.append(f"  [INFO] Waiting {settle_after_save}s for config to persist...")
+                                    time.sleep(settle_after_save)
+                                    logs.append(f"  [OK] Post-save settle complete")
                                     
                                     # Update NAPALM's revision_id to None to mark as committed
                                     if hasattr(self.connection, 'revision_id'):

@@ -1126,7 +1126,7 @@ class NornirDeviceManager:
         
         return results
 
-    def deploy_vlan(self, interface_list: List[str], vlan_id: int, platform: str, timeout: int = 90, bond_info_map: Optional[Dict[str, Dict[str, str]]] = None, bonds_to_create_on_device: Optional[Dict[str, Dict[str, Any]]] = None, dry_run: bool = False, preview_callback: Optional[Callable] = None, interface_vlan_map: Optional[Dict[str, Dict[str, Any]]] = None) -> Dict[str, Any]:
+    def deploy_vlan(self, interface_list: List[str], vlan_id: int, platform: str, timeout: int = 150, bond_info_map: Optional[Dict[str, Dict[str, str]]] = None, bonds_to_create_on_device: Optional[Dict[str, Dict[str, Any]]] = None, dry_run: bool = False, preview_callback: Optional[Callable] = None, interface_vlan_map: Optional[Dict[str, Dict[str, Any]]] = None) -> Dict[str, Any]:
         """
         Deploy VLAN configuration to multiple interfaces across all devices in parallel.
 
@@ -1143,7 +1143,7 @@ class NornirDeviceManager:
             interface_list: List of interface names (e.g., ['swp7', 'swp8'] or ['device:swp7', 'device:swp8'] for sync mode)
             vlan_id: VLAN ID to configure (1-4094). Ignored if interface_vlan_map is provided (sync mode).
             platform: Platform type ('cumulus' or 'eos')
-            timeout: Rollback timeout in seconds (default: 90)
+            timeout: Rollback timeout in seconds (default: 150)
             bond_info_map: Optional dict mapping device_name -> {interface_name: bond_name}
                           If provided, uses bond_name instead of interface_name for config generation
             bonds_to_create_on_device: Optional dict mapping device_name -> {bond_name: {'members': [...], 'bond_interface': obj}}
