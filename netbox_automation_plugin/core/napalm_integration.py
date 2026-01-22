@@ -5356,35 +5356,35 @@ class NAPALMDeviceManager:
                                                 has_diff = True
                                     
                                     if not has_diff:
-                                        # No diff - config is already applied, skip confirm and mark as successful
-                                        logger.info(f"Config already applied (no diff) - skipping confirm step")
+                                        # No diff detected - but we need to verify config is actually in running config
+                                        # Sometimes diff is empty even if config wasn't applied
+                                        logger.info(f"No config diff detected - verifying config is actually in running config...")
+                                        logs.append(f"  [DEBUG] No config diff detected - verifying config is in running config...")
+                                        
+                                        # Verify by checking if there's a pending revision
+                                        # If there's a pending revision, we should confirm it even if diff is empty
+                                        # The diff might be empty if the config was already applied to the pending revision
+                                        # but not yet confirmed to the running config
+                                        try:
+                                            pending_check = self._check_for_pending_commits(driver_name)
+                                            if pending_check:
+                                                logger.info(f"Pending revision exists - proceeding with confirm (diff was empty but revision is pending)")
+                                                logs.append(f"  [INFO] Pending revision exists - proceeding with confirm")
+                                                has_diff = True  # Force confirm to ensure config is applied
+                                            else:
+                                                logger.info(f"No pending revision - config may already be confirmed")
+                                                logs.append(f"  [INFO] No pending revision found - config may already be confirmed")
+                                        except Exception as pending_check_error:
+                                            logger.warning(f"Could not check for pending commits: {pending_check_error}")
+                                            logs.append(f"  ⚠ WARNING: Could not verify pending commits - proceeding with confirm to be safe")
+                                            has_diff = True  # Force confirm to be safe
+                                    
+                                    if not has_diff:
+                                        # Verified: No diff AND no pending revision - config is already applied
+                                        logger.info(f"Config already applied (no diff, no pending revision) - skipping confirm step")
                                         logs.append(f"  [OK] Config already applied to device - no confirm needed")
                                         logs.append(f"  [INFO] NVUE cannot force-apply a no-diff candidate (this is expected behavior)")
                                         logs.append(f"  [INFO] Configuration is already applied to device {self.device.name}")
-                                        
-                                        # Delete the pending revision since config is already applied
-                                        # The pending revision will linger if we don't delete it
-                                        try:
-                                            delete_cmd = f"nv config delete {actual_pending_revision}"
-                                            logger.info(f"Deleting pending revision {actual_pending_revision} (no diff - config already applied)")
-                                            logs.append(f"  [DEBUG] Executing: {delete_cmd}")
-                                            delete_output = self.connection.device.send_command_timing(delete_cmd, read_timeout=30)
-                                            logger.info(f"Delete revision output: {delete_output}")
-                                            logs.append(f"  [OK] Pending revision {actual_pending_revision} deleted successfully")
-                                            
-                                            # Verify deletion
-                                            time.sleep(2)
-                                            still_pending = self._check_for_pending_commits(driver_name)
-                                            if not still_pending:
-                                                logger.info(f"Verification: Pending revision {actual_pending_revision} successfully deleted")
-                                                logs.append(f"  [OK] Verification: No pending commits found - revision deleted")
-                                            else:
-                                                logger.warning(f"Warning: Pending revision may still exist after delete command")
-                                                logs.append(f"  ⚠ WARNING: Pending revision may still exist after delete command")
-                                        except Exception as delete_error:
-                                            logger.warning(f"Could not delete pending revision {actual_pending_revision}: {delete_error}")
-                                            logs.append(f"  ⚠ WARNING: Could not delete pending revision: {str(delete_error)[:100]}")
-                                            # Continue anyway - config is already applied, so this is not critical
                                         
                                         logs.append(f"  [INFO] Proceeding with post-deployment checks...")
                                         
