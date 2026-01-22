@@ -264,6 +264,7 @@ class NAPALMDeviceManager:
         Get device facts using NAPALM
         
         Handles cases where prompt detection fails (e.g., empty output from device)
+        Also handles JSON parsing errors and validates facts structure
         """
         if not self.connection:
             if not self.connect():
@@ -281,7 +282,30 @@ class NAPALMDeviceManager:
         
         try:
             facts = self.connection.get_facts()
+            # Validate facts is a dict and not None/empty
+            if facts is None:
+                logger.warning(f"get_facts() returned None for {self.device.name}")
+                return None
+            if not isinstance(facts, dict):
+                logger.warning(f"get_facts() returned non-dict type {type(facts)} for {self.device.name}: {facts}")
+                return None
+            # Even if facts is a dict, ensure it has at least some basic keys
+            # This helps catch cases where driver returns empty dict due to parsing errors
+            if not facts:
+                logger.warning(f"get_facts() returned empty dict for {self.device.name}")
+                return None
             return facts
+        except (ValueError, TypeError) as e:
+            # JSON parsing errors from napalm-cumulus driver (e.g., nv show system/interface JSON parsing)
+            error_msg = str(e)
+            if "json" in error_msg.lower() or "decode" in error_msg.lower():
+                logger.error(
+                    f"Failed to get facts from {self.device.name}: JSON parsing error. "
+                    f"This may indicate invalid JSON from device commands. Error: {e}"
+                )
+            else:
+                logger.error(f"Failed to get facts from {self.device.name}: Parsing error: {e}")
+            return None
         except Exception as e:
             error_msg = str(e)
             # Check for netmiko prompt detection errors
