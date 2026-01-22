@@ -221,6 +221,7 @@ class VLANDeploymentView(View):
 
                 if not sync_netbox_to_device:
                     # Normal mode: use form VLAN (both untagged and tagged)
+                    logger.debug(f"[DRY RUN PREVIEW] Normal mode: generating config for {target_interface_for_config} with untagged={untagged_vlan_id}, tagged={tagged_vlan_ids}, bridge_vlans={bridge_vlans}")
                     proposed_config = self._generate_vlan_config(
                         target_interface_for_config,
                         untagged_vlan=untagged_vlan_id,
@@ -229,6 +230,7 @@ class VLANDeploymentView(View):
                         device=device,
                         bridge_vlans=bridge_vlans
                     )
+                    logger.debug(f"[DRY RUN PREVIEW] Generated proposed_config (length={len(proposed_config) if proposed_config else 0}): {proposed_config[:200] if proposed_config else 'EMPTY'}")
                 else:
                     # Sync mode: use NetBox VLANs
                     from dcim.models import Interface
@@ -5972,6 +5974,7 @@ class VLANDeploymentView(View):
                     bond_member_of = interface_preview.get('bond_member_of', None)
                     current_device_config = interface_preview.get('current_config', 'Unable to fetch')
                     proposed_config = interface_preview.get('proposed_config', '')
+                    logger.debug(f"[DRY RUN DISPLAY] Interface {actual_interface_name}: proposed_config length={len(proposed_config) if proposed_config else 0}, content preview: {proposed_config[:200] if proposed_config else 'EMPTY'}")
                     netbox_diff = interface_preview.get('netbox_diff', '')
                     interface_details = interface_preview.get('interface_details', {})
                     validation_table = interface_preview.get('validation_table', '')
@@ -5993,7 +5996,11 @@ class VLANDeploymentView(View):
                         if platform == 'cumulus' and vlans_already:
                             vlan_list_str = ', '.join(map(str, sorted(vlans_already)))
                             all_proposed_configs.append(f"# Bridge VLANs already present: {vlan_list_str}")
-                        all_proposed_configs.append(proposed_config)
+                        # Split proposed_config into individual lines (it's a multi-line string)
+                        proposed_lines = proposed_config.split('\n') if proposed_config else []
+                        for line in proposed_lines:
+                            if line.strip():  # Only add non-empty lines
+                                all_proposed_configs.append(line)
                     if netbox_diff:
                         all_netbox_diffs.append(f"# Interface: {actual_interface_name}")
                         all_netbox_diffs.append(netbox_diff)
@@ -6121,14 +6128,23 @@ class VLANDeploymentView(View):
                             device_logs.append(f"# Bridge Domain br_default - Adding VLANs: {vlan_list_str}")
                             device_logs.append(f"nv set bridge domain br_default vlan {vlan_list_str}")
                             device_logs.append("")
-                        elif bridge_vlans:
-                            # All VLANs are already in bridge - show info message
+                        elif bridge_vlans and non_bridge_lines:
+                            # All bridge VLANs are already in bridge, but we have interface commands
+                            # Only show this message if we actually had bridge VLAN commands to check
+                            # (indicated by non_bridge_lines existing - means we parsed proposed config)
                             device_logs.append(f"# Bridge Domain br_default - All required VLANs already present")
                             device_logs.append("")
+                        # If no non_bridge_lines and no all_vlans_to_add, don't show bridge message
+                        # (means proposed_config was empty or had no commands)
 
                         # Show non-bridge commands
-                        for line in non_bridge_lines:
-                            device_logs.append(line)
+                        if non_bridge_lines:
+                            for line in non_bridge_lines:
+                                device_logs.append(line)
+                        else:
+                            # No non-bridge commands - this shouldn't happen if proposed_config was generated
+                            logger.warning(f"[DRY RUN DISPLAY] No non-bridge commands found for device {device.name} - proposed_config may be empty or only contains bridge VLAN commands")
+                            device_logs.append("# No interface configuration commands found")
                     else:
                         # Non-Cumulus platforms: just show all lines as-is
                         for line in all_proposed_configs:
@@ -6889,7 +6905,11 @@ class VLANDeploymentView(View):
                         )
                         if proposed_config:
                             all_proposed_configs.append(f"# Interface: {target_interface}")
-                            all_proposed_configs.append(proposed_config)
+                            # Split proposed_config into individual lines (it's a multi-line string)
+                            proposed_lines = proposed_config.split('\n') if proposed_config else []
+                            for line in proposed_lines:
+                                if line.strip():  # Only add non-empty lines
+                                    all_proposed_configs.append(line)
                             all_proposed_configs.append("")
                     except Exception as e:
                         logger.debug(f"Could not generate proposed config for {actual_interface_name}: {e}")
