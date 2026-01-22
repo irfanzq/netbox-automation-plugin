@@ -5749,6 +5749,42 @@ class VLANDeploymentView(View):
             nornir_manager = NornirDeviceManager(devices=devices)
             nornir_manager.initialize()
 
+            # Build interface_vlan_map for normal mode dry run (includes both untagged and tagged VLANs)
+            # This ensures tagged VLANs are included in bridge domain commands in preview
+            # In normal mode, interface_list contains interface names that apply to all devices
+            interface_vlan_map_dry_run = {}
+            if untagged_vlan_id or tagged_vlan_ids:
+                for device in devices:
+                    for interface_name in interface_list:
+                        # In normal mode, interface_name is just the interface name (e.g., 'swp3')
+                        # Build "device:interface" key for interface_vlan_map
+                        actual_interface_name = interface_name
+                        
+                        # Get target interface (bond if member)
+                        target_interface = actual_interface_name
+                        device_bond_map = bond_info_map.get(device.name, {})
+                        if actual_interface_name in device_bond_map:
+                            target_interface = device_bond_map[actual_interface_name]['bond_name']
+                        
+                        # Generate config for this interface
+                        config_info = self._generate_vlan_config(
+                            target_interface,
+                            untagged_vlan=untagged_vlan_id,
+                            tagged_vlans=tagged_vlan_ids,
+                            platform=platform,
+                            device=device,  # Pass device for bond detection
+                            bridge_vlans=None  # Will be fetched during deployment
+                        )
+                        
+                        # Build interface_vlan_map entry (use "device:interface" format for consistency with sync mode)
+                        map_key = f"{device.name}:{actual_interface_name}"
+                        interface_vlan_map_dry_run[map_key] = {
+                            'untagged_vlan': untagged_vlan_id,
+                            'tagged_vlans': tagged_vlan_ids if tagged_vlan_ids else [],
+                            'commands': config_info.split('\n') if config_info else [],
+                            'target_interface': target_interface
+                        }
+            
             nornir_results = nornir_manager.deploy_vlan(
                 interface_list=interface_list,
                 vlan_id=primary_vlan_id,
@@ -5757,7 +5793,8 @@ class VLANDeploymentView(View):
                 bond_info_map=bond_info_map if bond_info_map else None,
                 bonds_to_create_on_device=bonds_to_create_on_device if bonds_to_create_on_device else None,
                 dry_run=True,
-                preview_callback=preview_callback
+                preview_callback=preview_callback,
+                interface_vlan_map=interface_vlan_map_dry_run if interface_vlan_map_dry_run else None
             )
 
             logger.info(f"[DRY RUN] Nornir preview completed for {len(nornir_results)} devices")
@@ -6714,14 +6751,52 @@ class VLANDeploymentView(View):
             nornir_manager = NornirDeviceManager(devices=devices)
             nornir_manager.initialize()
 
+            # Build interface_vlan_map for normal mode (includes both untagged and tagged VLANs)
+            # This ensures tagged VLANs are included in bridge domain commands
+            # In normal mode, interface_list contains interface names that apply to all devices
+            interface_vlan_map = {}
+            if untagged_vlan_id or tagged_vlan_ids:
+                for device in devices:
+                    for interface_name in interface_list:
+                        # In normal mode, interface_name is just the interface name (e.g., 'swp3')
+                        # Build "device:interface" key for interface_vlan_map
+                        actual_interface_name = interface_name
+                        
+                        # Get target interface (bond if member)
+                        target_interface = actual_interface_name
+                        device_bond_map = bond_info_map.get(device.name, {})
+                        if actual_interface_name in device_bond_map:
+                            target_interface = device_bond_map[actual_interface_name]['bond_name']
+                        
+                        # Generate config for this interface
+                        config_info = self._generate_vlan_config(
+                            target_interface,
+                            untagged_vlan=untagged_vlan_id,
+                            tagged_vlans=tagged_vlan_ids,
+                            platform=platform,
+                            device=device,  # Pass device for bond detection
+                            bridge_vlans=None  # Will be fetched during deployment
+                        )
+                        
+                        # Build interface_vlan_map entry (use "device:interface" format for consistency with sync mode)
+                        map_key = f"{device.name}:{actual_interface_name}"
+                        interface_vlan_map[map_key] = {
+                            'untagged_vlan': untagged_vlan_id,
+                            'tagged_vlans': tagged_vlan_ids if tagged_vlan_ids else [],
+                            'commands': config_info.split('\n') if config_info else [],
+                            'target_interface': target_interface
+                        }
+            
             logger.info(f"[DEPLOYMENT] Deploying VLAN {primary_vlan_id} to {len(interface_list)} interfaces across {len(devices)} devices")
+            logger.info(f"[DEPLOYMENT] Tagged VLANs: {tagged_vlan_ids if tagged_vlan_ids else 'None'}")
             nornir_results = nornir_manager.deploy_vlan(
                 interface_list=interface_list,
                 vlan_id=primary_vlan_id,
                 platform=platform,
                 timeout=90,
                 bond_info_map=bond_info_map if bond_info_map else None,
-                bonds_to_create_on_device=bonds_to_create_on_device if bonds_to_create_on_device else None
+                bonds_to_create_on_device=bonds_to_create_on_device if bonds_to_create_on_device else None,
+                interface_vlan_map=interface_vlan_map if interface_vlan_map else None
             )
 
             logger.info(f"[DEPLOYMENT] Nornir deployment completed for {len(nornir_results)} devices")
@@ -6845,9 +6920,9 @@ class VLANDeploymentView(View):
                     bond_info = bond_info_map.get(device.name, {}).get(actual_interface_name, None)
                     bond_member_of = bond_info['bond_name'] if bond_info else None
 
-                    # Get NetBox state and diff (normal mode - will clear tagged VLANs)
+                    # Get NetBox state and diff (normal mode - includes tagged VLANs)
                     try:
-                        netbox_state = self._get_netbox_current_state(device, actual_interface_name, primary_vlan_id, mode='normal')
+                        netbox_state = self._get_netbox_current_state(device, actual_interface_name, primary_vlan_id, mode='normal', tagged_vlan_ids=tagged_vlan_ids)
 
                         bond_info_for_netbox = None
                         bond_name_for_netbox = None
@@ -7613,8 +7688,7 @@ class VLANDeploymentView(View):
                                 # Update untagged VLAN
                                 if untagged_vlan_id and vlan:
                                     interface_obj.untagged_vlan = vlan
-                                    interface_obj.mode = 'access'
-                                    interface_obj.save()
+                                    # Mode will be set after tagged VLANs are processed
                                     device_logs.append(f"[OK] Updated {target_interface_name}: untagged VLAN {untagged_vlan_id}")
                                     netbox_updated = "Yes"
 
@@ -7636,15 +7710,27 @@ class VLANDeploymentView(View):
                                             if tagged_vlan_obj:
                                                 interface_obj.tagged_vlans.add(tagged_vlan_obj)
                                                 vlans_added.append(tagged_vlan_id)
-                                        interface_obj.mode = 'tagged-all' if not untagged_vlan_id else 'tagged'
-                                        interface_obj.save()
-
                                         # Log what changed
                                         if current_tagged_vids:
                                             device_logs.append(f"[OK] Updated {target_interface_name}: tagged VLANs {sorted(current_tagged_vids)} → {sorted(vlans_added)}")
                                         else:
                                             device_logs.append(f"[OK] Updated {target_interface_name}: added tagged VLANs {sorted(vlans_added)}")
                                         netbox_updated = "Yes"
+                                
+                                # Set mode based on VLAN configuration:
+                                # - 'access' if only untagged VLAN (no tagged VLANs)
+                                # - 'tagged' if tagged VLANs are present (with or without untagged)
+                                if tagged_vlan_ids:
+                                    # Has tagged VLANs - use 'tagged' mode (allows untagged native VLAN + tagged VLANs)
+                                    interface_obj.mode = 'tagged'
+                                elif untagged_vlan_id:
+                                    # Only untagged VLAN - use 'access' mode
+                                    interface_obj.mode = 'access'
+                                else:
+                                    # No VLANs - clear mode
+                                    interface_obj.mode = None
+                                
+                                interface_obj.save()
                             except Interface.DoesNotExist:
                                 device_logs.append(f"[WARN] Interface {target_interface_name} not found in NetBox")
                             except Exception as e:

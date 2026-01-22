@@ -5355,6 +5355,9 @@ class NAPALMDeviceManager:
                                                 # Assume there's a diff and proceed with confirm (safer)
                                                 has_diff = True
                                     
+                                    # Track if we originally had no diff (before checking pending revision)
+                                    originally_no_diff = not has_diff
+                                    
                                     if not has_diff:
                                         # No diff detected - but we need to verify config is actually in running config
                                         # Sometimes diff is empty even if config wasn't applied
@@ -5394,14 +5397,24 @@ class NAPALMDeviceManager:
                                         # Skip the confirm command execution and verification
                                         # Go straight to save and success path
                                     else:
-                                        # Has diff - proceed with normal confirm flow
+                                        # Has diff OR pending revision exists - proceed with normal confirm flow
                                         # Directly execute confirm command (bypass NAPALM)
-                                        # CRITICAL FIX: Use "nv config apply" (without revision ID) to confirm the current pending commit
-                                        # When a revision is in 'confirm' state, running "nv config apply" confirms it
-                                        confirm_cmd = "nv config apply"
-                                        logger.info(f"Bypassing NAPALM - directly executing: {confirm_cmd} (to confirm pending revision {actual_pending_revision})")
-                                        logs.append(f"  [DEBUG] Directly executing: {confirm_cmd}")
-                                        logs.append(f"  [INFO] This will confirm the current pending commit (revision {actual_pending_revision})")
+                                        # CRITICAL: When there's no diff but a pending revision exists, we need to explicitly confirm it
+                                        # Use revision ID explicitly to ensure the pending revision is confirmed
+                                        # If diff is empty, "nv config apply" alone might not confirm the pending revision
+                                        if originally_no_diff:
+                                            # Originally had no diff but pending revision exists - use revision ID explicitly
+                                            confirm_cmd = f"nv config apply {actual_pending_revision}"
+                                            logger.info(f"No diff detected but pending revision exists - using revision ID explicitly: {confirm_cmd}")
+                                            logs.append(f"  [DEBUG] No diff but pending revision exists - using revision ID explicitly")
+                                            logs.append(f"  [DEBUG] Directly executing: {confirm_cmd}")
+                                            logs.append(f"  [INFO] This will explicitly confirm pending revision {actual_pending_revision} even though diff is empty")
+                                        else:
+                                            # Has diff - normal confirm flow
+                                            confirm_cmd = "nv config apply"
+                                            logger.info(f"Bypassing NAPALM - directly executing: {confirm_cmd} (to confirm pending revision {actual_pending_revision})")
+                                            logs.append(f"  [DEBUG] Directly executing: {confirm_cmd}")
+                                            logs.append(f"  [INFO] This will confirm the current pending commit (revision {actual_pending_revision})")
                                         
                                         # Check revision state BEFORE confirm to verify it's in 'confirm' state
                                         revision_state_before = None

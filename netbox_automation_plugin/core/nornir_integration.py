@@ -1761,10 +1761,21 @@ class NornirDeviceManager:
                     
                     # Generate config for this interface
                     # In sync mode, use per-interface VLAN config from interface_vlan_map
-                    # In normal mode, use vlan_id parameter
-                    if interface_vlan_map and interface_name in interface_vlan_map:
-                        # Sync mode: Use pre-generated commands from NetBox config
-                        vlan_config = interface_vlan_map[interface_name]
+                    # In normal mode, use vlan_id parameter (or interface_vlan_map if provided)
+                    # Check both "device:interface" format and just "interface" format for lookup
+                    vlan_config = None
+                    if interface_vlan_map:
+                        # Try exact match first
+                        if interface_name in interface_vlan_map:
+                            vlan_config = interface_vlan_map[interface_name]
+                        else:
+                            # Try "device:interface" format
+                            map_key = f"{device_name}:{actual_interface_name}"
+                            if map_key in interface_vlan_map:
+                                vlan_config = interface_vlan_map[map_key]
+                    
+                    if vlan_config:
+                        # Use pre-generated commands from interface_vlan_map (sync mode or normal mode with tagged VLANs)
                         commands = vlan_config.get('commands', [])
                         tagged_vlans = vlan_config.get('tagged_vlans', [])
                         vlans_already_in_bridge = vlan_config.get('vlans_already_in_bridge', [])
