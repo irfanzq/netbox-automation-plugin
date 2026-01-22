@@ -5567,17 +5567,8 @@ class NAPALMDeviceManager:
                                         logs.append(f"  ⚠ WARNING: Pending commit still exists after confirm command")
                                         logs.append(f"  [INFO] This means the confirm command did not succeed")
                                         logs.append(f"  [INFO] The pending commit will auto-rollback when the timer expires")
-                                        logs.append(f"  [INFO] Attempting to delete the pending commit now...")
-                                        # If confirm failed, delete the pending commit (it will rollback anyway, but deletion is cleaner)
-                                        delete_success = self._clear_pending_commit(driver_name, logs)
-                                        if delete_success:
-                                            logs.append(f"  [OK] Pending commit deleted successfully")
-                                            logger.info("Pending commit deleted after failed confirm")
-                                        else:
-                                            # Abort failed - but the commit will still auto-rollback when timer expires
-                                            logs.append(f"  ⚠ WARNING: Could not delete pending commit, but it will auto-rollback when timer expires")
-                                            logger.warning("Could not abort pending commit, but it will auto-rollback when timer expires")
-                                            raise Exception(f"Confirm command failed - pending commit still exists. It will auto-rollback when the timer expires.")
+                                        logs.append(f"  [INFO] We do NOT clear it (nv config delete would revert config). Manual cleanup: nv config delete <revision_id> if needed.")
+                                        raise Exception(f"Confirm command failed - pending commit still exists. It will auto-rollback when the timer expires.")
                                     else:
                                         logger.info(f"Confirm successful - no pending commits found")
                                         logs.append(f"  [OK] Confirm successful - no pending commits found")
@@ -5815,30 +5806,22 @@ class NAPALMDeviceManager:
                     logs.append(f"  SUCCESS: Commit CONFIRMED - changes are now PERMANENT")
                     logs.append(f"")
                     
-                    # POST-DEPLOYMENT VERIFICATION: Ensure no pending commit remains
+                    # POST-DEPLOYMENT VERIFICATION: Check for leftover pending (informational only)
+                    # CRITICAL: Do NOT call _clear_pending_commit after successful confirm!
+                    # Clearing runs "nv config delete <rev_id>" which REVERTS our confirmed config.
+                    # If NVUE still reports "pending" (e.g. our rev briefly in 'confirm' state),
+                    # that is timing/API semantics — we must NOT delete it or we undo our deploy.
                     logs.append(f"[Post-Deployment Verification] Checking for leftover pending commits...")
                     pending_after_success = self._check_for_pending_commits(driver_name)
                     
                     if pending_after_success:
-                        logger.warning(f"WARNING: Pending commit detected after 'successful' deployment - deployment may not have confirmed properly!")
-                        logs.append(f"  [WARN] Pending commit still exists after confirmation!")
-                        logs.append(f"  This indicates the commit confirmation did not complete properly.")
-                        logs.append(f"  Attempting to clear...")
-                        
-                        # Try to confirm/clear the pending commit
-                        clear_success = self._clear_pending_commit(driver_name, logs)
-                        
-                        if clear_success:
-                            logs.append(f"  [OK] Pending commit cleared successfully")
-                            result['message'] += " (had to clear leftover pending commit)"
-                        else:
-                            logs.append(f"  [FAIL] Could not clear pending commit - manual intervention required")
-                            result['success'] = False
-                            result['message'] = "Deployment incomplete - pending commit remains on device"
-                            logs.append(f"")
-                            logs.append(f"=== DEPLOYMENT INCOMPLETE ===")
-                            result['logs'] = logs
-                            return result
+                        logger.warning(
+                            "Pending commit still reported after confirm — NOT clearing. "
+                            "Clearing would revert our confirmed config. If this persists, check NVUE state manually."
+                        )
+                        logs.append(f"  [WARN] NVUE still reports a pending commit after confirmation.")
+                        logs.append(f"  We do NOT clear it: clearing would revert the config we just confirmed.")
+                        logs.append(f"  Config is permanent. If unsure, verify with: nv config revision -o json")
                     else:
                         logs.append(f"  [OK] No pending commits - deployment confirmed successfully")
                     logs.append(f"")
@@ -5882,23 +5865,15 @@ class NAPALMDeviceManager:
                     rollback_status, rollback_message = self._verify_rollback(driver_name)
                     result['rolled_back'] = rollback_status if rollback_status is not None else True
                     
-                    # POST-ROLLBACK CLEANUP: Ensure no pending commit remains
+                    # POST-ROLLBACK: Check for leftover pending (informational only; we do NOT clear)
                     logs.append(f"")
-                    logs.append(f"[Post-Rollback Cleanup] Checking for leftover pending commits...")
+                    logs.append(f"[Post-Rollback] Checking for leftover pending commits...")
                     pending_after_rollback = self._check_for_pending_commits(driver_name)
                     
                     if pending_after_rollback:
-                        logger.warning(f"Pending commit detected after rollback - attempting to clear...")
+                        logger.warning(f"Pending commit detected after rollback - we do NOT clear (nv config delete can revert config)")
                         logs.append(f"  [WARN] Pending commit still exists after rollback")
-                        logs.append(f"  Attempting to clear pending commit...")
-                        
-                        clear_success = self._clear_pending_commit(driver_name, logs)
-                        
-                        if clear_success:
-                            logs.append(f"  [OK] Pending commit cleared successfully")
-                        else:
-                            logs.append(f"  [FAIL] Could not clear pending commit automatically")
-                            logs.append(f"  Manual cleanup required: nv config delete <revision_id>")
+                        logs.append(f"  We do NOT clear it. Manual cleanup if needed: nv config delete <revision_id>")
                     else:
                         logs.append(f"  [OK] No pending commits - device is in stable state")
                     logs.append(f"")
@@ -6106,24 +6081,15 @@ class NAPALMDeviceManager:
                     logs.append(f"  Method: Platform-specific auto-rollback")
                     logs.append(f"  Command: NAPALM commit_config(revert_in={result.get('_deployment_timeout', 'unknown')})")
                 
-                # POST-VERIFICATION-FAILURE CLEANUP: Ensure no pending commit remains
+                # POST-VERIFICATION-FAILURE: Check for leftover pending (informational only; we do NOT clear)
                 logs.append(f"")
-                logs.append(f"[Post-Rollback Cleanup] Checking for leftover pending commits...")
+                logs.append(f"[Post-Rollback] Checking for leftover pending commits...")
                 pending_after_verification_failure = self._check_for_pending_commits(driver_name)
                 
                 if pending_after_verification_failure:
-                    logger.warning(f"Pending commit detected after verification failure rollback - attempting to clear...")
+                    logger.warning(f"Pending commit detected after verification failure rollback - we do NOT clear (nv config delete can revert config)")
                     logs.append(f"  [WARN] Pending commit still exists after rollback")
-                    logs.append(f"  Attempting to abort pending commit...")
-                    
-                    clear_success = self._clear_pending_commit(driver_name, logs)
-                    
-                    if clear_success:
-                        logs.append(f"  [OK] Pending commit cleared - device is now in stable state")
-                    else:
-                        logs.append(f"  [FAIL] Could not clear pending commit automatically")
-                        logs.append(f"  WARNING: Device may be in unstable state with pending commit")
-                        logs.append(f"  Manual cleanup required: nv config delete <revision_id>")
+                    logs.append(f"  We do NOT clear it. Manual cleanup if needed: nv config delete <revision_id>")
                 else:
                     logs.append(f"  [OK] No pending commits - device is in stable state")
                 logs.append(f"")
