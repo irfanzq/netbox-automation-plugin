@@ -4552,6 +4552,7 @@ class VLANDeploymentView(View):
 
                 # Check device config for bond membership using cached method (same as dry run)
                 logger.debug(f"[SYNC DEPLOYMENT] {device.name}:{interface.name} - Calling _get_current_device_config()")
+                bond_member_of = None
                 try:
                     device_config_result = self._get_current_device_config(device, interface.name, platform)
                     bond_member_of = device_config_result.get('bond_member_of', None)
@@ -4597,6 +4598,38 @@ class VLANDeploymentView(View):
                             logger.info(f"[SYNC DEPLOYMENT] {device.name}:{interface.name} - Bond {bond_member_of} exists in both device and NetBox")
                 except Exception as e:
                     logger.warning(f"[SYNC DEPLOYMENT] {device.name}:{interface.name} - Error checking bond membership: {e}")
+                    # If we got bond_member_of before the exception, still track it
+                    if bond_member_of:
+                        # Check if this bond exists in NetBox
+                        from dcim.models import Interface as InterfaceModel
+                        try:
+                            bond_exists_in_netbox = InterfaceModel.objects.filter(device=device, name=bond_member_of).exists()
+                            if not bond_exists_in_netbox:
+                                # Bond exists on device but not in NetBox - track it
+                                device_bond_map[interface.name] = {
+                                    'bond_name': bond_member_of,
+                                    'bond_id': None,  # No NetBox ID yet
+                                    'source': 'device'
+                                }
+
+                                # Track this bond for creation in NetBox
+                                if bond_member_of not in device_bonds_to_create:
+                                    device_bonds_to_create[bond_member_of] = {
+                                        'members': [],
+                                        'vlans_to_migrate': {}  # Map of member_name -> {untagged, tagged}
+                                    }
+                                device_bonds_to_create[bond_member_of]['members'].append(interface.name)
+
+                                # Collect VLANs from this member interface for migration
+                                vlans_info = {
+                                    'untagged': interface.untagged_vlan.vid if interface.untagged_vlan else None,
+                                    'tagged': list(interface.tagged_vlans.values_list('vid', flat=True))
+                                }
+                                device_bonds_to_create[bond_member_of]['vlans_to_migrate'][interface.name] = vlans_info
+
+                                logger.info(f"[SYNC DEPLOYMENT] Detected bond {bond_member_of} on device {device.name} (not in NetBox) - member: {interface.name}, VLANs: {vlans_info}")
+                        except Exception as e2:
+                            logger.debug(f"[SYNC DEPLOYMENT] Error in exception handler for {interface.name}: {e2}")
                     pass
 
             # Step 3: Check for bonds in NetBox but NOT on device (Case 2)
