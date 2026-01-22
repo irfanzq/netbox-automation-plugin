@@ -434,17 +434,20 @@ class VLANDeploymentForm(forms.Form):
                         )
                         continue  # Skip further checks for this interface
 
-                    # Check if cabled (BLOCKING)
-                    # EXCEPTION: Bond interfaces (LAG/port-channel) don't need to be cabled in normal mode
+                    # Check if cabled (WARNING only - no longer blocking)
+                    # EXCEPTION: Bond interfaces (LAG/port-channel) don't need to be cabled
                     # Bonds are logical interfaces - cables are on member interfaces, not bonds
                     from dcim.choices import InterfaceTypeChoices
                     is_bond_interface = interface.type == InterfaceTypeChoices.TYPE_LAG
                     
                     if not interface.cable and not is_bond_interface:
-                        blocking_errors.append(
-                            "Interface '" + iface_name + "' on device '" + device.name + "' is not cabled in NetBox - please add cable information first."
+                        # Log warning but don't block - allow deployment to proceed
+                        import logging
+                        logger = logging.getLogger('netbox_automation_plugin')
+                        logger.warning(
+                            f"Interface '{iface_name}' on device '{device.name}' is not cabled in NetBox - proceeding with deployment anyway"
                         )
-                        continue  # Skip further checks for this interface
+                        # Don't block - allow deployment to proceed
                     
                     # Check connected device status (BLOCKING)
                     try:

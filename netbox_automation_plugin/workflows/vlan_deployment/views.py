@@ -662,13 +662,16 @@ class VLANDeploymentView(View):
                     # Note: Port-channel/bond membership is handled automatically -
                     # config is applied to bond interface instead of member (no blocking needed)
 
-                    # Check cable (skip in sync mode)
-                    if not sync_mode and not interface.cable:
+                    # Check cable (skip in sync mode, warn in normal mode for dry run)
+                    # Dry run allows uncabled interfaces - actual deployment will still block
+                    from dcim.choices import InterfaceTypeChoices
+                    is_bond_interface = interface.type == InterfaceTypeChoices.TYPE_LAG
+                    if not sync_mode and not interface.cable and not is_bond_interface:
                         results['interface_validation'][key] = {
-                            'status': 'block',
-                            'message': f"Interface not cabled - would block deployment"
+                            'status': 'warn',
+                            'message': f"Interface not cabled - would warn in dry run (will block actual deployment)"
                         }
-                        continue
+                        # Don't continue - allow dry run to proceed with warning
 
                     # Check connected device status (skip in sync mode)
                     if not sync_mode:
@@ -3211,17 +3214,17 @@ class VLANDeploymentView(View):
                     # Note: Port-channel/bond membership is handled automatically -
                     # config is applied to bond interface instead of member (no blocking needed)
 
-                    # Check if cabled (BLOCKING)
-                    # EXCEPTION: Bond interfaces (LAG/port-channel) don't need to be cabled in normal mode
+                    # Check if cabled (WARNING only - no longer blocking)
+                    # EXCEPTION: Bond interfaces (LAG/port-channel) don't need to be cabled
                     # Bonds are logical interfaces - cables are on member interfaces, not bonds
                     from dcim.choices import InterfaceTypeChoices
                     is_bond_interface = interface.type == InterfaceTypeChoices.TYPE_LAG
                     
                     if not interface.cable and not is_bond_interface:
-                        errors.append(
-                            "Interface '" + iface_name + "' on device '" + device.name + "' is not cabled in NetBox - please add cable information first."
+                        logger.warning(
+                            f"Interface '{iface_name}' on device '{device.name}' is not cabled in NetBox - proceeding with deployment anyway"
                         )
-                        continue
+                        # Don't block - allow deployment to proceed
 
                     # Check connected device status (BLOCKING)
                     try:
