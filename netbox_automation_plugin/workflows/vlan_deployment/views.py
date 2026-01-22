@@ -4596,24 +4596,8 @@ class VLANDeploymentView(View):
                             }
                             logger.info(f"[SYNC DEPLOYMENT] {device.name}:{interface.name} - Bond {bond_member_of} exists in both device and NetBox")
                 except Exception as e:
+                    logger.warning(f"[SYNC DEPLOYMENT] {device.name}:{interface.name} - Error checking bond membership: {e}")
                     pass
-
-                    # Track this bond for creation in NetBox
-                    if bond_name not in device_bonds_to_create:
-                        device_bonds_to_create[bond_name] = {
-                            'members': [],
-                            'vlans_to_migrate': {}  # Map of member_name -> {untagged, tagged}
-                        }
-                    device_bonds_to_create[bond_name]['members'].append(interface.name)
-
-                    # Collect VLANs from this member interface for migration
-                    vlans_info = {
-                        'untagged': interface.untagged_vlan.vid if interface.untagged_vlan else None,
-                        'tagged': list(interface.tagged_vlans.values_list('vid', flat=True))
-                    }
-                    device_bonds_to_create[bond_name]['vlans_to_migrate'][interface.name] = vlans_info
-
-                    logger.info(f"[SYNC DEPLOYMENT] Detected bond {bond_name} on device {device.name} (not in NetBox) - member: {interface.name}, VLANs: {vlans_info}")
 
             # Step 3: Check for bonds in NetBox but NOT on device (Case 2)
             netbox_bonds = {}  # {bond_name: [member_interfaces]}
