@@ -5510,9 +5510,9 @@ class VLANDeploymentView(View):
         untagged_vlan_id = cleaned_data.get('untagged_vlan')
         tagged_vlans_str = cleaned_data.get('tagged_vlans', '').strip()
 
-        # Parse tagged VLANs from comma-separated string
-        tagged_vlan_ids = []
-        if tagged_vlans_str:
+        # Parse tagged VLANs: use form's tagged_vlans_parsed when available, else parse from string
+        tagged_vlan_ids = list(cleaned_data.get('tagged_vlans_parsed') or [])
+        if not tagged_vlan_ids and tagged_vlans_str:
             try:
                 tagged_vlan_ids = [int(x.strip()) for x in tagged_vlans_str.split(',') if x.strip()]
             except ValueError:
@@ -6224,12 +6224,14 @@ class VLANDeploymentView(View):
                                 group_key = ('standalone', 'update')
                                 if group_key not in netbox_groups:
                                     netbox_groups[group_key] = []
+                                # Use form tagged_vlan_ids for proposed_tagged so tagged VLANs always show in NetBox changes (dry run + normal)
+                                use_proposed_tagged = list(tagged_vlan_ids) if tagged_vlan_ids else proposed.get('tagged_vlans', [])
                                 netbox_groups[group_key].append({
                                     'interface': actual_interface_name,
                                     'current_untagged': current_untagged,
                                     'proposed_untagged': proposed_untagged,
                                     'current_tagged': current_tagged,
-                                    'proposed_tagged': proposed_tagged
+                                    'proposed_tagged': use_proposed_tagged
                                 })
                         except Exception as e:
                             logger.warning(f"Could not parse NetBox state for {actual_interface_name}: {e}")
@@ -7000,12 +7002,14 @@ class VLANDeploymentView(View):
                                 group_key = ('standalone', 'update')
                                 if group_key not in netbox_groups:
                                     netbox_groups[group_key] = []
+                                # Use form tagged_vlan_ids for proposed_tagged so tagged VLANs always show in NetBox changes
+                                use_proposed_tagged = list(tagged_vlan_ids) if tagged_vlan_ids else proposed.get('tagged_vlans', [])
                                 netbox_groups[group_key].append({
                                     'interface': actual_interface_name,
                                     'current_untagged': current_untagged,
                                     'proposed_untagged': proposed_untagged,
                                     'current_tagged': current_tagged,
-                                    'proposed_tagged': proposed_tagged
+                                    'proposed_tagged': use_proposed_tagged
                                 })
                     except Exception as e:
                         logger.debug(f"Could not generate NetBox diff for {actual_interface_name}: {e}")
