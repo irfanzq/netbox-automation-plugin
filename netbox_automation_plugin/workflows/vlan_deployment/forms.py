@@ -67,7 +67,7 @@ class VLANDeploymentForm(forms.Form):
         queryset=Location.objects.all(),
         required=False,
         label=_("Location"),
-        help_text=_("Select location within the site (e.g., Spruce)."),
+        help_text=_("Optional: Select location within the site. Leave empty to include devices with no location (e.g. new lab sites)."),
     )
 
     manufacturer = forms.ModelChoiceField(
@@ -272,9 +272,9 @@ class VLANDeploymentForm(forms.Form):
                 # Wrap in list to prevent Django from trying to format the string
                 raise forms.ValidationError([_("Please select at least one device for single device deployment.")])
         elif scope == 'group':
-            if not site or not location or not role:
+            if not site or not role:
                 # Wrap in list to prevent Django from trying to format the string
-                raise forms.ValidationError([_("Please select Site, Location, and Role for group deployment.")])
+                raise forms.ValidationError([_("Please select Site and Role for group deployment.")])
             if not cleaned_data.get('manufacturer'):
                 # Wrap in list to prevent Django from trying to format the string
                 raise forms.ValidationError([_("Please select Manufacturer for group deployment to prevent mixing incompatible platforms (e.g., EOS and Cumulus).")])

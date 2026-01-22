@@ -520,12 +520,15 @@ class VLANDeploymentView(View):
             manufacturer = cleaned_data.get('manufacturer')
             role = cleaned_data.get('role')
 
-            devices = Device.objects.filter(
+            q = Device.objects.filter(
                 site=site,
-                location=location,
                 device_type__manufacturer=manufacturer,
                 role=role,
-            ).select_related('primary_ip4', 'primary_ip6', 'site', 'location', 'role', 'device_type', 'device_type__manufacturer')
+            )
+            if location is not None:
+                q = q.filter(location=location)
+            # When location is empty: include ALL devices in the site (any location or no location)
+            devices = q.select_related('primary_ip4', 'primary_ip6', 'site', 'location', 'role', 'device_type', 'device_type__manufacturer')
 
             # Only keep devices with primary IP
             devices = [d for d in devices if d.primary_ip4 or d.primary_ip6]
