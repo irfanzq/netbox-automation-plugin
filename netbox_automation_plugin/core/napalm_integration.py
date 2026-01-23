@@ -5399,25 +5399,15 @@ class NAPALMDeviceManager:
                                     else:
                                         # Has diff OR pending revision exists - proceed with normal confirm flow
                                         # Directly execute confirm command (bypass NAPALM)
-                                        # CRITICAL: When there's no diff but a pending revision exists, we need to explicitly confirm it
-                                        # Use revision ID explicitly to ensure the pending revision is confirmed
-                                        # If diff is empty, "nv config apply" alone might not confirm the pending revision
-                                        if originally_no_diff:
-                                            # Originally had no diff but pending revision exists - use revision ID explicitly
-                                            confirm_cmd = f"nv config apply {actual_pending_revision}"
-                                            logger.info(f"No diff detected but pending revision exists - using revision ID explicitly: {confirm_cmd}")
-                                            logs.append(f"  [DEBUG] No diff but pending revision exists - using revision ID explicitly")
-                                            logs.append(f"  [DEBUG] Directly executing: {confirm_cmd}")
-                                            logs.append(f"  [INFO] This will explicitly confirm pending revision {actual_pending_revision} even though diff is empty")
-                                        else:
-                                            # Has diff - normal confirm flow
-                                            confirm_cmd = "nv config apply"
-                                            logger.info(f"Bypassing NAPALM - directly executing: {confirm_cmd} (to confirm pending revision {actual_pending_revision})")
-                                            logs.append(f"  [DEBUG] Directly executing: {confirm_cmd}")
-                                            logs.append(f"  [INFO] This will confirm the current pending commit (revision {actual_pending_revision})")
+                                        # CRITICAL: Check revision state FIRST to determine the correct command
+                                        # NVUE has different states: "pending" and "confirm"
+                                        # Based on testing: both "nv config apply -y" and "nv config apply {revision_id} --confirm-yes" work
+                                        # However, "nv config apply {revision_id} --confirm-yes" fails with "Unknown state: 'pending'" if state is "pending"
+                                        # Strategy: Check state, use appropriate command, with fallback
                                         
-                                        # Check revision state BEFORE confirm to verify it's in 'confirm' state
+                                        # Check revision state BEFORE confirm to determine correct command
                                         revision_state_before = None
+                                        confirm_cmd = None
                                         try:
                                             if hasattr(self.connection, 'device') and hasattr(self.connection.device, 'send_command'):
                                                 rev_json_before = self.connection.device.send_command_timing('nv config revision -o json', read_timeout=10)
@@ -5428,8 +5418,38 @@ class NAPALMDeviceManager:
                                                         revision_state_before = rev_data_before[actual_pending_revision].get('state') if isinstance(rev_data_before[actual_pending_revision], dict) else None
                                                         logger.info(f"Revision {actual_pending_revision} state BEFORE confirm: {revision_state_before}")
                                                         logs.append(f"  [DEBUG] Revision {actual_pending_revision} state BEFORE confirm: {revision_state_before}")
+                                                        
+                                                        # Choose command based on revision state
+                                                        if revision_state_before == 'confirm':
+                                                            # Revision is in "confirm" state (commit-confirm session) - use --confirm-yes flag
+                                                            confirm_cmd = f"nv config apply {actual_pending_revision} --confirm-yes"
+                                                            logger.info(f"Revision in 'confirm' state (commit-confirm session) - using: {confirm_cmd}")
+                                                            logs.append(f"  [INFO] Revision is in 'confirm' state - using confirm-yes flag")
+                                                        elif revision_state_before == 'pending':
+                                                            # Revision is in "pending" state - use nv config apply -y (works for both states)
+                                                            confirm_cmd = "nv config apply -y"
+                                                            logger.info(f"Revision in 'pending' state - using: {confirm_cmd}")
+                                                            logs.append(f"  [INFO] Revision is in 'pending' state - using 'nv config apply -y'")
+                                                        else:
+                                                            # Unknown state - prefer "nv config apply -y" as it works for both states
+                                                            confirm_cmd = "nv config apply -y"
+                                                            logger.warning(f"Revision in unknown state '{revision_state_before}' - using 'nv config apply -y' (universal)")
+                                                            logs.append(f"  [WARN] Revision in unknown state '{revision_state_before}' - using 'nv config apply -y'")
                                         except Exception as state_check_error:
-                                            logger.debug(f"Could not check revision state before confirm: {state_check_error}")
+                                            logger.warning(f"Could not check revision state before confirm: {state_check_error}")
+                                            logs.append(f"  [WARN] Could not check revision state - using 'nv config apply -y' (universal)")
+                                            # Fallback: use "nv config apply -y" as it works for both "pending" and "confirm" states
+                                            confirm_cmd = "nv config apply -y"
+                                        
+                                        # If state check failed or didn't set confirm_cmd, use universal command
+                                        if not confirm_cmd:
+                                            # Use "nv config apply -y" as it works reliably for both states
+                                            confirm_cmd = "nv config apply -y"
+                                            logger.info(f"Using universal confirm command: {confirm_cmd}")
+                                            logs.append(f"  [INFO] Using universal confirm command: {confirm_cmd}")
+                                        
+                                        logs.append(f"  [DEBUG] Directly executing: {confirm_cmd}")
+                                        logs.append(f"  [INFO] This will confirm/apply the pending commit (revision {actual_pending_revision})")
                                         
                                         # Use send_command_timing() for reliable command execution
                                         # send_command_timing() uses timing-based detection instead of prompt pattern matching
@@ -5454,8 +5474,23 @@ class NAPALMDeviceManager:
                                             # Parse output to check for actual errors (ignore state messages like "rolling back")
                                             if confirm_output:
                                                 output_str = str(confirm_output).lower()
-                                                # Check for actual errors (not just state messages)
-                                                if 'error:' in output_str and 'timeout' not in output_str:
+                                                # Check for "Unknown state: 'pending'" error - this means we used wrong command
+                                                if "unknown state: 'pending'" in output_str or "unknown state" in output_str:
+                                                    # We tried --confirm-yes but revision is in "pending" state
+                                                    # Retry with "nv config apply -y" (without revision ID)
+                                                    logger.warning(f"Confirm command failed with 'Unknown state: pending' - retrying with 'nv config apply -y'")
+                                                    logs.append(f"  [WARN] Confirm command failed: Unknown state 'pending'")
+                                                    logs.append(f"  [INFO] Retrying with 'nv config apply -y' (without revision ID)")
+                                                    try:
+                                                        confirm_output = self.connection.device.send_command_timing("nv config apply -y", read_timeout=90, delay_factor=2)
+                                                        logger.info(f"Retry with 'nv config apply -y' succeeded")
+                                                        logs.append(f"  [OK] Retry command succeeded")
+                                                    except Exception as retry_error:
+                                                        logger.error(f"Retry with 'nv config apply -y' also failed: {retry_error}")
+                                                        logs.append(f"  ✗ ERROR: Retry command also failed: {str(retry_error)[:100]}")
+                                                        raise Exception(f"Confirm command failed: Unknown state 'pending', and retry with 'nv config apply -y' also failed: {retry_error}")
+                                                # Check for other actual errors (not just state messages)
+                                                elif 'error:' in output_str and 'timeout' not in output_str:
                                                     # Real error (not timeout-related)
                                                     error_match = None
                                                     import re
