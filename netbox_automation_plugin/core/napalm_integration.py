@@ -5457,6 +5457,7 @@ class NAPALMDeviceManager:
                                         # Increase timeout to 90s - confirm command can take longer, especially with large configs
                                         confirm_output = None
                                         confirm_succeeded = False
+                                        confirm_output_no_diff = False  # Track if confirm output indicates "no config diff"
                                         try:
                                             if hasattr(self.connection.device, 'send_command_timing'):
                                                 logger.info(f"Using send_command_timing() for confirm command (more reliable for NVUE)")
@@ -5474,6 +5475,11 @@ class NAPALMDeviceManager:
                                             # Parse output to check for actual errors (ignore state messages like "rolling back")
                                             if confirm_output:
                                                 output_str = str(confirm_output).lower()
+                                                # Check if confirm output says "no config diff" - this means there's nothing to confirm
+                                                if 'no config diff' in output_str or 'config apply executed with no config diff' in output_str:
+                                                    confirm_output_no_diff = True
+                                                    logger.info(f"Confirm command output indicates 'no config diff' - revision may be orphaned")
+                                                    logs.append(f"  [INFO] Confirm output: 'no config diff' - revision may be orphaned (nothing to apply)")
                                                 # Check for "Unknown state: 'pending'" error - this means we used wrong command
                                                 if "unknown state: 'pending'" in output_str or "unknown state" in output_str:
                                                     # We tried --confirm-yes but revision is in "pending" state
@@ -5485,6 +5491,13 @@ class NAPALMDeviceManager:
                                                         confirm_output = self.connection.device.send_command_timing("nv config apply -y", read_timeout=90, delay_factor=2)
                                                         logger.info(f"Retry with 'nv config apply -y' succeeded")
                                                         logs.append(f"  [OK] Retry command succeeded")
+                                                        # Check retry output for "no config diff" as well
+                                                        if confirm_output:
+                                                            retry_output_str = str(confirm_output).lower()
+                                                            if 'no config diff' in retry_output_str or 'config apply executed with no config diff' in retry_output_str:
+                                                                confirm_output_no_diff = True
+                                                                logger.info(f"Retry command output also indicates 'no config diff'")
+                                                                logs.append(f"  [INFO] Retry output: 'no config diff' - revision may be orphaned")
                                                     except Exception as retry_error:
                                                         logger.error(f"Retry with 'nv config apply -y' also failed: {retry_error}")
                                                         logs.append(f"  ✗ ERROR: Retry command also failed: {str(retry_error)[:100]}")
@@ -5551,13 +5564,72 @@ class NAPALMDeviceManager:
                                                             revision_state_after = rev_data_after[actual_pending_revision].get('state') if isinstance(rev_data_after[actual_pending_revision], dict) else None
                                                             logger.info(f"Revision {actual_pending_revision} state AFTER confirm (attempt {attempt+1}/{max_retries}): {revision_state_after}")
                                                             logs.append(f"  [DEBUG] Revision {actual_pending_revision} state: {revision_state_after}")
-                                                            if revision_state_after != 'confirm':
-                                                                # State left 'confirm' — timer cancelled, confirm succeeded
-                                                                logger.info(f"Confirm successful - state is '{revision_state_after}' (no longer 'confirm')")
+                                                            
+                                                            # Check if revision is in "pending" state with no config diff
+                                                            # This happens when there's no diff - revision stays "pending" and can't be confirmed
+                                                            # We detect this by: (1) confirm output says "no config diff" OR (2) originally_no_diff flag
+                                                            if revision_state_after == 'pending' and (confirm_output_no_diff or originally_no_diff):
+                                                                # No config diff and revision is still "pending" - delete it since there's nothing to apply
+                                                                logger.info(f"Revision {actual_pending_revision} is in 'pending' state with no config diff - deleting orphaned revision")
+                                                                logs.append(f"  [INFO] Revision {actual_pending_revision} is in 'pending' state with no config diff")
+                                                                logs.append(f"  [INFO] Deleting orphaned revision (no changes to apply)")
+                                                                try:
+                                                                    delete_output = self.connection.device.send_command_timing(f'nv config delete {actual_pending_revision}', read_timeout=30)
+                                                                    logger.info(f"Delete command output: {delete_output[:200] if delete_output else '(no output)'}")
+                                                                    logs.append(f"  [DEBUG] Delete command output: {delete_output[:200] if delete_output else '(no output)'}")
+                                                                    
+                                                                    # Check if deletion was successful by looking for "deleted [rev_id: X]" in output
+                                                                    delete_succeeded = False
+                                                                    if delete_output:
+                                                                        delete_output_str = str(delete_output).lower()
+                                                                        if f'deleted [rev_id: {actual_pending_revision}]' in delete_output_str or f'deleted [rev_id:{actual_pending_revision}]' in delete_output_str:
+                                                                            delete_succeeded = True
+                                                                            logger.info(f"Delete command confirmed success - output shows 'deleted [rev_id: {actual_pending_revision}]'")
+                                                                            logs.append(f"  [OK] Delete command confirmed: 'deleted [rev_id: {actual_pending_revision}]' found in output")
+                                                                    
+                                                                    # Verify deletion by checking revision list
+                                                                    time.sleep(2)
+                                                                    rev_json_check = self.connection.device.send_command_timing('nv config revision -o json', read_timeout=10)
+                                                                    if rev_json_check:
+                                                                        rev_data_check = json.loads(rev_json_check)
+                                                                        if actual_pending_revision not in rev_data_check:
+                                                                            logger.info(f"Revision {actual_pending_revision} successfully deleted (verified: not in revision list)")
+                                                                            logs.append(f"  [OK] Revision {actual_pending_revision} successfully deleted - no longer in revision list")
+                                                                            pending_after_confirm = False
+                                                                            break
+                                                                        else:
+                                                                            logger.warning(f"Revision {actual_pending_revision} still exists after delete command")
+                                                                            logs.append(f"  [WARN] Revision {actual_pending_revision} still exists after delete - may need manual cleanup")
+                                                                            # Even if still exists, if delete output showed success, treat as deleted
+                                                                            if delete_succeeded:
+                                                                                logger.info(f"Delete output showed success - treating as deleted despite still appearing in list")
+                                                                                logs.append(f"  [INFO] Delete output confirmed success - treating revision as deleted")
+                                                                                pending_after_confirm = False
+                                                                                break
+                                                                    elif delete_succeeded:
+                                                                        # Delete output showed success, treat as deleted even if we can't verify
+                                                                        logger.info(f"Delete output showed success - treating revision as deleted")
+                                                                        logs.append(f"  [OK] Delete output confirmed success - revision {actual_pending_revision} deleted")
+                                                                        pending_after_confirm = False
+                                                                        break
+                                                                except Exception as delete_error:
+                                                                    logger.warning(f"Failed to delete orphaned revision {actual_pending_revision}: {delete_error}")
+                                                                    logs.append(f"  [WARN] Failed to delete orphaned revision: {str(delete_error)[:100]}")
+                                                            
+                                                            if revision_state_after == 'applied_and_saved' or revision_state_after == 'applied':
+                                                                # Revision was successfully applied and saved
+                                                                logger.info(f"Confirm successful - revision is '{revision_state_after}'")
                                                                 logs.append(f"  [OK] Confirm successful - state: {revision_state_before or '?'} → {revision_state_after}")
                                                                 pending_after_confirm = False
                                                                 break
-                                                            if revision_state_after == 'confirm':
+                                                            elif revision_state_after != 'confirm' and revision_state_after != 'pending':
+                                                                # State left 'confirm' or 'pending' — timer cancelled, confirm succeeded
+                                                                # (but not 'pending' - that's handled above)
+                                                                logger.info(f"Confirm successful - state is '{revision_state_after}' (no longer 'confirm' or 'pending')")
+                                                                logs.append(f"  [OK] Confirm successful - state: {revision_state_before or '?'} → {revision_state_after}")
+                                                                pending_after_confirm = False
+                                                                break
+                                                            elif revision_state_after == 'confirm':
                                                                 # Timer still running. Do NOT use history/_check to clear. Retry or fail.
                                                                 pending_after_confirm = True
                                                                 if attempt < max_retries - 1:
@@ -5566,6 +5638,17 @@ class NAPALMDeviceManager:
                                                                     time.sleep(retry_interval)
                                                                 else:
                                                                     logs.append(f"  [WARN] State still 'confirm' after {max_retries} checks — confirm did not complete; timer will rollback")
+                                                                continue
+                                                            elif revision_state_after == 'pending' and not originally_no_diff:
+                                                                # Revision is still "pending" but there WAS a diff - this shouldn't happen
+                                                                # Wait and retry - it might be processing
+                                                                pending_after_confirm = True
+                                                                if attempt < max_retries - 1:
+                                                                    logger.info(f"State still 'pending' (unexpected), waiting {retry_interval}s before recheck...")
+                                                                    logs.append(f"  [INFO] State still 'pending' — waiting {retry_interval}s (attempt {attempt+1}/{max_retries})")
+                                                                    time.sleep(retry_interval)
+                                                                else:
+                                                                    logs.append(f"  [WARN] State still 'pending' after {max_retries} checks — confirm may have failed")
                                                                 continue
                                                         else:
                                                             logger.info(f"Revision {actual_pending_revision} no longer in pending list - confirm succeeded")
