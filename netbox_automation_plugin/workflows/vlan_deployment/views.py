@@ -7692,73 +7692,92 @@ class VLANDeploymentView(View):
                             device_logs.append(f"[ERROR] Failed to create bond {bond_name}: {sync_result.get('error')}")
                         device_logs.append("")
 
-                    for actual_interface_name in device_interfaces:
-                        interface_result = device_results.get(actual_interface_name, {})
-                        if interface_result.get('success') and interface_result.get('committed'):
-                            try:
-                                # Check if this interface is a bond member
-                                bond_info = bond_info_map.get(device.name, {}).get(actual_interface_name, None)
-                                bond_member_of = bond_info['bond_name'] if bond_info else None
+                    # Skip VLAN updates in sync mode - NetBox is the source of truth
+                    # Only update VLANs in normal mode (where we're deploying new VLANs to devices)
+                    if not sync_netbox_to_device:
+                        # Normal mode: Update NetBox with deployed VLANs
+                        for actual_interface_name in device_interfaces:
+                            interface_result = device_results.get(actual_interface_name, {})
+                            if interface_result.get('success') and interface_result.get('committed'):
+                                try:
+                                    # Check if this interface is a bond member
+                                    bond_info = bond_info_map.get(device.name, {}).get(actual_interface_name, None)
+                                    bond_member_of = bond_info['bond_name'] if bond_info else None
 
-                                # If interface is bond member, update bond instead of member interface
-                                if bond_member_of:
-                                    target_interface_name = bond_member_of
-                                    device_logs.append(f"[INFO] {actual_interface_name} is member of {bond_member_of}, updating bond instead")
-                                else:
-                                    target_interface_name = actual_interface_name
-
-                                interface_obj = Interface.objects.get(device=device, name=target_interface_name)
-
-                                # Update untagged VLAN
-                                if untagged_vlan_id and vlan:
-                                    interface_obj.untagged_vlan = vlan
-                                    # Mode will be set after tagged VLANs are processed
-                                    device_logs.append(f"[OK] Updated {target_interface_name}: untagged VLAN {untagged_vlan_id}")
-                                    netbox_updated = "Yes"
-
-                                # Update tagged VLANs if any
-                                if tagged_vlan_ids:
-                                    # Check current tagged VLANs in NetBox
-                                    current_tagged_vids = set(interface_obj.tagged_vlans.values_list('vid', flat=True))
-                                    new_tagged_vids = set(tagged_vlan_ids)
-
-                                    if current_tagged_vids == new_tagged_vids:
-                                        # Tagged VLANs already match - no update needed
-                                        device_logs.append(f"[INFO] {target_interface_name}: tagged VLANs {sorted(tagged_vlan_ids)} already present in NetBox")
+                                    # If interface is bond member, update bond instead of member interface
+                                    if bond_member_of:
+                                        target_interface_name = bond_member_of
+                                        device_logs.append(f"[INFO] {actual_interface_name} is member of {bond_member_of}, updating bond instead")
                                     else:
-                                        # Update tagged VLANs
-                                        interface_obj.tagged_vlans.clear()
-                                        vlans_added = []
-                                        for tagged_vlan_id in tagged_vlan_ids:
-                                            tagged_vlan_obj = VLAN.objects.filter(vid=tagged_vlan_id).first()
-                                            if tagged_vlan_obj:
-                                                interface_obj.tagged_vlans.add(tagged_vlan_obj)
-                                                vlans_added.append(tagged_vlan_id)
-                                        # Log what changed
-                                        if current_tagged_vids:
-                                            device_logs.append(f"[OK] Updated {target_interface_name}: tagged VLANs {sorted(current_tagged_vids)} → {sorted(vlans_added)}")
+                                        target_interface_name = actual_interface_name
+
+                                    interface_obj = Interface.objects.get(device=device, name=target_interface_name)
+
+                                    # Get VLAN IDs from deployment configuration (normal mode uses form data)
+                                    interface_untagged_vlan_id = untagged_vlan_id
+                                    interface_tagged_vlan_ids = tagged_vlan_ids
+
+                                    # Update untagged VLAN
+                                    if interface_untagged_vlan_id:
+                                        # Retrieve VLAN object from database
+                                        untagged_vlan_obj = VLAN.objects.filter(vid=interface_untagged_vlan_id).first()
+                                        if untagged_vlan_obj:
+                                            interface_obj.untagged_vlan = untagged_vlan_obj
+                                            # Mode will be set after tagged VLANs are processed
+                                            device_logs.append(f"[OK] Updated {target_interface_name}: untagged VLAN {interface_untagged_vlan_id}")
+                                            netbox_updated = "Yes"
                                         else:
-                                            device_logs.append(f"[OK] Updated {target_interface_name}: added tagged VLANs {sorted(vlans_added)}")
-                                        netbox_updated = "Yes"
-                                
-                                # Set mode based on VLAN configuration:
-                                # - 'access' if only untagged VLAN (no tagged VLANs)
-                                # - 'tagged' if tagged VLANs are present (with or without untagged)
-                                if tagged_vlan_ids:
-                                    # Has tagged VLANs - use 'tagged' mode (allows untagged native VLAN + tagged VLANs)
-                                    interface_obj.mode = 'tagged'
-                                elif untagged_vlan_id:
-                                    # Only untagged VLAN - use 'access' mode
-                                    interface_obj.mode = 'access'
-                                else:
-                                    # No VLANs - clear mode
-                                    interface_obj.mode = None
-                                
-                                interface_obj.save()
-                            except Interface.DoesNotExist:
-                                device_logs.append(f"[WARN] Interface {target_interface_name} not found in NetBox")
-                            except Exception as e:
-                                device_logs.append(f"[ERROR] Failed to update {target_interface_name}: {e}")
+                                            device_logs.append(f"[WARN] VLAN {interface_untagged_vlan_id} not found in NetBox - cannot set untagged VLAN")
+
+                                    # Update tagged VLANs if any
+                                    if interface_tagged_vlan_ids:
+                                        # Check current tagged VLANs in NetBox
+                                        current_tagged_vids = set(interface_obj.tagged_vlans.values_list('vid', flat=True))
+                                        new_tagged_vids = set(interface_tagged_vlan_ids)
+
+                                        if current_tagged_vids == new_tagged_vids:
+                                            # Tagged VLANs already match - no update needed
+                                            device_logs.append(f"[INFO] {target_interface_name}: tagged VLANs {sorted(interface_tagged_vlan_ids)} already present in NetBox")
+                                        else:
+                                            # Update tagged VLANs
+                                            interface_obj.tagged_vlans.clear()
+                                            vlans_added = []
+                                            for tagged_vlan_id in interface_tagged_vlan_ids:
+                                                tagged_vlan_obj = VLAN.objects.filter(vid=tagged_vlan_id).first()
+                                                if tagged_vlan_obj:
+                                                    interface_obj.tagged_vlans.add(tagged_vlan_obj)
+                                                    vlans_added.append(tagged_vlan_id)
+                                            # Log what changed
+                                            if current_tagged_vids:
+                                                device_logs.append(f"[OK] Updated {target_interface_name}: tagged VLANs {sorted(current_tagged_vids)} → {sorted(vlans_added)}")
+                                            else:
+                                                device_logs.append(f"[OK] Updated {target_interface_name}: added tagged VLANs {sorted(vlans_added)}")
+                                            netbox_updated = "Yes"
+                                    
+                                    # Set mode based on VLAN configuration:
+                                    # - 'access' if only untagged VLAN (no tagged VLANs)
+                                    # - 'tagged' if tagged VLANs are present (with or without untagged)
+                                    if interface_tagged_vlan_ids:
+                                        # Has tagged VLANs - use 'tagged' mode (allows untagged native VLAN + tagged VLANs)
+                                        interface_obj.mode = 'tagged'
+                                    elif interface_untagged_vlan_id:
+                                        # Only untagged VLAN - use 'access' mode
+                                        interface_obj.mode = 'access'
+                                    else:
+                                        # No VLANs - clear mode
+                                        interface_obj.mode = None
+                                    
+                                    interface_obj.save()
+                                except Interface.DoesNotExist:
+                                    device_logs.append(f"[WARN] Interface {target_interface_name} not found in NetBox")
+                                except Exception as e:
+                                    device_logs.append(f"[ERROR] Failed to update {target_interface_name}: {e}")
+                    else:
+                        # Sync mode: NetBox is source of truth, skip individual interface VLAN updates
+                        # Bond creation with VLAN migration is handled above (before this section)
+                        # This ensures bonds created from device config get VLANs migrated from member interfaces
+                        device_logs.append(f"[INFO] Sync mode: Skipping individual interface VLAN updates - NetBox is source of truth")
+                        device_logs.append(f"[INFO] Bond creation with VLAN migration (if needed) is handled above")
 
                     device_logs.append("")
 
