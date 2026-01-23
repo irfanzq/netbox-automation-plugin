@@ -4832,6 +4832,45 @@ class VLANDeploymentView(View):
                             logger.info(f"[SYNC DEPLOYMENT]   - Members added: {sync_result.get('members_added', 0)}")
                             logger.info(f"[SYNC DEPLOYMENT]   - VLANs migrated: {sync_result.get('vlans_migrated', 0)}")
                             logger.info(f"[SYNC DEPLOYMENT]   - Members cleared: {sync_result.get('members_cleared', 0)}")
+                            
+                            # After migration, ensure bond has VLANs from vlans_to_migrate
+                            # This handles cases where migration might have missed VLANs
+                            try:
+                                bond_interface = Interface.objects.get(device=device, name=bond_name)
+                                bond_interface.refresh_from_db()
+                                
+                                # Check vlans_to_migrate and ensure they're on the bond
+                                vlans_updated = False
+                                for member_name, vlans_info in bond_data.get('vlans_to_migrate', {}).items():
+                                    # Set untagged VLAN if present in vlans_to_migrate
+                                    if vlans_info.get('untagged') and not bond_interface.untagged_vlan:
+                                        untagged_vlan_obj = VLAN.objects.filter(vid=vlans_info['untagged']).first()
+                                        if untagged_vlan_obj:
+                                            bond_interface.untagged_vlan = untagged_vlan_obj
+                                            vlans_updated = True
+                                            logger.info(f"[SYNC DEPLOYMENT] Set untagged VLAN {vlans_info['untagged']} on bond {bond_name} from vlans_to_migrate")
+                                    
+                                    # Add tagged VLANs if present in vlans_to_migrate
+                                    if vlans_info.get('tagged'):
+                                        current_tagged_vids = set(bond_interface.tagged_vlans.values_list('vid', flat=True))
+                                        for tagged_vid in vlans_info['tagged']:
+                                            if tagged_vid not in current_tagged_vids:
+                                                tagged_vlan_obj = VLAN.objects.filter(vid=tagged_vid).first()
+                                                if tagged_vlan_obj:
+                                                    bond_interface.tagged_vlans.add(tagged_vlan_obj)
+                                                    vlans_updated = True
+                                                    logger.info(f"[SYNC DEPLOYMENT] Added tagged VLAN {tagged_vid} to bond {bond_name} from vlans_to_migrate")
+                                
+                                if vlans_updated:
+                                    # Update mode based on VLANs
+                                    if bond_interface.untagged_vlan or bond_interface.tagged_vlans.exists():
+                                        bond_interface.mode = 'tagged' if bond_interface.tagged_vlans.exists() else 'access'
+                                    bond_interface.save()
+                                    logger.info(f"[SYNC DEPLOYMENT] Updated bond {bond_name} with VLANs from vlans_to_migrate")
+                            except Interface.DoesNotExist:
+                                logger.warning(f"[SYNC DEPLOYMENT] Bond {bond_name} not found in NetBox after creation - cannot update VLANs")
+                            except Exception as e:
+                                logger.warning(f"[SYNC DEPLOYMENT] Error updating VLANs on bond {bond_name} from vlans_to_migrate: {e}")
                         else:
                             logger.error(f"[SYNC DEPLOYMENT] Failed to create bond {bond_name} in NetBox: {sync_result.get('error')}")
                 else:
@@ -5280,7 +5319,20 @@ class VLANDeploymentView(View):
                     post_data = {}
 
                     # Get expected VLAN from NetBox
-                    expected_vlan = interface_obj.untagged_vlan.vid if interface_obj.untagged_vlan else None
+                    # IMPORTANT: If target_interface_for_checks is a bond (different from actual_interface_name),
+                    # we need to get the bond interface object, not the member interface object
+                    # because VLANs are migrated to the bond, not the member
+                    if target_interface_for_checks != actual_interface_name:
+                        # This is a bond - get the bond interface object
+                        try:
+                            bond_interface_obj = Interface.objects.get(device=device, name=target_interface_for_checks)
+                            expected_vlan = bond_interface_obj.untagged_vlan.vid if bond_interface_obj.untagged_vlan else None
+                        except Interface.DoesNotExist:
+                            # Bond doesn't exist in NetBox yet (shouldn't happen after migration, but handle gracefully)
+                            expected_vlan = None
+                    else:
+                        # This is a physical interface, not a bond
+                        expected_vlan = interface_obj.untagged_vlan.vid if interface_obj.untagged_vlan else None
 
                     # 1. Verify VLAN Configuration (on target interface - bond or physical)
                     # IMPORTANT: Use target_interface_for_checks (bond if detected) not actual_interface_name (member)
