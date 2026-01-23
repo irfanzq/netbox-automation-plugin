@@ -7712,22 +7712,45 @@ class VLANDeploymentView(View):
                                         target_interface_name = actual_interface_name
 
                                     interface_obj = Interface.objects.get(device=device, name=target_interface_name)
+                                    
+                                    # Refresh from DB to ensure we have latest state
+                                    interface_obj.refresh_from_db()
 
                                     # Get VLAN IDs from deployment configuration (normal mode uses form data)
                                     interface_untagged_vlan_id = untagged_vlan_id
                                     interface_tagged_vlan_ids = tagged_vlan_ids
 
                                     # Update untagged VLAN
+                                    # Check current untagged VLAN in NetBox
+                                    current_untagged_vid = interface_obj.untagged_vlan.vid if interface_obj.untagged_vlan else None
+                                    
                                     if interface_untagged_vlan_id:
-                                        # Retrieve VLAN object from database
-                                        untagged_vlan_obj = VLAN.objects.filter(vid=interface_untagged_vlan_id).first()
-                                        if untagged_vlan_obj:
-                                            interface_obj.untagged_vlan = untagged_vlan_obj
-                                            # Mode will be set after tagged VLANs are processed
-                                            device_logs.append(f"[OK] Updated {target_interface_name}: untagged VLAN {interface_untagged_vlan_id}")
-                                            netbox_updated = "Yes"
+                                        # We want to set an untagged VLAN
+                                        if current_untagged_vid == interface_untagged_vlan_id:
+                                            # Untagged VLAN already matches - no update needed
+                                            device_logs.append(f"[INFO] {target_interface_name}: untagged VLAN {interface_untagged_vlan_id} already present in NetBox")
                                         else:
-                                            device_logs.append(f"[WARN] VLAN {interface_untagged_vlan_id} not found in NetBox - cannot set untagged VLAN")
+                                            # Retrieve VLAN object from database using the VID provided in the form
+                                            # NetBox requires a VLAN object, not just an ID
+                                            untagged_vlan_obj = VLAN.objects.filter(vid=interface_untagged_vlan_id).first()
+                                            
+                                            if untagged_vlan_obj:
+                                                interface_obj.untagged_vlan = untagged_vlan_obj
+                                                # Save immediately to ensure untagged VLAN is persisted
+                                                interface_obj.save(update_fields=['untagged_vlan'])
+                                                if current_untagged_vid:
+                                                    device_logs.append(f"[OK] Updated {target_interface_name}: untagged VLAN {current_untagged_vid} → {interface_untagged_vlan_id}")
+                                                else:
+                                                    device_logs.append(f"[OK] Updated {target_interface_name}: untagged VLAN {interface_untagged_vlan_id}")
+                                                netbox_updated = "Yes"
+                                            else:
+                                                device_logs.append(f"[WARN] VLAN {interface_untagged_vlan_id} not found in NetBox - cannot set untagged VLAN")
+                                    elif current_untagged_vid:
+                                        # We don't want an untagged VLAN, but one exists - clear it
+                                        interface_obj.untagged_vlan = None
+                                        interface_obj.save(update_fields=['untagged_vlan'])
+                                        device_logs.append(f"[OK] Updated {target_interface_name}: cleared untagged VLAN {current_untagged_vid}")
+                                        netbox_updated = "Yes"
 
                                     # Update tagged VLANs if any
                                     if interface_tagged_vlan_ids:
@@ -7743,6 +7766,7 @@ class VLANDeploymentView(View):
                                             interface_obj.tagged_vlans.clear()
                                             vlans_added = []
                                             for tagged_vlan_id in interface_tagged_vlan_ids:
+                                                # Retrieve VLAN object from database using the VID provided in the form
                                                 tagged_vlan_obj = VLAN.objects.filter(vid=tagged_vlan_id).first()
                                                 if tagged_vlan_obj:
                                                     interface_obj.tagged_vlans.add(tagged_vlan_obj)
@@ -7767,7 +7791,8 @@ class VLANDeploymentView(View):
                                         # No VLANs - clear mode
                                         interface_obj.mode = None
                                     
-                                    interface_obj.save()
+                                    # Save mode changes (untagged VLAN already saved above if it was changed)
+                                    interface_obj.save(update_fields=['mode'])
                                 except Interface.DoesNotExist:
                                     device_logs.append(f"[WARN] Interface {target_interface_name} not found in NetBox")
                                 except Exception as e:
