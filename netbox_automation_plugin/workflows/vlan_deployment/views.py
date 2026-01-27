@@ -2,7 +2,7 @@ from django.shortcuts import render
 from django.views import View
 from django.http import HttpResponse, JsonResponse
 from django.utils.translation import gettext_lazy as _
-from django.db import transaction
+from django.db import transaction, connection
 from django.utils import timezone
 
 from dcim.models import Device, Interface
@@ -483,46 +483,75 @@ class VLANDeploymentView(View):
                     form.add_error(None, error)
                 return render(request, self.template_name_form, {"form": form})
 
-        # Create job record - use bulk_create to bypass NetBox serialization
+        # Create job record using raw SQL to completely bypass NetBox serialization
         dry_run = form.cleaned_data.get('dry_run', False)
         job_type = 'dryrun' if dry_run else 'deployment'
         
-        # Create job using bulk_create to bypass NetBox's serializer system
-        # Set created timestamp manually since bulk_create doesn't trigger save()
+        # Use raw SQL to create the job and avoid any ORM serialization
         now = timezone.now()
-        job = VLANDeploymentJob(
-            job_type=job_type,
-            status='running',
-            created_by=request.user,
-            started_at=now,
-            created=now,  # Set created timestamp manually
-            last_updated=now,  # Set last_updated timestamp manually
-            deployment_scope=form.cleaned_data.get('deployment_scope', 'single'),
-            sync_netbox_to_device=sync_netbox_to_device,
-            untagged_vlan_id=form.cleaned_data.get('untagged_vlan'),
-            tagged_vlan_ids=form.cleaned_data.get('tagged_vlans_parsed', []),
-        )
-        # Use bulk_create to avoid triggering NetBox's serializer
-        VLANDeploymentJob.objects.bulk_create([job], ignore_conflicts=False)
-        # Refresh from DB to get the ID and ensure object is properly loaded
-        job.refresh_from_db()
-        # Set devices after creation
-        job.devices.set(devices)
+        import json
+        
+        with connection.cursor() as cursor:
+            # Insert job using raw SQL
+            cursor.execute("""
+                INSERT INTO netbox_automation_plugin_vlandeploymentjob 
+                (job_type, status, created_by_id, started_at, created, last_updated, 
+                 deployment_scope, sync_netbox_to_device, untagged_vlan_id, tagged_vlan_ids,
+                 custom_field_data, result_summary, error_message, execution_log)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                RETURNING id
+            """, [
+                job_type,
+                'running',
+                request.user.id if request.user else None,
+                now,
+                now,
+                now,
+                form.cleaned_data.get('deployment_scope', 'single'),
+                sync_netbox_to_device,
+                form.cleaned_data.get('untagged_vlan'),
+                json.dumps(form.cleaned_data.get('tagged_vlans_parsed', [])),
+                '{}',  # custom_field_data
+                '{}',  # result_summary
+                '',    # error_message
+                '',    # execution_log
+            ])
+            job_id = cursor.fetchone()[0]
+        
+        # Set devices using raw SQL to avoid serializer
+        if devices:
+            device_ids = [d.id for d in devices]
+            with connection.cursor() as cursor:
+                # Insert device relationships
+                values = [(job_id, device_id) for device_id in device_ids]
+                cursor.executemany("""
+                    INSERT INTO netbox_automation_plugin_vlandeploymentjob_devices 
+                    (vlandeploymentjob_id, device_id) VALUES (%s, %s)
+                """, values)
         
         # Build initial execution log
+        job_type_display = 'Dry Run' if job_type == 'dryrun' else 'Deployment'
+        scope_display = 'Single Device' if form.cleaned_data.get('deployment_scope', 'single') == 'single' else 'Device Group'
         execution_log_parts = [
-            f"Job Type: {job.get_job_type_display()}",
-            f"Status: {job.get_status_display()}",
-            f"Deployment Scope: {job.get_deployment_scope_display()}",
+            f"Job Type: {job_type_display}",
+            f"Status: Running",
+            f"Deployment Scope: {scope_display}",
             f"Sync Mode: {'Enabled' if sync_netbox_to_device else 'Disabled'}",
             f"Devices: {', '.join([d.name for d in devices])}",
         ]
-        if job.untagged_vlan_id:
-            execution_log_parts.append(f"Untagged VLAN: {job.untagged_vlan_id}")
-        if job.tagged_vlan_ids:
-            execution_log_parts.append(f"Tagged VLANs: {', '.join(map(str, job.tagged_vlan_ids))}")
-        # Use update() instead of save() to avoid serializer issues
-        VLANDeploymentJob.objects.filter(id=job.id).update(execution_log="\n".join(execution_log_parts))
+        untagged_vlan = form.cleaned_data.get('untagged_vlan')
+        tagged_vlans = form.cleaned_data.get('tagged_vlans_parsed', [])
+        if untagged_vlan:
+            execution_log_parts.append(f"Untagged VLAN: {untagged_vlan}")
+        if tagged_vlans:
+            execution_log_parts.append(f"Tagged VLANs: {', '.join(map(str, tagged_vlans))}")
+        
+        # Update execution log using raw SQL
+        with connection.cursor() as cursor:
+            cursor.execute("""
+                UPDATE netbox_automation_plugin_vlandeploymentjob 
+                SET execution_log = %s WHERE id = %s
+            """, ["\n".join(execution_log_parts), job_id])
 
         # Run deployment - route to sync or normal mode
         results = None
@@ -532,60 +561,74 @@ class VLANDeploymentView(View):
             else:
                 results = self._run_vlan_deployment(devices, form.cleaned_data)
             
-            # Update job with success status using update() to avoid serializer issues
-            VLANDeploymentJob.objects.filter(id=job.id).update(
-                status='completed',
-                completed_at=timezone.now()
-            )
+            # Update job with success status using raw SQL
+            with connection.cursor() as cursor:
+                cursor.execute("""
+                    UPDATE netbox_automation_plugin_vlandeploymentjob 
+                    SET status = %s, completed_at = %s, last_updated = %s
+                    WHERE id = %s
+                """, ['completed', timezone.now(), timezone.now(), job_id])
         except Exception as e:
-            # Update job with failure status using update() to avoid serializer issues
+            # Update job with failure status using raw SQL
             error_msg = str(e)
-            VLANDeploymentJob.objects.filter(id=job.id).update(
-                status='failed',
-                completed_at=timezone.now(),
-                error_message=error_msg
-            )
-            logger.error(f"VLAN deployment job {job.id} failed: {e}")
+            with connection.cursor() as cursor:
+                cursor.execute("""
+                    UPDATE netbox_automation_plugin_vlandeploymentjob 
+                    SET status = %s, completed_at = %s, error_message = %s, last_updated = %s
+                    WHERE id = %s
+                """, ['failed', timezone.now(), error_msg, timezone.now(), job_id])
+            logger.error(f"VLAN deployment job {job_id} failed: {e}")
             logger.error(traceback.format_exc())
             # Re-raise the exception after saving job status
             raise
         finally:
-            # Update job summary and execution log using update() to avoid serializer issues
+            # Update job summary and execution log using raw SQL
             import json
-            if results:
-                summary = self._build_summary(results, len(devices))
-                status_counts = self._calculate_status_counts(results)
-                result_summary = {
-                    'summary': summary,
-                    'status_counts': status_counts,
-                    'device_count': len(devices),
-                }
-                # Get current execution log and append results
-                current_job = VLANDeploymentJob.objects.get(id=job.id)
-                log_addition = f"\n\n=== Results Summary ===\n"
-                log_addition += f"Device Count: {len(devices)}\n"
-                log_addition += f"Status Counts: {json.dumps(status_counts, indent=2)}\n"
-                new_execution_log = (current_job.execution_log or "") + log_addition
+            with connection.cursor() as cursor:
+                # Get current execution log
+                cursor.execute("""
+                    SELECT execution_log, status, error_message 
+                    FROM netbox_automation_plugin_vlandeploymentjob 
+                    WHERE id = %s
+                """, [job_id])
+                row = cursor.fetchone()
+                current_execution_log = row[0] or "" if row else ""
+                current_status = row[1] if row else 'running'
+                current_error = row[2] if row else ""
                 
-                VLANDeploymentJob.objects.filter(id=job.id).update(
-                    result_summary=result_summary,
-                    execution_log=new_execution_log
-                )
-            else:
-                result_summary = {
-                    'summary': {},
-                    'status_counts': {},
-                    'device_count': len(devices),
-                }
-                current_job = VLANDeploymentJob.objects.get(id=job.id)
-                new_execution_log = current_job.execution_log or ""
-                if current_job.status == 'failed':
-                    new_execution_log += f"\n\n=== Error ===\n{current_job.error_message}"
-                
-                VLANDeploymentJob.objects.filter(id=job.id).update(
-                    result_summary=result_summary,
-                    execution_log=new_execution_log
-                )
+                if results:
+                    summary = self._build_summary(results, len(devices))
+                    status_counts = self._calculate_status_counts(results)
+                    result_summary = {
+                        'summary': summary,
+                        'status_counts': status_counts,
+                        'device_count': len(devices),
+                    }
+                    log_addition = f"\n\n=== Results Summary ===\n"
+                    log_addition += f"Device Count: {len(devices)}\n"
+                    log_addition += f"Status Counts: {json.dumps(status_counts, indent=2)}\n"
+                    new_execution_log = current_execution_log + log_addition
+                    
+                    cursor.execute("""
+                        UPDATE netbox_automation_plugin_vlandeploymentjob 
+                        SET result_summary = %s, execution_log = %s, last_updated = %s
+                        WHERE id = %s
+                    """, [json.dumps(result_summary), new_execution_log, timezone.now(), job_id])
+                else:
+                    result_summary = {
+                        'summary': {},
+                        'status_counts': {},
+                        'device_count': len(devices),
+                    }
+                    new_execution_log = current_execution_log
+                    if current_status == 'failed':
+                        new_execution_log += f"\n\n=== Error ===\n{current_error}"
+                    
+                    cursor.execute("""
+                        UPDATE netbox_automation_plugin_vlandeploymentjob 
+                        SET result_summary = %s, execution_log = %s, last_updated = %s
+                        WHERE id = %s
+                    """, [json.dumps(result_summary), new_execution_log, timezone.now(), job_id])
 
         # CSV export if requested
         if "export_csv" in request.POST:
@@ -627,7 +670,7 @@ class VLANDeploymentView(View):
             "excluded_devices": excluded_device_names,
             "excluded_count": len(excluded_devices),
             "tagging_warnings": tagging_warnings,
-            "job_id": job.id if job else None,
+            "job_id": job_id,
         }
         return render(request, self.template_name_results, context)
 
