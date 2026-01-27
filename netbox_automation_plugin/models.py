@@ -216,10 +216,5 @@ class VLANDeploymentJob(NetBoxModel):
     
     def __str__(self):
         return f"VLAN Deployment {self.job_type} - {self.get_status_display()} ({self.id})"
-    
-    def get_absolute_url(self):
-        """Return the absolute URL for this job."""
-        from django.urls import reverse
-        return reverse('plugins:netbox_automation_plugin:vlan_deployment_jobs')
 
 
