@@ -483,11 +483,11 @@ class VLANDeploymentView(View):
                     form.add_error(None, error)
                 return render(request, self.template_name_form, {"form": form})
 
-        # Create job record - use bulk_create or direct assignment to avoid serializer issues
+        # Create job record - use bulk_create to bypass NetBox serialization
         dry_run = form.cleaned_data.get('dry_run', False)
         job_type = 'dryrun' if dry_run else 'deployment'
         
-        # Create job without devices first to avoid serializer issues
+        # Use bulk_create to bypass NetBox's serializer system
         job = VLANDeploymentJob(
             job_type=job_type,
             status='running',
@@ -498,8 +498,11 @@ class VLANDeploymentView(View):
             untagged_vlan_id=form.cleaned_data.get('untagged_vlan'),
             tagged_vlan_ids=form.cleaned_data.get('tagged_vlans_parsed', []),
         )
-        job.save()
-        # Set devices after saving to avoid serializer lookup during creation
+        # Use bulk_create to avoid triggering NetBox's serializer
+        VLANDeploymentJob.objects.bulk_create([job], ignore_conflicts=False)
+        # Refresh from DB to get the ID
+        job.refresh_from_db()
+        # Set devices after creation
         job.devices.set(devices)
         
         # Build initial execution log
@@ -514,8 +517,8 @@ class VLANDeploymentView(View):
             execution_log_parts.append(f"Untagged VLAN: {job.untagged_vlan_id}")
         if job.tagged_vlan_ids:
             execution_log_parts.append(f"Tagged VLANs: {', '.join(map(str, job.tagged_vlan_ids))}")
-        job.execution_log = "\n".join(execution_log_parts)
-        job.save()
+        # Use update() instead of save() to avoid serializer issues
+        VLANDeploymentJob.objects.filter(id=job.id).update(execution_log="\n".join(execution_log_parts))
 
         # Run deployment - route to sync or normal mode
         results = None
@@ -525,43 +528,60 @@ class VLANDeploymentView(View):
             else:
                 results = self._run_vlan_deployment(devices, form.cleaned_data)
             
-            # Update job with success status
-            job.status = 'completed'
-            job.completed_at = timezone.now()
+            # Update job with success status using update() to avoid serializer issues
+            VLANDeploymentJob.objects.filter(id=job.id).update(
+                status='completed',
+                completed_at=timezone.now()
+            )
         except Exception as e:
-            # Update job with failure status
-            job.status = 'failed'
-            job.completed_at = timezone.now()
-            job.error_message = str(e)
+            # Update job with failure status using update() to avoid serializer issues
+            error_msg = str(e)
+            VLANDeploymentJob.objects.filter(id=job.id).update(
+                status='failed',
+                completed_at=timezone.now(),
+                error_message=error_msg
+            )
             logger.error(f"VLAN deployment job {job.id} failed: {e}")
             logger.error(traceback.format_exc())
             # Re-raise the exception after saving job status
             raise
         finally:
-            # Save job summary and execution log (only if results are available)
+            # Update job summary and execution log using update() to avoid serializer issues
+            import json
             if results:
                 summary = self._build_summary(results, len(devices))
                 status_counts = self._calculate_status_counts(results)
-                job.result_summary = {
+                result_summary = {
                     'summary': summary,
                     'status_counts': status_counts,
                     'device_count': len(devices),
                 }
-                # Append results to execution log
-                import json
+                # Get current execution log and append results
+                current_job = VLANDeploymentJob.objects.get(id=job.id)
                 log_addition = f"\n\n=== Results Summary ===\n"
                 log_addition += f"Device Count: {len(devices)}\n"
                 log_addition += f"Status Counts: {json.dumps(status_counts, indent=2)}\n"
-                job.execution_log = (job.execution_log or "") + log_addition
+                new_execution_log = (current_job.execution_log or "") + log_addition
+                
+                VLANDeploymentJob.objects.filter(id=job.id).update(
+                    result_summary=result_summary,
+                    execution_log=new_execution_log
+                )
             else:
-                job.result_summary = {
+                result_summary = {
                     'summary': {},
                     'status_counts': {},
                     'device_count': len(devices),
                 }
-                if job.status == 'failed':
-                    job.execution_log = (job.execution_log or "") + f"\n\n=== Error ===\n{job.error_message}"
-            job.save()
+                current_job = VLANDeploymentJob.objects.get(id=job.id)
+                new_execution_log = current_job.execution_log or ""
+                if current_job.status == 'failed':
+                    new_execution_log += f"\n\n=== Error ===\n{current_job.error_message}"
+                
+                VLANDeploymentJob.objects.filter(id=job.id).update(
+                    result_summary=result_summary,
+                    execution_log=new_execution_log
+                )
 
         # CSV export if requested
         if "export_csv" in request.POST:
