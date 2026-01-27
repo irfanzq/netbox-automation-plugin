@@ -576,7 +576,7 @@ class VLANDeploymentView(View):
             "excluded_devices": excluded_device_names,
             "excluded_count": len(excluded_devices),
             "tagging_warnings": tagging_warnings,
-            "job": job,
+            "job_id": job.id if job else None,
         }
         return render(request, self.template_name_results, context)
 
