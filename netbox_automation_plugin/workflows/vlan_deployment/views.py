@@ -487,14 +487,18 @@ class VLANDeploymentView(View):
         dry_run = form.cleaned_data.get('dry_run', False)
         job_type = 'dryrun' if dry_run else 'deployment'
         
+        # Get table names from model meta
+        job_table = VLANDeploymentJob._meta.db_table
+        device_through_table = VLANDeploymentJob._meta.get_field('devices').remote_field.through._meta.db_table
+        
         # Use raw SQL to create the job and avoid any ORM serialization
         now = timezone.now()
         import json
         
         with connection.cursor() as cursor:
             # Insert job using raw SQL
-            cursor.execute("""
-                INSERT INTO netbox_automation_plugin_vlandeploymentjob 
+            cursor.execute(f"""
+                INSERT INTO {job_table} 
                 (job_type, status, created_by_id, started_at, created, last_updated, 
                  deployment_scope, sync_netbox_to_device, untagged_vlan_id, tagged_vlan_ids,
                  custom_field_data, result_summary, error_message, execution_log)
@@ -521,12 +525,16 @@ class VLANDeploymentView(View):
         # Set devices using raw SQL to avoid serializer
         if devices:
             device_ids = [d.id for d in devices]
+            # Get the field names for the through table
+            job_field_name = VLANDeploymentJob._meta.get_field('devices').remote_field.through._meta.get_field('vlandeploymentjob').column
+            device_field_name = VLANDeploymentJob._meta.get_field('devices').remote_field.through._meta.get_field('device').column
+            
             with connection.cursor() as cursor:
                 # Insert device relationships
                 values = [(job_id, device_id) for device_id in device_ids]
-                cursor.executemany("""
-                    INSERT INTO netbox_automation_plugin_vlandeploymentjob_devices 
-                    (vlandeploymentjob_id, device_id) VALUES (%s, %s)
+                cursor.executemany(f"""
+                    INSERT INTO {device_through_table} 
+                    ({job_field_name}, {device_field_name}) VALUES (%s, %s)
                 """, values)
         
         # Build initial execution log
@@ -547,11 +555,12 @@ class VLANDeploymentView(View):
             execution_log_parts.append(f"Tagged VLANs: {', '.join(map(str, tagged_vlans))}")
         
         # Update execution log using raw SQL
+        job_table = VLANDeploymentJob._meta.db_table
         with connection.cursor() as cursor:
-            cursor.execute("""
-                UPDATE netbox_automation_plugin_vlandeploymentjob 
-                SET execution_log = %s WHERE id = %s
-            """, ["\n".join(execution_log_parts), job_id])
+            cursor.execute(f"""
+                UPDATE {job_table} 
+                SET execution_log = %s, last_updated = %s WHERE id = %s
+            """, ["\n".join(execution_log_parts), timezone.now(), job_id])
 
         # Run deployment - route to sync or normal mode
         results = None
@@ -562,18 +571,20 @@ class VLANDeploymentView(View):
                 results = self._run_vlan_deployment(devices, form.cleaned_data)
             
             # Update job with success status using raw SQL
+            job_table = VLANDeploymentJob._meta.db_table
             with connection.cursor() as cursor:
-                cursor.execute("""
-                    UPDATE netbox_automation_plugin_vlandeploymentjob 
+                cursor.execute(f"""
+                    UPDATE {job_table} 
                     SET status = %s, completed_at = %s, last_updated = %s
                     WHERE id = %s
                 """, ['completed', timezone.now(), timezone.now(), job_id])
         except Exception as e:
             # Update job with failure status using raw SQL
             error_msg = str(e)
+            job_table = VLANDeploymentJob._meta.db_table
             with connection.cursor() as cursor:
-                cursor.execute("""
-                    UPDATE netbox_automation_plugin_vlandeploymentjob 
+                cursor.execute(f"""
+                    UPDATE {job_table} 
                     SET status = %s, completed_at = %s, error_message = %s, last_updated = %s
                     WHERE id = %s
                 """, ['failed', timezone.now(), error_msg, timezone.now(), job_id])
@@ -584,11 +595,12 @@ class VLANDeploymentView(View):
         finally:
             # Update job summary and execution log using raw SQL
             import json
+            job_table = VLANDeploymentJob._meta.db_table
             with connection.cursor() as cursor:
                 # Get current execution log
-                cursor.execute("""
+                cursor.execute(f"""
                     SELECT execution_log, status, error_message 
-                    FROM netbox_automation_plugin_vlandeploymentjob 
+                    FROM {job_table} 
                     WHERE id = %s
                 """, [job_id])
                 row = cursor.fetchone()
@@ -609,8 +621,8 @@ class VLANDeploymentView(View):
                     log_addition += f"Status Counts: {json.dumps(status_counts, indent=2)}\n"
                     new_execution_log = current_execution_log + log_addition
                     
-                    cursor.execute("""
-                        UPDATE netbox_automation_plugin_vlandeploymentjob 
+                    cursor.execute(f"""
+                        UPDATE {job_table} 
                         SET result_summary = %s, execution_log = %s, last_updated = %s
                         WHERE id = %s
                     """, [json.dumps(result_summary), new_execution_log, timezone.now(), job_id])
@@ -624,8 +636,8 @@ class VLANDeploymentView(View):
                     if current_status == 'failed':
                         new_execution_log += f"\n\n=== Error ===\n{current_error}"
                     
-                    cursor.execute("""
-                        UPDATE netbox_automation_plugin_vlandeploymentjob 
+                    cursor.execute(f"""
+                        UPDATE {job_table} 
                         SET result_summary = %s, execution_log = %s, last_updated = %s
                         WHERE id = %s
                     """, [json.dumps(result_summary), new_execution_log, timezone.now(), job_id])
