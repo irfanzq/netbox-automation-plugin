@@ -3,6 +3,7 @@ from django.views import View
 from django.http import HttpResponse, JsonResponse
 from django.utils.translation import gettext_lazy as _
 from django.db import transaction
+from django.utils import timezone
 
 from dcim.models import Device, Interface
 from dcim.choices import InterfaceTypeChoices
@@ -11,10 +12,12 @@ from extras.models import Tag
 
 from ...core.napalm_integration import NAPALMDeviceManager
 from ...core.nornir_integration import NornirDeviceManager
+from ...models import VLANDeploymentJob
 from .forms import VLANDeploymentForm
-from .tables import VLANDeploymentResultTable
+from .tables import VLANDeploymentResultTable, VLANDeploymentJobTable
 import logging
 import traceback
+import json
 
 logger = logging.getLogger('netbox_automation_plugin')
 
@@ -31,9 +34,23 @@ class VLANDeploymentView(View):
     template_name_results = "netbox_automation_plugin/vlan_deployment_results.html"
 
     def get(self, request):
+        from django_tables2 import RequestConfig
+        from .tables import VLANDeploymentJobTable
+        
         form = VLANDeploymentForm()
         # Form uses untagged_vlan (IntegerField), not a ModelChoiceField, so no queryset to set
-        return render(request, self.template_name_form, {"form": form})
+        
+        # Get jobs for the jobs tab
+        jobs = VLANDeploymentJob.objects.all().select_related('created_by').prefetch_related('devices')[:50]
+        jobs_table = VLANDeploymentJobTable(jobs, orderable=True)
+        RequestConfig(request, paginate={'per_page': 25}).configure(jobs_table)
+        
+        context = {
+            "form": form,
+            "jobs_table": jobs_table,
+            "job_count": VLANDeploymentJob.objects.count(),
+        }
+        return render(request, self.template_name_form, context)
 
     def _generate_dry_run_preview(self, device, interface_list, platform, vlan_id, bond_info_map, validation_results,
                                    sync_netbox_to_device=False, untagged_vlan_id=None, tagged_vlan_ids=None, vlan=None, primary_vlan_id=None,
@@ -466,18 +483,75 @@ class VLANDeploymentView(View):
                     form.add_error(None, error)
                 return render(request, self.template_name_form, {"form": form})
 
+        # Create job record
+        dry_run = form.cleaned_data.get('dry_run', False)
+        job_type = 'dryrun' if dry_run else 'deployment'
+        job = VLANDeploymentJob.objects.create(
+            job_type=job_type,
+            status='running',
+            created_by=request.user,
+            started_at=timezone.now(),
+            deployment_scope=form.cleaned_data.get('deployment_scope', 'single'),
+            sync_netbox_to_device=sync_netbox_to_device,
+            untagged_vlan_id=form.cleaned_data.get('untagged_vlan'),
+            tagged_vlan_ids=form.cleaned_data.get('tagged_vlans_parsed', []),
+        )
+        job.devices.set(devices)
+
         # Run deployment - route to sync or normal mode
-        if sync_netbox_to_device:
-            results = self._run_vlan_sync(devices, form.cleaned_data)
-        else:
-            results = self._run_vlan_deployment(devices, form.cleaned_data)
+        results = None
+        try:
+            if sync_netbox_to_device:
+                results = self._run_vlan_sync(devices, form.cleaned_data)
+            else:
+                results = self._run_vlan_deployment(devices, form.cleaned_data)
+            
+            # Update job with success status
+            job.status = 'completed'
+            job.completed_at = timezone.now()
+        except Exception as e:
+            # Update job with failure status
+            job.status = 'failed'
+            job.completed_at = timezone.now()
+            job.error_message = str(e)
+            logger.error(f"VLAN deployment job {job.id} failed: {e}")
+            logger.error(traceback.format_exc())
+            # Re-raise the exception after saving job status
+            raise
+        finally:
+            # Save job summary (only if results are available)
+            if results:
+                summary = self._build_summary(results, len(devices))
+                status_counts = self._calculate_status_counts(results)
+                job.result_summary = {
+                    'summary': summary,
+                    'status_counts': status_counts,
+                    'device_count': len(devices),
+                }
+            else:
+                job.result_summary = {
+                    'summary': {},
+                    'status_counts': {},
+                    'device_count': len(devices),
+                }
+            job.save()
 
         # CSV export if requested
         if "export_csv" in request.POST:
-            csv_content = self._build_csv(results)
-            response = HttpResponse(csv_content, content_type="text/csv; charset=utf-8-sig")
-            response["Content-Disposition"] = 'attachment; filename="vlan_deployment_results.csv"'
-            return response
+            if results:
+                csv_content = self._build_csv(results)
+                response = HttpResponse(csv_content, content_type="text/csv; charset=utf-8-sig")
+                response["Content-Disposition"] = 'attachment; filename="vlan_deployment_results.csv"'
+                return response
+            else:
+                # If no results (error case), return to form
+                form.add_error(None, _("No results to export. Deployment failed."))
+                return render(request, self.template_name_form, {"form": form})
+
+        if not results:
+            # If no results (error case), return to form
+            form.add_error(None, _("Deployment failed. Check job history for details."))
+            return render(request, self.template_name_form, {"form": form})
 
         table = VLANDeploymentResultTable(results, orderable=True)
         summary = self._build_summary(results, len(devices))
@@ -502,6 +576,7 @@ class VLANDeploymentView(View):
             "excluded_devices": excluded_device_names,
             "excluded_count": len(excluded_devices),
             "tagging_warnings": tagging_warnings,
+            "job": job,
         }
         return render(request, self.template_name_results, context)
 
@@ -9587,3 +9662,23 @@ class GetVLANsBySiteView(View):
             'vlans': vlan_list,
             'count': len(vlan_list),
         })
+
+
+class VLANDeploymentJobsView(View):
+    """
+    View to display VLAN deployment job history
+    """
+    template_name = "netbox_automation_plugin/vlan_deployment_jobs.html"
+
+    def get(self, request):
+        from django_tables2 import RequestConfig
+        
+        jobs = VLANDeploymentJob.objects.all().select_related('created_by').prefetch_related('devices')
+        table = VLANDeploymentJobTable(jobs, orderable=True)
+        RequestConfig(request, paginate={'per_page': 50}).configure(table)
+        
+        context = {
+            'table': table,
+            'job_count': jobs.count(),
+        }
+        return render(request, self.template_name, context)

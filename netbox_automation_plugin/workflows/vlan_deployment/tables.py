@@ -6,6 +6,7 @@ from django.urls import reverse
 
 from dcim.models import Device, Interface
 from netbox.tables import NetBoxTable, columns
+from ...models import VLANDeploymentJob
 
 
 class VLANDeploymentResultTable(NetBoxTable):
@@ -310,4 +311,86 @@ class VLANDeploymentResultTable(NetBoxTable):
             "risk_level",
             "actions",
         )
+
+
+class VLANDeploymentJobTable(NetBoxTable):
+    """
+    Table for displaying VLAN deployment job history
+    """
+    id = tables.Column(
+        linkify=True,
+        verbose_name=_("ID"),
+        orderable=True,
+    )
+    job_type = tables.Column(
+        verbose_name=_("Type"),
+        orderable=True,
+    )
+    status = tables.Column(
+        verbose_name=_("Status"),
+        orderable=True,
+    )
+    created_by = tables.Column(
+        verbose_name=_("User"),
+        orderable=True,
+    )
+    started_at = tables.DateTimeColumn(
+        verbose_name=_("Started"),
+        orderable=True,
+    )
+    completed_at = tables.DateTimeColumn(
+        verbose_name=_("Completed"),
+        orderable=True,
+    )
+    created = tables.DateTimeColumn(
+        verbose_name=_("Created"),
+        orderable=True,
+    )
+    device_count = tables.Column(
+        accessor='devices.count',
+        verbose_name=_("Devices"),
+        orderable=False,
+    )
+    
+    class Meta(NetBoxTable.Meta):
+        model = VLANDeploymentJob
+        fields = (
+            "id",
+            "job_type",
+            "status",
+            "created_by",
+            "started_at",
+            "completed_at",
+            "created",
+            "device_count",
+        )
+        default_columns = (
+            "id",
+            "job_type",
+            "status",
+            "created_by",
+            "started_at",
+            "completed_at",
+            "device_count",
+        )
+    
+    def render_job_type(self, value):
+        """Render job type with badge."""
+        if value == 'dryrun':
+            return format_html('<span class="badge bg-info">{}</span>', 'Dry Run')
+        elif value == 'deployment':
+            return format_html('<span class="badge bg-primary">{}</span>', 'Deployment')
+        return format_html('<span class="badge bg-secondary">{}</span>', value or 'N/A')
+    
+    def render_status(self, value):
+        """Render status with color-coded badge."""
+        status_map = {
+            'pending': ('bg-secondary', 'Pending'),
+            'running': ('bg-warning text-dark', 'Running'),
+            'completed': ('bg-success', 'Completed'),
+            'failed': ('bg-danger', 'Failed'),
+            'cancelled': ('bg-dark', 'Cancelled'),
+        }
+        badge_class, display_name = status_map.get(value, ('bg-secondary', value or 'N/A'))
+        return format_html('<span class="badge {}">{}</span>', badge_class, display_name)
 

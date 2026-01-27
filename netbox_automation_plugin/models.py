@@ -110,3 +110,116 @@ class AutomationTemplate(NetBoxModel):
         verbose_name_plural = 'Automation Templates'
 
 
+class VLANDeploymentJob(NetBoxModel):
+    """
+    Track VLAN deployment workflow executions (dry runs and deployments)
+    """
+    JOB_TYPE_CHOICES = [
+        ('dryrun', 'Dry Run'),
+        ('deployment', 'Deployment'),
+    ]
+    
+    JOB_STATUS_CHOICES = [
+        ('pending', 'Pending'),
+        ('running', 'Running'),
+        ('completed', 'Completed'),
+        ('failed', 'Failed'),
+        ('cancelled', 'Cancelled'),
+    ]
+    
+    job_type = models.CharField(
+        max_length=20,
+        choices=JOB_TYPE_CHOICES,
+        verbose_name='Type'
+    )
+    status = models.CharField(
+        max_length=20,
+        choices=JOB_STATUS_CHOICES,
+        default='pending',
+        verbose_name='Status'
+    )
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='vlan_deployment_jobs',
+        verbose_name='User'
+    )
+    started_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        verbose_name='Started'
+    )
+    completed_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        verbose_name='Completed'
+    )
+    
+    # Deployment parameters
+    deployment_scope = models.CharField(
+        max_length=20,
+        choices=[
+            ('single', 'Single Device'),
+            ('group', 'Device Group'),
+        ],
+        default='single'
+    )
+    sync_netbox_to_device = models.BooleanField(
+        default=False,
+        verbose_name='Sync Mode'
+    )
+    untagged_vlan_id = models.IntegerField(
+        null=True,
+        blank=True,
+        verbose_name='Untagged VLAN'
+    )
+    tagged_vlan_ids = models.JSONField(
+        default=list,
+        blank=True,
+        verbose_name='Tagged VLANs'
+    )
+    
+    # Devices involved in this deployment
+    devices = models.ManyToManyField(
+        Device,
+        related_name='vlan_deployment_jobs',
+        blank=True
+    )
+    
+    # Results and metadata
+    result_summary = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text='Summary of deployment results'
+    )
+    error_message = models.TextField(
+        blank=True,
+        help_text='Error message if job failed'
+    )
+    execution_log = models.TextField(
+        blank=True,
+        help_text='Detailed execution log'
+    )
+    
+    class Meta:
+        app_label = 'netbox_automation_plugin'
+        ordering = ['-created']
+        verbose_name = 'VLAN Deployment Job'
+        verbose_name_plural = 'VLAN Deployment Jobs'
+        indexes = [
+            models.Index(fields=['-created']),
+            models.Index(fields=['job_type', 'status']),
+            models.Index(fields=['created_by']),
+        ]
+    
+    def __str__(self):
+        return f"VLAN Deployment {self.job_type} - {self.get_status_display()} ({self.id})"
+    
+    def get_absolute_url(self):
+        """Return the absolute URL for this job."""
+        from django.urls import reverse
+        return reverse('plugins:netbox_automation_plugin:vlan_deployment_jobs')
+
+

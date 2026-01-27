@@ -1,0 +1,29 @@
+{% extends 'base/layout.html' %}
+{% load i18n %}
+{% load render_table from django_tables2 %}
+
+{% block title %}{% trans "VLAN Deployment Jobs" %}{% endblock %}
+
+{% block content %}
+<div class="row">
+  <div class="col-md-12">
+    <div class="card">
+      <div class="card-header">
+        <h5 class="card-title mb-0">{% trans "VLAN Deployment Jobs" %}</h5>
+      </div>
+      <div class="card-body">
+        {% if job_count %}
+          <p class="text-muted">
+            {% trans "Viewing" %} {{ job_count }} {% trans "job(s)" %}
+          </p>
+          {% render_table table %}
+        {% else %}
+          <p class="text-muted">
+            {% trans "No jobs found. Run a dry run or deployment to see job history." %}
+          </p>
+        {% endif %}
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}
