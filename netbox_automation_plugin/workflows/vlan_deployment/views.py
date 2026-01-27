@@ -487,12 +487,16 @@ class VLANDeploymentView(View):
         dry_run = form.cleaned_data.get('dry_run', False)
         job_type = 'dryrun' if dry_run else 'deployment'
         
-        # Use bulk_create to bypass NetBox's serializer system
+        # Create job using bulk_create to bypass NetBox's serializer system
+        # Set created timestamp manually since bulk_create doesn't trigger save()
+        now = timezone.now()
         job = VLANDeploymentJob(
             job_type=job_type,
             status='running',
             created_by=request.user,
-            started_at=timezone.now(),
+            started_at=now,
+            created=now,  # Set created timestamp manually
+            last_updated=now,  # Set last_updated timestamp manually
             deployment_scope=form.cleaned_data.get('deployment_scope', 'single'),
             sync_netbox_to_device=sync_netbox_to_device,
             untagged_vlan_id=form.cleaned_data.get('untagged_vlan'),
@@ -500,7 +504,7 @@ class VLANDeploymentView(View):
         )
         # Use bulk_create to avoid triggering NetBox's serializer
         VLANDeploymentJob.objects.bulk_create([job], ignore_conflicts=False)
-        # Refresh from DB to get the ID
+        # Refresh from DB to get the ID and ensure object is properly loaded
         job.refresh_from_db()
         # Set devices after creation
         job.devices.set(devices)
