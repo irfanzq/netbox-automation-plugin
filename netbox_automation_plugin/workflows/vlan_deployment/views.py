@@ -617,20 +617,49 @@ class VLANDeploymentView(View):
                         'device_count': len(devices),
                     }
                     
-                    # Collect all deployment logs from results
-                    all_deployment_logs = []
+                    # Group deployment logs by device for separate display
+                    device_logs_map = {}  # {device_name: [log1, log2, ...]}
                     all_tagged_vlans = set()
                     import re
                     
-                    # Collect tagged VLANs from form data (if available)
+                    # First, get existing tagged VLANs from the job (from initial form data)
+                    cursor.execute(f"""
+                        SELECT tagged_vlan_ids FROM {job_table} WHERE id = %s
+                    """, [job_id])
+                    existing_tagged_row = cursor.fetchone()
+                    if existing_tagged_row and existing_tagged_row[0]:
+                        try:
+                            existing_tagged = json.loads(existing_tagged_row[0])
+                            if isinstance(existing_tagged, list):
+                                all_tagged_vlans.update([int(v) for v in existing_tagged if isinstance(v, (int, str)) and str(v).isdigit()])
+                        except (json.JSONDecodeError, ValueError):
+                            pass
+                    
+                    # Also collect tagged VLANs from form data (if available) - this ensures we have them
                     form_tagged_vlans = form.cleaned_data.get('tagged_vlans_parsed', [])
                     if form_tagged_vlans:
-                        all_tagged_vlans.update(form_tagged_vlans)
+                        all_tagged_vlans.update([int(v) for v in form_tagged_vlans if isinstance(v, (int, str)) and str(v).isdigit()])
                     
+                    # Group results by device
                     for result in results:
+                        device_obj = result.get('device')
+                        if device_obj:
+                            # Get device name (handle both Device objects and strings)
+                            if hasattr(device_obj, 'name'):
+                                device_name = device_obj.name
+                            elif isinstance(device_obj, str):
+                                device_name = device_obj
+                            else:
+                                device_name = str(device_obj)
+                        else:
+                            device_name = "Unknown Device"
+                        
                         deployment_log = result.get('deployment_logs', '')
                         if deployment_log and deployment_log.strip():
-                            all_deployment_logs.append(deployment_log)
+                            # Group logs by device
+                            if device_name not in device_logs_map:
+                                device_logs_map[device_name] = []
+                            device_logs_map[device_name].append(deployment_log)
                             
                             # Extract tagged VLANs from deployment logs
                             # Look for patterns like "Tagged VLANs: 1514" or "Tagged VLANs: 1514, 1515"
@@ -659,26 +688,39 @@ class VLANDeploymentView(View):
                         if isinstance(vlans_to_add, list) and vlans_to_add:
                             all_tagged_vlans.update([int(v) for v in vlans_to_add if isinstance(v, (int, str)) and str(v).isdigit()])
                     
-                    # Combine all deployment logs
-                    if all_deployment_logs:
-                        full_logs = "\n\n".join(all_deployment_logs)
-                        new_execution_log = current_execution_log + "\n\n" + full_logs
+                    # Build execution log with separate sections for each device
+                    if device_logs_map:
+                        # Add separator and device sections
+                        full_logs_parts = []
+                        for device_name in sorted(device_logs_map.keys()):
+                            device_logs_list = device_logs_map[device_name]
+                            # Combine all logs for this device
+                            device_full_log = "\n\n".join(device_logs_list)
+                            full_logs_parts.append(device_full_log)
+                        
+                        # Join all device logs with clear separators
+                        full_logs = "\n\n" + "=" * 80 + "\n\n".join([
+                            f"\n{'=' * 80}\n\n{log}\n{'=' * 80}" 
+                            for log in full_logs_parts
+                        ])
+                        new_execution_log = current_execution_log + full_logs
                     else:
                         log_addition = f"\n\n=== Results Summary ===\n"
                         log_addition += f"Device Count: {len(devices)}\n"
                         log_addition += f"Status Counts: {json.dumps(status_counts, indent=2)}\n"
                         new_execution_log = current_execution_log + log_addition
                     
-                    # Update tagged VLANs if we found any in results (for sync mode)
-                    update_fields = ['result_summary', 'execution_log', 'last_updated']
-                    update_values = [json.dumps(result_summary), new_execution_log, timezone.now()]
+                    # Always update tagged_vlan_ids (preserve from form or update with extracted values)
+                    update_fields = ['result_summary', 'execution_log', 'tagged_vlan_ids', 'last_updated']
+                    tagged_vlans_list = sorted(list(all_tagged_vlans)) if all_tagged_vlans else []
+                    update_values = [
+                        json.dumps(result_summary), 
+                        new_execution_log, 
+                        json.dumps(tagged_vlans_list),
+                        timezone.now()
+                    ]
                     
-                    if all_tagged_vlans:
-                        # Update tagged_vlan_ids if we found tagged VLANs in results
-                        update_fields.append('tagged_vlan_ids')
-                        update_values.append(json.dumps(sorted(list(all_tagged_vlans))))
-                    
-                    # Build UPDATE query dynamically
+                    # Build UPDATE query
                     set_clause = ', '.join([f"{field} = %s" for field in update_fields])
                     update_values.append(job_id)
                     

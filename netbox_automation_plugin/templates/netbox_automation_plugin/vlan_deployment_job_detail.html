@@ -93,16 +93,18 @@
                   <td>VLAN {{ job.untagged_vlan_id }}</td>
                 </tr>
                 {% endif %}
-                {% if job.tagged_vlan_ids %}
                 <tr>
                   <th>{% trans "Tagged VLANs" %}</th>
                   <td>
-                    {% for vlan_id in job.tagged_vlan_ids %}
-                      <span class="badge bg-secondary">VLAN {{ vlan_id }}</span>
-                    {% endfor %}
+                    {% if job.tagged_vlan_ids and job.tagged_vlan_ids|length > 0 %}
+                      {% for vlan_id in job.tagged_vlan_ids %}
+                        <span class="badge bg-secondary">VLAN {{ vlan_id }}</span>
+                      {% endfor %}
+                    {% else %}
+                      <span class="text-muted">{% trans "None" %}</span>
+                    {% endif %}
                   </td>
                 </tr>
-                {% endif %}
                 <tr>
                   <th>{% trans "Devices" %}</th>
                   <td>
