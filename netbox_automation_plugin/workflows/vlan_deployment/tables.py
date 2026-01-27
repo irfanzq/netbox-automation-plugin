@@ -318,7 +318,7 @@ class VLANDeploymentJobTable(NetBoxTable):
     Table for displaying VLAN deployment job history
     """
     id = tables.Column(
-        linkify=True,
+        linkify=False,
         verbose_name=_("ID"),
         orderable=True,
     )
