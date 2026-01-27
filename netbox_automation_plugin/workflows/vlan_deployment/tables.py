@@ -320,6 +320,7 @@ class VLANDeploymentJobTable(tables.Table):
     id = tables.Column(
         verbose_name=_("ID"),
         orderable=True,
+        linkify=lambda record: reverse('plugins:netbox_automation_plugin:vlan_deployment_job_detail', args=[record.id]),
     )
     job_type = tables.Column(
         verbose_name=_("Type"),

@@ -483,10 +483,12 @@ class VLANDeploymentView(View):
                     form.add_error(None, error)
                 return render(request, self.template_name_form, {"form": form})
 
-        # Create job record
+        # Create job record - use bulk_create or direct assignment to avoid serializer issues
         dry_run = form.cleaned_data.get('dry_run', False)
         job_type = 'dryrun' if dry_run else 'deployment'
-        job = VLANDeploymentJob.objects.create(
+        
+        # Create job without devices first to avoid serializer issues
+        job = VLANDeploymentJob(
             job_type=job_type,
             status='running',
             created_by=request.user,
@@ -496,7 +498,24 @@ class VLANDeploymentView(View):
             untagged_vlan_id=form.cleaned_data.get('untagged_vlan'),
             tagged_vlan_ids=form.cleaned_data.get('tagged_vlans_parsed', []),
         )
+        job.save()
+        # Set devices after saving to avoid serializer lookup during creation
         job.devices.set(devices)
+        
+        # Build initial execution log
+        execution_log_parts = [
+            f"Job Type: {job.get_job_type_display()}",
+            f"Status: {job.get_status_display()}",
+            f"Deployment Scope: {job.get_deployment_scope_display()}",
+            f"Sync Mode: {'Enabled' if sync_netbox_to_device else 'Disabled'}",
+            f"Devices: {', '.join([d.name for d in devices])}",
+        ]
+        if job.untagged_vlan_id:
+            execution_log_parts.append(f"Untagged VLAN: {job.untagged_vlan_id}")
+        if job.tagged_vlan_ids:
+            execution_log_parts.append(f"Tagged VLANs: {', '.join(map(str, job.tagged_vlan_ids))}")
+        job.execution_log = "\n".join(execution_log_parts)
+        job.save()
 
         # Run deployment - route to sync or normal mode
         results = None
@@ -519,7 +538,7 @@ class VLANDeploymentView(View):
             # Re-raise the exception after saving job status
             raise
         finally:
-            # Save job summary (only if results are available)
+            # Save job summary and execution log (only if results are available)
             if results:
                 summary = self._build_summary(results, len(devices))
                 status_counts = self._calculate_status_counts(results)
@@ -528,12 +547,20 @@ class VLANDeploymentView(View):
                     'status_counts': status_counts,
                     'device_count': len(devices),
                 }
+                # Append results to execution log
+                import json
+                log_addition = f"\n\n=== Results Summary ===\n"
+                log_addition += f"Device Count: {len(devices)}\n"
+                log_addition += f"Status Counts: {json.dumps(status_counts, indent=2)}\n"
+                job.execution_log = (job.execution_log or "") + log_addition
             else:
                 job.result_summary = {
                     'summary': {},
                     'status_counts': {},
                     'device_count': len(devices),
                 }
+                if job.status == 'failed':
+                    job.execution_log = (job.execution_log or "") + f"\n\n=== Error ===\n{job.error_message}"
             job.save()
 
         # CSV export if requested
@@ -9681,4 +9708,31 @@ class VLANDeploymentJobsView(View):
             'table': table,
             'job_count': jobs.count(),
         }
+        return render(request, self.template_name, context)
+
+
+class VLANDeploymentJobDetailView(View):
+    """
+    View to display detailed information about a specific VLAN deployment job
+    """
+    template_name = "netbox_automation_plugin/vlan_deployment_job_detail.html"
+
+    def get(self, request, job_id):
+        from django.shortcuts import get_object_or_404
+        from django.urls import reverse
+        
+        job = get_object_or_404(
+            VLANDeploymentJob.objects.select_related('created_by').prefetch_related('devices'),
+            id=job_id
+        )
+        
+        # Prepare context with all job details
+        context = {
+            'job': job,
+            'devices': job.devices.all(),
+            'result_summary': job.result_summary or {},
+            'error_message': job.error_message,
+            'execution_log': job.execution_log,
+        }
+        
         return render(request, self.template_name, context)
