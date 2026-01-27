@@ -616,16 +616,77 @@ class VLANDeploymentView(View):
                         'status_counts': status_counts,
                         'device_count': len(devices),
                     }
-                    log_addition = f"\n\n=== Results Summary ===\n"
-                    log_addition += f"Device Count: {len(devices)}\n"
-                    log_addition += f"Status Counts: {json.dumps(status_counts, indent=2)}\n"
-                    new_execution_log = current_execution_log + log_addition
+                    
+                    # Collect all deployment logs from results
+                    all_deployment_logs = []
+                    all_tagged_vlans = set()
+                    import re
+                    
+                    # Collect tagged VLANs from form data (if available)
+                    form_tagged_vlans = form.cleaned_data.get('tagged_vlans_parsed', [])
+                    if form_tagged_vlans:
+                        all_tagged_vlans.update(form_tagged_vlans)
+                    
+                    for result in results:
+                        deployment_log = result.get('deployment_logs', '')
+                        if deployment_log and deployment_log.strip():
+                            all_deployment_logs.append(deployment_log)
+                            
+                            # Extract tagged VLANs from deployment logs
+                            # Look for patterns like "Tagged VLANs: 1514" or "Tagged VLANs: 1514, 1515"
+                            tagged_patterns = [
+                                r'Tagged VLANs?:\s*([\d,\s]+)',  # "Tagged VLANs: 1514" or "Tagged VLANs: 1514, 1515"
+                                r'Tagged VLANs?:\s*(\d+)',       # "Tagged VLANs: 1514"
+                            ]
+                            for pattern in tagged_patterns:
+                                matches = re.findall(pattern, deployment_log, re.IGNORECASE)
+                                for match in matches:
+                                    # Handle comma-separated values
+                                    vlans = [int(v.strip()) for v in match.split(',') if v.strip().isdigit()]
+                                    all_tagged_vlans.update(vlans)
+                        
+                        # Also check interface_details for tagged VLANs
+                        interface_details = result.get('interface_details', {})
+                        if isinstance(interface_details, dict):
+                            # Check various possible keys
+                            for key in ['tagged_vlans', 'tagged_vlan_ids', 'tagged']:
+                                tagged_from_details = interface_details.get(key, [])
+                                if isinstance(tagged_from_details, list) and tagged_from_details:
+                                    all_tagged_vlans.update([int(v) for v in tagged_from_details if isinstance(v, (int, str)) and str(v).isdigit()])
+                        
+                        # Check vlans_to_add_to_bridge (these are tagged VLANs)
+                        vlans_to_add = result.get('vlans_to_add_to_bridge', [])
+                        if isinstance(vlans_to_add, list) and vlans_to_add:
+                            all_tagged_vlans.update([int(v) for v in vlans_to_add if isinstance(v, (int, str)) and str(v).isdigit()])
+                    
+                    # Combine all deployment logs
+                    if all_deployment_logs:
+                        full_logs = "\n\n".join(all_deployment_logs)
+                        new_execution_log = current_execution_log + "\n\n" + full_logs
+                    else:
+                        log_addition = f"\n\n=== Results Summary ===\n"
+                        log_addition += f"Device Count: {len(devices)}\n"
+                        log_addition += f"Status Counts: {json.dumps(status_counts, indent=2)}\n"
+                        new_execution_log = current_execution_log + log_addition
+                    
+                    # Update tagged VLANs if we found any in results (for sync mode)
+                    update_fields = ['result_summary', 'execution_log', 'last_updated']
+                    update_values = [json.dumps(result_summary), new_execution_log, timezone.now()]
+                    
+                    if all_tagged_vlans:
+                        # Update tagged_vlan_ids if we found tagged VLANs in results
+                        update_fields.append('tagged_vlan_ids')
+                        update_values.append(json.dumps(sorted(list(all_tagged_vlans))))
+                    
+                    # Build UPDATE query dynamically
+                    set_clause = ', '.join([f"{field} = %s" for field in update_fields])
+                    update_values.append(job_id)
                     
                     cursor.execute(f"""
                         UPDATE {job_table} 
-                        SET result_summary = %s, execution_log = %s, last_updated = %s
+                        SET {set_clause}
                         WHERE id = %s
-                    """, [json.dumps(result_summary), new_execution_log, timezone.now(), job_id])
+                    """, update_values)
                 else:
                     result_summary = {
                         'summary': {},
