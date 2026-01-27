@@ -313,12 +313,11 @@ class VLANDeploymentResultTable(NetBoxTable):
         )
 
 
-class VLANDeploymentJobTable(NetBoxTable):
+class VLANDeploymentJobTable(tables.Table):
     """
     Table for displaying VLAN deployment job history
     """
     id = tables.Column(
-        linkify=False,
         verbose_name=_("ID"),
         orderable=True,
     )
@@ -352,7 +351,7 @@ class VLANDeploymentJobTable(NetBoxTable):
         orderable=False,
     )
     
-    class Meta(NetBoxTable.Meta):
+    class Meta:
         model = VLANDeploymentJob
         fields = (
             "id",
@@ -373,6 +372,9 @@ class VLANDeploymentJobTable(NetBoxTable):
             "completed_at",
             "device_count",
         )
+        attrs = {
+            'class': 'table table-hover table-headings',
+        }
     
     def render_job_type(self, value):
         """Render job type with badge."""
