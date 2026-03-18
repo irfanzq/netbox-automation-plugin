@@ -13,6 +13,13 @@ Set these in the environment of the NetBox process (e.g. systemd unit, Docker en
 | `MAAS_URL` | MAAS API base URL | `https://172.17.0.128:5443/MAAS` |
 | `MAAS_API_KEY` | MAAS API key (key:token:secret) | `...` |
 | `MAAS_INSECURE` | Skip TLS verify for MAAS | `true` or `false` |
+
+**Same MAAS as the UI:** `MAAS_URL` must be the API base for the MAAS instance where you see the machine in the web UI (e.g. spruce vs birch). If the URL points at a different region, hostnames can match while NICs look “missing.” **NIC list** uses REST + machine detail (`interface_set`) on MAAS 3.6+ when needed; ensure **`requests-oauthlib`** is installed in the NetBox venv.
+
+Full reconciliation design: **`sync/DRIFT_DESIGN.md`**.
+
+**Drift report — physical VLAN:** For each MAAS NIC that matches a NetBox interface by MAC, if both sides expose a numeric untagged VID, a mismatch sets status **`VLAN_DRIFT`** (see Phase 0 counts). If NetBox has VID but MAAS API does not return one (common vs machine summary UI), the row stays OK with a **VLAN unverified** note — manual check by fabric/VLAN name.
+
 | `OPENSTACK_AUTH_URL` | OpenStack Identity URL | `https://.../v3` |
 | `OPENSTACK_USERNAME` | OpenStack user | `admin` |
 | `OPENSTACK_PASSWORD` | OpenStack password | (secret) |

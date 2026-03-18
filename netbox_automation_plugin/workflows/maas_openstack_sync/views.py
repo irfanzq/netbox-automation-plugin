@@ -108,10 +108,12 @@ class MAASOpenStackSyncView(LoginRequiredMixin, View):
             }
             matched_names = maas_h & nb_h
             audit_map = fetch_netbox_audit_detail_for_names(matched_names)
-            matched_rows = build_maas_netbox_matched_rows(maas_data, audit_map)
+            matched_rows = build_maas_netbox_matched_rows(
+                maas_data, audit_map, openstack_data
+            )
             nb_ifaces = fetch_netbox_interfaces_for_names(matched_names)
             interface_audit = build_maas_netbox_interface_audit(
-                matched_names, maas_data, nb_ifaces
+                matched_names, maas_data, nb_ifaces, netbox_audit=audit_map
             )
             prefix_set = fetch_netbox_prefix_cidrs()
             netbox_prefix_count = len(prefix_set)

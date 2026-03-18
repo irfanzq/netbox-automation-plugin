@@ -3,8 +3,23 @@ Richer drift detail: matched MAAS↔NetBox rows, OpenStack↔NetBox prefix hints
 """
 
 import logging
+from collections import defaultdict
+from typing import Dict, Optional
 
 logger = logging.getLogger("netbox_automation_plugin.sync")
+
+
+def _parse_vid(val) -> Optional[int]:
+    """Numeric VLAN ID for comparison, or None if missing/non-numeric."""
+    if val is None:
+        return None
+    s = str(val).strip()
+    if not s or s == "—":
+        return None
+    try:
+        return int(s, 10)
+    except (ValueError, TypeError):
+        return None
 
 
 def _normalize_mac(mac: str) -> str:
@@ -20,11 +35,17 @@ def _normalize_mac(mac: str) -> str:
     return s
 
 
-def build_maas_netbox_interface_audit(matched_hostnames: set, maas_data: dict, netbox_ifaces: dict):
+def build_maas_netbox_interface_audit(
+    matched_hostnames: set,
+    maas_data: dict,
+    netbox_ifaces: dict,
+    netbox_audit=None,
+):
     """
     Line-by-line MAAS NIC vs NetBox interface (match by MAC). One entry per matched hostname.
 
     netbox_ifaces: hostname -> list of {name, mac, ips, mgmt_only}
+    netbox_audit: hostname -> {site_slug, location_name, ...} for per-device context columns.
     """
     by_h = {}
     for m in maas_data.get("machines") or []:
@@ -32,11 +53,17 @@ def build_maas_netbox_interface_audit(matched_hostnames: set, maas_data: dict, n
         if h:
             by_h[h] = m
 
+    nb_audit = netbox_audit or {}
     hosts_out = []
     for hostname in sorted(matched_hostnames):
         m = by_h.get(hostname) or {}
         maas_ifaces = m.get("interfaces") or []
         nb_list = netbox_ifaces.get(hostname) or []
+        nb_ctx = nb_audit.get(hostname) or {}
+        ctx_site = (nb_ctx.get("site_slug") or "-")[:14]
+        ctx_loc = (nb_ctx.get("location_name") or "-")[:16]
+        m_fab = (m.get("fabric_name") or "-")[:14]
+        m_pool = (m.get("pool_name") or "-")[:12]
         nb_by_mac = {}
         for nb in nb_list:
             k = _normalize_mac(nb.get("mac") or "")
@@ -51,13 +78,20 @@ def build_maas_netbox_interface_audit(matched_hostnames: set, maas_data: dict, n
             maas_ips = mi.get("ips") or []
             maas_ip_str = ", ".join(maas_ips) if maas_ips else "—"
             itype = (mi.get("type") or "")[:12]
+            maas_vlan = str(mi.get("vlan_vid") or "")[:8] or "—"
 
             if not mac:
                 rows.append({
+                    "maas_fabric": m_fab,
+                    "maas_pool": m_pool,
+                    "nb_site": ctx_site,
+                    "nb_location": ctx_loc,
                     "maas_if": maas_name,
+                    "maas_vlan": maas_vlan,
                     "maas_mac": "—",
                     "maas_ips": maas_ip_str,
                     "nb_if": "—",
+                    "nb_vlan": "—",
                     "nb_mac": "—",
                     "nb_ips": "—",
                     "status": "MAAS_NO_MAC",
@@ -69,10 +103,16 @@ def build_maas_netbox_interface_audit(matched_hostnames: set, maas_data: dict, n
             nb = nb_by_mac.get(mac)
             if not nb:
                 rows.append({
+                    "maas_fabric": m_fab,
+                    "maas_pool": m_pool,
+                    "nb_site": ctx_site,
+                    "nb_location": ctx_loc,
                     "maas_if": maas_name,
+                    "maas_vlan": maas_vlan,
                     "maas_mac": mac,
                     "maas_ips": maas_ip_str,
                     "nb_if": "—",
+                    "nb_vlan": "—",
                     "nb_mac": "—",
                     "nb_ips": "—",
                     "status": "NOT_IN_NETBOX",
@@ -85,9 +125,30 @@ def build_maas_netbox_interface_audit(matched_hostnames: set, maas_data: dict, n
             missing_nb = maas_ip_set - nb_ips_set
             nb_name = nb.get("name") or "—"
             nb_ip_str = ", ".join(nb.get("ips") or []) if nb.get("ips") else "—"
+            nb_vlan = str(nb.get("untagged_vlan_vid") or "")[:8] or "—"
             mgmt = "mgmt" if nb.get("mgmt_only") else ""
 
+            maas_v = _parse_vid(maas_vlan)
+            nb_v = _parse_vid(nb_vlan)
+
             notes = []
+            vlan_drift = False
+            # Physical untagged VLAN: MAAS vs NetBox (DRIFT_DESIGN — tag vlan-drift)
+            if maas_v is not None and nb_v is not None:
+                if maas_v != nb_v:
+                    vlan_drift = True
+                    notes.append(f"vlan-drift: MAAS VID {maas_v} != NetBox untagged {nb_v}")
+            elif maas_v is not None and nb_v is None:
+                vlan_drift = True
+                notes.append(
+                    f"vlan-drift: MAAS VID {maas_v}; NetBox iface has no untagged VLAN"
+                )
+            elif maas_v is None and nb_v is not None:
+                notes.append(
+                    f"VLAN unverified: NetBox untagged VID={nb_v}; MAAS VID not in API "
+                    f"(UI often name-only — confirm in MAAS API/subnets)"
+                )
+
             if (maas_name or "").lower() != (nb_name or "").lower():
                 notes.append(f"name: MAAS={maas_name} NB={nb_name}")
             if missing_nb:
@@ -98,7 +159,11 @@ def build_maas_netbox_interface_audit(matched_hostnames: set, maas_data: dict, n
             if extra_nb and not missing_nb:
                 notes.append(f"NB only IP: {', '.join(sorted(extra_nb)[:4])}")
 
-            if missing_nb:
+            if vlan_drift and missing_nb:
+                status = "VLAN_DRIFT+IP_GAP"
+            elif vlan_drift:
+                status = "VLAN_DRIFT"
+            elif missing_nb:
                 status = "IP_GAP"
             elif notes and any("name:" in n for n in notes):
                 status = "OK_NAME_DIFF"
@@ -106,10 +171,16 @@ def build_maas_netbox_interface_audit(matched_hostnames: set, maas_data: dict, n
                 status = "OK"
 
             rows.append({
+                "maas_fabric": m_fab,
+                "maas_pool": m_pool,
+                "nb_site": ctx_site,
+                "nb_location": ctx_loc,
                 "maas_if": maas_name,
+                "maas_vlan": maas_vlan,
                 "maas_mac": mac,
                 "maas_ips": maas_ip_str,
                 "nb_if": nb_name,
+                "nb_vlan": nb_vlan,
                 "nb_mac": mac,
                 "nb_ips": nb_ip_str,
                 "status": status,
@@ -124,6 +195,10 @@ def build_maas_netbox_interface_audit(matched_hostnames: set, maas_data: dict, n
 
         hosts_out.append({
             "hostname": hostname,
+            "nb_site": ctx_site,
+            "nb_location": ctx_loc,
+            "maas_fabric": m_fab,
+            "maas_pool": m_pool,
             "rows": rows,
             "netbox_only": netbox_only,
         })
@@ -131,12 +206,37 @@ def build_maas_netbox_interface_audit(matched_hostnames: set, maas_data: dict, n
     return {"hosts": hosts_out}
 
 
-def build_maas_netbox_matched_rows(maas_data: dict, netbox_audit: dict):
+def _place_match(a: str, b: str) -> bool:
+    """Loose match: a contained in b or vice versa (for fabric/location/pool/site hints)."""
+    a = (a or "").strip().lower()
+    b = (b or "").strip().lower()
+    if not a or not b or a == "-" or b == "-":
+        return False
+    return a in b or b in a
+
+
+def _openstack_fip_by_fixed_ip(openstack_data: Optional[dict]) -> Dict[str, list]:
+    m: dict[str, list] = defaultdict(list)
+    if not openstack_data or openstack_data.get("error"):
+        return m
+    for f in openstack_data.get("floating_ips") or []:
+        fix = (f.get("fixed_ip_address") or "").strip().lower()
+        pub = (f.get("floating_ip_address") or "").strip()
+        if fix and pub:
+            m[fix].append(pub)
+    return m
+
+
+def build_maas_netbox_matched_rows(
+    maas_data: dict, netbox_audit: dict, openstack_data: Optional[dict] = None
+):
     """
     For each hostname present in both MAAS and netbox_audit, emit comparison row + hints.
 
-    netbox_audit: name -> {site_slug, status, serial, primary_mac}
+    netbox_audit: name -> site_slug, location, status, serial, primary_mac,
+      primary_ip4_host, vrf_name, vlan_vids_summary, device_ips (for FIP join).
     """
+    fip_map = _openstack_fip_by_fixed_ip(openstack_data)
     rows = []
     for m in maas_data.get("machines") or []:
         h = (m.get("hostname") or "").strip()
@@ -146,28 +246,48 @@ def build_maas_netbox_matched_rows(maas_data: dict, netbox_audit: dict):
         hints = []
         zone = (m.get("zone_name") or "").strip().lower()
         pool = (m.get("pool_name") or "").strip().lower()
+        fab = (m.get("fabric_name") or "").strip().lower()
         site = (nb.get("site_slug") or "").strip().lower()
+        loc = (nb.get("location_name") or "").strip().lower()
         if site and pool and pool not in site and site not in pool and zone not in site:
-            hints.append("site vs MAAS zone/pool — verify site_mapping / design intent")
+            hints.append("site vs MAAS zone/pool")
+        if fab and loc and not _place_match(fab, loc) and not _place_match(pool, loc):
+            hints.append("MAAS fabric vs NB location — verify mapping")
+        elif fab and not loc:
+            hints.append("NB location empty — MAAS has fabric")
         maas_st = (m.get("status_name") or "").lower()
         nb_st = (nb.get("status") or "").lower()
         if maas_st and nb_st:
             if "deployed" in maas_st and "staged" in nb_st:
-                hints.append("MAAS deployed but NetBox status staged — consider active")
+                hints.append("MAAS deployed / NB staged — consider active")
             if "ready" in maas_st and "active" in nb_st:
                 pass
         if not nb.get("serial"):
-            hints.append("NetBox serial empty — MAAS has system_id for correlation")
+            hints.append("NB serial empty — correlate system_id")
+        match_ok = not hints
+        fips = []
+        for dip in nb.get("device_ips") or []:
+            fips.extend(fip_map.get((dip or "").lower(), []))
+        os_fip = ",".join(dict.fromkeys(fips))
+        if len(os_fip) > 48:
+            os_fip = os_fip[:46] + ".."
         rows.append({
             "hostname": h,
             "maas_zone": m.get("zone_name") or "-",
+            "maas_fabric": m.get("fabric_name") or "-",
             "maas_pool": m.get("pool_name") or "-",
             "maas_status": m.get("status_name") or "-",
-            "maas_system_id": (m.get("system_id") or "")[:12],
+            "maas_system_id": (m.get("system_id") or "") or "",
             "netbox_site": nb.get("site_slug") or "-",
+            "netbox_location": nb.get("location_name") or "-",
             "netbox_status": nb.get("status") or "-",
             "netbox_serial": (nb.get("serial") or "") or "(empty)",
             "netbox_primary_mac": nb.get("primary_mac") or "(none)",
+            "netbox_primary_ip": nb.get("primary_ip4_host") or "—",
+            "netbox_vrf": nb.get("vrf_name") or "Global",
+            "netbox_vlans": nb.get("vlan_vids_summary") or "—",
+            "openstack_fip": os_fip or "—",
+            "place_match": "OK" if match_ok else "CHECK",
             "hints": hints,
         })
     return sorted(rows, key=lambda r: r["hostname"])
@@ -240,5 +360,7 @@ def openstack_floating_ips_missing_from_netbox(openstack_data: dict):
                 "floating_ip": ip,
                 "fixed_ip_address": f.get("fixed_ip_address") or "-",
                 "id": f.get("id", ""),
+                "project_name": f.get("project_name") or "-",
+                "project_id": f.get("project_id") or "",
             })
     return missing
