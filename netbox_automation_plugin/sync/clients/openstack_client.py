@@ -32,6 +32,7 @@ def fetch_openstack_data(config: dict):
         return result
 
     try:
+        verify_tls = not config.get("openstack_insecure", False)
         conn = openstack.connect(
             auth_url=config["openstack_auth_url"],
             username=config.get("openstack_username") or "",
@@ -40,6 +41,7 @@ def fetch_openstack_data(config: dict):
             user_domain_name=config.get("openstack_user_domain_name") or "Default",
             project_domain_name=config.get("openstack_project_domain_name") or "Default",
             region_name=config.get("openstack_region_name") or "RegionOne",
+            verify=verify_tls,
         )
 
         for net in conn.network.networks():

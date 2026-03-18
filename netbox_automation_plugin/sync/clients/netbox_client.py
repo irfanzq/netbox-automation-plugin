@@ -10,7 +10,14 @@ import logging
 logger = logging.getLogger("netbox_automation_plugin.sync")
 
 
-def fetch_netbox_data(netbox_url: str, netbox_token: str, base_url_fallback: str = ""):
+def fetch_netbox_data(
+    netbox_url: str,
+    netbox_token: str,
+    base_url_fallback: str = "",
+    *,
+    ssl_verify: bool = True,
+    ca_bundle: str | None = None,
+):
     """
     Fetch devices and sites from NetBox. Returns a dict with:
       - devices: list of {name, id, site_slug}
@@ -35,12 +42,17 @@ def fetch_netbox_data(netbox_url: str, netbox_token: str, base_url_fallback: str
 
     try:
         nb = pynetbox.api(url, token=netbox_token)
-        # Optional: skip SSL verify for dev (e.g. self-signed)
-        if url.startswith("https://") and "insecure" in str(type(nb)).lower():
-            try:
+        if url.startswith("https://"):
+            if ca_bundle:
+                nb.http_session.verify = ca_bundle
+            elif not ssl_verify:
                 nb.http_session.verify = False
-            except Exception:
-                pass
+                try:
+                    import urllib3
+
+                    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+                except Exception:
+                    pass
 
         # Sites
         for s in nb.dcim.sites.all():

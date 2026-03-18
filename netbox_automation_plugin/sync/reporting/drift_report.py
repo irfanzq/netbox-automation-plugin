@@ -33,19 +33,21 @@ def format_drift_report(maas_data, netbox_data, openstack_data, drift):
     # MAAS vs NetBox drift
     lines.append("")
     lines.append("=== MAAS vs NetBox ===")
+    if netbox_data.get("error"):
+        lines.append(
+            "  *** NetBox fetch failed — \"In MAAS only\" lists every MAAS host (not a real drift). "
+            "Fix SSL: NETBOX_SSL_VERIFY=false or NETBOX_CA_BUNDLE; check NETBOX_URL from container. ***"
+        )
+        lines.append("")
     lines.append(f"  Matched (in both): {drift.get('matched_count', 0)}")
-    lines.append(f"  In MAAS only (missing in NetBox): {len(drift.get('in_maas_not_netbox') or [])}")
-    if drift.get("in_maas_not_netbox"):
-        for h in (drift["in_maas_not_netbox"] or [])[:20]:
-            lines.append(f"    - {h}")
-        if len(drift.get("in_maas_not_netbox") or []) > 20:
-            lines.append(f"    ... and {len(drift['in_maas_not_netbox']) - 20} more")
-    lines.append(f"  In NetBox only (orphan candidates): {len(drift.get('in_netbox_not_maas') or [])}")
-    if drift.get("in_netbox_not_maas"):
-        for h in (drift["in_netbox_not_maas"] or [])[:20]:
-            lines.append(f"    - {h}")
-        if len(drift.get("in_netbox_not_maas") or []) > 20:
-            lines.append(f"    ... and {len(drift['in_netbox_not_maas']) - 20} more")
+    maas_only = sorted(drift.get("in_maas_not_netbox") or [])
+    nb_only = sorted(drift.get("in_netbox_not_maas") or [])
+    lines.append(f"  In MAAS only (missing in NetBox): {len(maas_only)}")
+    for h in maas_only:
+        lines.append(f"    - {h}")
+    lines.append(f"  In NetBox only (orphan candidates): {len(nb_only)}")
+    for h in nb_only:
+        lines.append(f"    - {h}")
 
     # OpenStack section (optional)
     if openstack_data:
