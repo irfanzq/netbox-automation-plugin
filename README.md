@@ -23,18 +23,23 @@ netbox-automation-plugin @ git+https://github.com/irfanzq/netbox-automation-plug
 
 NAPALM imports `pkg_resources`, which is provided by **setuptools**. NetBox’s Python 3.12 venv may not include setuptools by default.
 
-This plugin declares **`setuptools>=65.0.0`** in `pyproject.toml`, so a normal `pip install` of the package pulls it in.
+This plugin pins **`setuptools>=65,<82`** because **setuptools 82+ removed `pkg_resources`**, which **NAPALM 5** still imports.
 
-**If your image still fails with `No module named 'pkg_resources'`**, your build is likely skipping plugin dependencies. Fix it permanently in the Dockerfile **before** installing the plugin:
+**If the build installs setuptools first then plugins and `import pkg_resources` still fails:** the second `uv pip install -r …` pass **drops setuptools** from the venv (it is not a dependency of NAPALM/plugins), so **`pkg_resources` disappears**. Install setuptools **after** plugin requirements (NetBox’s venv has no `pip`, so use `uv` with `--python`):
 
 ```dockerfile
-# Ensure setuptools is in the same venv as NetBox (required for NAPALM on Python 3.12+)
-RUN /opt/netbox/venv/bin/pip install --no-cache-dir 'setuptools>=65.0.0'
+RUN /usr/local/bin/uv pip install --python /opt/netbox/venv/bin/python --no-cache-dir -r /opt/netbox/plugin_requirements.txt \
+    && /usr/local/bin/uv pip install --python /opt/netbox/venv/bin/python --no-cache-dir 'setuptools>=65,<82' \
+    && /opt/netbox/venv/bin/python -c "import pkg_resources; print('ok')"
 ```
 
-Do **not** use `pip install --no-deps` for this plugin unless setuptools is already installed.
+Verify inside a running container:
 
-Then install the plugin as usual (e.g. from `plugin_requirements.txt` or `pip install .`).
+```bash
+docker exec <netbox-container> /opt/netbox/venv/bin/python -c "import pkg_resources; print('ok')"
+```
+
+Do **not** use `pip install --no-deps` for this plugin unless setuptools is already in that venv.
 
 ## Configuration
 
