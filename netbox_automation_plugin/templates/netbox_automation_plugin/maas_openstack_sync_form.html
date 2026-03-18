@@ -14,7 +14,7 @@
         </p>
         <div class="alert alert-secondary py-2 mb-3 small" role="note">
           <strong>{% trans "Drift audit" %}</strong> —
-          {% trans "Requires NETBOX_URL + NETBOX_TOKEN. For internal TLS CAs set NETBOX_SSL_VERIFY=false (or NETBOX_CA_BUNDLE). OpenStack must be reachable from this container (DNS / internal URL)." %}
+          {% trans "NetBox devices/sites are read from this instance (database) — no NETBOX_URL needed. MAAS and OpenStack use env vars; OpenStack must resolve from this container." %}
         </div>
         <form method="post" action="" class="d-flex flex-wrap align-items-end gap-2">
           {% csrf_token %}

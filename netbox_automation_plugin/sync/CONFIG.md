@@ -26,14 +26,16 @@ Optional (application credentials instead of user/password):
 - `OPENSTACK_APPLICATION_CREDENTIAL_ID`
 - `OPENSTACK_APPLICATION_CREDENTIAL_SECRET`
 
-NetBox’s API is called **from the NetBox container/worker** (not your laptop). Set:
+**NetBox (drift audit vs MAAS):** By default the plugin reads **this NetBox’s database** (Django ORM), same idea as VLAN deployment — **no `NETBOX_URL`, token, or DNS** to yourself.
+
+Only if you must compare MAAS to a **different** NetBox over HTTP:
 
 | Variable | Description |
 |----------|-------------|
-| `NETBOX_URL` | API base, e.g. `https://netbox-dev.b52.whitefiber.internal` (must match what the **container** can reach) |
-| `NETBOX_TOKEN` | API token with read access to devices/sites |
-| `NETBOX_SSL_VERIFY` | `false` if the API uses an internal CA the container does not trust (fixes `CERTIFICATE_VERIFY_FAILED`) |
-| `NETBOX_CA_BUNDLE` | Optional path inside the container to a PEM bundle (alternative to disabling verify) |
+| `NETBOX_SYNC_USE_REMOTE_API` | `true` to use pynetbox instead of local DB |
+| `NETBOX_URL` | Remote API base |
+| `NETBOX_TOKEN` | API token |
+| `NETBOX_SSL_VERIFY` / `NETBOX_CA_BUNDLE` | TLS options for remote API |
 
 **OpenStack from Docker:** If `birch.cloud.whitefiber.com` does not resolve inside the container, use an **internal auth URL** or add **`extra_hosts`** in Compose. `OPENSTACK_INSECURE=true` only skips TLS verification; it does not fix DNS.
 

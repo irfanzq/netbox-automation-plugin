@@ -102,6 +102,13 @@ def get_sync_config():
             lambda x: str(x).lower() in ("1", "true", "yes"),
         ),
         "netbox_ca_bundle": get_cfg("netbox_ca_bundle", "NETBOX_CA_BUNDLE", "") or None,
+        # Only if you must compare MAAS to a *different* NetBox over HTTP
+        "netbox_sync_use_remote_api": get_cfg(
+            "netbox_sync_use_remote_api",
+            "NETBOX_SYNC_USE_REMOTE_API",
+            "false",
+            lambda x: str(x).lower() in ("1", "true", "yes"),
+        ),
         # OpenStack TLS (DNS must resolve inside Docker — use internal URL or extra_hosts)
         "openstack_insecure": get_cfg(
             "openstack_insecure",

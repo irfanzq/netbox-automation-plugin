@@ -35,8 +35,8 @@ def format_drift_report(maas_data, netbox_data, openstack_data, drift):
     lines.append("=== MAAS vs NetBox ===")
     if netbox_data.get("error"):
         lines.append(
-            "  *** NetBox fetch failed — \"In MAAS only\" lists every MAAS host (not a real drift). "
-            "Fix SSL: NETBOX_SSL_VERIFY=false or NETBOX_CA_BUNDLE; check NETBOX_URL from container. ***"
+            "  *** NetBox data fetch failed — \"In MAAS only\" is not a real drift until fixed. "
+            "(Default: local DB read. Remote API: NETBOX_SYNC_USE_REMOTE_API=true + NETBOX_URL + token.) ***"
         )
         lines.append("")
     lines.append(f"  Matched (in both): {drift.get('matched_count', 0)}")
