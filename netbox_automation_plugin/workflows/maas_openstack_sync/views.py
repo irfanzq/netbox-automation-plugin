@@ -5,13 +5,13 @@ from django.utils.translation import gettext_lazy as _
 
 from .forms import MAASOpenStackSyncForm
 
-# Sync module: config, clients, reconciliation, reporting
-from ..sync.config import get_sync_config
-from ..sync.clients.maas_client import fetch_maas_data_sync
-from ..sync.clients.netbox_client import fetch_netbox_data
-from ..sync.clients.openstack_client import fetch_openstack_data
-from ..sync.reconciliation.maas_netbox import compute_maas_netbox_drift
-from ..sync.reporting.drift_report import format_drift_report
+# Sync package lives under netbox_automation_plugin.sync (not workflows.sync)
+from netbox_automation_plugin.sync.config import get_sync_config
+from netbox_automation_plugin.sync.clients.maas_client import fetch_maas_data_sync
+from netbox_automation_plugin.sync.clients.netbox_client import fetch_netbox_data
+from netbox_automation_plugin.sync.clients.openstack_client import fetch_openstack_data
+from netbox_automation_plugin.sync.reconciliation.maas_netbox import compute_maas_netbox_drift
+from netbox_automation_plugin.sync.reporting.drift_report import format_drift_report
 
 import logging
 
