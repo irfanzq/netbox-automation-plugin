@@ -320,22 +320,34 @@ class VLANDeploymentForm(forms.Form):
 
     def _validate_interfaces_on_devices(self, devices, interface_list, cleaned_data):
         """
-        Validate that all specified interfaces exist on all selected devices.
+        Validate that interfaces exist on their respective devices.
+        Allows different interfaces for different devices - only validates that
+        each interface exists on at least one device. The view will filter
+        interfaces per device during deployment.
         """
         from dcim.models import Interface
 
         errors = []
-
+        
+        # Build a map of which interfaces exist on which devices
+        interface_to_devices = {}
         for device in devices:
             device_interfaces = set(
                 Interface.objects.filter(device=device).values_list('name', flat=True)
             )
-
             for iface_name in interface_list:
-                if iface_name not in device_interfaces:
-                    errors.append(
-                        "Interface '" + iface_name + "' does not exist on device '" + device.name + "'"
-                    )
+                if iface_name in device_interfaces:
+                    if iface_name not in interface_to_devices:
+                        interface_to_devices[iface_name] = []
+                    interface_to_devices[iface_name].append(device.name)
+
+        # Check that each interface exists on at least one device
+        for iface_name in interface_list:
+            if iface_name not in interface_to_devices:
+                # Interface doesn't exist on any device - this is an error
+                errors.append(
+                    "Interface '" + iface_name + "' does not exist on any selected device"
+                )
 
         if errors:
             # Pass as a list to ValidationError to prevent string formatting issues

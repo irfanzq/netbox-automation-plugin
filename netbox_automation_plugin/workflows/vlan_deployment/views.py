@@ -619,26 +619,14 @@ class VLANDeploymentView(View):
                     
                     # Group deployment logs by device for separate display
                     device_logs_map = {}  # {device_name: [log1, log2, ...]}
-                    all_tagged_vlans = set()
-                    import re
                     
-                    # First, get existing tagged VLANs from the job (from initial form data)
-                    cursor.execute(f"""
-                        SELECT tagged_vlan_ids FROM {job_table} WHERE id = %s
-                    """, [job_id])
-                    existing_tagged_row = cursor.fetchone()
-                    if existing_tagged_row and existing_tagged_row[0]:
-                        try:
-                            existing_tagged = json.loads(existing_tagged_row[0])
-                            if isinstance(existing_tagged, list):
-                                all_tagged_vlans.update([int(v) for v in existing_tagged if isinstance(v, (int, str)) and str(v).isdigit()])
-                        except (json.JSONDecodeError, ValueError):
-                            pass
-                    
-                    # Also collect tagged VLANs from form data (if available) - this ensures we have them
+                    # Get tagged VLANs from form input - use ONLY form data, not extracted from logs
                     form_tagged_vlans = form.cleaned_data.get('tagged_vlans_parsed', [])
+                    tagged_vlans_list = []
                     if form_tagged_vlans:
-                        all_tagged_vlans.update([int(v) for v in form_tagged_vlans if isinstance(v, (int, str)) and str(v).isdigit()])
+                        # Convert to list of integers, ensuring they're valid
+                        tagged_vlans_list = [int(v) for v in form_tagged_vlans if isinstance(v, (int, str)) and str(v).isdigit()]
+                        tagged_vlans_list = sorted(list(set(tagged_vlans_list)))  # Remove duplicates and sort
                     
                     # Group results by device
                     for result in results:
@@ -660,49 +648,25 @@ class VLANDeploymentView(View):
                             if device_name not in device_logs_map:
                                 device_logs_map[device_name] = []
                             device_logs_map[device_name].append(deployment_log)
-                            
-                            # Extract tagged VLANs from deployment logs
-                            # Look for patterns like "Tagged VLANs: 1514" or "Tagged VLANs: 1514, 1515"
-                            tagged_patterns = [
-                                r'Tagged VLANs?:\s*([\d,\s]+)',  # "Tagged VLANs: 1514" or "Tagged VLANs: 1514, 1515"
-                                r'Tagged VLANs?:\s*(\d+)',       # "Tagged VLANs: 1514"
-                            ]
-                            for pattern in tagged_patterns:
-                                matches = re.findall(pattern, deployment_log, re.IGNORECASE)
-                                for match in matches:
-                                    # Handle comma-separated values
-                                    vlans = [int(v.strip()) for v in match.split(',') if v.strip().isdigit()]
-                                    all_tagged_vlans.update(vlans)
-                        
-                        # Also check interface_details for tagged VLANs
-                        interface_details = result.get('interface_details', {})
-                        if isinstance(interface_details, dict):
-                            # Check various possible keys
-                            for key in ['tagged_vlans', 'tagged_vlan_ids', 'tagged']:
-                                tagged_from_details = interface_details.get(key, [])
-                                if isinstance(tagged_from_details, list) and tagged_from_details:
-                                    all_tagged_vlans.update([int(v) for v in tagged_from_details if isinstance(v, (int, str)) and str(v).isdigit()])
-                        
-                        # Check vlans_to_add_to_bridge (these are tagged VLANs)
-                        vlans_to_add = result.get('vlans_to_add_to_bridge', [])
-                        if isinstance(vlans_to_add, list) and vlans_to_add:
-                            all_tagged_vlans.update([int(v) for v in vlans_to_add if isinstance(v, (int, str)) and str(v).isdigit()])
                     
                     # Build execution log with separate sections for each device
                     if device_logs_map:
-                        # Add separator and device sections
+                        # Add separator and device sections with clear headers
                         full_logs_parts = []
                         for device_name in sorted(device_logs_map.keys()):
                             device_logs_list = device_logs_map[device_name]
                             # Combine all logs for this device
                             device_full_log = "\n\n".join(device_logs_list)
-                            full_logs_parts.append(device_full_log)
+                            
+                            # Add clear device header
+                            device_header = f"\n{'=' * 80}\n"
+                            device_header += f"DEVICE: {device_name}\n"
+                            device_header += f"{'=' * 80}\n"
+                            
+                            full_logs_parts.append(device_header + device_full_log)
                         
                         # Join all device logs with clear separators
-                        full_logs = "\n\n" + "=" * 80 + "\n\n".join([
-                            f"\n{'=' * 80}\n\n{log}\n{'=' * 80}" 
-                            for log in full_logs_parts
-                        ])
+                        full_logs = "\n\n" + "\n\n".join(full_logs_parts) + f"\n\n{'=' * 80}\n"
                         new_execution_log = current_execution_log + full_logs
                     else:
                         log_addition = f"\n\n=== Results Summary ===\n"
@@ -710,13 +674,12 @@ class VLANDeploymentView(View):
                         log_addition += f"Status Counts: {json.dumps(status_counts, indent=2)}\n"
                         new_execution_log = current_execution_log + log_addition
                     
-                    # Always update tagged_vlan_ids (preserve from form or update with extracted values)
+                    # Update tagged_vlan_ids with form input (already set above from form data)
                     update_fields = ['result_summary', 'execution_log', 'tagged_vlan_ids', 'last_updated']
-                    tagged_vlans_list = sorted(list(all_tagged_vlans)) if all_tagged_vlans else []
                     update_values = [
                         json.dumps(result_summary), 
                         new_execution_log, 
-                        json.dumps(tagged_vlans_list),
+                        json.dumps(tagged_vlans_list),  # Use form input, not extracted values
                         timezone.now()
                     ]
                     
@@ -5966,17 +5929,26 @@ class VLANDeploymentView(View):
                 device_bonds_to_create_on_device = {}
                 device_bonds_to_create_in_netbox = {}
 
-                # Get all interfaces for this device
+                # Get all interfaces for this device - filter to only interfaces that exist on this device
                 device_interfaces = []
+                # Get all interface names that exist on this device for quick lookup
+                device_interface_names = set(
+                    Interface.objects.filter(device=device).values_list('name', flat=True)
+                )
+                
                 for interface_name in interface_list:
                     # Parse "device:interface" format if in sync mode
                     if sync_netbox_to_device and ':' in interface_name:
                         iface_device_name, actual_interface_name = interface_name.split(':', 1)
                         if iface_device_name != device.name:
                             continue
-                        device_interfaces.append(actual_interface_name)
+                        # Only add if interface exists on this device
+                        if actual_interface_name in device_interface_names:
+                            device_interfaces.append(actual_interface_name)
                     else:
-                        device_interfaces.append(interface_name)
+                        # Only add if interface exists on this device
+                        if interface_name in device_interface_names:
+                            device_interfaces.append(interface_name)
 
                 # Step 1: Check device config for bonds that exist on device
                 for actual_interface_name in device_interfaces:
@@ -7019,13 +6991,24 @@ class VLANDeploymentView(View):
 
                 # Get all interfaces for this device
                 device_interfaces = []
+                # Get all interface names that exist on this device for quick lookup
+                device_interface_names = set(
+                    Interface.objects.filter(device=device).values_list('name', flat=True)
+                )
+                
                 for interface_name in interface_list:
                     # In sync mode, interface_name is in "device:interface" format
                     if sync_netbox_to_device and ':' in interface_name:
                         iface_device_name, actual_interface_name = interface_name.split(':', 1)
                         if iface_device_name != device.name:
                             continue
-                        device_interfaces.append(actual_interface_name)
+                        # Only add if interface exists on this device
+                        if actual_interface_name in device_interface_names:
+                            device_interfaces.append(actual_interface_name)
+                    else:
+                        # Only add if interface exists on this device
+                        if interface_name in device_interface_names:
+                            device_interfaces.append(interface_name)
                     else:
                         device_interfaces.append(interface_name)
 
@@ -9902,11 +9885,54 @@ class VLANDeploymentJobDetailView(View):
     def get(self, request, job_id):
         from django.shortcuts import get_object_or_404
         from django.urls import reverse
+        import json
         
         job = get_object_or_404(
             VLANDeploymentJob.objects.select_related('created_by').prefetch_related('devices'),
             id=job_id
         )
+        
+        # Ensure tagged_vlan_ids is always a list for template rendering
+        # JSONField should auto-deserialize, but handle edge cases
+        tagged_vlan_ids = job.tagged_vlan_ids
+        if tagged_vlan_ids is None:
+            tagged_vlan_ids = []
+        elif isinstance(tagged_vlan_ids, str):
+            # If somehow stored as a string, try to parse it
+            try:
+                tagged_vlan_ids = json.loads(tagged_vlan_ids)
+                if not isinstance(tagged_vlan_ids, list):
+                    tagged_vlan_ids = []
+            except (json.JSONDecodeError, TypeError):
+                tagged_vlan_ids = []
+        elif not isinstance(tagged_vlan_ids, list):
+            # If it's some other type, convert to list
+            try:
+                tagged_vlan_ids = list(tagged_vlan_ids) if tagged_vlan_ids else []
+            except (TypeError, ValueError):
+                tagged_vlan_ids = []
+        
+        # Calculate duration properly
+        duration = None
+        if job.started_at and job.completed_at:
+            delta = job.completed_at - job.started_at
+            total_seconds = int(delta.total_seconds())
+            if total_seconds > 0:
+                hours = total_seconds // 3600
+                minutes = (total_seconds % 3600) // 60
+                seconds = total_seconds % 60
+                
+                parts = []
+                if hours > 0:
+                    parts.append(f"{hours} hour{'s' if hours != 1 else ''}")
+                if minutes > 0:
+                    parts.append(f"{minutes} minute{'s' if minutes != 1 else ''}")
+                if seconds > 0 or not parts:
+                    parts.append(f"{seconds} second{'s' if seconds != 1 else ''}")
+                
+                duration = ", ".join(parts)
+            else:
+                duration = "Less than 1 second"
         
         # Prepare context with all job details
         context = {
@@ -9915,6 +9941,8 @@ class VLANDeploymentJobDetailView(View):
             'result_summary': job.result_summary or {},
             'error_message': job.error_message,
             'execution_log': job.execution_log,
+            'tagged_vlan_ids': tagged_vlan_ids,  # Pass as separate context variable for easier template access
+            'duration': duration,
         }
         
         return render(request, self.template_name, context)

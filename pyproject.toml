@@ -26,6 +26,9 @@ dependencies = [
     'napalm>=4.0.0',
     'nornir>=3.0.0',
     'nornir-napalm>=0.4.0',
+    'python-libmaas',
+    'pynetbox',
+    'openstacksdk',
 ]
 
 [project.urls]

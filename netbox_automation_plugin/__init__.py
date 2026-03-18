@@ -52,6 +52,19 @@ class NetBoxAutomationPluginConfig(PluginConfig):
             'backup_enabled': True,
             'backup_path': '/opt/netbox/backups/',
             'compliance_check_interval': 24,
+        },
+        # MAAS / OpenStack Sync — URLs and mapping in config; keep secrets in env (MAAS_API_KEY, OPENSTACK_PASSWORD, etc.)
+        'maas_openstack_sync': {
+            'maas_url': '',
+            'maas_api_key': '',
+            'maas_insecure': True,
+            'openstack_auth_url': '',
+            'openstack_username': '',
+            'openstack_password': '',
+            'openstack_project_name': '',
+            'openstack_region_name': 'RegionOne',
+            'site_mapping_fabric': {},  # e.g. {'birch-fabric': 'birch'}
+            'site_mapping_pool': {},   # e.g. {'birch': 'birch'}
         }
     }
 

@@ -3,6 +3,7 @@ from django.urls import path
 from .workflows.lldp_consistency.views import LLDPConsistencyCheckView
 from .workflows.vlan_deployment.views import VLANDeploymentView, GetCommonInterfacesView, GetVLANsBySiteView, GetInterfacesForSyncView, VLANDeploymentJobsView, VLANDeploymentJobDetailView
 from .workflows.netbox_vlan_tagging.views import VLANTaggingView
+from .workflows.maas_openstack_sync.views import MAASOpenStackSyncView
 
 app_name = "netbox_automation_plugin"
 
@@ -46,6 +47,11 @@ urlpatterns = [
         "netbox-vlan-tagging/",
         VLANTaggingView.as_view(),
         name="netbox_vlan_tagging",
+    ),
+    path(
+        "maas-openstack-sync/",
+        MAASOpenStackSyncView.as_view(),
+        name="maas_openstack_sync",
     ),
 ]
 

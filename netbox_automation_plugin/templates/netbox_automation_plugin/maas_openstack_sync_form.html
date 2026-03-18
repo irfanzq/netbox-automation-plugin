@@ -1,0 +1,37 @@
+{% extends 'base/layout.html' %}
+{% load i18n %}
+{% load form_helpers %}
+
+{% block title %}{% trans "MAAS / OpenStack Sync" %}{% endblock %}
+
+{% block content %}
+<div class="row">
+  <div class="col">
+    <div class="card">
+      <h5 class="card-header">{% trans "MAAS / OpenStack Sync" %}</h5>
+      <div class="card-body">
+        <p class="card-text">
+          {% trans "Reconcile NetBox with MAAS (bare-metal) and OpenStack (runtime networks). Run a drift audit or full sync (branch-based)." %}
+        </p>
+        <form method="post" action="">
+          {% csrf_token %}
+          {% for field in form %}
+            <div class="mb-3">
+              {% render_field field %}
+            </div>
+          {% endfor %}
+          <button type="submit" class="btn btn-primary">{% trans "Run" %}</button>
+        </form>
+        {% if audit_done and report %}
+          <div class="card mt-3">
+            <h5 class="card-header">{% trans "Drift Audit Report" %}</h5>
+            <div class="card-body">
+              <pre class="mb-0" style="white-space: pre-wrap; font-size: 0.875rem;">{{ report }}</pre>
+            </div>
+          </div>
+        {% endif %}
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}
