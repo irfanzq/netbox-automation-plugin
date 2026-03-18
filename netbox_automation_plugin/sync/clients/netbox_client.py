@@ -1,13 +1,42 @@
 """
-NetBox client wrapper using pynetbox.
+NetBox data for sync / drift audit.
 
-Fetches devices, interfaces, sites. Used for drift audit and (later) branch-based writes.
-When netbox_url is empty, uses base_url to build API URL (e.g. from request).
+- **Local (ORM)**: Same process as NetBox — no HTTP, no NETBOX_URL/DNS/token. Use from UI/worker.
+- **Remote (pynetbox)**: Optional; only if you must read another NetBox instance via API.
 """
 
 import logging
 
 logger = logging.getLogger("netbox_automation_plugin.sync")
+
+
+def fetch_netbox_data_local():
+    """
+    Read sites and devices from this NetBox via Django ORM (like vlan_deployment).
+
+    Returns same shape as fetch_netbox_data: devices [{name, id, site_slug}], sites [{name, slug}], error.
+    """
+    result = {"devices": [], "sites": [], "error": None}
+    try:
+        from dcim.models import Device, Site
+
+        for s in Site.objects.only("name", "slug").iterator():
+            result["sites"].append({"name": s.name or "", "slug": s.slug or ""})
+        for d in Device.objects.select_related("site").only(
+            "name", "id", "site_id", "site__slug", "site__name"
+        ).iterator():
+            site_slug = ""
+            if d.site_id and d.site:
+                site_slug = (d.site.slug or d.site.name or "")
+            result["devices"].append({
+                "name": d.name or "",
+                "id": d.pk,
+                "site_slug": site_slug,
+            })
+    except Exception as e:
+        logger.exception("NetBox local ORM fetch failed")
+        result["error"] = str(e)
+    return result
 
 
 def fetch_netbox_data(

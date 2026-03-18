@@ -8,12 +8,16 @@ from .forms import MAASOpenStackSyncForm
 # Sync package lives under netbox_automation_plugin.sync (not workflows.sync)
 from netbox_automation_plugin.sync.config import get_sync_config
 from netbox_automation_plugin.sync.clients.maas_client import fetch_maas_data_sync
-from netbox_automation_plugin.sync.clients.netbox_client import fetch_netbox_data
+from netbox_automation_plugin.sync.clients.netbox_client import (
+    fetch_netbox_data,
+    fetch_netbox_data_local,
+)
 from netbox_automation_plugin.sync.clients.openstack_client import fetch_openstack_data
 from netbox_automation_plugin.sync.reconciliation.maas_netbox import compute_maas_netbox_drift
 from netbox_automation_plugin.sync.reporting.drift_report import format_drift_report
 
 import logging
+import os
 
 logger = logging.getLogger("netbox_automation_plugin")
 
@@ -41,9 +45,8 @@ class MAASOpenStackSyncView(LoginRequiredMixin, View):
         if mode != "audit":
             return render(request, self.template_name, {"form": form})
 
-        # Phase 1: Drift Audit — collect from MAAS, NetBox, optional OpenStack; compare; report
+        # Phase 1: Drift Audit — MAAS + OpenStack via HTTP; NetBox via local DB (same as vlan_deployment)
         config = get_sync_config()
-        base_url = request.build_absolute_uri("/").rstrip("/") if request else ""
 
         # 1) MAAS
         maas_data = fetch_maas_data_sync(
@@ -52,14 +55,21 @@ class MAASOpenStackSyncView(LoginRequiredMixin, View):
             config.get("maas_insecure", True),
         )
 
-        # 2) NetBox (use NETBOX_URL or current request host)
-        netbox_data = fetch_netbox_data(
-            config.get("netbox_url") or "",
-            config.get("netbox_token") or "",
-            base_url_fallback=base_url,
-            ssl_verify=config.get("netbox_ssl_verify", True),
-            ca_bundle=config.get("netbox_ca_bundle") or None,
-        )
+        # 2) NetBox — ORM inside this app (no NETBOX_URL / token / DNS)
+        use_remote_netbox = str(
+            config.get("netbox_sync_use_remote_api") or os.environ.get("NETBOX_SYNC_USE_REMOTE_API", "")
+        ).lower() in ("1", "true", "yes")
+        if use_remote_netbox:
+            base_url = request.build_absolute_uri("/").rstrip("/") if request else ""
+            netbox_data = fetch_netbox_data(
+                config.get("netbox_url") or "",
+                config.get("netbox_token") or "",
+                base_url_fallback=base_url,
+                ssl_verify=config.get("netbox_ssl_verify", True),
+                ca_bundle=config.get("netbox_ca_bundle") or None,
+            )
+        else:
+            netbox_data = fetch_netbox_data_local()
 
         # 3) OpenStack (optional; if auth not set, skip)
         openstack_data = None
