@@ -23,8 +23,8 @@ classifiers = [
 
 requires-python = ">=3.10.0"
 dependencies = [
-    # NAPALM still imports pkg_resources (Python 3.12+ venvs often omit setuptools)
-    'setuptools>=65.0.0',
+    # NAPALM imports pkg_resources; setuptools 82+ removed it — pin below 82
+    'setuptools>=65.0.0,<82',
     'napalm>=4.0.0',
     'nornir>=3.0.0',
     'nornir-napalm>=0.4.0',

@@ -7009,8 +7009,6 @@ class VLANDeploymentView(View):
                         # Only add if interface exists on this device
                         if interface_name in device_interface_names:
                             device_interfaces.append(interface_name)
-                    else:
-                        device_interfaces.append(interface_name)
 
                 # Step 1: Check device config for bonds that exist on device
                 for actual_interface_name in device_interfaces:
