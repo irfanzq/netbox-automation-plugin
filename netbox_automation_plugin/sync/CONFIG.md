@@ -17,7 +17,9 @@ Set these in the environment of the NetBox process (e.g. systemd unit, Docker en
 | `OPENSTACK_USERNAME` | OpenStack user | `admin` |
 | `OPENSTACK_PASSWORD` | OpenStack password | (secret) |
 | `OPENSTACK_PROJECT_NAME` | OpenStack project/tenant | `admin` |
-| `OPENSTACK_REGION_NAME` | Region | `RegionOne` |
+| `OS_REGION_NAME` / `OPENSTACK_REGION_NAME` | Must match Keystone (RC file), e.g. **`birch`** — not always `RegionOne` |
+| `OS_INTERFACE` / `OPENSTACK_INTERFACE` | Usually `public` (from RC file) |
+| `OS_PROJECT_ID` | Optional; from RC file if name auth fails |
 | `OPENSTACK_USER_DOMAIN_NAME` | User domain | `Default` |
 | `OPENSTACK_PROJECT_DOMAIN_NAME` | Project domain | `Default` |
 

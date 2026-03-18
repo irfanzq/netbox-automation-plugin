@@ -86,7 +86,9 @@ def get_sync_config():
         "openstack_username": get_cfg("openstack_username", ["OPENSTACK_USERNAME", "OS_USERNAME"], ""),
         "openstack_password": get_cfg("openstack_password", ["OPENSTACK_PASSWORD", "OS_PASSWORD"], ""),
         "openstack_project_name": get_cfg("openstack_project_name", ["OPENSTACK_PROJECT_NAME", "OS_PROJECT_NAME"], ""),
+        "openstack_project_id": get_cfg("openstack_project_id", ["OPENSTACK_PROJECT_ID", "OS_PROJECT_ID"], ""),
         "openstack_region_name": get_cfg("openstack_region_name", ["OPENSTACK_REGION_NAME", "OS_REGION_NAME"], "RegionOne"),
+        "openstack_interface": get_cfg("openstack_interface", ["OPENSTACK_INTERFACE", "OS_INTERFACE"], "public"),
         "openstack_user_domain_name": get_cfg("openstack_user_domain_name", ["OPENSTACK_USER_DOMAIN_NAME", "OS_USER_DOMAIN_NAME"], "Default"),
         "openstack_project_domain_name": get_cfg("openstack_project_domain_name", ["OPENSTACK_PROJECT_DOMAIN_NAME", "OS_PROJECT_DOMAIN_NAME"], "Default"),
         # Application credentials (alternative to username/password)

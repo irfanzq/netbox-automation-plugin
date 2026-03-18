@@ -33,16 +33,25 @@ def fetch_openstack_data(config: dict):
 
     try:
         verify_tls = not config.get("openstack_insecure", False)
-        conn = openstack.connect(
-            auth_url=config["openstack_auth_url"],
-            username=config.get("openstack_username") or "",
-            password=config.get("openstack_password") or "",
-            project_name=config.get("openstack_project_name") or "",
-            user_domain_name=config.get("openstack_user_domain_name") or "Default",
-            project_domain_name=config.get("openstack_project_domain_name") or "Default",
-            region_name=config.get("openstack_region_name") or "RegionOne",
-            verify=verify_tls,
-        )
+        auth_url = (config["openstack_auth_url"] or "").rstrip("/")
+        if auth_url and not auth_url.endswith("/v3"):
+            auth_url = auth_url + "/v3"
+        kwargs = {
+            "auth_url": auth_url,
+            "username": config.get("openstack_username") or "",
+            "password": config.get("openstack_password") or "",
+            "user_domain_name": config.get("openstack_user_domain_name") or "Default",
+            "project_domain_name": config.get("openstack_project_domain_name") or "Default",
+            "region_name": config.get("openstack_region_name") or "RegionOne",
+            "interface": config.get("openstack_interface") or "public",
+            "verify": verify_tls,
+        }
+        pid = (config.get("openstack_project_id") or "").strip()
+        if pid:
+            kwargs["project_id"] = pid
+        else:
+            kwargs["project_name"] = config.get("openstack_project_name") or ""
+        conn = openstack.connect(**kwargs)
 
         for net in conn.network.networks():
             result["networks"].append({"id": net.id, "name": net.name or net.id})
