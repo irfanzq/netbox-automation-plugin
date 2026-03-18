@@ -1,6 +1,5 @@
 {% extends 'base/layout.html' %}
 {% load i18n %}
-{% load form_helpers %}
 
 {% block title %}{% trans "MAAS / OpenStack Sync" %}{% endblock %}
 
@@ -10,17 +9,17 @@
     <div class="card">
       <h5 class="card-header">{% trans "MAAS / OpenStack Sync" %}</h5>
       <div class="card-body">
-        <p class="card-text">
-          {% trans "Reconcile NetBox with MAAS (bare-metal) and OpenStack (runtime networks). Run a drift audit or full sync (branch-based)." %}
+        <p class="card-text mb-2">
+          {% trans "Compare MAAS machines, NetBox devices, and (optionally) OpenStack networks. Read-only drift report — no changes are written." %}
         </p>
-        <form method="post" action="">
+        <div class="alert alert-secondary py-2 mb-3 small" role="note">
+          <strong>{% trans "Drift audit" %}</strong> —
+          {% trans "Requires NETBOX_URL + NETBOX_TOKEN. For internal TLS CAs set NETBOX_SSL_VERIFY=false (or NETBOX_CA_BUNDLE). OpenStack must be reachable from this container (DNS / internal URL)." %}
+        </div>
+        <form method="post" action="" class="d-flex flex-wrap align-items-end gap-2">
           {% csrf_token %}
-          {% for field in form %}
-            <div class="mb-3">
-              {% render_field field %}
-            </div>
-          {% endfor %}
-          <button type="submit" class="btn btn-primary">{% trans "Run" %}</button>
+          {{ form.mode }}
+          <button type="submit" class="btn btn-primary">{% trans "Run drift audit" %}</button>
         </form>
         {% if audit_done and report %}
           <div class="card mt-3">

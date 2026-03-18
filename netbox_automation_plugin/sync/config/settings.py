@@ -92,9 +92,23 @@ def get_sync_config():
         # Application credentials (alternative to username/password)
         "openstack_application_credential_id": get_cfg("openstack_application_credential_id", "OPENSTACK_APPLICATION_CREDENTIAL_ID", ""),
         "openstack_application_credential_secret": get_cfg("openstack_application_credential_secret", "OPENSTACK_APPLICATION_CREDENTIAL_SECRET", ""),
-        # NetBox (current instance — usually from NetBox's own config)
+        # NetBox (API from container/worker — often needs NETBOX_SSL_VERIFY=false for internal CA)
         "netbox_url": get_cfg("netbox_url", "NETBOX_URL", ""),
         "netbox_token": get_cfg("netbox_token", "NETBOX_TOKEN", ""),
+        "netbox_ssl_verify": get_cfg(
+            "netbox_ssl_verify",
+            "NETBOX_SSL_VERIFY",
+            "true",
+            lambda x: str(x).lower() in ("1", "true", "yes"),
+        ),
+        "netbox_ca_bundle": get_cfg("netbox_ca_bundle", "NETBOX_CA_BUNDLE", "") or None,
+        # OpenStack TLS (DNS must resolve inside Docker — use internal URL or extra_hosts)
+        "openstack_insecure": get_cfg(
+            "openstack_insecure",
+            "OPENSTACK_INSECURE",
+            "false",
+            lambda x: str(x).lower() in ("1", "true", "yes"),
+        ),
         # Site derivation: fabric -> NetBox site slug, pool -> site or tenant (optional)
         "site_mapping_fabric": cfg.get("site_mapping_fabric") or {},  # e.g. {"birch-fabric": "birch"}
         "site_mapping_pool": cfg.get("site_mapping_pool") or {},      # e.g. {"birch": "birch"}

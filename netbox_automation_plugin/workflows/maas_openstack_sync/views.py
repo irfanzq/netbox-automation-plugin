@@ -37,7 +37,7 @@ class MAASOpenStackSyncView(LoginRequiredMixin, View):
         if not form.is_valid():
             return render(request, self.template_name, {"form": form})
 
-        mode = form.cleaned_data["mode"]
+        mode = (form.cleaned_data.get("mode") or "audit").strip()
         if mode != "audit":
             return render(request, self.template_name, {"form": form})
 
@@ -57,6 +57,8 @@ class MAASOpenStackSyncView(LoginRequiredMixin, View):
             config.get("netbox_url") or "",
             config.get("netbox_token") or "",
             base_url_fallback=base_url,
+            ssl_verify=config.get("netbox_ssl_verify", True),
+            ca_bundle=config.get("netbox_ca_bundle") or None,
         )
 
         # 3) OpenStack (optional; if auth not set, skip)

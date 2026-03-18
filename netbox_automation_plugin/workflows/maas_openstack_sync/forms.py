@@ -6,16 +6,11 @@ class MAASOpenStackSyncForm(forms.Form):
     """
     Form for MAAS / OpenStack Sync workflow.
 
-    Phase 1: Drift Audit only (read-only). Full Sync and scope toggles come later.
+    Phase 1: Drift Audit only. Mode is fixed to audit (hidden) so the UI stays a single clear action.
     """
 
-    mode = forms.ChoiceField(
-        choices=[
-            ("audit", _("Drift Audit (read-only)")),
-            # ("apply", _("Full Sync (apply to branch)")),  # Phase 2
-        ],
+    mode = forms.CharField(
+        widget=forms.HiddenInput(),
         initial="audit",
-        label=_("Mode"),
-        help_text=_("Drift Audit: compare MAAS, OpenStack, and NetBox; produce report. No changes."),
-        widget=forms.RadioSelect(attrs={"class": "form-check-input"}),
+        required=False,
     )

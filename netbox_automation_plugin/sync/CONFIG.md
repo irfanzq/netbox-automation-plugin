@@ -26,10 +26,20 @@ Optional (application credentials instead of user/password):
 - `OPENSTACK_APPLICATION_CREDENTIAL_ID`
 - `OPENSTACK_APPLICATION_CREDENTIAL_SECRET`
 
-NetBox’s own URL and token are usually already in NetBox config; for sync we can use the same process or set:
+NetBox’s API is called **from the NetBox container/worker** (not your laptop). Set:
 
-- `NETBOX_URL` — only if different from current host
-- `NETBOX_TOKEN` — often from NetBox’s existing token
+| Variable | Description |
+|----------|-------------|
+| `NETBOX_URL` | API base, e.g. `https://netbox-dev.b52.whitefiber.internal` (must match what the **container** can reach) |
+| `NETBOX_TOKEN` | API token with read access to devices/sites |
+| `NETBOX_SSL_VERIFY` | `false` if the API uses an internal CA the container does not trust (fixes `CERTIFICATE_VERIFY_FAILED`) |
+| `NETBOX_CA_BUNDLE` | Optional path inside the container to a PEM bundle (alternative to disabling verify) |
+
+**OpenStack from Docker:** If `birch.cloud.whitefiber.com` does not resolve inside the container, use an **internal auth URL** or add **`extra_hosts`** in Compose. `OPENSTACK_INSECURE=true` only skips TLS verification; it does not fix DNS.
+
+| Variable | Description |
+|----------|-------------|
+| `OPENSTACK_INSECURE` | `true` to skip TLS verify for Keystone/API (e.g. dev CAs) |
 
 ### Plugin config (optional override)
 
