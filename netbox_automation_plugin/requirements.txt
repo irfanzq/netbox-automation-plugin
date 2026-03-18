@@ -2,3 +2,7 @@ napalm>=5.0.0
 nornir>=3.4.0
 nornir-napalm>=0.4.0
 
+# MAAS / OpenStack Sync (Phase 1 Drift Audit)
+python-libmaas
+pynetbox
+openstacksdk

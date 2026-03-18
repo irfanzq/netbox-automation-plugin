@@ -1,0 +1,101 @@
+"""
+Sync configuration for MAAS, OpenStack, and NetBox.
+
+Best practice: keep URLs and non-secret options in plugin config; keep API keys
+and tokens in environment variables so they are never committed.
+
+Option A — Environment variables (recommended for secrets):
+  Set in the NetBox process environment (e.g. in systemd, docker, or shell):
+    MAAS_URL=https://maas.example.com/MAAS
+    MAAS_API_KEY=key:token:secret
+    MAAS_INSECURE=false
+    OPENSTACK_AUTH_URL=https://...
+    OPENSTACK_USERNAME=...
+    OPENSTACK_PASSWORD=...   (or OPENSTACK_APPLICATION_CREDENTIAL_ID/SECRET)
+    OPENSTACK_PROJECT_NAME=...
+    OPENSTACK_REGION_NAME=RegionOne
+  NetBox uses the same process; the plugin reads os.environ when the key
+  is not in PLUGINS_CONFIG.
+
+Option B — Plugin config (NetBox configuration.py):
+  In configuration.py you can set:
+    PLUGINS_CONFIG = {
+      "netbox_automation_plugin": {
+        "maas_openstack_sync": {
+          "maas_url": os.environ.get("MAAS_URL", ""),
+          "maas_api_key": os.environ.get("MAAS_API_KEY", ""),
+          "maas_insecure": True,
+          "openstack_auth_url": os.environ.get("OPENSTACK_AUTH_URL", ""),
+          ...
+        }
+      }
+    }
+  So secrets still come from env; config just passes them through.
+
+Site mapping (fabric/pool -> NetBox site) is non-secret and can live in
+plugin config or a dedicated mapping structure.
+"""
+
+import os
+from django.conf import settings
+
+
+def _plugin_config():
+    """Return the maas_openstack_sync section of plugin config."""
+    plugins_config = getattr(settings, "PLUGINS_CONFIG", {}) or {}
+    return plugins_config.get("netbox_automation_plugin", {}).get("maas_openstack_sync", {})
+
+
+def _get(key: str, env_key: str, default=None):
+    """Get value from plugin config, then env, then default."""
+    cfg = _plugin_config()
+    if key in cfg and cfg[key] not in (None, ""):
+        return cfg[key]
+    return os.environ.get(env_key, default)
+
+
+def get_sync_config():
+    """
+    Return a single dict with all sync-related config.
+    Secrets and URLs: prefer env vars so they are not in config files.
+    """
+    cfg = _plugin_config()
+
+    def get_cfg(key, env_keys, default=None, coerce=None):
+        """Get from plugin config, then first env key found (env_keys can be str or list)."""
+        raw = cfg.get(key)
+        if raw is None or raw == "":
+            keys = [env_keys] if isinstance(env_keys, str) else env_keys
+            for ek in keys:
+                raw = os.environ.get(ek)
+                if raw:
+                    break
+            if raw is None:
+                raw = default
+        if coerce and raw is not None:
+            return coerce(raw)
+        return raw
+
+    return {
+        # MAAS
+        "maas_url": get_cfg("maas_url", "MAAS_URL", "").rstrip("/"),
+        "maas_api_key": get_cfg("maas_api_key", "MAAS_API_KEY", ""),
+        "maas_insecure": get_cfg("maas_insecure", "MAAS_INSECURE", "true", lambda x: str(x).lower() in ("1", "true", "yes")),
+        # OpenStack (supports standard OS_* and OPENSTACK_* env vars)
+        "openstack_auth_url": get_cfg("openstack_auth_url", ["OPENSTACK_AUTH_URL", "OS_AUTH_URL"], ""),
+        "openstack_username": get_cfg("openstack_username", ["OPENSTACK_USERNAME", "OS_USERNAME"], ""),
+        "openstack_password": get_cfg("openstack_password", ["OPENSTACK_PASSWORD", "OS_PASSWORD"], ""),
+        "openstack_project_name": get_cfg("openstack_project_name", ["OPENSTACK_PROJECT_NAME", "OS_PROJECT_NAME"], ""),
+        "openstack_region_name": get_cfg("openstack_region_name", ["OPENSTACK_REGION_NAME", "OS_REGION_NAME"], "RegionOne"),
+        "openstack_user_domain_name": get_cfg("openstack_user_domain_name", ["OPENSTACK_USER_DOMAIN_NAME", "OS_USER_DOMAIN_NAME"], "Default"),
+        "openstack_project_domain_name": get_cfg("openstack_project_domain_name", ["OPENSTACK_PROJECT_DOMAIN_NAME", "OS_PROJECT_DOMAIN_NAME"], "Default"),
+        # Application credentials (alternative to username/password)
+        "openstack_application_credential_id": get_cfg("openstack_application_credential_id", "OPENSTACK_APPLICATION_CREDENTIAL_ID", ""),
+        "openstack_application_credential_secret": get_cfg("openstack_application_credential_secret", "OPENSTACK_APPLICATION_CREDENTIAL_SECRET", ""),
+        # NetBox (current instance — usually from NetBox's own config)
+        "netbox_url": get_cfg("netbox_url", "NETBOX_URL", ""),
+        "netbox_token": get_cfg("netbox_token", "NETBOX_TOKEN", ""),
+        # Site derivation: fabric -> NetBox site slug, pool -> site or tenant (optional)
+        "site_mapping_fabric": cfg.get("site_mapping_fabric") or {},  # e.g. {"birch-fabric": "birch"}
+        "site_mapping_pool": cfg.get("site_mapping_pool") or {},      # e.g. {"birch": "birch"}
+    }

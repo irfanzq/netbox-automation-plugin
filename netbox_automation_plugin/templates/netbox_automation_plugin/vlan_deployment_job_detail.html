@@ -60,10 +60,10 @@
                   <th>{% trans "Completed" %}</th>
                   <td>{{ job.completed_at|date:"Y-m-d H:i:s"|default:"—" }}</td>
                 </tr>
-                {% if job.started_at and job.completed_at %}
+                {% if duration %}
                 <tr>
                   <th>{% trans "Duration" %}</th>
-                  <td>{{ job.completed_at|timesince:job.started_at }}</td>
+                  <td>{{ duration }}</td>
                 </tr>
                 {% endif %}
               </tbody>
@@ -96,7 +96,11 @@
                 <tr>
                   <th>{% trans "Tagged VLANs" %}</th>
                   <td>
-                    {% if job.tagged_vlan_ids and job.tagged_vlan_ids|length > 0 %}
+                    {% if tagged_vlan_ids and tagged_vlan_ids|length > 0 %}
+                      {% for vlan_id in tagged_vlan_ids %}
+                        <span class="badge bg-secondary">VLAN {{ vlan_id }}</span>
+                      {% endfor %}
+                    {% elif job.tagged_vlan_ids and job.tagged_vlan_ids|length > 0 %}
                       {% for vlan_id in job.tagged_vlan_ids %}
                         <span class="badge bg-secondary">VLAN {{ vlan_id }}</span>
                       {% endfor %}

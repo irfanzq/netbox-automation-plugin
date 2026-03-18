@@ -16,6 +16,11 @@ menu_items = (
         link_text="NetBox VLAN Tagging",
         permissions=["dcim.view_device", "dcim.view_interface", "extras.change_tag"],
     ),
+    PluginMenuItem(
+        link="plugins:netbox_automation_plugin:maas_openstack_sync",
+        link_text="MAAS / OpenStack Sync",
+        permissions=["dcim.view_device", "dcim.view_site"],
+    ),
 )
 
 
