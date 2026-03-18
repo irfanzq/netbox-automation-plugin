@@ -21,11 +21,90 @@
           {{ form.mode }}
           <button type="submit" class="btn btn-primary">{% trans "Run drift audit" %}</button>
         </form>
+        {% if audit_done and audit_summary %}
+          <div class="card mt-3 border-info">
+            <h5 class="card-header">{% trans "Drift data sources" %}</h5>
+            <div class="card-body py-2 small">
+              <div class="row g-2">
+                <div class="col-md-4">
+                  <strong>{% trans "MAAS" %}</strong>
+                  {% if audit_summary.maas_ok %}
+                    <span class="badge text-bg-success">OK</span>
+                    <span class="text-muted">— {{ audit_summary.maas_machines }} {% trans "machines" %}</span>
+                  {% else %}
+                    <span class="badge text-bg-danger">{% trans "Error" %}</span>
+                    <div class="text-danger text-break mt-1">{{ audit_summary.maas_error }}</div>
+                  {% endif %}
+                </div>
+                <div class="col-md-4">
+                  <strong>{% trans "NetBox (this DB)" %}</strong>
+                  {% if audit_summary.use_remote_netbox %}
+                    <span class="badge text-bg-warning">{% trans "Remote API" %}</span>
+                    <div class="text-muted">{% trans "Matched hosts / NIC audit need local ORM — limited in this mode." %}</div>
+                  {% elif audit_summary.netbox_ok %}
+                    <span class="badge text-bg-success">OK</span>
+                    <span class="text-muted">— {{ audit_summary.netbox_devices }} {% trans "devices" %}, {% trans "matched" %} {{ audit_summary.drift_matched }}</span>
+                  {% else %}
+                    <span class="badge text-bg-danger">{% trans "Error" %}</span>
+                    <div class="text-danger text-break mt-1">{{ audit_summary.netbox_error }}</div>
+                  {% endif %}
+                </div>
+                <div class="col-md-4">
+                  <strong>{% trans "OpenStack" %}</strong>
+                  {% if audit_summary.openstack_skipped %}
+                    <span class="badge text-bg-secondary">{% trans "Skipped" %}</span>
+                    <span class="text-muted">{% trans "Set OS_AUTH_URL + OS_PASSWORD (or app cred)" %}</span>
+                  {% elif audit_summary.openstack_ok %}
+                    <span class="badge text-bg-success">OK</span>
+                    <span class="text-muted">— {{ audit_summary.openstack_networks }} {% trans "nets" %}, {{ audit_summary.openstack_subnets }} {% trans "subnets" %}, {{ audit_summary.openstack_fips }} {% trans "FIPs" %}</span>
+                  {% elif audit_summary.openstack_cred_missing %}
+                    <span class="badge text-bg-warning">{% trans "Not configured" %}</span>
+                    <div class="text-muted text-break mt-1">{{ audit_summary.openstack_error }}</div>
+                  {% else %}
+                    <span class="badge text-bg-danger">{% trans "Error" %}</span>
+                    <div class="text-danger text-break mt-1">{{ audit_summary.openstack_error }}</div>
+                  {% endif %}
+                </div>
+              </div>
+              {% if not audit_summary.use_remote_netbox and audit_summary.netbox_ok %}
+                <div class="mt-2 text-muted">
+                  {% trans "Report sections" %}:
+                  <strong>{% trans "Matched hosts" %}</strong> {{ audit_summary.matched_hostnames }} —
+                  <strong>{% trans "NIC audit" %}</strong> {{ audit_summary.interface_audit_hosts }} {% trans "devices" %}
+                </div>
+              {% endif %}
+            </div>
+          </div>
+        {% endif %}
         {% if audit_done and report %}
+          <style>
+            .drift-audit-report-scroll {
+              overflow-x: auto !important;
+              overflow-y: auto;
+              max-width: 100%;
+              -webkit-overflow-scrolling: touch;
+            }
+            .drift-audit-report-scroll pre.drift-report-pre {
+              display: inline-block !important;
+              box-sizing: content-box;
+              white-space: pre !important;
+              word-wrap: normal !important;
+              overflow-wrap: normal !important;
+              word-break: normal !important;
+              max-width: none !important;
+              width: max-content !important;
+              margin: 0;
+              vertical-align: top;
+              tab-size: 8;
+            }
+          </style>
           <div class="card mt-3">
             <h5 class="card-header">{% trans "Drift Audit Report" %}</h5>
-            <div class="card-body">
-              <pre class="mb-0 font-monospace" style="white-space: pre-wrap; font-size: 0.8rem; line-height: 1.3;">{{ report }}</pre>
+            <div class="card-body p-2">
+              <p class="small text-muted mb-2">{% trans "Each table row is one line — scroll horizontally to see the full row (no wrapping)." %}</p>
+              <div class="drift-audit-report-scroll border rounded bg-body-secondary p-2">
+                <pre class="drift-report-pre mb-0 font-monospace" style="font-size: 0.8rem; line-height: 1.35;">{{ report }}</pre>
+              </div>
             </div>
           </div>
         {% endif %}

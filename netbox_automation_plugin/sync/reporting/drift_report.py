@@ -9,6 +9,10 @@ _MAX_OS_SUBNET_HINTS = 60
 _MAX_COL = 24
 _MAX_MATCHED_COL = 18
 _MAX_NOTES_COL = 42
+# Notes column: full text for scrollable HTML report (avoid truncation)
+_NOTES_COL_MAX_WIDTH = 8000
+# Matched-hosts style tables: full cell text per column (no mid-cell truncation)
+_DYNAMIC_COL_CAP = 320
 
 
 def _maas_machine_by_hostname(maas_data):
@@ -27,13 +31,44 @@ def _cell(s, w):
     return s.ljust(w)
 
 
-def _ascii_table(headers, rows, indent="  ", *, max_col=None, notes_col_idx=None):
+def _ascii_table(
+    headers,
+    rows,
+    indent="  ",
+    *,
+    max_col=None,
+    notes_col_idx=None,
+    dynamic_columns=False,
+):
+    """
+    dynamic_columns: size every column to content (caps: notes col 8000, else 140).
+    One ASCII line per data row — use with horizontal scroll in HTML.
+    """
     if not headers:
         return []
     n = len(headers)
     widths = []
     for i in range(n):
-        cap = _MAX_NOTES_COL if notes_col_idx == i else (max_col or _MAX_COL)
+        if dynamic_columns:
+            w = max(len(str(headers[i])), 6)
+            for r in rows:
+                if i < len(r):
+                    cell = str(r[i]).replace("\n", " ").replace("\r", "")
+                    w = max(w, len(cell))
+            if notes_col_idx is not None and i == notes_col_idx:
+                widths.append(min(w, _NOTES_COL_MAX_WIDTH))
+            else:
+                widths.append(min(w, _DYNAMIC_COL_CAP))
+            continue
+        if notes_col_idx is not None and i == notes_col_idx:
+            w = max(len(str(headers[i])), 8)
+            for r in rows:
+                if i < len(r):
+                    cell = str(r[i]).replace("\n", " ").replace("\r", "")
+                    w = max(w, len(cell))
+            widths.append(min(w, _NOTES_COL_MAX_WIDTH))
+            continue
+        cap = max_col or _MAX_COL
         w = min(max(len(headers[i]), 5), cap)
         for r in rows:
             if i < len(r):
@@ -289,7 +324,7 @@ def format_drift_report(
             "  Hint: verify NetBox site vs MAAS zone/pool; serial vs system_id."
         )
         lines.append(
-            "  Columns: MAAS/NB placement, identity, NB primary IP/VRF/VLANs, OpenStack FIP (fixed→float on any device IP)."
+            "  Columns: MAAS BMC (power_address) vs NetBox OOB IP; NB primary IP = in-band; OpenStack FIP on device IPs."
         )
         lines.append("")
         mh_headers = [
@@ -307,6 +342,8 @@ def format_drift_report(
             "VRF",
             "VLANs",
             "OS FIP",
+            "MAAS BMC",
+            "NB OOB",
             "notes",
         ]
         mrows = []
@@ -330,14 +367,16 @@ def format_drift_report(
                 str(r.get("netbox_vrf", "")),
                 str(r.get("netbox_vlans", "")),
                 str(r.get("openstack_fip", "")),
+                str(r.get("maas_bmc", "")),
+                str(r.get("netbox_oob", "")),
                 notes,
             ])
         lines.extend(
             _ascii_table(
                 mh_headers,
                 mrows,
-                max_col=_MAX_MATCHED_COL,
                 notes_col_idx=len(mh_headers) - 1,
+                dynamic_columns=True,
             )
         )
         lines.append(f"  ({len(matched_rows)} matched hosts)")
@@ -356,7 +395,7 @@ def format_drift_report(
         )
         lines.append(
             "  Status: OK | VLAN_DRIFT | VLAN_DRIFT+IP_GAP | OK_NAME_DIFF | IP_GAP | "
-            "NOT_IN_NETBOX | MAAS_NO_MAC"
+            "NOT_IN_NETBOX | MAC_MISMATCH | MAAS_NO_MAC"
         )
         lines.append("")
         hosts = interface_audit["hosts"]
@@ -375,10 +414,11 @@ def format_drift_report(
                         x["maas_mac"][:17],
                         x["maas_ips"][:22],
                         x["nb_if"][:12],
+                        x.get("nb_mac", "—")[:17],
                         x.get("nb_vlan", "")[:6],
                         x["nb_ips"][:22],
                         x["status"][:18],
-                        x["notes"][:28],
+                        x["notes"],
                     ]
                     for x in block["rows"]
                 ]
@@ -391,9 +431,10 @@ def format_drift_report(
                             "NB site",
                             "NB loc",
                             "MAAS intf",
-                            "MAC",
+                            "MAAS MAC",
                             "MAAS IPs",
                             "NB intf",
+                            "NB MAC",
                             "NB VLAN",
                             "NB IPs",
                             "status",
@@ -401,7 +442,7 @@ def format_drift_report(
                         ],
                         irows,
                         max_col=22,
-                        notes_col_idx=12,
+                        notes_col_idx=13,
                     )
                 )
             else:

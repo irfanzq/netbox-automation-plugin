@@ -101,7 +101,46 @@ def build_maas_netbox_interface_audit(
 
             maas_macs_with_nic.add(mac)
             nb = nb_by_mac.get(mac)
+            matched_by_name = False
+            mac_mismatch_done = False
+            if not nb and maas_name and str(maas_name).strip() not in ("", "—"):
+                mn = str(maas_name).strip().lower()
+                for cand in nb_list:
+                    if (cand.get("name") or "").strip().lower() != mn:
+                        continue
+                    cmac = _normalize_mac(cand.get("mac") or "")
+                    if not cmac:
+                        nb = cand
+                        matched_by_name = True
+                    elif cmac != mac:
+                        rows.append({
+                            "maas_fabric": m_fab,
+                            "maas_pool": m_pool,
+                            "nb_site": ctx_site,
+                            "nb_location": ctx_loc,
+                            "maas_if": maas_name,
+                            "maas_vlan": maas_vlan,
+                            "maas_mac": mac,
+                            "maas_ips": maas_ip_str,
+                            "nb_if": cand.get("name") or "—",
+                            "nb_vlan": str(cand.get("untagged_vlan_vid") or "")[:8] or "—",
+                            "nb_mac": cmac,
+                            "nb_ips": ", ".join(cand.get("ips") or []) or "—",
+                            "status": "MAC_MISMATCH",
+                            "notes": (
+                                f"Same iface name as NetBox but MAC differs "
+                                f"(NB={cmac} MAAS={mac})"
+                            ),
+                        })
+                        mac_mismatch_done = True
+                    else:
+                        nb = cand
+                    break
+            if mac_mismatch_done:
+                continue
+
             if not nb:
+                n_mac = sum(1 for x in nb_list if _normalize_mac(x.get("mac") or ""))
                 rows.append({
                     "maas_fabric": m_fab,
                     "maas_pool": m_pool,
@@ -116,7 +155,11 @@ def build_maas_netbox_interface_audit(
                     "nb_mac": "—",
                     "nb_ips": "—",
                     "status": "NOT_IN_NETBOX",
-                    "notes": "No NetBox interface with this MAC",
+                    "notes": (
+                        f"No NetBox interface with this MAC. "
+                        f"Device has {len(nb_list)} interface(s) in NetBox, "
+                        f"{n_mac} with MAC set — fill MACs on NB or rename to match MAAS."
+                    ),
                 })
                 continue
 
@@ -132,6 +175,10 @@ def build_maas_netbox_interface_audit(
             nb_v = _parse_vid(nb_vlan)
 
             notes = []
+            if matched_by_name:
+                notes.append(
+                    f"Matched by interface name; NetBox MAC empty — set to {mac} for MAC-based audit"
+                )
             vlan_drift = False
             # Physical untagged VLAN: MAAS vs NetBox (DRIFT_DESIGN — tag vlan-drift)
             if maas_v is not None and nb_v is not None:
@@ -170,6 +217,14 @@ def build_maas_netbox_interface_audit(
             else:
                 status = "OK"
 
+            nb_mac_stored = _normalize_mac(nb.get("mac") or "")
+            if nb_mac_stored:
+                nb_mac_out = nb_mac_stored
+            elif matched_by_name:
+                nb_mac_out = "—"
+            else:
+                nb_mac_out = mac
+
             rows.append({
                 "maas_fabric": m_fab,
                 "maas_pool": m_pool,
@@ -180,8 +235,8 @@ def build_maas_netbox_interface_audit(
                 "maas_mac": mac,
                 "maas_ips": maas_ip_str,
                 "nb_if": nb_name,
+                "nb_mac": nb_mac_out,
                 "nb_vlan": nb_vlan,
-                "nb_mac": mac,
                 "nb_ips": nb_ip_str,
                 "status": status,
                 "notes": "; ".join(notes) if notes else "—",
@@ -264,6 +319,10 @@ def build_maas_netbox_matched_rows(
                 pass
         if not nb.get("serial"):
             hints.append("NB serial empty — correlate system_id")
+        maas_bmc = (m.get("bmc_ip") or "").strip()
+        nb_oob = (nb.get("oob_ip_host") or "").strip()
+        if maas_bmc and nb_oob and maas_bmc.lower() != nb_oob.lower():
+            hints.append(f"MAAS BMC {maas_bmc} vs NetBox OOB {nb_oob}")
         match_ok = not hints
         fips = []
         for dip in nb.get("device_ips") or []:
@@ -287,6 +346,8 @@ def build_maas_netbox_matched_rows(
             "netbox_vrf": nb.get("vrf_name") or "Global",
             "netbox_vlans": nb.get("vlan_vids_summary") or "—",
             "openstack_fip": os_fip or "—",
+            "maas_bmc": maas_bmc or "—",
+            "netbox_oob": nb_oob or "—",
             "place_match": "OK" if match_ok else "CHECK",
             "hints": hints,
         })

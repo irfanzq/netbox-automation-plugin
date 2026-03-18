@@ -62,7 +62,7 @@ class NetBoxAutomationPluginConfig(PluginConfig):
             'openstack_username': '',
             'openstack_password': '',
             'openstack_project_name': '',
-            'openstack_region_name': 'RegionOne',
+            'openstack_region_name': 'birch',
             'site_mapping_fabric': {},  # e.g. {'birch-fabric': 'birch'}
             'site_mapping_pool': {},   # e.g. {'birch': 'birch'}
         }

@@ -49,7 +49,7 @@ LLDP (cabling)    ─┘         ↓
 | Runtime IP allocation (cloud) | **OpenStack** |
 | Design intent & IP planning | **NetBox** |
 
-**MAAS must not overwrite NetBox design:** hostnames, site/rack, roles, VLAN design (MAAS data reconciles/validates only).
+**MAAS must not overwrite NetBox design:** hostnames, site/rack, roles, VLAN design, and **populated chassis serial / manufacturer / model** when those reflect **netbox-agent** or manual design (MAAS reconciles/validates; see serial rules below).
 
 **OpenStack** does not own NetBox IPAM design; used for **runtime visibility and drift**.
 
@@ -57,18 +57,44 @@ LLDP (cabling)    ─┘         ↓
 
 | Object | Identity key |
 |--------|----------------|
-| **Device** | **hostname** (validate with **serial** when available) |
+| **Device** | **hostname** (match); **serial** validates identity when present — see **Serial & hardware identity** below |
 | **Interface** | device + interface name (**validated by MAC**) |
 | **VLAN** | VLAN Group + VID |
 | **Prefix** | prefix + VRF |
 | **IP address** | IP + VRF |
 | **Floating IP** | **IP + tenant/project** |
 
+## Serial number & hardware identity (drift / sync logic)
+
+**Context:** MAAS reports serial from commissioning/DMI; **netbox-agent** typically reads **live** chassis serial into NetBox. In practice **NetBox serial is often more reliable** once agent has run; MAAS serial remains useful for cross-check and for machines **not yet** enrolled with agent.
+
+### Source-of-truth for chassis serial
+
+| Situation | Rule |
+|-----------|------|
+| NetBox serial **already populated** (e.g. by agent) | **Do not overwrite** with MAAS on reconciliation. If MAAS serial **differs**, treat as **drift** — report/flag for review, not auto-sync. |
+| NetBox device **missing**; create from MAAS (future branch sync) | May **seed** serial from MAAS **only while** NetBox serial is empty; expect **agent to become authoritative** when the host runs agent. |
+| Serial missing everywhere | Match on **hostname** (and MAC/`system_id` for idempotency); fill serial when agent or trusted source appears. |
+
+### Matching policy (device exists or not)
+
+Recommended order for **“is this the same physical machine?”**:
+
+1. **Serial** — when both sides expose a trusted serial, use for **validation** (and strongest dedupe when hostname changed).
+2. **Hostname** (short name ↔ NetBox device name) — **primary join in Phase 0 drift today**; serial is often sparse, so hostname is the usual key.
+3. **MAC / interface correlation** — fallback at **interface** level; weak alone for whole-device identity.
+4. **MAAS `system_id`** — durable **MAAS-side** id for idempotent ETL / traceability (store in custom field if desired).
+
+### MAAS → NetBox scope for hardware fields
+
+- **MAAS owns:** machine presence, lifecycle, hostname (as observed), interfaces, MACs, fabric/VLAN context, **BMC endpoint** (power parameters — surfaced in drift as **MAAS BMC** vs NetBox **OOB IP**).
+- **NetBox-agent / design owns:** chassis serial, manufacturer, model where org policy says agent is truth — **v1 sync does not stomp those from MAAS** once set.
+
 ## Automation scope (rollout)
 
 ### MAAS → NetBox (primary)
 
-- Create/update devices from MAAS machines  
+- Create/update devices from MAAS machines (respect **serial/hardware** rules above)  
 - Create/update interfaces from MAAS NICs  
 - MAC alignment  
 - Tag `source:maas`  

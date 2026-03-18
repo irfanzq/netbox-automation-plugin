@@ -81,10 +81,29 @@ class MAASOpenStackSyncView(LoginRequiredMixin, View):
         else:
             netbox_data = fetch_netbox_data_local()
 
-        # 3) OpenStack (optional; if auth not set, skip)
+        # 3) OpenStack — same env as test_openstack_sdk.py (OS_AUTH_URL / app cred)
         openstack_data = None
-        if config.get("openstack_auth_url"):
+        has_openstack_auth = bool(
+            (config.get("openstack_auth_url") or "").strip()
+            or (os.environ.get("OS_AUTH_URL") or os.environ.get("OPENSTACK_AUTH_URL") or "").strip()
+        )
+        has_openstack_creds = bool(
+            (config.get("openstack_password") or os.environ.get("OS_PASSWORD") or "").strip()
+            or (
+                (config.get("openstack_application_credential_id") or "").strip()
+                and (config.get("openstack_application_credential_secret") or "").strip()
+            )
+        )
+        if has_openstack_auth and has_openstack_creds:
             openstack_data = fetch_openstack_data(config)
+        elif has_openstack_auth and not has_openstack_creds:
+            openstack_data = {
+                "networks": [],
+                "subnets": [],
+                "floating_ips": [],
+                "error": "OpenStack auth URL set but no OS_PASSWORD (or application credential ID/secret). Drift report will omit OpenStack data.",
+                "openstack_cred_missing": True,
+            }
 
         # 4) Drift (MAAS vs NetBox)
         drift = compute_maas_netbox_drift(maas_data, netbox_data)
@@ -139,6 +158,30 @@ class MAASOpenStackSyncView(LoginRequiredMixin, View):
             interface_audit=interface_audit,
         )
 
+        maas_m = len(maas_data.get("machines") or [])
+        nb_d = len(netbox_data.get("devices") or [])
+        audit_summary = {
+            "maas_ok": not maas_data.get("error"),
+            "maas_machines": maas_m,
+            "maas_error": (maas_data.get("error") or "")[:280],
+            "netbox_ok": not netbox_data.get("error"),
+            "netbox_devices": nb_d,
+            "netbox_error": (netbox_data.get("error") or "")[:280],
+            "openstack_ok": openstack_data and not openstack_data.get("error"),
+            "openstack_skipped": openstack_data is None,
+            "openstack_networks": len((openstack_data or {}).get("networks") or []),
+            "openstack_subnets": len((openstack_data or {}).get("subnets") or []),
+            "openstack_fips": len((openstack_data or {}).get("floating_ips") or []),
+            "openstack_error": ((openstack_data or {}).get("error") or "")[:320],
+            "openstack_cred_missing": bool(
+                (openstack_data or {}).get("openstack_cred_missing")
+            ),
+            "matched_hostnames": len(matched_rows or []),
+            "interface_audit_hosts": len((interface_audit or {}).get("hosts") or []),
+            "use_remote_netbox": use_remote_netbox,
+            "drift_matched": drift.get("matched_count", 0),
+        }
+
         return render(
             request,
             self.template_name,
@@ -146,5 +189,6 @@ class MAASOpenStackSyncView(LoginRequiredMixin, View):
                 "form": form,
                 "report": report,
                 "audit_done": True,
+                "audit_summary": audit_summary,
             },
         )

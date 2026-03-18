@@ -13,7 +13,7 @@ Option A — Environment variables (recommended for secrets):
     OPENSTACK_USERNAME=...
     OPENSTACK_PASSWORD=...   (or OPENSTACK_APPLICATION_CREDENTIAL_ID/SECRET)
     OPENSTACK_PROJECT_NAME=...
-    OPENSTACK_REGION_NAME=RegionOne
+    OPENSTACK_REGION_NAME=birch
   NetBox uses the same process; the plugin reads os.environ when the key
   is not in PLUGINS_CONFIG.
 
@@ -38,6 +38,9 @@ plugin config or a dedicated mapping structure.
 
 import os
 from django.conf import settings
+
+# When OS_REGION_NAME / plugin openstack_region_name are unset (org default cloud)
+OPENSTACK_DEFAULT_REGION_NAME = "birch"
 
 
 def _plugin_config():
@@ -87,7 +90,12 @@ def get_sync_config():
         "openstack_password": get_cfg("openstack_password", ["OPENSTACK_PASSWORD", "OS_PASSWORD"], ""),
         "openstack_project_name": get_cfg("openstack_project_name", ["OPENSTACK_PROJECT_NAME", "OS_PROJECT_NAME"], ""),
         "openstack_project_id": get_cfg("openstack_project_id", ["OPENSTACK_PROJECT_ID", "OS_PROJECT_ID"], ""),
-        "openstack_region_name": get_cfg("openstack_region_name", ["OPENSTACK_REGION_NAME", "OS_REGION_NAME"], "RegionOne"),
+        # Env first, then plugin; final default matches org Keystone region
+        "openstack_region_name": (
+            (os.environ.get("OS_REGION_NAME") or os.environ.get("OPENSTACK_REGION_NAME") or "").strip()
+            or (cfg.get("openstack_region_name") or "").strip()
+            or OPENSTACK_DEFAULT_REGION_NAME
+        ),
         "openstack_interface": get_cfg("openstack_interface", ["OPENSTACK_INTERFACE", "OS_INTERFACE"], "public"),
         "openstack_user_domain_name": get_cfg("openstack_user_domain_name", ["OPENSTACK_USER_DOMAIN_NAME", "OS_USER_DOMAIN_NAME"], "Default"),
         "openstack_project_domain_name": get_cfg("openstack_project_domain_name", ["OPENSTACK_PROJECT_DOMAIN_NAME", "OS_PROJECT_DOMAIN_NAME"], "Default"),

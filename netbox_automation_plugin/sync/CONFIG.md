@@ -20,11 +20,15 @@ Full reconciliation design: **`sync/DRIFT_DESIGN.md`**.
 
 **Drift report — physical VLAN:** For each MAAS NIC that matches a NetBox interface by MAC, if both sides expose a numeric untagged VID, a mismatch sets status **`VLAN_DRIFT`** (see Phase 0 counts). If NetBox has VID but MAAS API does not return one (common vs machine summary UI), the row stays OK with a **VLAN unverified** note — manual check by fabric/VLAN name.
 
+**MAAS BMC vs in-band IPs:** **BMC / OOB** comes from MAAS **power** (`power_address` on IPMI/Redfish/etc.). **Interface IPs** in the report are **in-band** NIC addresses — not the same. Matched-hosts table columns **MAAS BMC** and **NB OOB** (NetBox Device **OOB IP** when your version exposes `oob_ip`) compare those.
+
+**NOT_IN_NETBOX on a device that exists:** The plugin matches NICs **by MAC** first. If NetBox interfaces have **no MAC filled in**, they never match — the report then says how many interfaces exist and how many have MACs. **Fallback:** same **interface name** as MAAS (e.g. `ens110f0`) with empty NB MAC → matched with a note to set the MAC. If MAAS and NetBox use **different names**, add MACs on NetBox so MAC matching works.
+
 | `OPENSTACK_AUTH_URL` | OpenStack Identity URL | `https://.../v3` |
 | `OPENSTACK_USERNAME` | OpenStack user | `admin` |
 | `OPENSTACK_PASSWORD` | OpenStack password | (secret) |
 | `OPENSTACK_PROJECT_NAME` | OpenStack project/tenant | `admin` |
-| `OS_REGION_NAME` / `OPENSTACK_REGION_NAME` | Must match Keystone (RC file), e.g. **`birch`** — not always `RegionOne` |
+| `OS_REGION_NAME` / `OPENSTACK_REGION_NAME` | Override Keystone region; default / plugin fallback is **`birch`** (`OPENSTACK_DEFAULT_REGION_NAME` in `sync/config/settings.py`). |
 | `OS_INTERFACE` / `OPENSTACK_INTERFACE` | Usually `public` (from RC file) |
 | `OS_PROJECT_ID` | Optional; from RC file if name auth fails |
 | `OPENSTACK_USER_DOMAIN_NAME` | User domain | `Default` |
