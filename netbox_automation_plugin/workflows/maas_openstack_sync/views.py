@@ -11,6 +11,16 @@ from netbox_automation_plugin.sync.clients.maas_client import fetch_maas_data_sy
 from netbox_automation_plugin.sync.clients.netbox_client import (
     fetch_netbox_data,
     fetch_netbox_data_local,
+    fetch_netbox_audit_detail_for_names,
+    fetch_netbox_interfaces_for_names,
+    fetch_netbox_prefix_cidrs,
+)
+from netbox_automation_plugin.sync.reconciliation.audit_detail import (
+    build_maas_netbox_interface_audit,
+    build_maas_netbox_matched_rows,
+    openstack_floating_ips_missing_from_netbox,
+    openstack_subnet_prefix_hints,
+    openstack_subnets_missing_prefixes,
 )
 from netbox_automation_plugin.sync.clients.openstack_client import fetch_openstack_data
 from netbox_automation_plugin.sync.reconciliation.maas_netbox import compute_maas_netbox_drift
@@ -79,8 +89,53 @@ class MAASOpenStackSyncView(LoginRequiredMixin, View):
         # 4) Drift (MAAS vs NetBox)
         drift = compute_maas_netbox_drift(maas_data, netbox_data)
 
+        matched_rows = None
+        interface_audit = None
+        os_subnet_hints = None
+        os_subnet_gaps = None
+        os_floating_gaps = []
+        netbox_prefix_count = 0
+        if not use_remote_netbox and not netbox_data.get("error"):
+            maas_h = {
+                (m.get("hostname") or "").strip()
+                for m in (maas_data.get("machines") or [])
+                if (m.get("hostname") or "").strip()
+            }
+            nb_h = {
+                (d.get("name") or "").strip()
+                for d in (netbox_data.get("devices") or [])
+                if (d.get("name") or "").strip()
+            }
+            matched_names = maas_h & nb_h
+            audit_map = fetch_netbox_audit_detail_for_names(matched_names)
+            matched_rows = build_maas_netbox_matched_rows(maas_data, audit_map)
+            nb_ifaces = fetch_netbox_interfaces_for_names(matched_names)
+            interface_audit = build_maas_netbox_interface_audit(
+                matched_names, maas_data, nb_ifaces
+            )
+            prefix_set = fetch_netbox_prefix_cidrs()
+            netbox_prefix_count = len(prefix_set)
+            if openstack_data and not openstack_data.get("error"):
+                os_subnet_hints = openstack_subnet_prefix_hints(openstack_data, prefix_set)
+                os_subnet_gaps = openstack_subnets_missing_prefixes(os_subnet_hints)
+
+        if openstack_data and not openstack_data.get("error"):
+            os_floating_gaps = openstack_floating_ips_missing_from_netbox(openstack_data)
+
         # 5) Report
-        report = format_drift_report(maas_data, netbox_data, openstack_data, drift)
+        report = format_drift_report(
+            maas_data,
+            netbox_data,
+            openstack_data,
+            drift,
+            matched_rows=matched_rows,
+            os_subnet_hints=os_subnet_hints,
+            os_subnet_gaps=os_subnet_gaps,
+            os_floating_gaps=os_floating_gaps,
+            netbox_prefix_count=netbox_prefix_count,
+            use_remote_netbox=use_remote_netbox,
+            interface_audit=interface_audit,
+        )
 
         return render(
             request,

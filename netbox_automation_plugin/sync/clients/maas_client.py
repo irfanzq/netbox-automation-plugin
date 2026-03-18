@@ -15,6 +15,52 @@ import logging
 logger = logging.getLogger("netbox_automation_plugin.sync")
 
 
+def _ip_host_only(addr: str) -> str:
+    if not addr:
+        return ""
+    return str(addr).split("/", 1)[0].strip().lower()
+
+
+async def _machine_interfaces_list(machine):
+    """
+    Return list of {name, mac, ips[], type} for one MAAS machine via Interfaces.read.
+    """
+    rows = []
+    try:
+        from maas.client.viscera.interfaces import Interfaces
+    except ImportError:
+        logger.warning("maas.client.viscera.interfaces.Interfaces not importable")
+        return rows
+    try:
+        iface_set = await Interfaces.read(machine)
+    except Exception as e:
+        logger.debug("Interfaces.read failed for %s: %s", getattr(machine, "system_id", "?"), e)
+        return rows
+    for iface in iface_set:
+        mac = (getattr(iface, "mac_address", None) or "").strip().lower().replace("-", ":")
+        name = (getattr(iface, "name", None) or "").strip()
+        itype = str(getattr(iface, "type", "") or "")
+        ips = []
+        for link in list(getattr(iface, "links", []) or []):
+            ip = getattr(link, "ip_address", None)
+            if ip:
+                h = _ip_host_only(str(ip))
+                if h:
+                    ips.append(h)
+        try:
+            disc_iter = getattr(iface, "discovered", None) or []
+            for disc in list(disc_iter):
+                ip = getattr(disc, "ip_address", None)
+                if ip:
+                    h = _ip_host_only(str(ip))
+                    if h and h not in ips:
+                        ips.append(h)
+        except (TypeError, ValueError):
+            pass
+        rows.append({"name": name, "mac": mac, "ips": ips, "type": itype})
+    return rows
+
+
 def hostname_short(name):
     """
     Return the short hostname (before first dot) for matching with NetBox.
@@ -30,7 +76,7 @@ def hostname_short(name):
 async def fetch_maas_data(maas_url: str, maas_api_key: str, maas_insecure: bool):
     """
     Fetch machines, zones, and pools from MAAS. Returns a dict with:
-      - machines: list of {hostname, system_id, zone_name, pool_name}
+      - machines: list of {hostname, system_id, zone_name, pool_name, status_name}
       - zones: list of {name, id}
       - pools: list of {name, id}
       - error: str if connection failed
@@ -84,12 +130,22 @@ async def fetch_maas_data(maas_url: str, maas_api_key: str, maas_insecure: bool)
             # MAAS may give hostname or fqdn; normalize to short name for NetBox matching
             raw_name = getattr(m, "hostname", "") or getattr(m, "fqdn", "")
             short_name = hostname_short(raw_name)
+            status_name = "-"
+            try:
+                st = getattr(m, "status", None)
+                if st is not None:
+                    status_name = getattr(st, "name", None) or str(st)
+            except Exception:
+                pass
+            ifaces = await _machine_interfaces_list(m)
             result["machines"].append({
                 "hostname": short_name,
                 "fqdn": raw_name if raw_name != short_name else "",
                 "system_id": getattr(m, "system_id", ""),
                 "zone_name": zone_name,
                 "pool_name": pool_name,
+                "status_name": status_name,
+                "interfaces": ifaces,
             })
     except Exception as e:
         logger.exception("MAAS fetch failed")
