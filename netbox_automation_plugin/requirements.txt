@@ -1,9 +1,10 @@
-setuptools>=65.0.0,<82
+setuptools>=65.0.0,<81
 napalm>=5.0.0
 nornir>=3.4.0
 nornir-napalm>=0.4.0
 
 # MAAS / OpenStack Sync (Phase 1 Drift Audit)
 python-libmaas
+requests-oauthlib>=1.3.0
 pynetbox
 openstacksdk

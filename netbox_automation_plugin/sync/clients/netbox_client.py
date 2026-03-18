@@ -22,6 +22,21 @@ def fetch_netbox_data_local():
 
         for s in Site.objects.only("name", "slug").iterator():
             result["sites"].append({"name": s.name or "", "slug": s.slug or ""})
+        try:
+            from dcim.models import Location
+
+            result["locations_count"] = Location.objects.count()
+            result["location_lines"] = []
+            for loc in (
+                Location.objects.select_related("site")
+                .only("name", "site__slug", "site__name")
+                .order_by("site__slug", "name")[:60]
+            ):
+                ss = (loc.site.slug or loc.site.name or "") if loc.site_id else ""
+                result["location_lines"].append(f"{ss}/{loc.name or '-'}")
+        except Exception:
+            result["locations_count"] = 0
+            result["location_lines"] = []
         for d in Device.objects.select_related("site").only(
             "name", "id", "site_id", "site__slug", "site__name"
         ).iterator():
@@ -50,16 +65,36 @@ def fetch_netbox_audit_detail_for_names(names: set):
     try:
         from dcim.models import Device, Interface
 
-        names_list = list(names)[:2000]
+        from django.db.models import Prefetch
+
+        from ipam.models import IPAddress
+
+        names_list = list(names)[:8000]
+        iface_qs = (
+            Interface.objects.select_related("untagged_vlan")
+            .prefetch_related(
+                Prefetch(
+                    "ip_addresses",
+                    queryset=IPAddress.objects.select_related("vrf"),
+                )
+            )
+        )
         devices = (
             Device.objects.filter(name__in=names_list)
-            .select_related("site")
-            .prefetch_related("interfaces")
+            .select_related("site", "location", "primary_ip4", "primary_ip4__vrf")
+            .prefetch_related(Prefetch("interfaces", queryset=iface_qs))
         )
         for d in devices:
             site_slug = ""
+            site_name = ""
             if d.site_id and d.site:
                 site_slug = d.site.slug or d.site.name or ""
+                site_name = d.site.name or site_slug
+            loc_name = ""
+            loc_slug = ""
+            if getattr(d, "location_id", None) and d.location:
+                loc_name = d.location.name or ""
+                loc_slug = getattr(d.location, "slug", None) or loc_name
             try:
                 status_val = d.get_status_display()
             except Exception:
@@ -78,11 +113,49 @@ def fetch_netbox_audit_detail_for_names(names: set):
                     primary_mac = str(pick.mac_address).lower()
             except Exception:
                 pass
+            primary_ip4_host = ""
+            vrf_name = "Global"
+            try:
+                if getattr(d, "primary_ip4_id", None) and d.primary_ip4:
+                    pip = d.primary_ip4
+                    primary_ip4_host = str(pip.address).split("/", 1)[0].strip()
+                    if getattr(pip, "vrf_id", None) and pip.vrf:
+                        vrf_name = (pip.vrf.name or pip.vrf.slug or str(pip.vrf_id))[:32]
+            except Exception:
+                pass
+            device_ips = set()
+            vlan_vids = set()
+            try:
+                for iface in d.interfaces.all():
+                    uv = getattr(iface, "untagged_vlan", None)
+                    if uv is not None and getattr(uv, "vid", None) is not None:
+                        vlan_vids.add(str(uv.vid))
+                    for ip in iface.ip_addresses.all():
+                        device_ips.add(
+                            str(ip.address).split("/", 1)[0].strip().lower()
+                        )
+            except Exception:
+                pass
+            try:
+                vlan_summary = ",".join(
+                    sorted(vlan_vids, key=lambda x: (int(x) if x.isdigit() else 9999, x))
+                )
+            except Exception:
+                vlan_summary = ",".join(sorted(vlan_vids))
+            if len(vlan_summary) > 28:
+                vlan_summary = vlan_summary[:26] + ".."
             out[d.name] = {
                 "site_slug": site_slug,
+                "site_name": site_name,
+                "location_name": loc_name,
+                "location_slug": loc_slug,
                 "status": status_val,
                 "serial": serial,
                 "primary_mac": primary_mac,
+                "primary_ip4_host": primary_ip4_host,
+                "vrf_name": vrf_name,
+                "vlan_vids_summary": vlan_summary or "—",
+                "device_ips": sorted(device_ips),
             }
     except Exception:
         logger.exception("NetBox audit detail for names failed")
@@ -101,9 +174,15 @@ def fetch_netbox_interfaces_for_names(names: set):
         from django.db.models import Prefetch
 
         from dcim.models import Device, Interface
+        from ipam.models import IPAddress
 
         names_list = list(names)[:2000]
-        iface_qs = Interface.objects.prefetch_related("ip_addresses")
+        iface_qs = Interface.objects.select_related("untagged_vlan").prefetch_related(
+            Prefetch(
+                "ip_addresses",
+                queryset=IPAddress.objects.select_related("vrf"),
+            )
+        )
         devices = Device.objects.filter(name__in=names_list).prefetch_related(
             Prefetch("interfaces", queryset=iface_qs)
         )
@@ -114,13 +193,23 @@ def fetch_netbox_interfaces_for_names(names: set):
                 if iface.mac_address:
                     mac = str(iface.mac_address).lower().replace("-", ":")
                 ips = []
+                ip_vrfs = []
                 for ip in iface.ip_addresses.all():
-                    ips.append(str(ip.address).split("/", 1)[0].strip().lower())
+                    host = str(ip.address).split("/", 1)[0].strip().lower()
+                    ips.append(host)
+                    v = ""
+                    if getattr(ip, "vrf_id", None) and ip.vrf:
+                        v = (ip.vrf.name or ip.vrf.slug or "")[:12]
+                    ip_vrfs.append(v or "Global")
+                uv = getattr(iface, "untagged_vlan", None)
+                vid = str(uv.vid) if uv and getattr(uv, "vid", None) is not None else ""
                 lst.append({
                     "name": iface.name or "",
                     "mac": mac,
                     "ips": ips,
                     "mgmt_only": bool(getattr(iface, "mgmt_only", False)),
+                    "untagged_vlan_vid": vid,
+                    "ip_vrfs": ip_vrfs,
                 })
             out[d.name or ""] = lst
     except Exception:

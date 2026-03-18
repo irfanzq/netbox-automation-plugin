@@ -2,6 +2,11 @@
 
 NetBox plugin with NAPALM and Nornir integration for parallel device operations.
 
+## MAAS / OpenStack sync (drift audit)
+
+Design and Phase 0 scope: [`netbox_automation_plugin/sync/DRIFT_DESIGN.md`](netbox_automation_plugin/sync/DRIFT_DESIGN.md).  
+Config: [`netbox_automation_plugin/sync/CONFIG.md`](netbox_automation_plugin/sync/CONFIG.md).
+
 ## Features
 
 - Parallel device connections using Nornir ThreadedRunner

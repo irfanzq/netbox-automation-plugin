@@ -21,44 +21,254 @@ def _ip_host_only(addr: str) -> str:
     return str(addr).split("/", 1)[0].strip().lower()
 
 
-async def _machine_interfaces_list(machine):
+def _ifaces_from_viscera_list(iface_list):
     """
-    Return list of {name, mac, ips[], type} for one MAAS machine via Interfaces.read.
+    Build interface dicts from python-libmaas Interface objects.
+    Each NIC is isolated in try/except so one broken object does not zero out the whole machine.
     """
     rows = []
+    for iface in iface_list:
+        try:
+            mac = (getattr(iface, "mac_address", None) or "").strip().lower().replace("-", ":")
+            name = (getattr(iface, "name", None) or "").strip()
+            itype = str(getattr(iface, "type", "") or "")
+            ips = []
+            try:
+                links = getattr(iface, "links", None) or []
+                for link in list(links):
+                    try:
+                        ip = getattr(link, "ip_address", None)
+                        if ip:
+                            h = _ip_host_only(str(ip))
+                            if h:
+                                ips.append(h)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+            try:
+                for disc in list(getattr(iface, "discovered", None) or []):
+                    try:
+                        ip = getattr(disc, "ip_address", None)
+                        if ip:
+                            h = _ip_host_only(str(ip))
+                            if h and h not in ips:
+                                ips.append(h)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+            vid = ""
+            try:
+                v = getattr(iface, "vlan", None)
+                if v is not None:
+                    vid = str(getattr(v, "vid", None) or getattr(v, "id", None) or "")
+            except Exception:
+                pass
+            rows.append({
+                "name": name, "mac": mac, "ips": ips, "type": itype, "vlan_vid": vid,
+            })
+        except Exception as e:
+            logger.debug("MAAS viscera iface skip: %s", e)
+            continue
+    return rows
+
+
+async def _machine_interfaces_list(machine):
+    """Return list of {name, mac, ips[], type} for one MAAS machine via Interfaces.read."""
     try:
         from maas.client.viscera.interfaces import Interfaces
     except ImportError:
-        logger.warning("maas.client.viscera.interfaces.Interfaces not importable")
-        return rows
+        return []
+    sid = getattr(machine, "system_id", None) or ""
     try:
-        iface_set = await Interfaces.read(machine)
+        iface_set = await Interfaces.read(sid or machine)
     except Exception as e:
-        logger.debug("Interfaces.read failed for %s: %s", getattr(machine, "system_id", "?"), e)
-        return rows
+        logger.debug("Interfaces.read failed for %s: %s", sid, e)
+        return []
+    try:
+        ilist = list(iface_set)
+    except Exception as e:
+        logger.warning("MAAS interfaces list() failed for %s: %s", sid, e)
+        return []
+    return _ifaces_from_viscera_list(ilist)
+
+
+def _fabric_from_iface_set(iface_set):
+    """Best-effort MAAS fabric name from interfaces' VLAN (same API round-trip as NIC list)."""
+    seen = []
     for iface in iface_set:
-        mac = (getattr(iface, "mac_address", None) or "").strip().lower().replace("-", ":")
-        name = (getattr(iface, "name", None) or "").strip()
-        itype = str(getattr(iface, "type", "") or "")
+        v = getattr(iface, "vlan", None)
+        if v is None:
+            continue
+        fab = getattr(v, "fabric", None)
+        if fab is not None:
+            n = getattr(fab, "name", None) or str(fab)
+            if n and n not in seen:
+                seen.append(str(n))
+        else:
+            d = getattr(v, "_data", None) or {}
+            fd = d.get("fabric")
+            if isinstance(fd, dict) and fd.get("name"):
+                n = str(fd["name"])
+                if n not in seen:
+                    seen.append(n)
+    if not seen:
+        return "-"
+    return seen[0] if len(seen) == 1 else ", ".join(seen[:3])
+
+
+def _fabric_from_rest_ifaces(items: list) -> str:
+    seen = []
+    for item in items:
+        vlan = item.get("vlan") if isinstance(item, dict) else None
+        if not isinstance(vlan, dict):
+            continue
+        fab = vlan.get("fabric")
+        if isinstance(fab, dict) and fab.get("name"):
+            n = str(fab["name"])
+            if n not in seen:
+                seen.append(n)
+    if not seen:
+        return "-"
+    return seen[0] if len(seen) == 1 else ", ".join(seen[:3])
+
+
+def _rest_rows_from_iface_dicts(items: list) -> list:
+    """Parse MAAS interface objects (list endpoint or interface_set on machine)."""
+    rows = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        mac = (
+            item.get("mac_address")
+            or item.get("mac")
+            or item.get("hwaddr")
+            or ""
+        )
+        mac = str(mac).strip().lower().replace("-", ":")
+        name = (item.get("name") or "").strip()
+        itype = str(item.get("type") or "")
         ips = []
-        for link in list(getattr(iface, "links", []) or []):
-            ip = getattr(link, "ip_address", None)
+        for link in item.get("links") or []:
+            if not isinstance(link, dict):
+                continue
+            ip = link.get("ip_address")
             if ip:
                 h = _ip_host_only(str(ip))
-                if h:
+                if h and h not in ips:
                     ips.append(h)
-        try:
-            disc_iter = getattr(iface, "discovered", None) or []
-            for disc in list(disc_iter):
-                ip = getattr(disc, "ip_address", None)
-                if ip:
-                    h = _ip_host_only(str(ip))
-                    if h and h not in ips:
-                        ips.append(h)
-        except (TypeError, ValueError):
-            pass
-        rows.append({"name": name, "mac": mac, "ips": ips, "type": itype})
+        for disc in item.get("discovered") or []:
+            if isinstance(disc, dict) and disc.get("ip_address"):
+                h = _ip_host_only(str(disc["ip_address"]))
+                if h and h not in ips:
+                    ips.append(h)
+        vid = ""
+        vlan = item.get("vlan") if isinstance(item, dict) else None
+        if isinstance(vlan, dict):
+            vid = str(vlan.get("vid") or vlan.get("id") or "")
+        rows.append({
+            "name": name, "mac": mac, "ips": ips, "type": itype, "vlan_vid": vid,
+        })
     return rows
+
+
+def _embedded_interface_arrays(machine: dict):
+    """MAAS 3.x machine JSON may use interface_set, interfaces, or boot_interface only."""
+    if not isinstance(machine, dict):
+        return []
+    for key in ("interface_set", "interfaces", "network_interfaces"):
+        arr = machine.get(key)
+        if isinstance(arr, list) and arr:
+            return arr
+    return []
+
+
+def _maas_interfaces_rest(maas_url: str, api_key: str, system_id: str, verify_tls: bool):
+    """
+    When python-libmaas returns no NICs: same data as MAAS UI via REST.
+
+    1) GET .../interfaces/ (list)
+    2) GET .../machines/{id}/ or .../nodes/{id}/ and read interface_set (MAAS 3.6 often
+       populates here even when the list endpoint is empty).
+    """
+    parts = api_key.split(":", 2)
+    if len(parts) != 3:
+        return [], "-"
+    ck, tk, ts = parts[0], parts[1], parts[2]
+    base = maas_url.rstrip("/")
+    if not base.lower().endswith("maas"):
+        base = base + "/MAAS" if "/MAAS" not in base.upper() else base
+    try:
+        import requests
+        from requests_oauthlib import OAuth1
+    except ImportError:
+        logger.warning("requests_oauthlib not available for MAAS REST interface fallback")
+        return [], "-"
+    auth = OAuth1(ck, "", tk, ts, signature_method="PLAINTEXT")
+    last_err = None
+
+    list_urls = [
+        f"{base}/api/2.0/machines/{system_id}/interfaces/",
+        f"{base}/api/2.0/nodes/{system_id}/interfaces/",
+    ]
+    for url in list_urls:
+        try:
+            r = requests.get(url, auth=auth, verify=verify_tls, timeout=90)
+            if r.status_code == 404:
+                continue
+            if r.status_code != 200:
+                last_err = f"{url} -> {r.status_code} {r.text[:100]}"
+                continue
+            data = r.json()
+            if isinstance(data, list) and data:
+                rows = _rest_rows_from_iface_dicts(data)
+                if rows:
+                    return rows, _fabric_from_rest_ifaces(data)
+            elif isinstance(data, dict) and data.get("interfaces"):
+                arr = data["interfaces"]
+                if isinstance(arr, list):
+                    rows = _rest_rows_from_iface_dicts(arr)
+                    if rows:
+                        return rows, _fabric_from_rest_ifaces(arr)
+        except Exception as e:
+            last_err = str(e)
+            logger.debug("MAAS REST %s: %s", url, e)
+
+    detail_urls = [
+        f"{base}/api/2.0/machines/{system_id}/",
+        f"{base}/api/2.0/nodes/{system_id}/",
+    ]
+    for url in detail_urls:
+        try:
+            r = requests.get(url, auth=auth, verify=verify_tls, timeout=90)
+            if r.status_code != 200:
+                last_err = f"{url} -> {r.status_code} {r.text[:100]}"
+                continue
+            machine = r.json()
+            arr = _embedded_interface_arrays(machine)
+            if not arr:
+                last_err = f"{url} -> 200 but no interface_set/interfaces on machine JSON"
+                continue
+            rows = _rest_rows_from_iface_dicts(arr)
+            if rows:
+                logger.info(
+                    "MAAS interfaces from machine detail %s (%d NICs)",
+                    system_id,
+                    len(rows),
+                )
+                return rows, _fabric_from_rest_ifaces(arr)
+        except Exception as e:
+            last_err = str(e)
+            logger.debug("MAAS machine detail %s: %s", url, e)
+
+    if last_err:
+        logger.warning(
+            "MAAS REST could not load interfaces for system_id=%s host check MAAS_URL matches UI MAAS. Last: %s",
+            system_id,
+            last_err,
+        )
+    return [], "-"
 
 
 def hostname_short(name):
@@ -137,13 +347,45 @@ async def fetch_maas_data(maas_url: str, maas_api_key: str, maas_insecure: bool)
                     status_name = getattr(st, "name", None) or str(st)
             except Exception:
                 pass
-            ifaces = await _machine_interfaces_list(m)
+            sid = (getattr(m, "system_id", None) or "").strip()
+            ifaces = []
+            fabric_name = "-"
+            if sid:
+                try:
+                    from maas.client.viscera.interfaces import Interfaces
+
+                    iface_set = await Interfaces.read(sid)
+                    ilist = list(iface_set)
+                    ifaces = _ifaces_from_viscera_list(ilist)
+                    fabric_name = _fabric_from_iface_set(ilist)
+                except Exception as e:
+                    logger.warning(
+                        "MAAS Interfaces.read(%s) host=%s: %s",
+                        sid,
+                        short_name,
+                        e,
+                    )
+                if not ifaces:
+                    rest_if, rest_fab = await asyncio.to_thread(
+                        _maas_interfaces_rest,
+                        maas_url,
+                        maas_api_key,
+                        sid,
+                        not maas_insecure,
+                    )
+                    if rest_if:
+                        ifaces = rest_if
+                        fabric_name = rest_fab if rest_fab != "-" else fabric_name
+                        logger.debug(
+                            "MAAS REST fallback: %d ifaces for %s", len(ifaces), short_name
+                        )
             result["machines"].append({
                 "hostname": short_name,
                 "fqdn": raw_name if raw_name != short_name else "",
                 "system_id": getattr(m, "system_id", ""),
                 "zone_name": zone_name,
                 "pool_name": pool_name,
+                "fabric_name": fabric_name,
                 "status_name": status_name,
                 "interfaces": ifaces,
             })
