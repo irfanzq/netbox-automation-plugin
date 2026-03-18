@@ -22,6 +22,8 @@ Full reconciliation design: **`sync/DRIFT_DESIGN.md`**.
 
 **MAAS BMC vs in-band IPs:** **BMC / OOB** comes from MAAS **power** (`power_address` on IPMI/Redfish/etc.). **Interface IPs** in the report are **in-band** NIC addresses — not the same. Matched-hosts table columns **MAAS BMC** and **NB OOB** (NetBox Device **OOB IP** when your version exposes `oob_ip`) compare those.
 
+**MAAS API key for BMC:** Normal `GET .../machines/{id}/` often returns **`power_parameters: null`**. MAAS documents a separate **[machine power-parameters](https://maas.io/docs/machine)** operation (`op=power_parameters`) that returns full power fields; it is **admin-only** (403 for non-admin keys). The plugin tries that op after the standard read — use a **MAAS administrator** OAuth key in `MAAS_API_KEY` if you need **MAAS BMC** in the drift report. **python-libmaas** does not expose a different path; same API.
+
 **NOT_IN_NETBOX on a device that exists:** The plugin matches NICs **by MAC** first. If NetBox interfaces have **no MAC filled in**, they never match — the report then says how many interfaces exist and how many have MACs. **Fallback:** same **interface name** as MAAS (e.g. `ens110f0`) with empty NB MAC → matched with a note to set the MAC. If MAAS and NetBox use **different names**, add MACs on NetBox so MAC matching works.
 
 | `OPENSTACK_AUTH_URL` | OpenStack Identity URL | `https://.../v3` |

@@ -17,21 +17,52 @@ from urllib.parse import urlparse
 
 logger = logging.getLogger("netbox_automation_plugin.sync")
 
+_maas_insecure_warn_done = False
+
+
+def _silence_urllib3_insecure_when_maas_tls_skipped():
+    """
+    MAAS_INSECURE=true uses verify=False on many requests per machine; urllib3
+    logs InsecureRequestWarning each time. Silence once per process when intentional.
+    """
+    global _maas_insecure_warn_done
+    if _maas_insecure_warn_done:
+        return
+    try:
+        import urllib3
+
+        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+    except Exception:
+        pass
+    _maas_insecure_warn_done = True
+
 
 def _bmc_ip_from_power(power_parameters, power_type=None) -> str:
     """
-    Best-effort BMC / power endpoint host or IP from MAAS power_parameters.
-    Not the same as in-band NIC IPs on interfaces.
+    Best-effort BMC / power endpoint from MAAS power_parameters or op=power_parameters JSON.
+    Same fields as test_maas_libmaas.py bmc_from_power (IPMI, Redfish, etc.).
     """
     if not isinstance(power_parameters, dict):
         return ""
-    addr = (
-        power_parameters.get("power_address")
-        or power_parameters.get("power_host")
-        or ""
-    )
-    addr = str(addr).strip()
-    if not addr or addr.lower() in ("none", "null", "-"):
+    addr = ""
+    for key in (
+        "power_address",
+        "power_host",
+        "redfish_address",
+        "redfish_host",
+        "bmc_address",
+        "power_ip",
+        "ip_address",
+    ):
+        raw = power_parameters.get(key)
+        if raw is None:
+            continue
+        addr = str(raw).strip()
+        if addr and addr.lower() not in ("none", "null", "-"):
+            break
+    else:
+        addr = ""
+    if not addr:
         return ""
     try:
         if "://" in addr:
@@ -50,33 +81,235 @@ def _bmc_ip_from_power(power_parameters, power_type=None) -> str:
     return first[:64] if len(first) <= 64 else first[:62] + ".."
 
 
+def _bmc_from_machine_or_power_op(j: dict) -> str:
+    """power_parameters may be nested or op=power_parameters may return flat keys."""
+    if not isinstance(j, dict):
+        return ""
+    pp = j.get("power_parameters")
+    for candidate in (pp, j):
+        if isinstance(candidate, dict) and candidate:
+            bmc = _bmc_ip_from_power(candidate, j.get("power_type"))
+            if bmc:
+                return bmc
+    return ""
+
+
 def _maas_rest_fetch_bmc(maas_url: str, api_key: str, system_id: str, verify_tls: bool) -> str:
+    """
+    BMC from MAAS: normal machine read often omits power_parameters (null) for non-admin keys.
+    MAAS also exposes machine power-parameters via op=power_parameters (admin only); see
+    https://maas.io/docs/machine — same for python-libmaas vs raw REST.
+    """
     parts = api_key.split(":", 2)
     if len(parts) != 3 or not system_id:
         return ""
     ck, tk, ts = parts[0], parts[1], parts[2]
-    base = maas_url.rstrip("/")
-    if not base.lower().endswith("maas"):
-        base = base + "/MAAS" if "/MAAS" not in base.upper() else base
+    base = _maas_rest_base(maas_url)
     try:
         import requests
         from requests_oauthlib import OAuth1
     except ImportError:
         return ""
     auth = OAuth1(ck, "", tk, ts, signature_method="PLAINTEXT")
+
     for path in (f"{base}/api/2.0/machines/{system_id}/", f"{base}/api/2.0/nodes/{system_id}/"):
         try:
             r = requests.get(path, auth=auth, verify=verify_tls, timeout=45)
+            if r.status_code == 200:
+                j = r.json()
+                if isinstance(j, dict):
+                    bmc = _bmc_from_machine_or_power_op(j)
+                    if bmc:
+                        return bmc
+        except Exception:
+            logger.debug("MAAS BMC fetch %s", path, exc_info=True)
+
+    # Admin-only: full power config including IPMI power_address (403 otherwise)
+    for path in (f"{base}/api/2.0/machines/{system_id}/", f"{base}/api/2.0/nodes/{system_id}/"):
+        try:
+            r = requests.get(
+                path,
+                params={"op": "power_parameters"},
+                auth=auth,
+                verify=verify_tls,
+                timeout=45,
+            )
+            if r.status_code == 403:
+                logger.debug(
+                    "MAAS op=power_parameters returned 403 for %s — use admin MAAS API key for BMC IP",
+                    system_id,
+                )
+                continue
             if r.status_code != 200:
                 continue
             j = r.json()
             if isinstance(j, dict):
-                bmc = _bmc_ip_from_power(j.get("power_parameters"), j.get("power_type"))
+                bmc = _bmc_from_machine_or_power_op(j)
                 if bmc:
                     return bmc
         except Exception:
-            logger.debug("MAAS BMC fetch %s", path, exc_info=True)
+            logger.debug("MAAS power_parameters op %s", path, exc_info=True)
+
+    try:
+        r = requests.get(
+            f"{base}/api/2.0/machines/",
+            params={"op": "power_parameters", "id": system_id},
+            auth=auth,
+            verify=verify_tls,
+            timeout=45,
+        )
+        if r.status_code == 200:
+            j = r.json()
+            if isinstance(j, dict):
+                bmc = _bmc_from_machine_or_power_op(j)
+                if bmc:
+                    return bmc
+            if isinstance(j, list) and j and isinstance(j[0], dict):
+                bmc = _bmc_from_machine_or_power_op(j[0])
+                if bmc:
+                    return bmc
+    except Exception:
+        logger.debug("MAAS machines op=power_parameters", exc_info=True)
+
     return ""
+
+
+def _maas_rest_base(maas_url: str) -> str:
+    base = maas_url.rstrip("/")
+    if not base.lower().endswith("maas"):
+        base = base + "/MAAS" if "/MAAS" not in base.upper() else base
+    return base
+
+
+def _fetch_maas_fabric_catalog(maas_url: str, api_key: str, verify_tls: bool) -> dict:
+    """
+    GET /api/2.0/fabrics/ — map fabric id and name -> display name.
+    MAAS interface JSON often has fabric as URL or slug; vlan.fabric is rarely a {name:} dict.
+    """
+    parts = api_key.split(":", 2)
+    if len(parts) != 3:
+        return {}
+    ck, tk, ts = parts[0], parts[1], parts[2]
+    base = _maas_rest_base(maas_url)
+    try:
+        import requests
+        from requests_oauthlib import OAuth1
+    except ImportError:
+        logger.warning("MAAS fabric catalog skipped (install requests requests_oauthlib)")
+        return {}
+    auth = OAuth1(ck, "", tk, ts, signature_method="PLAINTEXT")
+    try:
+        r = requests.get(f"{base}/api/2.0/fabrics/", auth=auth, verify=verify_tls, timeout=120)
+        if r.status_code != 200:
+            logger.warning("MAAS fabrics list HTTP %s", r.status_code)
+            return {}
+    except Exception:
+        logger.debug("MAAS fabrics fetch failed", exc_info=True)
+        return {}
+    out = {}
+    for fab in r.json() or []:
+        if not isinstance(fab, dict):
+            continue
+        fid = str(fab.get("id", ""))
+        name = (fab.get("name") or fid or "").strip()
+        if fid:
+            out[fid] = name or fid
+        if name:
+            out[name.lower()] = name
+    return out
+
+
+def _fabric_from_rest_ifaces(items: list, fabric_catalog: dict | None = None) -> str:
+    """Resolve fabric from MAAS interface JSON (interface.fabric string/URL + vlan.fabric)."""
+    catalog = fabric_catalog or {}
+
+    def add(seen: list, n: str) -> None:
+        n = (n or "").strip()
+        if n and n not in seen:
+            seen.append(n)
+
+    seen = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        fab = item.get("fabric")
+        if isinstance(fab, str) and fab.strip():
+            s = fab.strip()
+            if "/" in s:
+                key = s.rstrip("/").split("/")[-1]
+                add(seen, catalog.get(key, key))
+            else:
+                add(seen, catalog.get(s, catalog.get(s.lower(), s)))
+        elif isinstance(fab, dict):
+            add(seen, str(fab.get("name") or fab.get("id") or ""))
+        vlan = item.get("vlan")
+        if isinstance(vlan, dict):
+            vf = vlan.get("fabric")
+            if isinstance(vf, dict) and vf.get("name"):
+                add(seen, str(vf["name"]))
+            elif isinstance(vf, str) and vf.strip():
+                key = vf.rstrip("/").split("/")[-1]
+                add(seen, catalog.get(key, key))
+    if not seen:
+        return "-"
+    return seen[0] if len(seen) == 1 else ", ".join(seen[:3])
+
+
+def _enrich_machines_fabric_rest(
+    machines: list,
+    maas_url: str,
+    maas_api_key: str,
+    verify_tls: bool,
+    fabric_catalog: dict,
+) -> None:
+    """Fill fabric_name from machine detail REST when still '-' (libmaas often omits fabric on VLAN)."""
+    need = [
+        i
+        for i, mm in enumerate(machines)
+        if mm.get("system_id") and (mm.get("fabric_name") or "-").strip() in ("-", "")
+    ]
+    if not need:
+        return
+
+    def fetch_idx(i: int) -> tuple:
+        mm = machines[i]
+        sid = mm["system_id"]
+        base = _maas_rest_base(maas_url)
+        parts = maas_api_key.split(":", 2)
+        if len(parts) != 3:
+            return i, "-"
+        ck, tk, ts = parts[0], parts[1], parts[2]
+        try:
+            import requests
+            from requests_oauthlib import OAuth1
+        except ImportError:
+            return i, "-"
+        auth = OAuth1(ck, "", tk, ts, signature_method="PLAINTEXT")
+        for path in (f"{base}/api/2.0/machines/{sid}/", f"{base}/api/2.0/nodes/{sid}/"):
+            try:
+                r = requests.get(path, auth=auth, verify=verify_tls, timeout=90)
+                if r.status_code != 200:
+                    continue
+                machine = r.json()
+                arr = _embedded_interface_arrays(machine)
+                if arr:
+                    return i, _fabric_from_rest_ifaces(arr, fabric_catalog)
+            except Exception:
+                logger.debug("MAAS fabric enrich %s", path, exc_info=True)
+        return i, "-"
+
+    max_workers = min(16, max(4, len(need)))
+    try:
+        with ThreadPoolExecutor(max_workers=max_workers) as ex:
+            for fut in as_completed([ex.submit(fetch_idx, i) for i in need]):
+                try:
+                    i, fab = fut.result()
+                    if fab and fab != "-":
+                        machines[i]["fabric_name"] = fab
+                except Exception:
+                    pass
+    except Exception:
+        logger.debug("Fabric enrichment pool failed", exc_info=True)
 
 
 def _enrich_machines_bmc_rest(
@@ -98,7 +331,8 @@ def _enrich_machines_bmc_rest(
             _maas_rest_fetch_bmc(maas_url, maas_api_key, mm["system_id"], verify_tls),
         )
 
-    max_workers = min(16, max(4, len(need)))
+    # One GET chain per machine (read + op=power_parameters); parallelize for UI drift latency
+    max_workers = min(32, max(8, len(need)))
     try:
         with ThreadPoolExecutor(max_workers=max_workers) as ex:
             futures = [ex.submit(fetch_idx, i) for i in need]
@@ -216,22 +450,6 @@ def _fabric_from_iface_set(iface_set):
     return seen[0] if len(seen) == 1 else ", ".join(seen[:3])
 
 
-def _fabric_from_rest_ifaces(items: list) -> str:
-    seen = []
-    for item in items:
-        vlan = item.get("vlan") if isinstance(item, dict) else None
-        if not isinstance(vlan, dict):
-            continue
-        fab = vlan.get("fabric")
-        if isinstance(fab, dict) and fab.get("name"):
-            n = str(fab["name"])
-            if n not in seen:
-                seen.append(n)
-    if not seen:
-        return "-"
-    return seen[0] if len(seen) == 1 else ", ".join(seen[:3])
-
-
 def _rest_rows_from_iface_dicts(items: list) -> list:
     """Parse MAAS interface objects (list endpoint or interface_set on machine)."""
     rows = []
@@ -282,7 +500,13 @@ def _embedded_interface_arrays(machine: dict):
     return []
 
 
-def _maas_interfaces_rest(maas_url: str, api_key: str, system_id: str, verify_tls: bool):
+def _maas_interfaces_rest(
+    maas_url: str,
+    api_key: str,
+    system_id: str,
+    verify_tls: bool,
+    fabric_catalog: dict | None = None,
+):
     """
     When python-libmaas returns no NICs: same data as MAAS UI via REST.
 
@@ -322,13 +546,13 @@ def _maas_interfaces_rest(maas_url: str, api_key: str, system_id: str, verify_tl
             if isinstance(data, list) and data:
                 rows = _rest_rows_from_iface_dicts(data)
                 if rows:
-                    return rows, _fabric_from_rest_ifaces(data)
+                    return rows, _fabric_from_rest_ifaces(data, fabric_catalog)
             elif isinstance(data, dict) and data.get("interfaces"):
                 arr = data["interfaces"]
                 if isinstance(arr, list):
                     rows = _rest_rows_from_iface_dicts(arr)
                     if rows:
-                        return rows, _fabric_from_rest_ifaces(arr)
+                        return rows, _fabric_from_rest_ifaces(arr, fabric_catalog)
         except Exception as e:
             last_err = str(e)
             logger.debug("MAAS REST %s: %s", url, e)
@@ -355,7 +579,7 @@ def _maas_interfaces_rest(maas_url: str, api_key: str, system_id: str, verify_tl
                     system_id,
                     len(rows),
                 )
-                return rows, _fabric_from_rest_ifaces(arr)
+                return rows, _fabric_from_rest_ifaces(arr, fabric_catalog)
         except Exception as e:
             last_err = str(e)
             logger.debug("MAAS machine detail %s: %s", url, e)
@@ -394,6 +618,9 @@ async def fetch_maas_data(maas_url: str, maas_api_key: str, maas_insecure: bool)
         result["error"] = "MAAS_URL and MAAS_API_KEY are required"
         return result
 
+    if maas_insecure:
+        _silence_urllib3_insecure_when_maas_tls_skipped()
+
     try:
         from maas.client import connect
     except ImportError:
@@ -420,6 +647,9 @@ async def fetch_maas_data(maas_url: str, maas_api_key: str, maas_insecure: bool)
 
         # Machines (with zone and pool)
         machines = await client.machines.list()
+        fabric_catalog = await asyncio.to_thread(
+            _fetch_maas_fabric_catalog, maas_url, maas_api_key, not maas_insecure
+        )
         for m in machines:
             zone_name = "-"
             pool_name = "-"
@@ -470,6 +700,7 @@ async def fetch_maas_data(maas_url: str, maas_api_key: str, maas_insecure: bool)
                         maas_api_key,
                         sid,
                         not maas_insecure,
+                        fabric_catalog,
                     )
                     if rest_if:
                         ifaces = rest_if
@@ -497,6 +728,9 @@ async def fetch_maas_data(maas_url: str, maas_api_key: str, maas_insecure: bool)
                 "interfaces": ifaces,
                 "bmc_ip": bmc_ip,
             })
+        _enrich_machines_fabric_rest(
+            result["machines"], maas_url, maas_api_key, not maas_insecure, fabric_catalog
+        )
         _enrich_machines_bmc_rest(result["machines"], maas_url, maas_api_key, not maas_insecure)
     except Exception as e:
         logger.exception("MAAS fetch failed")
