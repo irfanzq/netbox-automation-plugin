@@ -79,9 +79,15 @@ def fetch_netbox_audit_detail_for_names(names: set):
                 )
             )
         )
+        select_rel = ["site", "location", "primary_ip4", "primary_ip4__vrf"]
+        try:
+            Device._meta.get_field("oob_ip")
+            select_rel.append("oob_ip")
+        except Exception:
+            pass
         devices = (
             Device.objects.filter(name__in=names_list)
-            .select_related("site", "location", "primary_ip4", "primary_ip4__vrf")
+            .select_related(*select_rel)
             .prefetch_related(Prefetch("interfaces", queryset=iface_qs))
         )
         for d in devices:
@@ -123,6 +129,13 @@ def fetch_netbox_audit_detail_for_names(names: set):
                         vrf_name = (pip.vrf.name or pip.vrf.slug or str(pip.vrf_id))[:32]
             except Exception:
                 pass
+            oob_ip_host = ""
+            try:
+                oob = getattr(d, "oob_ip", None)
+                if oob is not None:
+                    oob_ip_host = str(oob.address).split("/", 1)[0].strip()
+            except Exception:
+                pass
             device_ips = set()
             vlan_vids = set()
             try:
@@ -156,6 +169,7 @@ def fetch_netbox_audit_detail_for_names(names: set):
                 "vrf_name": vrf_name,
                 "vlan_vids_summary": vlan_summary or "—",
                 "device_ips": sorted(device_ips),
+                "oob_ip_host": oob_ip_host,
             }
     except Exception:
         logger.exception("NetBox audit detail for names failed")

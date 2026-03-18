@@ -5,6 +5,9 @@ Fetches networks, subnets, floating IPs. Used for drift audit and OpenStack visi
 """
 
 import logging
+import os
+
+from netbox_automation_plugin.sync.config.settings import OPENSTACK_DEFAULT_REGION_NAME
 
 logger = logging.getLogger("netbox_automation_plugin.sync")
 
@@ -36,23 +39,40 @@ def fetch_openstack_data(config: dict):
         auth_url = (config["openstack_auth_url"] or "").rstrip("/")
         if auth_url and not auth_url.endswith("/v3"):
             auth_url = auth_url + "/v3"
-        region = (config.get("openstack_region_name") or "").strip() or "RegionOne"
-        kwargs = {
-            "auth_url": auth_url,
-            "username": config.get("openstack_username") or "",
-            "password": config.get("openstack_password") or "",
-            "user_domain_name": config.get("openstack_user_domain_name") or "Default",
-            "project_domain_name": config.get("openstack_project_domain_name") or "Default",
-            "region_name": region,
-            "interface": config.get("openstack_interface") or "public",
-            "verify": verify_tls,
-        }
-        pid = (config.get("openstack_project_id") or "").strip()
-        if pid:
-            kwargs["project_id"] = pid
+        region = (
+            (os.environ.get("OS_REGION_NAME") or os.environ.get("OPENSTACK_REGION_NAME") or "").strip()
+            or (config.get("openstack_region_name") or "").strip()
+            or OPENSTACK_DEFAULT_REGION_NAME
+        )
+        app_id = (config.get("openstack_application_credential_id") or "").strip()
+        app_secret = (config.get("openstack_application_credential_secret") or "").strip()
+        if app_id and app_secret:
+            kwargs = {
+                "auth_url": auth_url,
+                "application_credential_id": app_id,
+                "application_credential_secret": app_secret,
+                "region_name": region,
+                "interface": config.get("openstack_interface") or "public",
+                "verify": verify_tls,
+            }
+            conn = openstack.connect(**kwargs)
         else:
-            kwargs["project_name"] = config.get("openstack_project_name") or ""
-        conn = openstack.connect(**kwargs)
+            kwargs = {
+                "auth_url": auth_url,
+                "username": config.get("openstack_username") or "",
+                "password": config.get("openstack_password") or "",
+                "user_domain_name": config.get("openstack_user_domain_name") or "Default",
+                "project_domain_name": config.get("openstack_project_domain_name") or "Default",
+                "region_name": region,
+                "interface": config.get("openstack_interface") or "public",
+                "verify": verify_tls,
+            }
+            pid = (config.get("openstack_project_id") or "").strip()
+            if pid:
+                kwargs["project_id"] = pid
+            else:
+                kwargs["project_name"] = config.get("openstack_project_name") or ""
+            conn = openstack.connect(**kwargs)
         project_label = (
             (config.get("openstack_project_name") or "").strip()
             or (config.get("openstack_project_id") or "").strip()[:12]

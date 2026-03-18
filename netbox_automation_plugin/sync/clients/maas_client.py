@@ -11,8 +11,106 @@ We normalize MAAS hostname to the short name (part before first dot) for matchin
 
 import asyncio
 import logging
+import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from urllib.parse import urlparse
 
 logger = logging.getLogger("netbox_automation_plugin.sync")
+
+
+def _bmc_ip_from_power(power_parameters, power_type=None) -> str:
+    """
+    Best-effort BMC / power endpoint host or IP from MAAS power_parameters.
+    Not the same as in-band NIC IPs on interfaces.
+    """
+    if not isinstance(power_parameters, dict):
+        return ""
+    addr = (
+        power_parameters.get("power_address")
+        or power_parameters.get("power_host")
+        or ""
+    )
+    addr = str(addr).strip()
+    if not addr or addr.lower() in ("none", "null", "-"):
+        return ""
+    try:
+        if "://" in addr:
+            host = (urlparse(addr).hostname or "").strip()
+            if host:
+                return host[:64]
+    except Exception:
+        pass
+    first = addr.split()[0]
+    m = re.match(r"^(\d{1,3}(?:\.\d{1,3}){3})(?::\d+)?$", first)
+    if m:
+        return m.group(1)
+    m = re.search(r"(\d{1,3}(?:\.\d{1,3}){3})", addr)
+    if m:
+        return m.group(1)
+    return first[:64] if len(first) <= 64 else first[:62] + ".."
+
+
+def _maas_rest_fetch_bmc(maas_url: str, api_key: str, system_id: str, verify_tls: bool) -> str:
+    parts = api_key.split(":", 2)
+    if len(parts) != 3 or not system_id:
+        return ""
+    ck, tk, ts = parts[0], parts[1], parts[2]
+    base = maas_url.rstrip("/")
+    if not base.lower().endswith("maas"):
+        base = base + "/MAAS" if "/MAAS" not in base.upper() else base
+    try:
+        import requests
+        from requests_oauthlib import OAuth1
+    except ImportError:
+        return ""
+    auth = OAuth1(ck, "", tk, ts, signature_method="PLAINTEXT")
+    for path in (f"{base}/api/2.0/machines/{system_id}/", f"{base}/api/2.0/nodes/{system_id}/"):
+        try:
+            r = requests.get(path, auth=auth, verify=verify_tls, timeout=45)
+            if r.status_code != 200:
+                continue
+            j = r.json()
+            if isinstance(j, dict):
+                bmc = _bmc_ip_from_power(j.get("power_parameters"), j.get("power_type"))
+                if bmc:
+                    return bmc
+        except Exception:
+            logger.debug("MAAS BMC fetch %s", path, exc_info=True)
+    return ""
+
+
+def _enrich_machines_bmc_rest(
+    machines: list, maas_url: str, maas_api_key: str, verify_tls: bool
+) -> None:
+    """Fill bmc_ip via REST for machines missing it (parallel)."""
+    need = [
+        i
+        for i, mm in enumerate(machines)
+        if mm.get("system_id") and not (str(mm.get("bmc_ip") or "").strip())
+    ]
+    if not need:
+        return
+
+    def fetch_idx(i: int) -> tuple:
+        mm = machines[i]
+        return (
+            i,
+            _maas_rest_fetch_bmc(maas_url, maas_api_key, mm["system_id"], verify_tls),
+        )
+
+    max_workers = min(16, max(4, len(need)))
+    try:
+        with ThreadPoolExecutor(max_workers=max_workers) as ex:
+            futures = [ex.submit(fetch_idx, i) for i in need]
+            for fut in as_completed(futures):
+                try:
+                    i, bmc = fut.result()
+                    if bmc:
+                        machines[i]["bmc_ip"] = bmc
+                except Exception:
+                    pass
+    except Exception:
+        logger.debug("BMC enrichment pool failed", exc_info=True)
 
 
 def _ip_host_only(addr: str) -> str:
@@ -379,6 +477,15 @@ async def fetch_maas_data(maas_url: str, maas_api_key: str, maas_insecure: bool)
                         logger.debug(
                             "MAAS REST fallback: %d ifaces for %s", len(ifaces), short_name
                         )
+            bmc_ip = ""
+            try:
+                md = getattr(m, "_data", None)
+                if isinstance(md, dict):
+                    bmc_ip = _bmc_ip_from_power(
+                        md.get("power_parameters"), md.get("power_type")
+                    )
+            except Exception:
+                pass
             result["machines"].append({
                 "hostname": short_name,
                 "fqdn": raw_name if raw_name != short_name else "",
@@ -388,7 +495,9 @@ async def fetch_maas_data(maas_url: str, maas_api_key: str, maas_insecure: bool)
                 "fabric_name": fabric_name,
                 "status_name": status_name,
                 "interfaces": ifaces,
+                "bmc_ip": bmc_ip,
             })
+        _enrich_machines_bmc_rest(result["machines"], maas_url, maas_api_key, not maas_insecure)
     except Exception as e:
         logger.exception("MAAS fetch failed")
         result["error"] = str(e)
