@@ -205,6 +205,7 @@ def format_drift_report(
     Return {"drift": str, "reference": str}.
     drift = Phase 0 + drift-only tables (MAAS-only, matched with drift, NIC drift, OS gaps).
     reference = full matched hosts, full per-device NIC audit, OpenStack ref (collapsible in UI).
+    OpenStack data is already combined from all configured clouds before being passed here.
     """
     drift_lines = []
     ref_lines = []

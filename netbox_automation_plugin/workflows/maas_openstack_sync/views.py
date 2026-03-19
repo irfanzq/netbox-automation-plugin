@@ -10,7 +10,7 @@ from .forms import MAASOpenStackSyncForm
 DRIFT_AUDIT_CACHE_TIMEOUT = 600  # seconds
 
 # Sync package lives under netbox_automation_plugin.sync (not workflows.sync)
-from netbox_automation_plugin.sync.config import get_sync_config
+from netbox_automation_plugin.sync.config import get_sync_config, get_openstack_configs
 from netbox_automation_plugin.sync.clients.maas_client import fetch_maas_data_sync
 from netbox_automation_plugin.sync.clients.netbox_client import (
     fetch_netbox_data,
@@ -26,7 +26,7 @@ from netbox_automation_plugin.sync.reconciliation.audit_detail import (
     openstack_subnet_prefix_hints,
     openstack_subnets_missing_prefixes,
 )
-from netbox_automation_plugin.sync.clients.openstack_client import fetch_openstack_data
+from netbox_automation_plugin.sync.clients.openstack_client import fetch_openstack_data, fetch_all_openstack_data
 from netbox_automation_plugin.sync.reconciliation.maas_netbox import compute_maas_netbox_drift
 from netbox_automation_plugin.sync.reporting.drift_report import (
     format_drift_report,
@@ -178,29 +178,45 @@ class MAASOpenStackSyncView(LoginRequiredMixin, View):
         else:
             netbox_data = fetch_netbox_data_local()
 
-        # 3) OpenStack — same env as test_openstack_sdk.py (OS_AUTH_URL / app cred)
+        # 3) OpenStack — one or more clouds (OPENSTACK_* and optional OPENSTACK_2_*); merge into one dataset
+        openstack_configs = get_openstack_configs()
         openstack_data = None
-        has_openstack_auth = bool(
-            (config.get("openstack_auth_url") or "").strip()
-            or (os.environ.get("OS_AUTH_URL") or os.environ.get("OPENSTACK_AUTH_URL") or "").strip()
-        )
-        has_openstack_creds = bool(
-            (config.get("openstack_password") or os.environ.get("OS_PASSWORD") or "").strip()
-            or (
-                (config.get("openstack_application_credential_id") or "").strip()
-                and (config.get("openstack_application_credential_secret") or "").strip()
+        all_results = []
+        if openstack_configs:
+            c1 = openstack_configs[0]
+            has_creds_1 = bool(
+                (c1.get("openstack_password") or "").strip()
+                or (
+                    (c1.get("openstack_application_credential_id") or "").strip()
+                    and (c1.get("openstack_application_credential_secret") or "").strip()
+                )
             )
-        )
-        if has_openstack_auth and has_openstack_creds:
-            openstack_data = fetch_openstack_data(config)
-        elif has_openstack_auth and not has_openstack_creds:
-            openstack_data = {
-                "networks": [],
-                "subnets": [],
-                "floating_ips": [],
-                "error": "OpenStack auth URL set but no OS_PASSWORD (or application credential ID/secret). Drift report will omit OpenStack data.",
-                "openstack_cred_missing": True,
-            }
+            if not has_creds_1 and len(openstack_configs) == 1:
+                openstack_data = {
+                    "networks": [],
+                    "subnets": [],
+                    "floating_ips": [],
+                    "error": "OpenStack auth URL set but no OS_PASSWORD (or application credential ID/secret). Drift report will omit OpenStack data.",
+                    "openstack_cred_missing": True,
+                }
+            else:
+                all_results = fetch_all_openstack_data(openstack_configs)
+                # Merge all clouds into one dataset; user sees one OpenStack vs NetBox report
+                merged = {"networks": [], "subnets": [], "floating_ips": [], "error": None}
+                errors = []
+                for r in all_results:
+                    data = r.get("data") or {}
+                    if data.get("error"):
+                        errors.append((r.get("label") or "OpenStack") + ": " + (data["error"][:80] or "error"))
+                    else:
+                        merged["networks"].extend(data.get("networks") or [])
+                        merged["subnets"].extend(data.get("subnets") or [])
+                        merged["floating_ips"].extend(data.get("floating_ips") or [])
+                if errors and not merged["networks"] and not merged["subnets"] and not merged["floating_ips"]:
+                    merged["error"] = "; ".join(errors)
+                elif errors:
+                    merged["error"] = None  # partial success; report combined data
+                openstack_data = merged
 
         # 4) Drift (MAAS vs NetBox)
         drift = compute_maas_netbox_drift(maas_data, netbox_data)
@@ -240,7 +256,7 @@ class MAASOpenStackSyncView(LoginRequiredMixin, View):
         if openstack_data and not openstack_data.get("error"):
             os_floating_gaps = openstack_floating_ips_missing_from_netbox(openstack_data)
 
-        # 5) Report (drift-only main + reference for collapsible section)
+        # 5) Report (drift-only main + reference for collapsible section); single combined OpenStack view
         report_out = format_drift_report(
             maas_data,
             netbox_data,
