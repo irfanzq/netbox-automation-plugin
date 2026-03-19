@@ -377,6 +377,12 @@ def format_drift_report(
 
     # --- OpenStack subnet GAPs ---
     drift_lines.append("")
+    # Show per-cloud counts so user can validate all clouds were queried (e.g. spruce)
+    cloud_summary = (openstack_data or {}).get("_cloud_summary")
+    if cloud_summary:
+        parts = [f"{c.get('label', '?')} ({c.get('networks', 0)} nets, {c.get('subnets', 0)} subnets, {c.get('floating_ips', 0)} FIPs)" for c in cloud_summary]
+        drift_lines.append(f"  [OpenStack] Data combined from {len(cloud_summary)} cloud(s): {', '.join(parts)}")
+        drift_lines.append("")
     if openstack_data and openstack_data.get("error"):
         drift_lines.append("  [OpenStack] Subnet / FIP gaps: API error")
     elif use_remote_netbox or os_subnet_gaps is None:
@@ -614,6 +620,11 @@ def build_drift_report_xlsx(
         ws_sum.append(["  Networks", str(len(nets)), ""])
         ws_sum.append(["  Subnets", str(len(subs)), ""])
         ws_sum.append(["  Floating IPs", str(len(fips)), ""])
+        cloud_summary = openstack_data.get("_cloud_summary")
+        if cloud_summary:
+            ws_sum.append(["  Data from clouds", str(len(cloud_summary)), ""])
+            for c in cloud_summary:
+                ws_sum.append(["    " + str(c.get("label", "?")), f"{c.get('networks', 0)} nets, {c.get('subnets', 0)} subnets, {c.get('floating_ips', 0)} FIPs", ""])
     ws_sum.append([])
     pc = _phase0_category_counts(
         drift,

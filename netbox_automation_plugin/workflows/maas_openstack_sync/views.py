@@ -216,7 +216,25 @@ class MAASOpenStackSyncView(LoginRequiredMixin, View):
                     merged["error"] = "; ".join(errors)
                 elif errors:
                     merged["error"] = None  # partial success; report combined data
+                # Per-cloud counts so report can show "data from N clouds" for validation
+                merged["_cloud_summary"] = [
+                    {
+                        "label": r.get("label") or "OpenStack",
+                        "networks": len((r.get("data") or {}).get("networks") or []),
+                        "subnets": len((r.get("data") or {}).get("subnets") or []),
+                        "floating_ips": len((r.get("data") or {}).get("floating_ips") or []),
+                    }
+                    for r in all_results
+                ]
                 openstack_data = merged
+                logger.info(
+                    "OpenStack merge: %d clouds -> %d networks, %d subnets, %d FIPs (clouds: %s)",
+                    len(all_results),
+                    len(merged["networks"]),
+                    len(merged["subnets"]),
+                    len(merged["floating_ips"]),
+                    [(c["label"], c["networks"], c["subnets"], c["floating_ips"]) for c in merged["_cloud_summary"]],
+                )
 
         # 4) Drift (MAAS vs NetBox)
         drift = compute_maas_netbox_drift(maas_data, netbox_data)
