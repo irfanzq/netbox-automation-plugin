@@ -1,7 +1,10 @@
 """
 Generate human-readable drift audit report from MAAS, NetBox, and OpenStack data.
 Uses ASCII tables (+---+) for readability in <pre> or plain text.
+XLSX export via build_drift_report_xlsx() for download (openpyxl); Google Sheets opens .xlsx.
 """
+
+from io import BytesIO
 
 _MAX_MAAS_MISSING_ROWS = 500
 _MAX_OS_NETWORKS = 40
@@ -543,3 +546,212 @@ def format_drift_report(
     lines.append("")
     lines.extend(_banner("END OF DRIFT AUDIT", "="))
     return "\n".join(lines)
+
+
+def build_drift_report_xlsx(
+    maas_data,
+    netbox_data,
+    openstack_data,
+    drift,
+    *,
+    matched_rows=None,
+    os_subnet_hints=None,
+    os_subnet_gaps=None,
+    os_floating_gaps=None,
+    netbox_prefix_count=0,
+    use_remote_netbox=False,
+    interface_audit=None,
+):
+    """
+    Build an Excel (.xlsx) workbook from the same inputs as format_drift_report.
+    Returns bytes suitable for HttpResponse(..., content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet").
+    Google Sheets opens .xlsx files.
+    """
+    try:
+        from openpyxl import Workbook
+        from openpyxl.styles import Font
+    except ImportError:
+        raise RuntimeError("openpyxl is required for XLSX export. pip install openpyxl")
+
+    wb = Workbook()
+    header_font = Font(bold=True)
+
+    def _sheet(name, max_len=31):
+        s = wb.create_sheet(title=name[:max_len])
+        return s
+
+    def _append_header(ws, row):
+        ws.append(row)
+        r = ws.max_row
+        for c in range(1, len(row) + 1):
+            ws.cell(row=r, column=c).font = header_font
+        return r
+
+    # --- Summary ---
+    ws_sum = wb.active
+    ws_sum.title = "Summary"
+    ws_sum.append(["Drift audit summary"])
+    ws_sum.cell(row=1, column=1).font = header_font
+    ws_sum.append([])
+    ws_sum.append(["MAAS", "OK" if not maas_data.get("error") else "Error", ""])
+    ws_sum.append(["  Machines", str(len(maas_data.get("machines") or [])), ""])
+    ws_sum.append(["NetBox", "OK" if not netbox_data.get("error") else "Error", ""])
+    ws_sum.append(["  Devices", str(len(netbox_data.get("devices") or [])), ""])
+    ws_sum.append(["  Sites", str(len(netbox_data.get("sites") or [])), ""])
+    if netbox_prefix_count:
+        ws_sum.append(["  IPAM Prefixes", str(netbox_prefix_count), ""])
+    ws_sum.append([])
+    if openstack_data is None:
+        ws_sum.append(["OpenStack", "Not configured", ""])
+    elif openstack_data.get("error"):
+        ws_sum.append(["OpenStack", "Error", (openstack_data.get("error") or "")[:200]])
+    else:
+        nets = openstack_data.get("networks") or []
+        subs = openstack_data.get("subnets") or []
+        fips = openstack_data.get("floating_ips") or []
+        ws_sum.append(["OpenStack", "OK", ""])
+        ws_sum.append(["  Networks", str(len(nets)), ""])
+        ws_sum.append(["  Subnets", str(len(subs)), ""])
+        ws_sum.append(["  Floating IPs", str(len(fips)), ""])
+    ws_sum.append([])
+    pc = _phase0_category_counts(
+        drift,
+        matched_rows,
+        interface_audit,
+        os_subnet_gaps,
+        os_floating_gaps or [],
+        use_remote_netbox,
+    )
+    sub_txt = str(pc["sub_gaps"]) if pc["sub_gaps"] is not None else "N/A"
+    ws_sum.append([])
+    ws_sum.append(["Phase 0 — Drift categories", "", ""])
+    _append_header(ws_sum, ["Category", "Count"])
+    ws_sum.append(["MAAS only (no NetBox Device)", str(pc["maas_only"])])
+    ws_sum.append(["NetBox only (no MAAS hostname)", str(pc["nb_only_dev"])])
+    ws_sum.append(["Matched — CHECK (placement/lifecycle)", str(pc["check_hosts"])])
+    ws_sum.append(["Interface rows not OK", str(pc["iface_not_ok"])])
+    ws_sum.append(["VLAN drift NICs", str(pc["vlan_drift_nic"])])
+    ws_sum.append(["VLAN unverified NICs", str(pc["vlan_unverified_nic"])])
+    ws_sum.append(["NetBox-only NICs", str(pc["nb_only_nic"])])
+    ws_sum.append(["OpenStack subnet gaps", sub_txt])
+    ws_sum.append(["OpenStack FIP gaps", str(pc["fip_gaps"])])
+    ws_sum.append([])
+    ws_sum.append(["MAAS <-> NetBox matched hostnames", str(drift.get("matched_count", 0)), ""])
+
+    # --- Matched Hosts ---
+    if matched_rows:
+        ws_mh = _sheet("Matched Hosts")
+        mh_headers = [
+            "host", "MAAS zone", "MAAS pool", "MAAS st", "NB site", "NB st",
+            "MAAS fab", "NB loc", "sys_id", "serial", "pri IP", "VRF", "VLANs",
+            "OS FIP", "MAAS BMC", "NB OOB", "notes",
+        ]
+        _append_header(ws_mh, mh_headers)
+        for r in matched_rows:
+            notes = "; ".join(r.get("hints") or []) or "—"
+            ser = str(r.get("netbox_serial", ""))
+            if ser == "(empty)":
+                ser = "—"
+            ws_mh.append([
+                r.get("hostname", ""),
+                str(r.get("maas_zone", "")),
+                str(r.get("maas_pool", "")),
+                str(r.get("maas_status", "")),
+                str(r.get("netbox_site", "")),
+                str(r.get("netbox_status", "")),
+                str(r.get("maas_fabric", "")),
+                str(r.get("netbox_location", "")),
+                str(r.get("maas_system_id", "")),
+                ser,
+                str(r.get("netbox_primary_ip", "")),
+                str(r.get("netbox_vrf", "")),
+                str(r.get("netbox_vlans", "")),
+                str(r.get("openstack_fip", "")),
+                str(r.get("maas_bmc", "")),
+                str(r.get("netbox_oob", "")),
+                notes,
+            ])
+
+    # --- NIC Audit (one row per interface row, with hostname) ---
+    if interface_audit and interface_audit.get("hosts"):
+        ws_nic = _sheet("NIC Audit")
+        nic_headers = [
+            "hostname", "MAAS fab", "MA pool", "MA VLAN", "NB site", "NB loc",
+            "MAAS intf", "MAAS MAC", "MAAS IPs", "NB intf", "NB MAC", "NB VLAN",
+            "NB IPs", "status", "notes",
+        ]
+        _append_header(ws_nic, nic_headers)
+        for block in interface_audit["hosts"]:
+            hn = block.get("hostname", "")
+            for row in block.get("rows") or []:
+                ws_nic.append([
+                    hn,
+                    str(row.get("maas_fabric", ""))[:20],
+                    str(row.get("maas_pool", ""))[:16],
+                    str(row.get("maas_vlan", ""))[:12],
+                    str(row.get("nb_site", ""))[:16],
+                    str(row.get("nb_location", ""))[:20],
+                    str(row.get("maas_if", ""))[:24],
+                    str(row.get("maas_mac", ""))[:18],
+                    str(row.get("maas_ips", ""))[:44],
+                    str(row.get("nb_if", "—"))[:24],
+                    str(row.get("nb_mac", "—"))[:18],
+                    str(row.get("nb_vlan", ""))[:12],
+                    str(row.get("nb_ips", ""))[:44],
+                    str(row.get("status", ""))[:24],
+                    str(row.get("notes", ""))[:500],
+                ])
+
+    # --- MAAS only (no NetBox Device) ---
+    maas_only = sorted(drift.get("in_maas_not_netbox") or [])
+    if maas_only is not None:
+        ws_maas = _sheet("MAAS only")
+        by_h = _maas_machine_by_hostname(maas_data)
+        _append_header(ws_maas, ["hostname", "zone", "pool", "MAAS status", "system_id"])
+        for h in maas_only:
+            m = by_h.get(h, {})
+            ws_maas.append([
+                h,
+                str(m.get("zone_name", "-")),
+                str(m.get("pool_name", "-")),
+                str(m.get("status_name", "-")),
+                str(m.get("system_id", "")),
+            ])
+
+    # --- OpenStack subnet gaps ---
+    if os_subnet_gaps:
+        ws_sub = _sheet("OS subnet gaps")
+        _append_header(ws_sub, ["CIDR", "network", "network_id"])
+        for g in os_subnet_gaps:
+            ws_sub.append([
+                g.get("cidr", ""),
+                (g.get("network_name") or "-")[:60],
+                (g.get("network_id") or "")[:40],
+            ])
+
+    # --- OpenStack FIP gaps ---
+    if os_floating_gaps:
+        ws_fip = _sheet("OS FIP gaps")
+        _append_header(ws_fip, ["floating_ip", "fixed_ip", "project"])
+        for g in os_floating_gaps:
+            ws_fip.append([
+                g.get("floating_ip", ""),
+                g.get("fixed_ip_address", "-"),
+                str(g.get("project_name") or g.get("project_id") or "-")[:40],
+            ])
+
+    # --- OpenStack reference (networks) ---
+    if openstack_data and not openstack_data.get("error"):
+        nets = openstack_data.get("networks") or []
+        if nets:
+            ws_os = _sheet("OpenStack networks")
+            _append_header(ws_os, ["name", "id"])
+            for n in nets:
+                ws_os.append([
+                    (n.get("name") or n.get("id") or "")[:60],
+                    (n.get("id") or "")[:40],
+                ])
+
+    buf = BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
