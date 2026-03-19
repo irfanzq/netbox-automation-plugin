@@ -33,6 +33,7 @@ from netbox_automation_plugin.sync.reporting.drift_report import (
     build_drift_report_xlsx,
 )
 from django.http import HttpResponse
+from django.urls import reverse
 
 import logging
 import os
@@ -58,6 +59,36 @@ def _cache_drift_audit(request, payload):
     cache.set(key, payload, timeout=DRIFT_AUDIT_CACHE_TIMEOUT)
 
 
+def _audit_summary_from_payload(payload):
+    """Build audit_summary dict from cached or fresh audit payload."""
+    maas_data = payload.get("maas_data") or {}
+    netbox_data = payload.get("netbox_data") or {}
+    openstack_data = payload.get("openstack_data")
+    drift = payload.get("drift") or {}
+    matched_rows = payload.get("matched_rows")
+    interface_audit = payload.get("interface_audit")
+    use_remote_netbox = payload.get("use_remote_netbox", False)
+    return {
+        "maas_ok": not maas_data.get("error"),
+        "maas_machines": len(maas_data.get("machines") or []),
+        "maas_error": (maas_data.get("error") or "")[:280],
+        "netbox_ok": not netbox_data.get("error"),
+        "netbox_devices": len(netbox_data.get("devices") or []),
+        "netbox_error": (netbox_data.get("error") or "")[:280],
+        "openstack_ok": openstack_data and not openstack_data.get("error"),
+        "openstack_skipped": openstack_data is None,
+        "openstack_networks": len((openstack_data or {}).get("networks") or []),
+        "openstack_subnets": len((openstack_data or {}).get("subnets") or []),
+        "openstack_fips": len((openstack_data or {}).get("floating_ips") or []),
+        "openstack_error": ((openstack_data or {}).get("error") or "")[:320],
+        "openstack_cred_missing": bool((openstack_data or {}).get("openstack_cred_missing")),
+        "matched_hostnames": len(matched_rows or []),
+        "interface_audit_hosts": len((interface_audit or {}).get("hosts") or []),
+        "use_remote_netbox": use_remote_netbox,
+        "drift_matched": drift.get("matched_count", 0),
+    }
+
+
 class MAASOpenStackSyncView(LoginRequiredMixin, View):
     """
     MAAS / OpenStack Sync workflow.
@@ -81,13 +112,13 @@ class MAASOpenStackSyncView(LoginRequiredMixin, View):
         if mode != "audit":
             return render(request, self.template_name, {"form": form})
 
-        # If Download Excel: use cached audit result so we don't re-run the report
+        # If Download Excel: show report and trigger download (via GET endpoint). Cache hit = use cache; miss = run audit below.
         export_xlsx = request.POST.get("format") == "xlsx"
         if export_xlsx:
             cached = cache.get(_drift_audit_cache_key(request))
             if cached:
                 try:
-                    xlsx_bytes = build_drift_report_xlsx(
+                    report_out = format_drift_report(
                         cached["maas_data"],
                         cached["netbox_data"],
                         cached["openstack_data"],
@@ -100,14 +131,26 @@ class MAASOpenStackSyncView(LoginRequiredMixin, View):
                         use_remote_netbox=cached.get("use_remote_netbox", False),
                         interface_audit=cached.get("interface_audit"),
                     )
-                    resp = HttpResponse(
-                        xlsx_bytes,
-                        content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    report_drift = report_out.get("drift", "") if isinstance(report_out, dict) else report_out
+                    report_reference = report_out.get("reference", "") if isinstance(report_out, dict) else ""
+                    audit_summary = _audit_summary_from_payload(cached)
+                    return render(
+                        request,
+                        self.template_name,
+                        {
+                            "form": form,
+                            "report_drift": report_drift,
+                            "report_reference": report_reference,
+                            "audit_done": True,
+                            "audit_summary": audit_summary,
+                            "auto_download_xlsx": True,
+                            "download_xlsx_url": request.build_absolute_uri(
+                                reverse("plugins:netbox_automation_plugin:maas_openstack_sync_download_xlsx")
+                            ),
+                        },
                     )
-                    resp["Content-Disposition"] = 'attachment; filename="drift-report.xlsx"'
-                    return resp
                 except Exception as e:
-                    logger.warning("XLSX from cache failed, will re-run audit: %s", e)
+                    logger.warning("Report from cache failed, will re-run audit: %s", e)
 
         # Phase 1: Drift Audit — MAAS + OpenStack via HTTP; NetBox via local DB (same as vlan_deployment)
         config = get_sync_config()
@@ -257,40 +300,21 @@ class MAASOpenStackSyncView(LoginRequiredMixin, View):
             logger.debug("Could not cache drift audit for XLSX reuse: %s", e)
 
         if export_xlsx:
-            try:
-                xlsx_bytes = build_drift_report_xlsx(
-                    maas_data,
-                    netbox_data,
-                    openstack_data,
-                    drift,
-                    matched_rows=matched_rows,
-                    os_subnet_hints=os_subnet_hints,
-                    os_subnet_gaps=os_subnet_gaps,
-                    os_floating_gaps=os_floating_gaps,
-                    netbox_prefix_count=netbox_prefix_count,
-                    use_remote_netbox=use_remote_netbox,
-                    interface_audit=interface_audit,
-                )
-            except Exception as e:
-                logger.exception("XLSX export failed: %s", e)
-                return render(
-                    request,
-                    self.template_name,
-                    {
-                        "form": form,
-                        "report_drift": report_drift,
-                        "report_reference": report_reference,
-                        "audit_done": True,
-                        "audit_summary": audit_summary,
-                        "export_error": str(e),
-                    },
-                )
-            resp = HttpResponse(
-                xlsx_bytes,
-                content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            return render(
+                request,
+                self.template_name,
+                {
+                    "form": form,
+                    "report_drift": report_drift,
+                    "report_reference": report_reference,
+                    "audit_done": True,
+                    "audit_summary": audit_summary,
+                    "auto_download_xlsx": True,
+                    "download_xlsx_url": request.build_absolute_uri(
+                        reverse("plugins:netbox_automation_plugin:maas_openstack_sync_download_xlsx")
+                    ),
+                },
             )
-            resp["Content-Disposition"] = 'attachment; filename="drift-report.xlsx"'
-            return resp
 
         return render(
             request,
@@ -303,3 +327,43 @@ class MAASOpenStackSyncView(LoginRequiredMixin, View):
                 "audit_summary": audit_summary,
             },
         )
+
+
+class DriftAuditDownloadXlsxView(LoginRequiredMixin, View):
+    """GET: return drift-report.xlsx from session cache (no re-run). Used after POST format=xlsx to trigger download."""
+
+    def get(self, request):
+        cached = cache.get(_drift_audit_cache_key(request))
+        if not cached:
+            return HttpResponse(
+                _("Run drift audit first, then use Download as Excel."),
+                status=404,
+                content_type="text/plain; charset=utf-8",
+            )
+        try:
+            xlsx_bytes = build_drift_report_xlsx(
+                cached["maas_data"],
+                cached["netbox_data"],
+                cached["openstack_data"],
+                cached["drift"],
+                matched_rows=cached.get("matched_rows"),
+                os_subnet_hints=cached.get("os_subnet_hints"),
+                os_subnet_gaps=cached.get("os_subnet_gaps"),
+                os_floating_gaps=cached.get("os_floating_gaps"),
+                netbox_prefix_count=cached.get("netbox_prefix_count", 0),
+                use_remote_netbox=cached.get("use_remote_netbox", False),
+                interface_audit=cached.get("interface_audit"),
+            )
+        except Exception as e:
+            logger.exception("XLSX export failed: %s", e)
+            return HttpResponse(
+                _("Excel export failed: ") + str(e),
+                status=500,
+                content_type="text/plain; charset=utf-8",
+            )
+        resp = HttpResponse(
+            xlsx_bytes,
+            content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+        resp["Content-Disposition"] = 'attachment; filename="drift-report.xlsx"'
+        return resp
