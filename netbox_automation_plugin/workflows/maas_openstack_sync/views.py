@@ -2,8 +2,12 @@ from django.shortcuts import render
 from django.views import View
 from django.contrib.auth.mixins import LoginRequiredMixin
 from django.utils.translation import gettext_lazy as _
+from django.core.cache import cache
 
 from .forms import MAASOpenStackSyncForm
+
+# Cache key for last drift audit result (so Download Excel uses it without re-running)
+DRIFT_AUDIT_CACHE_TIMEOUT = 600  # seconds
 
 # Sync package lives under netbox_automation_plugin.sync (not workflows.sync)
 from netbox_automation_plugin.sync.config import get_sync_config
@@ -36,6 +40,24 @@ import os
 logger = logging.getLogger("netbox_automation_plugin")
 
 
+def _drift_audit_cache_key(request):
+    """Per-session key for cached drift audit (so Download Excel does not re-run)."""
+    return f"drift_audit:{request.session.session_key or request.user.pk}"
+
+
+def _cache_drift_audit(request, payload):
+    """Store audit payload for later XLSX download. drift sets -> lists for serialization."""
+    key = _drift_audit_cache_key(request)
+    drift = payload.get("drift") or {}
+    payload = dict(payload)
+    payload["drift"] = {
+        **drift,
+        "in_maas_not_netbox": list(drift.get("in_maas_not_netbox") or []),
+        "in_netbox_not_maas": list(drift.get("in_netbox_not_maas") or []),
+    }
+    cache.set(key, payload, timeout=DRIFT_AUDIT_CACHE_TIMEOUT)
+
+
 class MAASOpenStackSyncView(LoginRequiredMixin, View):
     """
     MAAS / OpenStack Sync workflow.
@@ -58,6 +80,34 @@ class MAASOpenStackSyncView(LoginRequiredMixin, View):
         mode = (form.cleaned_data.get("mode") or "audit").strip()
         if mode != "audit":
             return render(request, self.template_name, {"form": form})
+
+        # If Download Excel: use cached audit result so we don't re-run the report
+        export_xlsx = request.POST.get("format") == "xlsx"
+        if export_xlsx:
+            cached = cache.get(_drift_audit_cache_key(request))
+            if cached:
+                try:
+                    xlsx_bytes = build_drift_report_xlsx(
+                        cached["maas_data"],
+                        cached["netbox_data"],
+                        cached["openstack_data"],
+                        cached["drift"],
+                        matched_rows=cached.get("matched_rows"),
+                        os_subnet_hints=cached.get("os_subnet_hints"),
+                        os_subnet_gaps=cached.get("os_subnet_gaps"),
+                        os_floating_gaps=cached.get("os_floating_gaps"),
+                        netbox_prefix_count=cached.get("netbox_prefix_count", 0),
+                        use_remote_netbox=cached.get("use_remote_netbox", False),
+                        interface_audit=cached.get("interface_audit"),
+                    )
+                    resp = HttpResponse(
+                        xlsx_bytes,
+                        content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    )
+                    resp["Content-Disposition"] = 'attachment; filename="drift-report.xlsx"'
+                    return resp
+                except Exception as e:
+                    logger.warning("XLSX from cache failed, will re-run audit: %s", e)
 
         # Phase 1: Drift Audit — MAAS + OpenStack via HTTP; NetBox via local DB (same as vlan_deployment)
         config = get_sync_config()
@@ -147,9 +197,8 @@ class MAASOpenStackSyncView(LoginRequiredMixin, View):
         if openstack_data and not openstack_data.get("error"):
             os_floating_gaps = openstack_floating_ips_missing_from_netbox(openstack_data)
 
-        # 5) Report (text or XLSX download)
-        export_xlsx = request.POST.get("format") == "xlsx"
-        report = format_drift_report(
+        # 5) Report (drift-only main + reference for collapsible section)
+        report_out = format_drift_report(
             maas_data,
             netbox_data,
             openstack_data,
@@ -162,6 +211,8 @@ class MAASOpenStackSyncView(LoginRequiredMixin, View):
             use_remote_netbox=use_remote_netbox,
             interface_audit=interface_audit,
         )
+        report_drift = report_out.get("drift", "") if isinstance(report_out, dict) else report_out
+        report_reference = report_out.get("reference", "") if isinstance(report_out, dict) else ""
 
         maas_m = len(maas_data.get("machines") or [])
         nb_d = len(netbox_data.get("devices") or [])
@@ -187,6 +238,24 @@ class MAASOpenStackSyncView(LoginRequiredMixin, View):
             "drift_matched": drift.get("matched_count", 0),
         }
 
+        # Store result so "Download as Excel" can use it without re-running the audit
+        try:
+            _cache_drift_audit(request, {
+                "maas_data": maas_data,
+                "netbox_data": netbox_data,
+                "openstack_data": openstack_data,
+                "drift": drift,
+                "matched_rows": matched_rows,
+                "os_subnet_hints": os_subnet_hints,
+                "os_subnet_gaps": os_subnet_gaps,
+                "os_floating_gaps": os_floating_gaps,
+                "netbox_prefix_count": netbox_prefix_count,
+                "use_remote_netbox": use_remote_netbox,
+                "interface_audit": interface_audit,
+            })
+        except Exception as e:
+            logger.debug("Could not cache drift audit for XLSX reuse: %s", e)
+
         if export_xlsx:
             try:
                 xlsx_bytes = build_drift_report_xlsx(
@@ -209,7 +278,8 @@ class MAASOpenStackSyncView(LoginRequiredMixin, View):
                     self.template_name,
                     {
                         "form": form,
-                        "report": report,
+                        "report_drift": report_drift,
+                        "report_reference": report_reference,
                         "audit_done": True,
                         "audit_summary": audit_summary,
                         "export_error": str(e),
@@ -227,7 +297,8 @@ class MAASOpenStackSyncView(LoginRequiredMixin, View):
             self.template_name,
             {
                 "form": form,
-                "report": report,
+                "report_drift": report_drift,
+                "report_reference": report_reference,
                 "audit_done": True,
                 "audit_summary": audit_summary,
             },

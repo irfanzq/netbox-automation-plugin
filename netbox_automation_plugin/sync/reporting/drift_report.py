@@ -141,6 +141,52 @@ def _phase0_category_counts(
     }
 
 
+def _matched_hosts_with_drift(matched_rows):
+    """Rows that have placement CHECK or any hints (so we show only drifting hosts)."""
+    if not matched_rows:
+        return []
+    return [
+        r for r in matched_rows
+        if r.get("place_match") == "CHECK" or (r.get("hints") or [])
+    ]
+
+
+def _nic_drift_flat_rows(interface_audit):
+    """List of (host, maas_if, maas_mac, nb_if, status, note) for rows with status != OK."""
+    out = []
+    for block in (interface_audit or {}).get("hosts") or []:
+        hn = block.get("hostname", "")
+        for row in block.get("rows") or []:
+            st = (row.get("status") or "").strip()
+            if st != "OK":
+                out.append((
+                    hn,
+                    (row.get("maas_if") or "")[:16],
+                    (row.get("maas_mac") or "")[:17],
+                    (row.get("nb_if") or "—")[:16],
+                    st[:20],
+                    (row.get("notes") or "")[:60],
+                ))
+    return out
+
+
+def _nb_only_nic_flat_rows(interface_audit):
+    """List of (host, nb_intf, mac, ips, vlan) for NetBox-only NICs."""
+    out = []
+    for block in (interface_audit or {}).get("hosts") or []:
+        hn = block.get("hostname", "")
+        for x in block.get("netbox_only") or []:
+            ips = x.get("ips") or []
+            out.append((
+                hn,
+                (x.get("name") or "")[:14],
+                (x.get("mac") or "")[:17],
+                ", ".join(ips)[:24] if ips else "—",
+                str(x.get("untagged_vlan_vid") or "")[:8],
+            ))
+    return out
+
+
 def format_drift_report(
     maas_data,
     netbox_data,
@@ -155,16 +201,22 @@ def format_drift_report(
     use_remote_netbox=False,
     interface_audit=None,
 ):
-    lines = []
+    """
+    Return {"drift": str, "reference": str}.
+    drift = Phase 0 + drift-only tables (MAAS-only, matched with drift, NIC drift, OS gaps).
+    reference = full matched hosts, full per-device NIC audit, OpenStack ref (collapsible in UI).
+    """
+    drift_lines = []
+    ref_lines = []
 
-    # --- INVENTORY (classic compact) ---
-    lines.extend(_banner("INVENTORY"))
-    lines.append("")
-    lines.append("  MAAS")
+    # --- INVENTORY (compact) ---
+    drift_lines.extend(_banner("INVENTORY"))
+    drift_lines.append("")
+    drift_lines.append("  MAAS")
     if maas_data.get("error"):
-        lines.append(f"    Error: {maas_data['error']}")
+        drift_lines.append(f"    Error: {maas_data['error']}")
     else:
-        lines.extend(
+        drift_lines.extend(
             _ascii_table(
                 ["Metric", "Count"],
                 [
@@ -175,10 +227,10 @@ def format_drift_report(
             )
         )
 
-    lines.append("")
-    lines.append("  NetBox (this instance)")
+    drift_lines.append("")
+    drift_lines.append("  NetBox (this instance)")
     if netbox_data.get("error"):
-        lines.append(f"    Error: {netbox_data['error']}")
+        drift_lines.append(f"    Error: {netbox_data['error']}")
     else:
         inv_rows = [
             ["Sites", str(len(netbox_data.get("sites") or []))],
@@ -186,14 +238,14 @@ def format_drift_report(
         ]
         if netbox_prefix_count:
             inv_rows.append(["IPAM Prefix objects", str(netbox_prefix_count)])
-        lines.extend(_ascii_table(["Metric", "Count"], inv_rows))
+        drift_lines.extend(_ascii_table(["Metric", "Count"], inv_rows))
 
-    # --- Phase 0 (design doc) — counts only; NetBox-only device names hidden ---
-    lines.append("")
-    lines.extend(_banner("PHASE 0 — DRIFT CATEGORIES (design doc)"))
-    lines.append("  NetBox = design / IPAM; MAAS = bare-metal + MACs; OpenStack = runtime.  sync/DRIFT_DESIGN.md")
-    lines.append("  Identity: Device hostname (+ serial); Interface MAC (+ name); FIP = IP + project.")
-    lines.append("")
+    # --- Phase 0 (design doc) — counts only ---
+    drift_lines.append("")
+    drift_lines.extend(_banner("PHASE 0 — DRIFT CATEGORIES (design doc)"))
+    drift_lines.append("  NetBox = design / IPAM; MAAS = bare-metal + MACs; OpenStack = runtime.  sync/DRIFT_DESIGN.md")
+    drift_lines.append("  Identity: Device hostname (+ serial); Interface MAC (+ name); FIP = IP + project.")
+    drift_lines.append("")
     pc = _phase0_category_counts(
         drift,
         matched_rows,
@@ -208,7 +260,7 @@ def format_drift_report(
         if pc["nb_only_dev"]
         else "0"
     )
-    lines.extend(
+    drift_lines.extend(
         _ascii_table(
             ["Drift category", "Count / note"],
             [
@@ -232,18 +284,18 @@ def format_drift_report(
         )
     )
 
-    # --- GAPS (classic columns) ---
-    lines.append("")
-    lines.extend(_banner("GAPS — runtime not yet in NetBox", "-"))
-    lines.append(
+    # --- GAPS: MAAS-only hosts ---
+    drift_lines.append("")
+    drift_lines.extend(_banner("GAPS — runtime not yet in NetBox", "-"))
+    drift_lines.append(
         "  MAAS -> Device; OpenStack subnet CIDR -> Prefix; floating IP -> IPAddress."
     )
-    lines.append("")
+    drift_lines.append("")
 
     maas_only = sorted(drift.get("in_maas_not_netbox") or [])
-    lines.append(f"  [MAAS] Machines with no NetBox Device: {len(maas_only)}")
+    drift_lines.append(f"  [MAAS] Machines with no NetBox Device: {len(maas_only)}")
     if maas_data.get("error"):
-        lines.append("    (MAAS error)")
+        drift_lines.append("    (MAAS error)")
     elif maas_only:
         gap_rows = []
         by_h = _maas_machine_by_hostname(maas_data)
@@ -259,35 +311,86 @@ def format_drift_report(
                 str(m.get("status_name", "-"))[:14],
                 str(m.get("system_id", ""))[:14],
             ])
-        lines.extend(
+        drift_lines.extend(
             _ascii_table(
                 ["hostname", "zone", "pool", "MAAS status", "system_id"],
                 gap_rows,
             )
         )
     else:
-        lines.append("    (none)")
+        drift_lines.append("    (none)")
 
-    lines.append("")
+    # --- Matched hosts with drift only (CHECK or hints) ---
+    matched_with_drift = _matched_hosts_with_drift(matched_rows)
+    if matched_with_drift:
+        drift_lines.append("")
+        drift_lines.extend(_banner("MATCHED HOSTS WITH DRIFT (review needed)", "-"))
+        drift_lines.append("  What sync would do: update site/role/serial from MAAS or flag for review.")
+        drift_lines.append("")
+        mrows = []
+        for r in matched_with_drift:
+            notes = "; ".join(r.get("hints") or []) or "—"
+            if r.get("place_match") == "CHECK":
+                notes = ("CHECK; " + notes) if notes != "—" else "CHECK"
+            mrows.append([
+                r.get("hostname", "")[:20],
+                str(r.get("maas_zone", ""))[:14],
+                str(r.get("netbox_site", ""))[:14],
+                notes[:70],
+            ])
+        drift_lines.extend(_ascii_table(["host", "MAAS zone", "NB site", "drift note"], mrows, notes_col_idx=3))
+        drift_lines.append(f"  ({len(matched_with_drift)} hosts with drift)")
+
+    # --- NIC drift (flat: only status != OK) ---
+    nic_drift_rows = _nic_drift_flat_rows(interface_audit)
+    if nic_drift_rows:
+        drift_lines.append("")
+        drift_lines.extend(_banner("NIC DRIFT (interfaces not OK)", "-"))
+        drift_lines.append("  What sync would do: align interface/VLAN/IP from MAAS.")
+        drift_lines.append("")
+        drift_lines.extend(_ascii_table(
+            ["host", "MAAS intf", "MAAS MAC", "NB intf", "status", "note"],
+            nic_drift_rows,
+            notes_col_idx=5,
+            max_col=22,
+        ))
+        drift_lines.append(f"  ({len(nic_drift_rows)} NIC rows with drift)")
+
+    # --- NetBox-only NICs (MAC not on MAAS) ---
+    nb_only_rows = _nb_only_nic_flat_rows(interface_audit)
+    if nb_only_rows:
+        drift_lines.append("")
+        drift_lines.extend(_banner("NETBOX-ONLY NICs (MAC not on MAAS)", "-"))
+        drift_lines.append("")
+        drift_lines.extend(_ascii_table(
+            ["host", "NB intf", "MAC", "IPs", "VLAN"],
+            nb_only_rows,
+            max_col=24,
+        ))
+        drift_lines.append(f"  ({len(nb_only_rows)} NetBox-only NICs)")
+
+    # --- OpenStack subnet GAPs ---
+    drift_lines.append("")
     if openstack_data and openstack_data.get("error"):
-        lines.append("  [OpenStack] Subnet / FIP gaps: API error")
+        drift_lines.append("  [OpenStack] Subnet / FIP gaps: API error")
     elif use_remote_netbox or os_subnet_gaps is None:
-        lines.append("  [OpenStack] Subnet vs Prefix: not evaluated (use local NetBox ORM).")
+        drift_lines.append("  [OpenStack] Subnet vs Prefix: not evaluated (use local NetBox ORM).")
     else:
-        lines.append(f"  [OpenStack] Subnets without exact Prefix: {len(os_subnet_gaps)}")
+        drift_lines.append(f"  [OpenStack] Subnets without exact Prefix: {len(os_subnet_gaps or [])}")
         if os_subnet_gaps:
             srows = [
                 [g.get("cidr", ""), g.get("network_name", "-")[:22], g.get("network_id", "")[:18]]
                 for g in os_subnet_gaps
             ]
-            lines.extend(_ascii_table(["CIDR", "network", "net_id"], srows))
+            drift_lines.extend(_ascii_table(["CIDR", "network", "net_id"], srows))
         else:
-            lines.append("    (all subnets have matching Prefix)")
+            drift_lines.append("    (all subnets have matching Prefix)")
 
-    lines.append("")
+    # --- OpenStack FIP GAPs ---
+    drift_lines.append("")
     if openstack_data and not openstack_data.get("error"):
         fg = os_floating_gaps if os_floating_gaps is not None else []
-        lines.append(f"  [OpenStack] Floating IPs without NetBox IPAddress: {len(fg)}")
+        drift_lines.append(f"  [OpenStack] Floating IPs without NetBox IPAddress: {len(fg)}")
         if fg:
             frows = [
                 [
@@ -297,19 +400,23 @@ def format_drift_report(
                 ]
                 for g in fg
             ]
-            lines.extend(_ascii_table(["floating_ip", "fixed", "project"], frows))
+            drift_lines.extend(_ascii_table(["floating_ip", "fixed", "project"], frows))
         else:
-            lines.append("    (none)")
+            drift_lines.append("    (none)")
     elif not openstack_data:
-        lines.append("  [OpenStack] Floating IPs: (not configured)")
+        drift_lines.append("  [OpenStack] Floating IPs: (not configured)")
 
-    # --- SUMMARY (classic two rows) ---
-    lines.append("")
-    lines.extend(_banner("MAAS <-> NetBox SUMMARY"))
+    drift_lines.append("")
+    drift_lines.extend(_banner("END OF DRIFT AUDIT", "="))
+
+    # ---------- REFERENCE (full data; collapsible in UI) ----------
+    ref_lines.extend(_banner("REFERENCE — FULL DATA", "="))
+    ref_lines.append("")
+    ref_lines.extend(_banner("MAAS <-> NetBox SUMMARY"))
     if netbox_data.get("error"):
-        lines.append("  *** NetBox error — summary unreliable ***")
+        ref_lines.append("  *** NetBox error — summary unreliable ***")
     matched = drift.get("matched_count", 0)
-    lines.extend(
+    ref_lines.extend(
         _ascii_table(
             ["Check", "Value"],
             [
@@ -319,35 +426,15 @@ def format_drift_report(
         )
     )
 
-    # --- MATCHED HOSTS (full list: classic cols + IPAM/OpenStack per DRIFT_DESIGN) ---
     if matched_rows:
-        lines.append("")
-        lines.extend(_banner("MATCHED HOSTS — site / status / serial"))
-        lines.append(
-            "  Hint: verify NetBox site vs MAAS zone/pool; serial vs system_id."
-        )
-        lines.append(
-            "  Columns: MAAS BMC (power_address) vs NetBox OOB IP; NB primary IP = in-band; OpenStack FIP on device IPs."
-        )
-        lines.append("")
+        ref_lines.append("")
+        ref_lines.extend(_banner("MATCHED HOSTS (all)"))
+        ref_lines.append("  Full list: site / status / serial / BMC / notes.")
+        ref_lines.append("")
         mh_headers = [
-            "host",
-            "MAAS zone",
-            "MAAS pool",
-            "MAAS st",
-            "NB site",
-            "NB st",
-            "MAAS fab",
-            "NB loc",
-            "sys_id",
-            "serial",
-            "pri IP",
-            "VRF",
-            "VLANs",
-            "OS FIP",
-            "MAAS BMC",
-            "NB OOB",
-            "notes",
+            "host", "MAAS zone", "MAAS pool", "MAAS st", "NB site", "NB st",
+            "MAAS fab", "NB loc", "sys_id", "serial", "pri IP", "VRF", "VLANs",
+            "OS FIP", "MAAS BMC", "NB OOB", "notes",
         ]
         mrows = []
         for r in matched_rows:
@@ -374,178 +461,86 @@ def format_drift_report(
                 str(r.get("netbox_oob", "")),
                 notes,
             ])
-        lines.extend(
-            _ascii_table(
-                mh_headers,
-                mrows,
-                notes_col_idx=len(mh_headers) - 1,
-                dynamic_columns=True,
-            )
+        ref_lines.extend(
+            _ascii_table(mh_headers, mrows, notes_col_idx=len(mh_headers) - 1, dynamic_columns=True)
         )
-        lines.append(f"  ({len(matched_rows)} matched hosts)")
+        ref_lines.append(f"  ({len(matched_rows)} matched hosts)")
 
-    # --- INTERFACES (all matched hosts; MAC/IP/VLAN per design doc) ---
-    if interface_audit and interface_audit.get("hosts"):
-        lines.append("")
-        lines.extend(_banner("MAAS <-> NetBox INTERFACES (by MAC)"))
-        lines.append(
-            "  Each row: one MAAS NIC. NetBox columns when the same MAC exists on the Device."
-        )
-        lines.append(
-            "  VLAN (DRIFT_DESIGN): untagged VID MAAS vs NetBox when API exposes MAAS vid; "
-            "mismatch → status VLAN_DRIFT (+ IP_GAP if IPs differ). "
-            "NB VID only → note VLAN unverified (MAAS UI often hides VID)."
-        )
-        lines.append(
-            "  Status: OK | VLAN_DRIFT | VLAN_DRIFT+IP_GAP | OK_NAME_DIFF | IP_GAP | "
-            "NOT_IN_NETBOX | MAC_MISMATCH | MAAS_NO_MAC"
-        )
-        lines.append("")
-        hosts = interface_audit["hosts"]
-        for block in hosts:
+    if interface_audit and interface_audit.get("hosts") and not use_remote_netbox:
+        ref_lines.append("")
+        ref_lines.extend(_banner("MAAS <-> NetBox INTERFACES (per device)"))
+        ref_lines.append("  Each row: one MAAS NIC. NetBox columns when same MAC exists.")
+        ref_lines.append("")
+        for block in interface_audit["hosts"]:
             hn = block["hostname"]
-            lines.extend(_banner(f"DEVICE: {hn}", "-"))
+            ref_lines.extend(_banner(f"DEVICE: {hn}", "-"))
             if block.get("rows"):
                 irows = [
                     [
-                        x.get("maas_fabric", "")[:10],
-                        x.get("maas_pool", "")[:8],
-                        x.get("maas_vlan", "")[:6],
-                        x.get("nb_site", "")[:8],
-                        x.get("nb_location", "")[:10],
-                        x["maas_if"][:12],
-                        x["maas_mac"][:17],
-                        x["maas_ips"][:22],
-                        x["nb_if"][:12],
-                        x.get("nb_mac", "—")[:17],
-                        x.get("nb_vlan", "")[:6],
-                        x["nb_ips"][:22],
-                        x["status"][:18],
-                        x["notes"],
+                        x.get("maas_fabric", "")[:10], x.get("maas_pool", "")[:8], x.get("maas_vlan", "")[:6],
+                        x.get("nb_site", "")[:8], x.get("nb_location", "")[:10],
+                        x["maas_if"][:12], x["maas_mac"][:17], x["maas_ips"][:22],
+                        x["nb_if"][:12], x.get("nb_mac", "—")[:17], x.get("nb_vlan", "")[:6], x["nb_ips"][:22],
+                        x["status"][:18], x["notes"],
                     ]
                     for x in block["rows"]
                 ]
-                lines.extend(
+                ref_lines.extend(
                     _ascii_table(
-                        [
-                            "MAAS fab",
-                            "MA pool",
-                            "MA VLAN",
-                            "NB site",
-                            "NB loc",
-                            "MAAS intf",
-                            "MAAS MAC",
-                            "MAAS IPs",
-                            "NB intf",
-                            "NB MAC",
-                            "NB VLAN",
-                            "NB IPs",
-                            "status",
-                            "notes",
-                        ],
-                        irows,
-                        max_col=22,
-                        notes_col_idx=13,
+                        ["MAAS fab", "MA pool", "MA VLAN", "NB site", "NB loc", "MAAS intf", "MAAS MAC", "MAAS IPs",
+                         "NB intf", "NB MAC", "NB VLAN", "NB IPs", "status", "notes"],
+                        irows, max_col=22, notes_col_idx=13,
                     )
                 )
             else:
-                lines.append("    (no MAAS interfaces returned for this machine)")
-
+                ref_lines.append("    (no MAAS interfaces)")
             nb_only = block.get("netbox_only") or []
             if nb_only:
-                lines.append(f"  NetBox-only interfaces (MAC not on MAAS machine): {len(nb_only)}")
-                nrows = []
-                for x in nb_only:
-                    iv = x.get("ip_vrfs") or []
-                    ips = x.get("ips") or []
-                    vrf_s = ""
-                    if iv and ips:
-                        pairs = [f"{ips[i]}/{iv[i]}" if i < len(iv) else ips[i] for i in range(len(ips))]
-                        vrf_s = "; ".join(pairs)[:36]
-                    elif iv:
-                        vrf_s = ",".join(sorted(set(iv)))[:20]
-                    nrows.append([
-                        (x.get("name") or "")[:14],
-                        (x.get("mac") or "")[:17],
-                        (", ".join(ips)[:24] or "—"),
-                        str(x.get("untagged_vlan_vid") or "")[:8] or "—",
-                        vrf_s or "—",
-                        "mgmt" if x.get("mgmt_only") else "",
-                    ])
-                lines.extend(
-                    _ascii_table(
-                        ["NB intf", "MAC", "NB IP(s)", "VLAN", "IP/VRF", ""],
-                        nrows,
-                        max_col=20,
-                    )
-                )
-            lines.append("")
-
+                ref_lines.append(f"  NetBox-only: {len(nb_only)}")
+                nrows = [
+                    [(x.get("name") or "")[:14], (x.get("mac") or "")[:17], (", ".join(x.get("ips") or [])[:24] or "—")]
+                    for x in nb_only
+                ]
+                ref_lines.extend(_ascii_table(["NB intf", "MAC", "IPs"], nrows, max_col=20))
+            ref_lines.append("")
     elif use_remote_netbox:
-        lines.append("")
-        lines.append("  (Interface audit requires local NetBox ORM — not available with remote API.)")
+        ref_lines.append("")
+        ref_lines.append("  (Interface audit requires local NetBox ORM.)")
 
-    if openstack_data:
-        lines.append("")
-        lines.extend(_banner("OPENSTACK REFERENCE"))
-        if openstack_data.get("error"):
-            lines.append(f"  Error: {openstack_data['error']}")
-        else:
-            nets = openstack_data.get("networks") or []
-            subs = openstack_data.get("subnets") or []
-            fips = openstack_data.get("floating_ips") or []
-            lines.extend(
-                _ascii_table(
-                    ["Object", "Count"],
-                    [
-                        ["Networks", str(len(nets))],
-                        ["Subnets", str(len(subs))],
-                        ["Floating IPs", str(len(fips))],
-                    ],
-                )
+    if openstack_data and not openstack_data.get("error"):
+        ref_lines.append("")
+        ref_lines.extend(_banner("OPENSTACK REFERENCE"))
+        ref_lines.append("  Networks, subnets vs Prefix, full FIP list.")
+        ref_lines.append("")
+        nets = openstack_data.get("networks") or []
+        subs = openstack_data.get("subnets") or []
+        fips = openstack_data.get("floating_ips") or []
+        ref_lines.extend(
+            _ascii_table(
+                ["Object", "Count"],
+                [["Networks", str(len(nets))], ["Subnets", str(len(subs))], ["Floating IPs", str(len(fips))]],
             )
-            lines.append("")
-            nrows = [
-                [(n.get("name") or n.get("id") or "")[:30], (n.get("id") or "")[:36]]
-                for n in nets[:_MAX_OS_NETWORKS]
-            ]
-            if nrows:
-                lines.extend(_ascii_table(["Network", "id"], nrows))
-            if len(nets) > _MAX_OS_NETWORKS:
-                lines.append(f"  ... {len(nets) - _MAX_OS_NETWORKS} more networks")
+        )
+        ref_lines.append("")
+        nrows = [[(n.get("name") or n.get("id") or "")[:30], (n.get("id") or "")[:36]] for n in nets[:_MAX_OS_NETWORKS]]
+        if nrows:
+            ref_lines.extend(_ascii_table(["Network", "id"], nrows))
+        if os_subnet_hints:
+            ref_lines.append("")
+            ref_lines.append("  Subnets vs NetBox Prefix (exact CIDR)")
+            sh = [["OK" if h.get("exact_prefix_in_netbox") else "GAP", h.get("cidr", ""), (h.get("network_name") or "")[:20]] for h in os_subnet_hints[:_MAX_OS_SUBNET_HINTS]]
+            ref_lines.extend(_ascii_table(["", "CIDR", "network"], sh))
+        if fips:
+            ref_lines.append("")
+            frows = [[f.get("floating_ip_address", ""), f.get("fixed_ip_address", ""), str(f.get("project_name") or "-")[:14]] for f in fips[:25]]
+            ref_lines.extend(_ascii_table(["floating_ip", "fixed_ip", "project"], frows))
+            if len(fips) > 25:
+                ref_lines.append(f"  ... {len(fips) - 25} more FIPs")
 
-            if os_subnet_hints is not None and os_subnet_hints:
-                lines.append("")
-                lines.append("  Subnets vs NetBox Prefix (exact CIDR)")
-                sh = [
-                    [
-                        "OK" if h.get("exact_prefix_in_netbox") else "GAP",
-                        h.get("cidr", ""),
-                        (h.get("network_name") or "")[:20],
-                    ]
-                    for h in os_subnet_hints[:_MAX_OS_SUBNET_HINTS]
-                ]
-                lines.extend(_ascii_table(["", "CIDR", "network"], sh))
-                if len(os_subnet_hints) > _MAX_OS_SUBNET_HINTS:
-                    lines.append(f"  ... {len(os_subnet_hints) - _MAX_OS_SUBNET_HINTS} more")
+    ref_lines.append("")
+    ref_lines.extend(_banner("END OF REFERENCE", "="))
 
-            if fips:
-                lines.append("")
-                frows = [
-                    [
-                        f.get("floating_ip_address", ""),
-                        f.get("fixed_ip_address", ""),
-                        str(f.get("project_name") or "-")[:14],
-                    ]
-                    for f in fips[:25]
-                ]
-                lines.extend(_ascii_table(["floating_ip", "fixed_ip", "project"], frows))
-                if len(fips) > 25:
-                    lines.append(f"  ... {len(fips) - 25} more FIPs")
-
-    lines.append("")
-    lines.extend(_banner("END OF DRIFT AUDIT", "="))
-    return "\n".join(lines)
+    return {"drift": "\n".join(drift_lines), "reference": "\n".join(ref_lines)}
 
 
 def build_drift_report_xlsx(
