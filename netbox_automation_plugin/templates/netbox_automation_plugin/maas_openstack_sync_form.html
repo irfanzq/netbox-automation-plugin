@@ -10,17 +10,15 @@
       <h5 class="card-header">{% trans "MAAS / OpenStack Sync" %}</h5>
       <div class="card-body">
         <p class="card-text mb-2">
-          {% trans "Compare MAAS machines, NetBox devices, and (optionally) OpenStack networks. Read-only drift report — no changes are written." %}
+          {% trans "Compare MAAS machines with NetBox devices (hosts and NICs) and, optionally, OpenStack subnets and floating IPs with NetBox IPAM. Read-only drift report — no changes are written." %}
         </p>
-        <div class="alert alert-secondary py-2 mb-3 small" role="note">
-          <strong>{% trans "Drift audit" %}</strong> —
-          {% trans "NetBox devices/sites are read from this instance (database) — no NETBOX_URL needed. MAAS and OpenStack use env vars; OpenStack must resolve from this container." %}
-        </div>
         <form method="post" action="" class="d-flex flex-wrap align-items-end gap-2">
           {% csrf_token %}
           {{ form.mode }}
           <button type="submit" class="btn btn-primary">{% trans "Run drift audit" %}</button>
+          <button type="submit" name="format" value="xlsx" class="btn btn-outline-success">{% trans "Download as Excel (.xlsx)" %}</button>
         </form>
+        <p class="small text-muted mt-1 mb-0">{% trans "Download as Excel: runs the audit, shows the report, and triggers the file download." %}</p>
         {% if audit_done and audit_summary %}
           <div class="card mt-3 border-info">
             <h5 class="card-header">{% trans "Drift data sources" %}</h5>
@@ -130,6 +128,30 @@
               <p class="small text-muted mt-2 mb-0">{% trans "Excel can be opened in Microsoft Excel or Google Sheets." %}</p>
             </div>
           </div>
+        {% endif %}
+        {% if auto_download_xlsx and download_xlsx_url %}
+          <script>
+            (function() {
+              var url = "{{ download_xlsx_url|escapejs }}";
+              fetch(url, { credentials: "same-origin" })
+                .then(function(r) {
+                  if (!r.ok) throw new Error(r.statusText);
+                  return r.blob();
+                })
+                .then(function(blob) {
+                  var a = document.createElement("a");
+                  a.href = URL.createObjectURL(blob);
+                  a.download = "drift-report.xlsx";
+                  document.body.appendChild(a);
+                  a.click();
+                  document.body.removeChild(a);
+                  URL.revokeObjectURL(a.href);
+                })
+                .catch(function(e) {
+                  console.warn("Drift report Excel download failed:", e);
+                });
+            })();
+          </script>
         {% endif %}
       </div>
     </div>

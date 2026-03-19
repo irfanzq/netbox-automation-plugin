@@ -165,7 +165,7 @@ def _nic_drift_flat_rows(interface_audit):
                     (row.get("maas_mac") or "")[:17],
                     (row.get("nb_if") or "—")[:16],
                     st[:20],
-                    (row.get("notes") or "")[:60],
+                    (row.get("notes") or ""),
                 ))
     return out
 
@@ -336,9 +336,14 @@ def format_drift_report(
                 r.get("hostname", "")[:20],
                 str(r.get("maas_zone", ""))[:14],
                 str(r.get("netbox_site", ""))[:14],
-                notes[:70],
+                notes,
             ])
-        drift_lines.extend(_ascii_table(["host", "MAAS zone", "NB site", "drift note"], mrows, notes_col_idx=3))
+        drift_lines.extend(_ascii_table(
+            ["host", "MAAS zone", "NB site", "drift note"],
+            mrows,
+            notes_col_idx=3,
+            dynamic_columns=True,
+        ))
         drift_lines.append(f"  ({len(matched_with_drift)} hosts with drift)")
 
     # --- NIC drift (flat: only status != OK) ---
@@ -352,7 +357,7 @@ def format_drift_report(
             ["host", "MAAS intf", "MAAS MAC", "NB intf", "status", "note"],
             nic_drift_rows,
             notes_col_idx=5,
-            max_col=22,
+            dynamic_columns=True,
         ))
         drift_lines.append(f"  ({len(nic_drift_rows)} NIC rows with drift)")
 
@@ -633,69 +638,37 @@ def build_drift_report_xlsx(
     ws_sum.append([])
     ws_sum.append(["MAAS <-> NetBox matched hostnames", str(drift.get("matched_count", 0)), ""])
 
-    # --- Matched Hosts ---
-    if matched_rows:
-        ws_mh = _sheet("Matched Hosts")
-        mh_headers = [
-            "host", "MAAS zone", "MAAS pool", "MAAS st", "NB site", "NB st",
-            "MAAS fab", "NB loc", "sys_id", "serial", "pri IP", "VRF", "VLANs",
-            "OS FIP", "MAAS BMC", "NB OOB", "notes",
-        ]
-        _append_header(ws_mh, mh_headers)
-        for r in matched_rows:
+    # --- Matched hosts with drift only (same as on-screen report) ---
+    matched_with_drift = _matched_hosts_with_drift(matched_rows)
+    if matched_with_drift:
+        ws_mh = _sheet("Matched hosts with drift")
+        _append_header(ws_mh, ["host", "MAAS zone", "NB site", "drift note"])
+        for r in matched_with_drift:
             notes = "; ".join(r.get("hints") or []) or "—"
-            ser = str(r.get("netbox_serial", ""))
-            if ser == "(empty)":
-                ser = "—"
+            if r.get("place_match") == "CHECK":
+                notes = ("CHECK; " + notes) if notes != "—" else "CHECK"
             ws_mh.append([
                 r.get("hostname", ""),
                 str(r.get("maas_zone", "")),
-                str(r.get("maas_pool", "")),
-                str(r.get("maas_status", "")),
                 str(r.get("netbox_site", "")),
-                str(r.get("netbox_status", "")),
-                str(r.get("maas_fabric", "")),
-                str(r.get("netbox_location", "")),
-                str(r.get("maas_system_id", "")),
-                ser,
-                str(r.get("netbox_primary_ip", "")),
-                str(r.get("netbox_vrf", "")),
-                str(r.get("netbox_vlans", "")),
-                str(r.get("openstack_fip", "")),
-                str(r.get("maas_bmc", "")),
-                str(r.get("netbox_oob", "")),
                 notes,
             ])
 
-    # --- NIC Audit (one row per interface row, with hostname) ---
-    if interface_audit and interface_audit.get("hosts"):
-        ws_nic = _sheet("NIC Audit")
-        nic_headers = [
-            "hostname", "MAAS fab", "MA pool", "MA VLAN", "NB site", "NB loc",
-            "MAAS intf", "MAAS MAC", "MAAS IPs", "NB intf", "NB MAC", "NB VLAN",
-            "NB IPs", "status", "notes",
-        ]
-        _append_header(ws_nic, nic_headers)
-        for block in interface_audit["hosts"]:
-            hn = block.get("hostname", "")
-            for row in block.get("rows") or []:
-                ws_nic.append([
-                    hn,
-                    str(row.get("maas_fabric", ""))[:20],
-                    str(row.get("maas_pool", ""))[:16],
-                    str(row.get("maas_vlan", ""))[:12],
-                    str(row.get("nb_site", ""))[:16],
-                    str(row.get("nb_location", ""))[:20],
-                    str(row.get("maas_if", ""))[:24],
-                    str(row.get("maas_mac", ""))[:18],
-                    str(row.get("maas_ips", ""))[:44],
-                    str(row.get("nb_if", "—"))[:24],
-                    str(row.get("nb_mac", "—"))[:18],
-                    str(row.get("nb_vlan", ""))[:12],
-                    str(row.get("nb_ips", ""))[:44],
-                    str(row.get("status", ""))[:24],
-                    str(row.get("notes", ""))[:500],
-                ])
+    # --- NIC drift (only status != OK; same as on-screen report) ---
+    nic_drift_rows = _nic_drift_flat_rows(interface_audit)
+    if nic_drift_rows:
+        ws_nic = _sheet("NIC drift")
+        _append_header(ws_nic, ["host", "MAAS intf", "MAAS MAC", "NB intf", "status", "note"])
+        for row in nic_drift_rows:
+            ws_nic.append(list(row))
+
+    # --- NB-only NICs (same as on-screen report) ---
+    nb_only_rows = _nb_only_nic_flat_rows(interface_audit)
+    if nb_only_rows:
+        ws_nb = _sheet("NB-only NICs")
+        _append_header(ws_nb, ["host", "NB intf", "MAC", "IPs", "VLAN"])
+        for row in nb_only_rows:
+            ws_nb.append(list(row))
 
     # --- MAAS only (no NetBox Device) ---
     maas_only = sorted(drift.get("in_maas_not_netbox") or [])
@@ -745,6 +718,70 @@ def build_drift_report_xlsx(
                 ws_os.append([
                     (n.get("name") or n.get("id") or "")[:60],
                     (n.get("id") or "")[:40],
+                ])
+
+    # --- Reference: full Matched Hosts (all rows) ---
+    if matched_rows:
+        ws_ref_mh = _sheet("Reference - Matched Hosts")
+        mh_headers = [
+            "host", "MAAS zone", "MAAS pool", "MAAS st", "NB site", "NB st",
+            "MAAS fab", "NB loc", "sys_id", "serial", "pri IP", "VRF", "VLANs",
+            "OS FIP", "MAAS BMC", "NB OOB", "notes",
+        ]
+        _append_header(ws_ref_mh, mh_headers)
+        for r in matched_rows:
+            notes = "; ".join(r.get("hints") or []) or "—"
+            ser = str(r.get("netbox_serial", ""))
+            if ser == "(empty)":
+                ser = "—"
+            ws_ref_mh.append([
+                r.get("hostname", ""),
+                str(r.get("maas_zone", "")),
+                str(r.get("maas_pool", "")),
+                str(r.get("maas_status", "")),
+                str(r.get("netbox_site", "")),
+                str(r.get("netbox_status", "")),
+                str(r.get("maas_fabric", "")),
+                str(r.get("netbox_location", "")),
+                str(r.get("maas_system_id", "")),
+                ser,
+                str(r.get("netbox_primary_ip", "")),
+                str(r.get("netbox_vrf", "")),
+                str(r.get("netbox_vlans", "")),
+                str(r.get("openstack_fip", "")),
+                str(r.get("maas_bmc", "")),
+                str(r.get("netbox_oob", "")),
+                notes,
+            ])
+
+    # --- Reference: full NIC Audit (all interface rows) ---
+    if interface_audit and interface_audit.get("hosts"):
+        ws_ref_nic = _sheet("Reference - NIC Audit")
+        nic_headers = [
+            "hostname", "MAAS fab", "MA pool", "MA VLAN", "NB site", "NB loc",
+            "MAAS intf", "MAAS MAC", "MAAS IPs", "NB intf", "NB MAC", "NB VLAN",
+            "NB IPs", "status", "notes",
+        ]
+        _append_header(ws_ref_nic, nic_headers)
+        for block in interface_audit["hosts"]:
+            hn = block.get("hostname", "")
+            for row in block.get("rows") or []:
+                ws_ref_nic.append([
+                    hn,
+                    str(row.get("maas_fabric", ""))[:20],
+                    str(row.get("maas_pool", ""))[:16],
+                    str(row.get("maas_vlan", ""))[:12],
+                    str(row.get("nb_site", ""))[:16],
+                    str(row.get("nb_location", ""))[:20],
+                    str(row.get("maas_if", ""))[:24],
+                    str(row.get("maas_mac", ""))[:18],
+                    str(row.get("maas_ips", ""))[:44],
+                    str(row.get("nb_if", "—"))[:24],
+                    str(row.get("nb_mac", "—"))[:18],
+                    str(row.get("nb_vlan", ""))[:12],
+                    str(row.get("nb_ips", ""))[:44],
+                    str(row.get("status", ""))[:24],
+                    str(row.get("notes", "")),
                 ])
 
     buf = BytesIO()
