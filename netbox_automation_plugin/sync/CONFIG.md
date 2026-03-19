@@ -41,6 +41,19 @@ Optional (application credentials instead of user/password):
 - `OPENSTACK_APPLICATION_CREDENTIAL_ID`
 - `OPENSTACK_APPLICATION_CREDENTIAL_SECRET`
 
+**Second (or more) OpenStack clouds (optional):** set `OPENSTACK_2_AUTH_URL` to add another cloud. Data from all configured OpenStack clouds is **combined** into one dataset; the drift report and Excel show a single "OpenStack" view (one subnet gaps table, one FIP gaps table) compared to NetBox. Users do not see per-cloud sections. All second-cloud options use the `OPENSTACK_2_` prefix:
+
+| Variable | Description |
+|----------|-------------|
+| `OPENSTACK_2_AUTH_URL` | **Required** to enable 2nd cloud. Identity URL (e.g. `https://cloud2.example.com/v3`). |
+| `OPENSTACK_2_USERNAME` | OpenStack user for 2nd cloud |
+| `OPENSTACK_2_PASSWORD` | OpenStack password (or use app cred below) |
+| `OPENSTACK_2_PROJECT_NAME` | Project/tenant name |
+| `OPENSTACK_2_REGION_NAME` | Region (default: same as `OPENSTACK_DEFAULT_REGION_NAME`) |
+| `OPENSTACK_2_LABEL` | Display name in report (default: region name or "OpenStack 2") |
+| `OPENSTACK_2_APPLICATION_CREDENTIAL_ID` / `OPENSTACK_2_APPLICATION_CREDENTIAL_SECRET` | Optional app cred for 2nd cloud |
+| `OPENSTACK_2_INSECURE` | `true` to skip TLS verify for 2nd cloud |
+
 **NetBox (drift audit vs MAAS):** By default the plugin reads **this NetBox’s database** (Django ORM), same idea as VLAN deployment — **no `NETBOX_URL`, token, or DNS** to yourself.
 
 Only if you must compare MAAS to a **different** NetBox over HTTP:
@@ -86,3 +99,16 @@ PLUGINS_CONFIG = {
 - `site_mapping_pool`: dict mapping MAAS pool name → NetBox site slug when pool names align with sites (e.g. `birch` → `birch`).
 
 These can live in plugin config or in a dedicated config file; they are not secrets.
+
+### Adding a second OpenStack server (step-by-step)
+
+1. **Set environment variables** for the 2nd cloud where the NetBox process runs (e.g. in `netbox.env`, Docker Compose `env_file`, or systemd `Environment=`):
+   - `OPENSTACK_2_AUTH_URL` — Identity URL of the 2nd OpenStack (e.g. `https://cloud2.example.com:5000/v3`). **Required** to enable the 2nd cloud.
+   - `OPENSTACK_2_USERNAME` — OpenStack user for the 2nd cloud.
+   - `OPENSTACK_2_PASSWORD` — Password (or use application credentials below).
+   - `OPENSTACK_2_PROJECT_NAME` — Project/tenant name.
+   - Optional: `OPENSTACK_2_REGION_NAME` (e.g. `regionTwo`), `OPENSTACK_2_LABEL` (e.g. `oak` for display in the report), `OPENSTACK_2_INSECURE=true` if you skip TLS verify.
+
+2. **Restart NetBox** (or the container/worker that runs the plugin) so it picks up the new env vars.
+
+3. **Run the drift audit** (Automation → MAAS / OpenStack Sync → Run drift audit). The "Drift data sources" card shows one OpenStack row with **combined** counts (networks, subnets, FIPs from all clouds). The report and Excel show a single OpenStack vs NetBox view: one subnet gaps table and one FIP gaps table.

@@ -21,6 +21,14 @@ def fetch_openstack_data(config: dict):
       - floating_ips: list of {floating_ip_address, fixed_ip_address, id, project_id, project_name}
       - error: str if connection failed
     """
+    return fetch_openstack_data_for_config(config)
+
+
+def fetch_openstack_data_for_config(config: dict):
+    """
+    Fetch OpenStack data using a config dict that has openstack_* keys
+    (e.g. one entry from get_openstack_configs()). Same return shape as fetch_openstack_data().
+    """
     result = {"networks": [], "subnets": [], "floating_ips": [], "error": None}
 
     auth_url = config.get("openstack_auth_url") or ""
@@ -40,8 +48,7 @@ def fetch_openstack_data(config: dict):
         if auth_url and not auth_url.endswith("/v3"):
             auth_url = auth_url + "/v3"
         region = (
-            (os.environ.get("OS_REGION_NAME") or os.environ.get("OPENSTACK_REGION_NAME") or "").strip()
-            or (config.get("openstack_region_name") or "").strip()
+            (config.get("openstack_region_name") or "").strip()
             or OPENSTACK_DEFAULT_REGION_NAME
         )
         app_id = (config.get("openstack_application_credential_id") or "").strip()
@@ -110,3 +117,15 @@ def fetch_openstack_data(config: dict):
         result["error"] = msg
 
     return result
+
+
+def fetch_all_openstack_data(configs: list):
+    """
+    Fetch from multiple OpenStack configs (e.g. from get_openstack_configs()).
+    Returns list of {"label": str, "data": dict}; each data has networks, subnets, floating_ips, error.
+    """
+    out = []
+    for c in configs:
+        label = c.get("label") or "OpenStack"
+        out.append({"label": label, "data": fetch_openstack_data_for_config(c)})
+    return out

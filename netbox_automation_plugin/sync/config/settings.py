@@ -130,3 +130,63 @@ def get_sync_config():
         "site_mapping_fabric": cfg.get("site_mapping_fabric") or {},  # e.g. {"birch-fabric": "birch"}
         "site_mapping_pool": cfg.get("site_mapping_pool") or {},      # e.g. {"birch": "birch"}
     }
+
+
+def get_openstack_configs():
+    """
+    Return a list of OpenStack config dicts for drift audit (multi-cloud).
+    First cloud: OPENSTACK_* / OS_* (same as get_sync_config()).
+    Second cloud: OPENSTACK_2_AUTH_URL, OPENSTACK_2_USERNAME, OPENSTACK_2_PASSWORD, etc.
+    Each dict has openstack_* keys plus "label" (display name). If OPENSTACK_2_AUTH_URL
+    is not set, returns a single-element list (backward compatible).
+    """
+    full = get_sync_config()
+    configs = []
+
+    # First cloud (existing env)
+    auth1 = (full.get("openstack_auth_url") or "").strip()
+    if auth1:
+        configs.append({
+            "label": (
+                (full.get("openstack_region_name") or "").strip()
+                or os.environ.get("OPENSTACK_LABEL") or "OpenStack"
+            ),
+            "openstack_auth_url": full["openstack_auth_url"],
+            "openstack_username": full["openstack_username"],
+            "openstack_password": full["openstack_password"],
+            "openstack_project_name": full["openstack_project_name"],
+            "openstack_project_id": full["openstack_project_id"],
+            "openstack_region_name": full["openstack_region_name"],
+            "openstack_interface": full["openstack_interface"],
+            "openstack_user_domain_name": full["openstack_user_domain_name"],
+            "openstack_project_domain_name": full["openstack_project_domain_name"],
+            "openstack_application_credential_id": full["openstack_application_credential_id"],
+            "openstack_application_credential_secret": full["openstack_application_credential_secret"],
+            "openstack_insecure": full["openstack_insecure"],
+        })
+
+    # Second cloud (OPENSTACK_2_* env only)
+    auth2 = (os.environ.get("OPENSTACK_2_AUTH_URL") or "").strip()
+    if auth2:
+        def _e2(k, default=None):
+            return (os.environ.get("OPENSTACK_2_" + k) or default)
+
+        region2 = (_e2("REGION_NAME") or "").strip() or OPENSTACK_DEFAULT_REGION_NAME
+        label2 = (_e2("LABEL") or "").strip() or region2 or "OpenStack 2"
+        configs.append({
+            "label": label2,
+            "openstack_auth_url": auth2.rstrip("/"),
+            "openstack_username": _e2("USERNAME", ""),
+            "openstack_password": _e2("PASSWORD", ""),
+            "openstack_project_name": _e2("PROJECT_NAME", ""),
+            "openstack_project_id": _e2("PROJECT_ID", ""),
+            "openstack_region_name": region2,
+            "openstack_interface": _e2("INTERFACE", "public"),
+            "openstack_user_domain_name": _e2("USER_DOMAIN_NAME", "Default"),
+            "openstack_project_domain_name": _e2("PROJECT_DOMAIN_NAME", "Default"),
+            "openstack_application_credential_id": _e2("APPLICATION_CREDENTIAL_ID", ""),
+            "openstack_application_credential_secret": _e2("APPLICATION_CREDENTIAL_SECRET", ""),
+            "openstack_insecure": str(_e2("INSECURE", "false")).lower() in ("1", "true", "yes"),
+        })
+
+    return configs
