@@ -618,8 +618,8 @@ async def fetch_maas_data(maas_url: str, maas_api_key: str, maas_insecure: bool)
         result["error"] = "MAAS_URL and MAAS_API_KEY are required"
         return result
 
-    if maas_insecure:
-        _silence_urllib3_insecure_when_maas_tls_skipped()
+    # Silence InsecureRequestWarning for this run (MAAS_INSECURE=true is common in labs)
+    _silence_urllib3_insecure_when_maas_tls_skipped()
 
     try:
         from maas.client import connect

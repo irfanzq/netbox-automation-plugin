@@ -24,7 +24,11 @@ from netbox_automation_plugin.sync.reconciliation.audit_detail import (
 )
 from netbox_automation_plugin.sync.clients.openstack_client import fetch_openstack_data
 from netbox_automation_plugin.sync.reconciliation.maas_netbox import compute_maas_netbox_drift
-from netbox_automation_plugin.sync.reporting.drift_report import format_drift_report
+from netbox_automation_plugin.sync.reporting.drift_report import (
+    format_drift_report,
+    build_drift_report_xlsx,
+)
+from django.http import HttpResponse
 
 import logging
 import os
@@ -143,7 +147,8 @@ class MAASOpenStackSyncView(LoginRequiredMixin, View):
         if openstack_data and not openstack_data.get("error"):
             os_floating_gaps = openstack_floating_ips_missing_from_netbox(openstack_data)
 
-        # 5) Report
+        # 5) Report (text or XLSX download)
+        export_xlsx = request.POST.get("format") == "xlsx"
         report = format_drift_report(
             maas_data,
             netbox_data,
@@ -181,6 +186,41 @@ class MAASOpenStackSyncView(LoginRequiredMixin, View):
             "use_remote_netbox": use_remote_netbox,
             "drift_matched": drift.get("matched_count", 0),
         }
+
+        if export_xlsx:
+            try:
+                xlsx_bytes = build_drift_report_xlsx(
+                    maas_data,
+                    netbox_data,
+                    openstack_data,
+                    drift,
+                    matched_rows=matched_rows,
+                    os_subnet_hints=os_subnet_hints,
+                    os_subnet_gaps=os_subnet_gaps,
+                    os_floating_gaps=os_floating_gaps,
+                    netbox_prefix_count=netbox_prefix_count,
+                    use_remote_netbox=use_remote_netbox,
+                    interface_audit=interface_audit,
+                )
+            except Exception as e:
+                logger.exception("XLSX export failed: %s", e)
+                return render(
+                    request,
+                    self.template_name,
+                    {
+                        "form": form,
+                        "report": report,
+                        "audit_done": True,
+                        "audit_summary": audit_summary,
+                        "export_error": str(e),
+                    },
+                )
+            resp = HttpResponse(
+                xlsx_bytes,
+                content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+            resp["Content-Disposition"] = 'attachment; filename="drift-report.xlsx"'
+            return resp
 
         return render(
             request,

@@ -20,7 +20,9 @@
           {% csrf_token %}
           {{ form.mode }}
           <button type="submit" class="btn btn-primary">{% trans "Run drift audit" %}</button>
+          <button type="submit" name="format" value="xlsx" class="btn btn-outline-success">{% trans "Download as Excel (.xlsx)" %}</button>
         </form>
+        <p class="small text-muted mt-1 mb-0">{% trans "Excel can be opened in Microsoft Excel or Google Sheets." %}</p>
         {% if audit_done and audit_summary %}
           <div class="card mt-3 border-info">
             <h5 class="card-header">{% trans "Drift data sources" %}</h5>
@@ -74,6 +76,11 @@
                 </div>
               {% endif %}
             </div>
+          </div>
+        {% endif %}
+        {% if export_error %}
+          <div class="alert alert-warning mt-3" role="alert">
+            <strong>{% trans "Excel export failed" %}</strong>: {{ export_error }}
           </div>
         {% endif %}
         {% if audit_done and report %}
