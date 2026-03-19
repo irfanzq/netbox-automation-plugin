@@ -4,6 +4,64 @@
 {% block title %}{% trans "MAAS / OpenStack Sync" %}{% endblock %}
 
 {% block content %}
+<style>
+  #drift-audit-loading-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 9999;
+    background: rgba(0, 0, 0, 0.5);
+    display: none;
+    align-items: center;
+    justify-content: center;
+  }
+  #drift-audit-loading-overlay.drift-loading-visible {
+    display: flex;
+  }
+  .drift-loading-content {
+    text-align: center;
+    color: #fff;
+  }
+  .drift-loading-spinner {
+    width: 64px;
+    height: 64px;
+    margin: 0 auto 12px;
+    position: relative;
+    border: 4px solid rgba(255, 255, 255, 0.3);
+    border-top-color: #fff;
+    border-radius: 50%;
+    animation: drift-spin 0.9s linear infinite;
+  }
+  .drift-loading-spinner .drift-loading-text {
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    transform: translate(-50%, -50%) rotate(180deg);
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: lowercase;
+    letter-spacing: 0.02em;
+    color: #fff;
+    animation: drift-spin-text 0.9s linear infinite;
+  }
+  @keyframes drift-spin {
+    to { transform: rotate(360deg); }
+  }
+  @keyframes drift-spin-text {
+    to { transform: translate(-50%, -50%) rotate(-180deg); }
+  }
+  .drift-loading-message {
+    font-size: 1rem;
+    font-weight: 500;
+  }
+</style>
+<div id="drift-audit-loading-overlay" aria-hidden="true">
+  <div class="drift-loading-content">
+    <div class="drift-loading-spinner">
+      <span class="drift-loading-text">loading</span>
+    </div>
+    <div class="drift-loading-message">{% trans "Running report…" %}</div>
+  </div>
+</div>
 <div class="row">
   <div class="col">
     <div class="card">
@@ -12,13 +70,25 @@
         <p class="card-text mb-2">
           {% trans "Compare MAAS machines with NetBox devices (hosts and NICs) and, optionally, OpenStack subnets and floating IPs with NetBox IPAM. Read-only drift report — no changes are written." %}
         </p>
-        <form method="post" action="" class="d-flex flex-wrap align-items-end gap-2">
+        <form method="post" action="" class="d-flex flex-wrap align-items-end gap-2 drift-audit-form">
           {% csrf_token %}
           {{ form.mode }}
           <button type="submit" class="btn btn-primary">{% trans "Run drift audit" %}</button>
           <button type="submit" name="format" value="xlsx" class="btn btn-outline-success">{% trans "Download as Excel (.xlsx)" %}</button>
         </form>
         <p class="small text-muted mt-1 mb-0">{% trans "Download as Excel: runs the audit, shows the report, and triggers the file download." %}</p>
+        <script>
+          (function() {
+            var overlay = document.getElementById("drift-audit-loading-overlay");
+            if (!overlay) return;
+            document.querySelectorAll(".drift-audit-form").forEach(function(f) {
+              f.addEventListener("submit", function() {
+                overlay.classList.add("drift-loading-visible");
+                overlay.setAttribute("aria-hidden", "false");
+              });
+            });
+          })();
+        </script>
         {% if audit_done and audit_summary %}
           <div class="card mt-3 border-info">
             <h5 class="card-header">{% trans "Drift data sources" %}</h5>
@@ -104,7 +174,7 @@
           <div class="card mt-3">
             <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">
               <h5 class="mb-0">{% trans "Drift Audit Report" %}</h5>
-              <form method="post" action="" class="d-inline">
+              <form method="post" action="" class="d-inline drift-audit-form">
                 {% csrf_token %}
                 {{ form.mode }}
                 <input type="hidden" name="format" value="xlsx" />
