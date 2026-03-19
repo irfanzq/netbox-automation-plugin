@@ -20,9 +20,7 @@
           {% csrf_token %}
           {{ form.mode }}
           <button type="submit" class="btn btn-primary">{% trans "Run drift audit" %}</button>
-          <button type="submit" name="format" value="xlsx" class="btn btn-outline-success">{% trans "Download as Excel (.xlsx)" %}</button>
         </form>
-        <p class="small text-muted mt-1 mb-0">{% trans "Excel can be opened in Microsoft Excel or Google Sheets." %}</p>
         {% if audit_done and audit_summary %}
           <div class="card mt-3 border-info">
             <h5 class="card-header">{% trans "Drift data sources" %}</h5>
@@ -106,9 +104,18 @@
             }
           </style>
           <div class="card mt-3">
-            <h5 class="card-header">{% trans "Drift Audit Report" %}</h5>
+            <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">
+              <h5 class="mb-0">{% trans "Drift Audit Report" %}</h5>
+              <form method="post" action="" class="d-inline">
+                {% csrf_token %}
+                {{ form.mode }}
+                <input type="hidden" name="format" value="xlsx" />
+                <button type="submit" class="btn btn-outline-success btn-sm">{% trans "Download as Excel (.xlsx)" %}</button>
+              </form>
+            </div>
             <div class="card-body p-2">
               <p class="small text-muted mb-2">{% trans "Each table row is one line — scroll horizontally to see the full row (no wrapping)." %}</p>
+              <p class="small text-muted mb-2">{% trans "Excel can be opened in Microsoft Excel or Google Sheets." %}</p>
               <div class="drift-audit-report-scroll border rounded bg-body-secondary p-2">
                 <pre class="drift-report-pre mb-0 font-monospace" style="font-size: 0.8rem; line-height: 1.35;">{{ report }}</pre>
               </div>

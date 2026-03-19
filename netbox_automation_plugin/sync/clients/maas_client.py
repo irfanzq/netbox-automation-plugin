@@ -679,35 +679,20 @@ async def fetch_maas_data(maas_url: str, maas_api_key: str, maas_insecure: bool)
             ifaces = []
             fabric_name = "-"
             if sid:
-                try:
-                    from maas.client.viscera.interfaces import Interfaces
-
-                    iface_set = await Interfaces.read(sid)
-                    ilist = list(iface_set)
-                    ifaces = _ifaces_from_viscera_list(ilist)
-                    fabric_name = _fabric_from_iface_set(ilist)
-                except Exception as e:
-                    logger.warning(
-                        "MAAS Interfaces.read(%s) host=%s: %s",
-                        sid,
-                        short_name,
-                        e,
-                    )
-                if not ifaces:
-                    rest_if, rest_fab = await asyncio.to_thread(
-                        _maas_interfaces_rest,
-                        maas_url,
-                        maas_api_key,
-                        sid,
-                        not maas_insecure,
-                        fabric_catalog,
-                    )
-                    if rest_if:
-                        ifaces = rest_if
-                        fabric_name = rest_fab if rest_fab != "-" else fabric_name
-                        logger.debug(
-                            "MAAS REST fallback: %d ifaces for %s", len(ifaces), short_name
-                        )
+                # Use REST for interfaces; viscera Interfaces.read() is class-bound and
+                # raises "type object 'Interfaces' has no attribute '_handler'" when
+                # called without a client origin.
+                rest_if, rest_fab = await asyncio.to_thread(
+                    _maas_interfaces_rest,
+                    maas_url,
+                    maas_api_key,
+                    sid,
+                    not maas_insecure,
+                    fabric_catalog,
+                )
+                if rest_if:
+                    ifaces = rest_if
+                    fabric_name = rest_fab if rest_fab != "-" else fabric_name
             bmc_ip = ""
             try:
                 md = getattr(m, "_data", None)
