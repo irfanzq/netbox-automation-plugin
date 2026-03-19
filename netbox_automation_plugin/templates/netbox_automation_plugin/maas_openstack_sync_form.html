@@ -81,7 +81,7 @@
             <strong>{% trans "Excel export failed" %}</strong>: {{ export_error }}
           </div>
         {% endif %}
-        {% if audit_done and report %}
+        {% if audit_done and report_drift %}
           <style>
             .drift-audit-report-scroll {
               overflow-x: auto !important;
@@ -114,11 +114,20 @@
               </form>
             </div>
             <div class="card-body p-2">
+              <p class="small text-muted mb-2">{% trans "Only drifting items are listed below. Expand Reference for full matched hosts and per-device NIC audit." %}</p>
               <p class="small text-muted mb-2">{% trans "Each table row is one line — scroll horizontally to see the full row (no wrapping)." %}</p>
-              <p class="small text-muted mb-2">{% trans "Excel can be opened in Microsoft Excel or Google Sheets." %}</p>
               <div class="drift-audit-report-scroll border rounded bg-body-secondary p-2">
-                <pre class="drift-report-pre mb-0 font-monospace" style="font-size: 0.8rem; line-height: 1.35;">{{ report }}</pre>
+                <pre class="drift-report-pre mb-0 font-monospace" style="font-size: 0.8rem; line-height: 1.35;">{{ report_drift }}</pre>
               </div>
+              {% if report_reference %}
+                <details class="mt-3">
+                  <summary class="btn btn-outline-secondary btn-sm">{% trans "Reference — full matched hosts, per-device NIC audit, OpenStack networks/FIPs" %}</summary>
+                  <div class="drift-audit-report-scroll border rounded bg-body-secondary p-2 mt-2">
+                    <pre class="drift-report-pre mb-0 font-monospace" style="font-size: 0.8rem; line-height: 1.35;">{{ report_reference }}</pre>
+                  </div>
+                </details>
+              {% endif %}
+              <p class="small text-muted mt-2 mb-0">{% trans "Excel can be opened in Microsoft Excel or Google Sheets." %}</p>
             </div>
           </div>
         {% endif %}
