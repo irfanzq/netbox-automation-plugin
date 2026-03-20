@@ -40,12 +40,15 @@ def build_maas_netbox_interface_audit(
     maas_data: dict,
     netbox_ifaces: dict,
     netbox_audit=None,
+    maas_iface_filter=None,
 ):
     """
     Line-by-line MAAS NIC vs NetBox interface (match by MAC). One entry per matched hostname.
 
     netbox_ifaces: hostname -> list of {name, mac, ips, mgmt_only}
     netbox_audit: hostname -> {site_slug, location_name, ...} for per-device context columns.
+    maas_iface_filter: optional (machine_dict, iface_dict) -> bool; False drops the MAAS NIC from
+        this audit (e.g. unconfigured / out-of-scope interfaces — keeps drift safe for NetBox apply).
     """
     by_h = {}
     for m in maas_data.get("machines") or []:
@@ -73,6 +76,12 @@ def build_maas_netbox_interface_audit(
         maas_macs_with_nic = set()
         rows = []
         for mi in maas_ifaces:
+            if maas_iface_filter is not None:
+                try:
+                    if not maas_iface_filter(m, mi):
+                        continue
+                except Exception:
+                    continue
             mac = _normalize_mac(mi.get("mac") or "")
             maas_name = mi.get("name") or "—"
             maas_ips = mi.get("ips") or []

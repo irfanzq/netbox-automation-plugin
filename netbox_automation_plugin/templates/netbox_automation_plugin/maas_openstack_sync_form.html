@@ -125,7 +125,7 @@
               {{ form.mode }}
               <div class="row g-3">
                 <div class="col-12">
-                  <label class="form-label mb-1" for="{{ form.sites.id_for_label }}" id="maas-lbl-sites">{{ form.sites.label }}</label>
+                  <label class="form-label mb-1" for="{{ form.sites.id_for_label }}" id="maas-lbl-sites">{{ form.sites.label }} ({% trans "optional" %})</label>
                   <div
                     class="maas-sync-multiselect position-relative"
                     data-ms-placeholder="{% trans 'Select sites…' %}"
@@ -275,19 +275,20 @@
                     })[0];
                     if (!o) return;
                     if (val === "__all__") {
-                      if (cb.checked) {
-                        Array.prototype.forEach.call(sel.options, function(x) {
-                          x.selected = x.value === "__all__";
-                        });
-                      } else {
-                        o.selected = false;
-                      }
+                      Array.prototype.forEach.call(sel.options, function(x) {
+                        x.selected = cb.checked;
+                      });
                     } else {
                       var allO = Array.prototype.slice.call(sel.options).filter(function(x) {
                         return x.value === "__all__";
                       })[0];
-                      if (allO) allO.selected = false;
                       o.selected = cb.checked;
+                      if (allO) {
+                        var everyNonAllSelected = Array.prototype.every.call(sel.options, function(x) {
+                          return x.value === "__all__" || x.selected;
+                        });
+                        allO.selected = everyNonAllSelected;
+                      }
                     }
                     syncCheckboxesFromSelect();
                     updateSummary();

@@ -391,14 +391,29 @@ def _ifaces_from_viscera_list(iface_list):
             except Exception:
                 pass
             vid = ""
+            iface_fabric = ""
             try:
                 v = getattr(iface, "vlan", None)
                 if v is not None:
                     vid = str(getattr(v, "vid", None) or getattr(v, "id", None) or "")
+                    fab = getattr(v, "fabric", None)
+                    if fab is not None:
+                        iface_fabric = str(getattr(fab, "name", None) or fab or "").strip()
+                    if not iface_fabric:
+                        vd = getattr(v, "_data", None) or {}
+                        if isinstance(vd, dict):
+                            fd = vd.get("fabric")
+                            if isinstance(fd, dict) and fd.get("name"):
+                                iface_fabric = str(fd["name"]).strip()
             except Exception:
                 pass
             rows.append({
-                "name": name, "mac": mac, "ips": ips, "type": itype, "vlan_vid": vid,
+                "name": name,
+                "mac": mac,
+                "ips": ips,
+                "type": itype,
+                "vlan_vid": vid,
+                "iface_fabric": iface_fabric,
             })
         except Exception as e:
             logger.debug("MAAS viscera iface skip: %s", e)
@@ -450,7 +465,40 @@ def _fabric_from_iface_set(iface_set):
     return seen[0] if len(seen) == 1 else ", ".join(seen[:3])
 
 
-def _rest_rows_from_iface_dicts(items: list) -> list:
+def _fabric_name_from_interface_item(item: dict, fabric_catalog: dict | None) -> str:
+    """Single interface row: resolved fabric display name (for per-NIC scope in drift)."""
+    catalog = fabric_catalog or {}
+    if not isinstance(item, dict):
+        return ""
+    out = []
+
+    def add(n: str) -> None:
+        n = (n or "").strip()
+        if n and n not in out:
+            out.append(n)
+
+    fab = item.get("fabric")
+    if isinstance(fab, str) and fab.strip():
+        s = fab.strip()
+        if "/" in s:
+            key = s.rstrip("/").split("/")[-1]
+            add(catalog.get(key, key))
+        else:
+            add(catalog.get(s, catalog.get(s.lower(), s)))
+    elif isinstance(fab, dict):
+        add(str(fab.get("name") or fab.get("id") or ""))
+    vlan = item.get("vlan")
+    if isinstance(vlan, dict):
+        vf = vlan.get("fabric")
+        if isinstance(vf, dict) and vf.get("name"):
+            add(str(vf["name"]))
+        elif isinstance(vf, str) and vf.strip():
+            key = vf.rstrip("/").split("/")[-1]
+            add(catalog.get(key, key))
+    return out[0] if out else ""
+
+
+def _rest_rows_from_iface_dicts(items: list, fabric_catalog: dict | None = None) -> list:
     """Parse MAAS interface objects (list endpoint or interface_set on machine)."""
     rows = []
     for item in items:
@@ -483,8 +531,14 @@ def _rest_rows_from_iface_dicts(items: list) -> list:
         vlan = item.get("vlan") if isinstance(item, dict) else None
         if isinstance(vlan, dict):
             vid = str(vlan.get("vid") or vlan.get("id") or "")
+        iface_fabric = _fabric_name_from_interface_item(item, fabric_catalog)
         rows.append({
-            "name": name, "mac": mac, "ips": ips, "type": itype, "vlan_vid": vid,
+            "name": name,
+            "mac": mac,
+            "ips": ips,
+            "type": itype,
+            "vlan_vid": vid,
+            "iface_fabric": iface_fabric,
         })
     return rows
 
@@ -544,13 +598,13 @@ def _maas_interfaces_rest(
                 continue
             data = r.json()
             if isinstance(data, list) and data:
-                rows = _rest_rows_from_iface_dicts(data)
+                rows = _rest_rows_from_iface_dicts(data, fabric_catalog)
                 if rows:
                     return rows, _fabric_from_rest_ifaces(data, fabric_catalog)
             elif isinstance(data, dict) and data.get("interfaces"):
                 arr = data["interfaces"]
                 if isinstance(arr, list):
-                    rows = _rest_rows_from_iface_dicts(arr)
+                    rows = _rest_rows_from_iface_dicts(arr, fabric_catalog)
                     if rows:
                         return rows, _fabric_from_rest_ifaces(arr, fabric_catalog)
         except Exception as e:
@@ -572,7 +626,7 @@ def _maas_interfaces_rest(
             if not arr:
                 last_err = f"{url} -> 200 but no interface_set/interfaces on machine JSON"
                 continue
-            rows = _rest_rows_from_iface_dicts(arr)
+            rows = _rest_rows_from_iface_dicts(arr, fabric_catalog)
             if rows:
                 logger.info(
                     "MAAS interfaces from machine detail %s (%d NICs)",
@@ -668,6 +722,27 @@ async def fetch_maas_data(maas_url: str, maas_api_key: str, maas_insecure: bool)
             # MAAS may give hostname or fqdn; normalize to short name for NetBox matching
             raw_name = getattr(m, "hostname", "") or getattr(m, "fqdn", "")
             short_name = hostname_short(raw_name)
+            domain_part = ""
+            try:
+                dom = getattr(m, "domain", None)
+                if dom is not None:
+                    domain_part = (getattr(dom, "name", None) or "").strip()
+            except Exception:
+                pass
+            md_pre = getattr(m, "_data", None)
+            if not domain_part and isinstance(md_pre, dict):
+                dmd = md_pre.get("domain")
+                if isinstance(dmd, dict):
+                    domain_part = (dmd.get("name") or "").strip()
+            raw_fqdn = (getattr(m, "fqdn", None) or "").strip()
+            if raw_fqdn and "." in raw_fqdn:
+                dns_name = raw_fqdn
+            elif domain_part and short_name:
+                dns_name = f"{short_name}.{domain_part}"
+            elif raw_name and "." in str(raw_name):
+                dns_name = str(raw_name).strip()
+            else:
+                dns_name = short_name
             status_name = "-"
             try:
                 st = getattr(m, "status", None)
@@ -716,6 +791,7 @@ async def fetch_maas_data(maas_url: str, maas_api_key: str, maas_insecure: bool)
             result["machines"].append({
                 "hostname": short_name,
                 "fqdn": raw_name if raw_name != short_name else "",
+                "dns_name": dns_name,
                 "system_id": getattr(m, "system_id", ""),
                 "serial": str(serial).strip(),
                 "zone_name": zone_name,

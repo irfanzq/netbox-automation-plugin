@@ -73,6 +73,20 @@ def _norm_tokens(s: str) -> set[str]:
     return {t for t in re.split(r"[^a-z0-9]+", (s or "").lower()) if t}
 
 
+def _unique_fabric_names(machines):
+    """Distinct MAAS fabric_name values, normalized; dedupe case-insensitively."""
+    seen: dict[str, str] = {}
+    for m in machines or []:
+        raw = (m.get("fabric_name") or "").strip()
+        if not raw or raw == "-":
+            continue
+        raw = re.sub(r"\s+", " ", raw)
+        key = raw.casefold()
+        if key not in seen:
+            seen[key] = raw
+    return sorted(seen.values(), key=lambda x: x.casefold())
+
+
 def _fabric_matches_locations(fabric_name: str, selected_location_names: set[str]) -> bool:
     """Fuzzy match MAAS fabric text to selected NetBox location names."""
     if not selected_location_names:
@@ -93,6 +107,190 @@ def _fabric_matches_locations(fabric_name: str, selected_location_names: set[str
         if any(len(t) >= 4 and t in fab_tokens for t in loc_tokens):
             return True
     return False
+
+
+_OPAQUE_FABRIC_RE = re.compile(r"^fabric-\d+$", re.I)
+
+
+def _maas_effective_dns_name(m: dict) -> str:
+    """FQDN / DNS name for scope matching (hostname + domain from MAAS)."""
+    return (m.get("dns_name") or m.get("fqdn") or m.get("hostname") or "").strip()
+
+
+def _maas_iface_row_fabric(m: dict, mi: dict) -> str:
+    f = (mi.get("iface_fabric") or "").strip()
+    if f and f != "-":
+        return f
+    return (m.get("fabric_name") or "").strip()
+
+
+def _maas_machine_has_non_opaque_iface(m: dict) -> bool:
+    """True if any MAAS NIC with MAC uses a non fabric-<n> fabric (real fabric name)."""
+    for mi in m.get("interfaces") or []:
+        if not (mi.get("mac") or "").strip():
+            continue
+        fab = _maas_iface_row_fabric(m, mi)
+        if fab and not _OPAQUE_FABRIC_RE.match(fab):
+            return True
+    return False
+
+
+def _maas_scope_tokens_from_selection(selected_location_names: set, selected_sites: set) -> set[str]:
+    """NetBox location names + site slugs used for MAAS NIC / fabric fuzzy matching."""
+    tokens: set[str] = set()
+    for loc in selected_location_names or []:
+        s = (loc or "").strip()
+        if s:
+            tokens.add(s)
+    for site in selected_sites or []:
+        s = (site or "").strip()
+        if s:
+            tokens.add(s)
+    return tokens
+
+
+def _maas_machine_has_location_matching_non_opaque_iface(m: dict, tokens: set) -> bool:
+    """
+    True if this host has a non-opaque fabric that fuzzy-matches selected site/location tokens
+    (machine-level fabric_name and/or per-NIC fabric). Used to drop redundant fabric-<n> NICs
+    only when birch-fabric (etc.) actually matches scope — not unrelated named fabrics.
+    """
+    if not tokens:
+        return False
+    mf = (m.get("fabric_name") or "").strip()
+    if mf and mf != "-" and not _OPAQUE_FABRIC_RE.match(mf):
+        if _fabric_matches_locations(mf, tokens):
+            return True
+    for mi in m.get("interfaces") or []:
+        if not (mi.get("mac") or "").strip():
+            continue
+        fab = _maas_iface_row_fabric(m, mi)
+        if fab and not _OPAQUE_FABRIC_RE.match(fab) and _fabric_matches_locations(fab, tokens):
+            return True
+    return False
+
+
+def _make_maas_iface_filter(selected_location_names: set, selected_sites: set):
+    """
+    MAAS NICs included in drift / NetBox-apply path:
+    - Drop NICs with no MAC (unconfigured / bond children without L2 identity here).
+    - Unscoped: drop fabric-<n> when the host has any other named (non-opaque) fabric.
+    - Scoped (sites/locations selected): include every MAC'd NIC on machines already in MAAS scope
+      except drop fabric-<n> when the host has a location/site-matching named fabric elsewhere
+      (no blanket drop of opaque NICs; avoids losing L2 rows for NetBox-only or DNS-scoped hosts).
+    """
+    tokens = _maas_scope_tokens_from_selection(selected_location_names or set(), selected_sites or set())
+
+    def filt(m: dict, mi: dict) -> bool:
+        if not (mi.get("mac") or "").strip():
+            return False
+        ifab = _maas_iface_row_fabric(m, mi)
+        if not tokens:
+            if ifab and _OPAQUE_FABRIC_RE.match(ifab) and _maas_machine_has_non_opaque_iface(m):
+                return False
+            return True
+        # Scoped machines only: drop opaque only if a scope-matching real fabric exists on host
+        if ifab and _OPAQUE_FABRIC_RE.match(ifab):
+            if _maas_machine_has_location_matching_non_opaque_iface(m, tokens):
+                return False
+            return True
+        # All other MAC'd NICs on scoped hosts stay in drift (fabric/DNS heuristics optional;
+        # host list is already narrowed by NetBox + MAAS rules).
+        return True
+
+    return filt
+
+
+def _unique_fabrics_from_filtered_maas_interfaces(machines, iface_filt):
+    """Distinct fabric names from MAAS NICs that pass iface_filt."""
+    seen: dict[str, str] = {}
+    for m in machines or []:
+        for mi in m.get("interfaces") or []:
+            if not iface_filt(m, mi):
+                continue
+            raw = _maas_iface_row_fabric(m, mi)
+            if not raw or raw == "-":
+                continue
+            raw = re.sub(r"\s+", " ", raw)
+            k = raw.casefold()
+            if k not in seen:
+                seen[k] = raw
+    return sorted(seen.values(), key=lambda x: x.casefold())
+
+
+def _maas_opaque_fabrics_from_machines(machines) -> list[str]:
+    """Distinct fabric-<n> names from any MAAS NIC (with MAC) on these machines (for scope list)."""
+    seen: dict[str, str] = {}
+    for m in machines or []:
+        for mi in m.get("interfaces") or []:
+            if not (mi.get("mac") or "").strip():
+                continue
+            raw = _maas_iface_row_fabric(m, mi)
+            if not raw or raw == "-" or not _OPAQUE_FABRIC_RE.match(raw):
+                continue
+            raw = re.sub(r"\s+", " ", raw)
+            k = raw.casefold()
+            if k not in seen:
+                seen[k] = raw
+    return sorted(seen.values(), key=lambda x: x.casefold())
+
+
+def _maas_machines_using_fabric(machines, fabric: str) -> list:
+    """Hosts (machine dicts) that have at least one MAC’d NIC on the given fabric."""
+    fc = (fabric or "").strip().casefold()
+    if not fc:
+        return []
+    out = []
+    seen_h: set[str] = set()
+    for m in machines or []:
+        h = (m.get("hostname") or "").strip()
+        for mi in m.get("interfaces") or []:
+            if not (mi.get("mac") or "").strip():
+                continue
+            if _maas_iface_row_fabric(m, mi).strip().casefold() != fc:
+                continue
+            if h and h not in seen_h:
+                seen_h.add(h)
+                out.append(m)
+            break
+    return out
+
+
+def _merge_scope_fabrics_named_plus_opaque(
+    machines,
+    fabrics_from_filtered_nics: list[str],
+    scope_tokens: set[str] | None = None,
+) -> list[str]:
+    """
+    Scope fabric list = named fabrics from NICs that pass the drift filter, plus opaque
+    fabric-<n> only when not redundant. Redundant means every host on that opaque also has
+    a non-opaque fabric that matches scope tokens (when scoped); unscoped, any named fabric.
+    """
+    seen: dict[str, str] = {}
+    for raw in fabrics_from_filtered_nics or []:
+        if not raw or raw == "-":
+            continue
+        k = raw.casefold()
+        if k not in seen:
+            seen[k] = raw
+    opaque_candidates = _maas_opaque_fabrics_from_machines(machines)
+    for raw in opaque_candidates:
+        k = raw.casefold()
+        if k in seen:
+            continue
+        hosts = _maas_machines_using_fabric(machines, raw)
+        if not hosts:
+            continue
+        if scope_tokens:
+            redundant = all(
+                _maas_machine_has_location_matching_non_opaque_iface(m, scope_tokens) for m in hosts
+            )
+        else:
+            redundant = all(_maas_machine_has_non_opaque_iface(m) for m in hosts)
+        if redundant:
+            continue
+        seen[k] = raw
+    return sorted(seen.values(), key=lambda x: x.casefold())
 
 
 def _text_matches_locations(text: str, selected_location_names: set[str]) -> bool:
@@ -347,11 +545,7 @@ class MAASOpenStackSyncView(LoginRequiredMixin, View):
         )
         maas_machines_before = list(maas_data.get("machines") or [])
         scope_meta["maas_machines_before"] = len(maas_machines_before)
-        fabrics_before = sorted({
-            (m.get("fabric_name") or "").strip()
-            for m in maas_machines_before
-            if (m.get("fabric_name") or "").strip() and (m.get("fabric_name") or "").strip() != "-"
-        })
+        fabrics_before = _unique_fabric_names(maas_machines_before)
         scope_meta["maas_all_fabrics"] = fabrics_before
 
         # 2) NetBox — local ORM only (same process as NetBox app)
@@ -459,6 +653,7 @@ class MAASOpenStackSyncView(LoginRequiredMixin, View):
 
         matched_rows = None
         interface_audit = None
+        audit_map = None
         os_subnet_hints = None
         os_subnet_gaps = None
         os_floating_gaps = []
@@ -478,10 +673,6 @@ class MAASOpenStackSyncView(LoginRequiredMixin, View):
             audit_map = fetch_netbox_audit_detail_for_names(matched_names)
             matched_rows = build_maas_netbox_matched_rows(
                 maas_data, audit_map, openstack_data
-            )
-            nb_ifaces = fetch_netbox_interfaces_for_names(matched_names)
-            interface_audit = build_maas_netbox_interface_audit(
-                matched_names, maas_data, nb_ifaces, netbox_audit=audit_map
             )
             prefix_set = fetch_netbox_prefix_cidrs()
             netbox_prefix_count = len(prefix_set)
@@ -534,7 +725,17 @@ class MAASOpenStackSyncView(LoginRequiredMixin, View):
                 host = (m.get("hostname") or "").strip()
                 if not host:
                     continue
-                if _fabric_matches_locations(m.get("fabric_name") or "", selected_location_names):
+                if selected_location_names and _fabric_matches_locations(
+                    m.get("fabric_name") or "", selected_location_names
+                ):
+                    allowed_names.add(host)
+                if selected_location_names and _text_matches_locations(
+                    _maas_effective_dns_name(m), selected_location_names
+                ):
+                    allowed_names.add(host)
+                if selected_sites and _text_matches_locations(
+                    _maas_effective_dns_name(m), selected_sites
+                ):
                     allowed_names.add(host)
 
             maas_data["machines"] = [
@@ -542,32 +743,68 @@ class MAASOpenStackSyncView(LoginRequiredMixin, View):
                 if (m.get("hostname") or "").strip() in allowed_names
             ]
             if selected_location_names:
-                unmatched_fabrics = sorted({
-                    (m.get("fabric_name") or "").strip()
-                    for m in maas_machines_before
-                    if (m.get("fabric_name") or "").strip()
-                    and not _fabric_matches_locations(m.get("fabric_name") or "", selected_location_names)
-                })
+                unmatched_keys: dict[str, str] = {}
+                for m in maas_machines_before:
+                    raw = (m.get("fabric_name") or "").strip()
+                    if not raw or raw == "-":
+                        continue
+                    raw = re.sub(r"\s+", " ", raw)
+                    if not _fabric_matches_locations(raw, selected_location_names):
+                        k = raw.casefold()
+                        if k not in unmatched_keys:
+                            unmatched_keys[k] = raw
+                unmatched_fabrics = sorted(unmatched_keys.values(), key=lambda x: x.casefold())
             else:
                 unmatched_fabrics = []
             scope_meta["maas_unmatched_fabrics"] = unmatched_fabrics[:20]
             scope_meta["maas_unmatched_fabrics_more"] = max(0, len(unmatched_fabrics) - 20)
             if matched_rows is not None:
                 matched_rows = [r for r in matched_rows if (r.get("hostname") or "").strip() in allowed_names]
-            if interface_audit:
-                interface_audit["hosts"] = [
-                    h for h in (interface_audit.get("hosts") or [])
-                    if (h.get("hostname") or "").strip() in allowed_names
-                ]
 
             # Recompute drift counts from scoped host/device sets.
             drift = compute_maas_netbox_drift(maas_data, netbox_data)
+
+        # NIC filter: unscoped = drop redundant opaque vs any named fabric; scoped = keep all
+        # MAC'd NICs except opaque when a scope-matching named fabric exists on the host.
+        _maas_scope_tok = _maas_scope_tokens_from_selection(
+            selected_location_names or set(),
+            selected_sites or set(),
+        )
+        _iface_filt = _make_maas_iface_filter(
+            selected_location_names or set(),
+            selected_sites or set(),
+        )
+        scope_meta["maas_fabrics_after"] = _merge_scope_fabrics_named_plus_opaque(
+            maas_data.get("machines"),
+            _unique_fabrics_from_filtered_maas_interfaces(
+                maas_data.get("machines"), _iface_filt
+            ),
+            scope_tokens=_maas_scope_tok if _maas_scope_tok else None,
+        )
+
+        if not netbox_data.get("error"):
+            nb_h_final = {
+                (d.get("name") or "").strip()
+                for d in (netbox_data.get("devices") or [])
+                if (d.get("name") or "").strip()
+            }
+            maas_h_final = {
+                (m.get("hostname") or "").strip()
+                for m in (maas_data.get("machines") or [])
+                if (m.get("hostname") or "").strip()
+            }
+            mn_final = maas_h_final & nb_h_final
+            audit_map_final = fetch_netbox_audit_detail_for_names(mn_final)
+            nb_if_final = fetch_netbox_interfaces_for_names(mn_final)
+            interface_audit = build_maas_netbox_interface_audit(
+                mn_final,
+                maas_data,
+                nb_if_final,
+                netbox_audit=audit_map_final,
+                maas_iface_filter=_iface_filt,
+            )
+
         scope_meta["maas_machines_after"] = len(maas_data.get("machines") or [])
-        scope_meta["maas_fabrics_after"] = sorted({
-            (m.get("fabric_name") or "").strip()
-            for m in (maas_data.get("machines") or [])
-            if (m.get("fabric_name") or "").strip() and (m.get("fabric_name") or "").strip() != "-"
-        })
         scope_meta["coverage_status"] = (
             "PASS"
             if not maas_data.get("error") and not netbox_data.get("error") and not ((openstack_data or {}).get("error"))

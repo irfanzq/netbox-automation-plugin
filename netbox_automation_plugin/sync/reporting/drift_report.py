@@ -34,25 +34,41 @@ def _dedupe_keep_order(items):
     return out
 
 
-def _format_inventory_list(items, *, noisy_regex=None, noisy_label="auto-generated", sample=20):
+def _format_inventory_list(
+    items,
+    *,
+    noisy_regex=None,
+    noisy_label="auto-generated",
+    sample=20,
+    max_named_display=35,
+):
     vals = _dedupe_keep_order(items)
     if not vals:
         return "(none)"
     if not noisy_regex:
-        return ", ".join(vals)
+        if len(vals) <= max_named_display:
+            return ", ".join(vals)
+        show = vals[:max_named_display]
+        more = len(vals) - len(show)
+        return f"{', '.join(show)}, ... +{more} more unique"
     pat = re.compile(noisy_regex)
     noisy = [v for v in vals if pat.match(v)]
     named = [v for v in vals if not pat.match(v)]
     parts = []
     if named:
-        parts.append(f"named ({len(named)}): {', '.join(named)}")
+        show_n = named[:max_named_display]
+        more_n = len(named) - len(show_n)
+        txt_n = ", ".join(show_n)
+        if more_n > 0:
+            txt_n = f"{txt_n}, ... +{more_n} more named"
+        parts.append(f"named ({len(named)} unique): {txt_n}")
     if noisy:
         show = noisy[:sample]
         more = len(noisy) - len(show)
         txt = ", ".join(show)
         if more > 0:
             txt = f"{txt}, ... +{more} more"
-        parts.append(f"{noisy_label} ({len(noisy)}): {txt}")
+        parts.append(f"{noisy_label} ({len(noisy)} unique): {txt}")
     return " | ".join(parts) if parts else "(none)"
 
 
@@ -477,6 +493,10 @@ def format_drift_report(
         maas_unmatched = list(scope_meta.get("maas_unmatched_fabrics") or [])
         if scope_meta.get("maas_unmatched_fabrics_more"):
             maas_unmatched.append(f"... +{scope_meta['maas_unmatched_fabrics_more']} more")
+        _maas_fabric_noisy = r"(?i)^fabric-\d+$"
+        # scope_meta["maas_fabrics_after"]: fabrics from drift NICs + extra fabric-<n> when not
+        # redundant vs a scope-matching named fabric (views._merge_scope_fabrics_named_plus_opaque).
+        _maas_fab_in_scope_label = "MAAS fabrics fetched (in-scope)"
         drift_lines.extend(_ascii_table(
             ["Check", "Value"],
             [
@@ -507,15 +527,15 @@ def format_drift_report(
                     "MAAS all fabrics (pre-scope, summarized)",
                     _format_inventory_list(
                         scope_meta.get("maas_all_fabrics") or [],
-                        noisy_regex=r"^fabric-\d+$",
+                        noisy_regex=_maas_fabric_noisy,
                         noisy_label="fabric-<number>",
                     ),
                 ],
                 [
-                    "MAAS fabrics fetched (in-scope)",
+                    _maas_fab_in_scope_label,
                     _format_inventory_list(
                         scope_meta.get("maas_fabrics_after") or [],
-                        noisy_regex=r"^fabric-\d+$",
+                        noisy_regex=_maas_fabric_noisy,
                         noisy_label="fabric-<number>",
                     ),
                 ],
@@ -881,19 +901,21 @@ def build_drift_report_xlsx(
             "OpenStack FIPs included / fetched",
             f"{scope_meta.get('openstack_fips_after', 0)} / {scope_meta.get('openstack_fips_before', 0)}",
         ])
+        _x_maas_fabric_noisy = r"(?i)^fabric-\d+$"
+        _x_maas_fab_in_scope_label = "MAAS fabrics fetched (in-scope)"
         ws_sum.append([
             "MAAS all fabrics (pre-scope, summarized)",
             _format_inventory_list(
                 scope_meta.get("maas_all_fabrics") or [],
-                noisy_regex=r"^fabric-\d+$",
+                noisy_regex=_x_maas_fabric_noisy,
                 noisy_label="fabric-<number>",
             ),
         ])
         ws_sum.append([
-            "MAAS fabrics fetched (in-scope)",
+            _x_maas_fab_in_scope_label,
             _format_inventory_list(
                 scope_meta.get("maas_fabrics_after") or [],
-                noisy_regex=r"^fabric-\d+$",
+                noisy_regex=_x_maas_fabric_noisy,
                 noisy_label="fabric-<number>",
             ),
         ])
