@@ -70,11 +70,25 @@
         <p class="card-text mb-2">
           {% trans "Compare MAAS machines with NetBox devices (hosts and NICs) and, optionally, OpenStack subnets and floating IPs with NetBox IPAM. Read-only drift report — no changes are written." %}
         </p>
-        <form method="post" action="" class="d-flex flex-wrap align-items-end gap-2 drift-audit-form">
+        <form method="post" action="" class="drift-audit-form">
           {% csrf_token %}
           {{ form.mode }}
-          <button type="submit" class="btn btn-primary">{% trans "Run drift audit" %}</button>
-          <button type="submit" name="format" value="xlsx" class="btn btn-outline-success">{% trans "Download as Excel (.xlsx)" %}</button>
+          <div class="row g-2 align-items-end">
+            <div class="col-md-4">
+              <label class="form-label mb-1">{{ form.sites.label }}</label>
+              {{ form.sites }}
+              <div class="form-text">{{ form.sites.help_text }}</div>
+            </div>
+            <div class="col-md-5">
+              <label class="form-label mb-1">{{ form.locations.label }}</label>
+              {{ form.locations }}
+              <div class="form-text">{{ form.locations.help_text }}</div>
+            </div>
+            <div class="col-md-3 d-flex flex-wrap gap-2">
+              <button type="submit" class="btn btn-primary">{% trans "Run drift audit" %}</button>
+              <button type="submit" name="format" value="xlsx" class="btn btn-outline-success">{% trans "Download as Excel (.xlsx)" %}</button>
+            </div>
+          </div>
         </form>
         <p class="small text-muted mt-1 mb-0">{% trans "Download as Excel: runs the audit, shows the report, and triggers the file download." %}</p>
         <script>
@@ -192,6 +206,12 @@
               <form method="post" action="" class="d-inline drift-audit-form">
                 {% csrf_token %}
                 {{ form.mode }}
+                {% for v in form.sites.value %}
+                  <input type="hidden" name="sites" value="{{ v }}" />
+                {% endfor %}
+                {% for v in form.locations.value %}
+                  <input type="hidden" name="locations" value="{{ v }}" />
+                {% endfor %}
                 <input type="hidden" name="format" value="xlsx" />
                 <button type="submit" class="btn btn-outline-success btn-sm">{% trans "Download as Excel (.xlsx)" %}</button>
               </form>

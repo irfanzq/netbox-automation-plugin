@@ -14,3 +14,24 @@ class MAASOpenStackSyncForm(forms.Form):
         initial="audit",
         required=False,
     )
+
+    sites = forms.MultipleChoiceField(
+        label=_("Sites"),
+        required=False,
+        choices=(),
+        widget=forms.SelectMultiple(attrs={"size": 8, "class": "form-select"}),
+        help_text=_("Optional. Limit report to selected NetBox sites."),
+    )
+
+    locations = forms.MultipleChoiceField(
+        label=_("Locations"),
+        required=False,
+        choices=(),
+        widget=forms.SelectMultiple(attrs={"size": 10, "class": "form-select"}),
+        help_text=_("Optional. Select one or more NetBox locations."),
+    )
+
+    def __init__(self, *args, site_choices=None, location_choices=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.fields["sites"].choices = [("__all__", _("Select all sites"))] + (site_choices or [])
+        self.fields["locations"].choices = [("__all__", _("Select all locations"))] + (location_choices or [])

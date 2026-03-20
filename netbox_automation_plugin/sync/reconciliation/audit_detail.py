@@ -336,6 +336,7 @@ def build_maas_netbox_matched_rows(
             "maas_fabric": m.get("fabric_name") or "-",
             "maas_pool": m.get("pool_name") or "-",
             "maas_status": m.get("status_name") or "-",
+            "maas_serial": (m.get("serial") or "") or "(empty)",
             "maas_system_id": (m.get("system_id") or "") or "",
             "netbox_site": nb.get("site_slug") or "-",
             "netbox_location": nb.get("location_name") or "-",
