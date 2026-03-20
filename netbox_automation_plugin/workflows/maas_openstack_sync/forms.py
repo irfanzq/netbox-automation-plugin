@@ -26,7 +26,7 @@ class MAASOpenStackSyncForm(forms.Form):
                 "tabindex": "-1",
             }
         ),
-        help_text=_("Optional. Limit report to selected NetBox sites."),
+        help_text=_("Optional. Limit the drift report to selected NetBox sites."),
     )
 
     locations = forms.MultipleChoiceField(
@@ -40,7 +40,10 @@ class MAASOpenStackSyncForm(forms.Form):
                 "tabindex": "-1",
             }
         ),
-        help_text=_("Optional. Select one or more NetBox locations."),
+        help_text=_(
+            "Optional. Limit the drift report to selected NetBox locations; "
+            "OpenStack sections use the same location-based scope."
+        ),
     )
 
     def __init__(self, *args, site_choices=None, location_choices=None, **kwargs):

@@ -2,6 +2,10 @@
 Generate human-readable drift audit report from MAAS, NetBox, and OpenStack data.
 Uses ASCII tables (+---+) for readability in <pre> or plain text.
 XLSX export via build_drift_report_xlsx() for download (openpyxl); Google Sheets opens .xlsx.
+
+Copy in this module explains that MAAS→NetBox reconciliation/sync (when run, using this drift
+as the source of truth) is intended to cover data NICs and OOB/management from MAAS power
+(IPMI, Redfish, iDRAC-class, etc.), not only the read-only audit UI.
 """
 
 from io import BytesIO
@@ -163,6 +167,7 @@ def _phase0_category_counts(
     check_hosts = sum(1 for r in (matched_rows or []) if r.get("place_match") == "CHECK")
     nb_only_nic = 0
     iface_not_ok = 0
+    maas_nic_missing_nb = 0
     vlan_drift_nic = 0
     vlan_unverified_nic = 0
     for b in (interface_audit or {}).get("hosts") or []:
@@ -171,6 +176,8 @@ def _phase0_category_counts(
             st = row.get("status") or ""
             if st != "OK":
                 iface_not_ok += 1
+            if st == "NOT_IN_NETBOX":
+                maas_nic_missing_nb += 1
             if st.startswith("VLAN_DRIFT"):
                 vlan_drift_nic += 1
             notes = row.get("notes") or ""
@@ -187,6 +194,7 @@ def _phase0_category_counts(
         "check_hosts": check_hosts,
         "nb_only_nic": nb_only_nic,
         "iface_not_ok": iface_not_ok,
+        "maas_nic_missing_nb": maas_nic_missing_nb,
         "sub_gaps": sub_gaps,
         "fip_gaps": fip_gaps,
         "vlan_drift_nic": vlan_drift_nic,
@@ -240,6 +248,284 @@ def _dedupe_note_parts(text: str) -> str:
     return "; ".join(ordered)
 
 
+def _ip_address_host(ip_str: str) -> str:
+    """Host portion of an IP or CIDR string, lowercased."""
+    if not ip_str or ip_str == "—":
+        return ""
+    return str(ip_str).split("/", 1)[0].strip().lower()
+
+
+# NetBox interface names often used for out-of-band (for coverage heuristics).
+_MGMT_INTERFACE_NAME_HINTS = frozenset({
+    "ipmi",
+    "idrac",
+    "bmc",
+    "ilo",
+    "imm",
+    "xcc",
+    "drac",
+    "oob",
+    "mgmt",
+    "mgnt",
+    "ipmi-nic",
+    "bmc-nic",
+})
+
+
+def _suggested_netbox_mgmt_interface_name(power_type: str) -> str:
+    """Default interface name to create from MAAS power driver (operator can rename)."""
+    pl = (power_type or "").lower()
+    if "redfish" in pl or "idrac" in pl:
+        return "idrac"
+    if "ipmi" in pl:
+        return "ipmi"
+    return "bmc"
+
+
+def _nb_iface_carrying_ip(nb_ifaces: list, target_ip: str):
+    """First NetBox interface dict whose ips[] contains target (host match)."""
+    bh = _ip_address_host(target_ip)
+    if not bh:
+        return None
+    for iface in nb_ifaces or []:
+        for ip in iface.get("ips") or []:
+            if _ip_address_host(ip) == bh:
+                return iface
+    return None
+
+
+def _meaningful_maas_power_type(pt: str) -> bool:
+    """True if MAAS reports a concrete power driver (not empty / manual / unknown)."""
+    p = (pt or "").strip().lower()
+    if not p or p in ("—", "-", "manual", "unknown"):
+        return False
+    return True
+
+
+def _netbox_bmc_ip_coverage(nb_ifaces: list, bmc_ip: str):
+    """
+    How NetBox documents the MAAS BMC IP on interfaces.
+    Returns (code, iface_name_or_emdash, short_note).
+    """
+    bh = _ip_address_host(bmc_ip)
+    if not bh:
+        return "NO_BMC_MAAS", "—", ""
+    mgmt_name = ""
+    any_name = ""
+    for iface in nb_ifaces or []:
+        iname = (iface.get("name") or "").strip().lower()
+        is_mgmt_named = iname in _MGMT_INTERFACE_NAME_HINTS
+        is_mgmt_flag = bool(iface.get("mgmt_only"))
+        for ip in iface.get("ips") or []:
+            if _ip_address_host(ip) != bh:
+                continue
+            disp = (iface.get("name") or "?").strip()
+            if is_mgmt_flag or is_mgmt_named:
+                mgmt_name = disp
+            if not any_name:
+                any_name = disp
+            break
+    if mgmt_name:
+        return "MGMT_IFACE", mgmt_name, "IP on mgmt-style interface"
+    if any_name:
+        return "IP_OTHER_IFACE", any_name, "IP present; name not typical for OOB"
+    return "NO_IFACE_IP", "—", "No interface carries this IP"
+
+
+def _build_proposed_mgmt_interface_rows(
+    matched_rows,
+    maas_by_hostname: dict,
+    netbox_ifaces,
+):
+    """
+    Matched hosts: OOB / IPMI / iDRAC alignment from MAAS power (BMC IP, optional MAC/VLAN hints).
+
+    Rows when MAAS has BMC IP (compare to NetBox OOB + interfaces), or when MAAS has a power
+    driver but no BMC IP in the API (admin/permissions/config gap).
+    """
+    from netbox_automation_plugin.sync.reconciliation.audit_detail import (
+        _normalize_mac,
+    )
+
+    nb_if = netbox_ifaces if isinstance(netbox_ifaces, dict) else {}
+    out = []
+    for r in matched_rows or []:
+        h = (r.get("hostname") or "").strip()
+        if not h:
+            continue
+        m = maas_by_hostname.get(h) or {}
+        bmc = (m.get("bmc_ip") or "").strip()
+        pt = (m.get("power_type") or "").strip() or "—"
+        suggest = _suggested_netbox_mgmt_interface_name(pt)
+        nb_oob = (r.get("netbox_oob") or "").strip()
+        maas_mac = (m.get("bmc_mac") or "").strip()
+        maas_vlan = (m.get("bmc_vlan") or "").strip()
+        sid = str(m.get("system_id") or "")[:16] or "—"
+        nb_list = nb_if.get(h) or []
+
+        if not bmc:
+            if not _meaningful_maas_power_type(pt):
+                continue
+            cov = "NO_BMC_IP_MAAS"
+            nb_ifn = "—"
+            nb_mgmt_mac = "—"
+            nb_mgmt_vid = "—"
+            status = "NO_BMC_IP"
+            action = (
+                "MAAS power_type is set but no BMC IP in machine API — grant admin API key, "
+                "use op=power_parameters, or configure power_address in MAAS; then re-run audit."
+            )
+            if maas_mac or maas_vlan:
+                action += f" MAAS hints: MAC={maas_mac or '—'} VLAN={maas_vlan or '—'}."
+            risk = "High"
+            out.append([
+                h,
+                sid,
+                "—",
+                pt,
+                maas_mac or "—",
+                maas_vlan or "—",
+                suggest,
+                nb_oob or "—",
+                cov,
+                nb_ifn,
+                nb_mgmt_mac,
+                nb_mgmt_vid,
+                status,
+                action,
+                risk,
+            ])
+            continue
+
+        cov, nb_ifn, cov_note = _netbox_bmc_ip_coverage(nb_list, bmc)
+        oob_match = bool(nb_oob) and _ip_address_host(nb_oob) == _ip_address_host(bmc)
+        nb_detail = _nb_iface_carrying_ip(nb_list, bmc)
+        nb_mgmt_mac = (nb_detail.get("mac") or "—") if nb_detail else "—"
+        nb_mgmt_vid = (
+            str(nb_detail.get("untagged_vlan_vid") or "—") if nb_detail else "—"
+        )
+
+        if oob_match and cov == "MGMT_IFACE":
+            status = "OK"
+            action = "OOB + mgmt interface align with MAAS BMC"
+            risk = "None"
+        elif oob_match and cov == "NO_IFACE_IP":
+            status = "ADD_MGMT_IFACE"
+            action = (
+                f"Create interface '{suggest}', mgmt_only=True, type e.g. 1000BASE-T; "
+                f"assign {bmc}/<prefix>; cable in NetBox as needed"
+            )
+            risk = "Medium"
+        elif oob_match and cov == "IP_OTHER_IFACE":
+            status = "REVIEW"
+            action = (
+                f"BMC IP on '{nb_ifn}'; consider mgmt_only + rename to '{suggest}' or IPMI/iDRAC"
+            )
+            risk = "Low"
+        elif not oob_match and cov == "MGMT_IFACE":
+            status = "SET_OOB"
+            action = f"Set device OOB IP to {bmc} (matches MAAS); mgmt on {nb_ifn}"
+            risk = "Low"
+        elif cov == "NO_IFACE_IP":
+            status = "ADD_OOB_AND_MGMT"
+            action = (
+                f"Set device oob_ip to {bmc}; create '{suggest}' mgmt interface + assign IP"
+            )
+            risk = "Medium"
+        else:
+            status = "REVIEW"
+            action = cov_note or "Align OOB / mgmt interface / MAAS BMC"
+            risk = "Medium"
+
+        if maas_mac and nb_mgmt_mac and nb_mgmt_mac != "—":
+            mm = _normalize_mac(maas_mac)
+            nm = _normalize_mac(nb_mgmt_mac)
+            if mm and nm and mm != nm:
+                action += (
+                    f" MAC mismatch: MAAS BMC MAC {maas_mac} vs NetBox iface {nb_mgmt_mac}."
+                )
+                if status == "OK":
+                    status = "REVIEW"
+                    risk = "Medium"
+        if maas_vlan and nb_mgmt_vid not in ("", "—", "None"):
+            if maas_vlan.strip() != str(nb_mgmt_vid).strip():
+                action += (
+                    f" VLAN hint: MAAS {maas_vlan} vs NetBox untagged {nb_mgmt_vid} on BMC iface."
+                )
+                if status == "OK":
+                    status = "REVIEW"
+                    risk = "Low"
+
+        out.append([
+            h,
+            sid,
+            bmc,
+            pt,
+            maas_mac or "—",
+            maas_vlan or "—",
+            suggest,
+            nb_oob or "—",
+            cov,
+            nb_ifn,
+            nb_mgmt_mac,
+            nb_mgmt_vid,
+            status,
+            action,
+            risk,
+        ])
+    return sorted(out, key=lambda x: (x[0] or "").lower())
+
+
+def _build_add_nb_interface_rows(interface_audit):
+    """
+    MAAS physical/logical NICs with a MAC that do not match any NetBox interface on the device.
+    Preview: proposed new dcim.Interface (+ untagged VLAN, IP assignments from MAAS).
+    """
+    out = []
+    for b in (interface_audit or {}).get("hosts") or []:
+        hn = (b.get("hostname") or "").strip()
+        if not hn:
+            continue
+        nb_site = (b.get("nb_site") or "—").strip()
+        nb_loc = (b.get("nb_location") or "—").strip()
+        for row in b.get("rows") or []:
+            if (row.get("status") or "") != "NOT_IN_NETBOX":
+                continue
+            maas_if = (row.get("maas_if") or "").strip() or "—"
+            maas_fab = str(row.get("maas_fabric") or "—")
+            mac = (row.get("maas_mac") or "").strip()
+            ips = (row.get("maas_ips") or "—").strip()
+            vlan = str(row.get("maas_vlan") or "—")
+            props = (
+                f"MAC {mac}; untagged VLAN {vlan} (from MAAS); "
+                f"IPs: {ips}"
+            )
+            action = (
+                f"Create NetBox interface named like MAAS '{maas_if}'; set MAC {mac}; "
+                f"set untagged VLAN to MAAS VID {vlan} where applicable; "
+                f"assign MAAS IPs on this interface (or device primary if policy prefers)"
+            )
+            out.append([
+                hn,
+                nb_site,
+                nb_loc,
+                maas_if,
+                maas_fab,
+                mac,
+                ips,
+                vlan,
+                (
+                    maas_if
+                    if maas_if != "—"
+                    else (f"maas-nic-{mac.replace(':', '')[-6:]}" if mac else "maas-nic")
+                ),
+                props,
+                action,
+                "Medium",
+            ])
+    return sorted(out, key=lambda x: (x[0] or "").lower())
+
+
 def _friendly_note(raw: str) -> str:
     note = _dedupe_note_parts(raw or "")
     parts = [p.strip() for p in note.split(";") if p.strip()]
@@ -283,10 +569,15 @@ def _proposed_changes_rows(
     matched_rows,
     os_subnet_gaps,
     os_floating_gaps,
+    netbox_ifaces=None,
 ):
     """Build user-friendly proposed change buckets (preview only)."""
     by_h = _maas_machine_by_hostname(maas_data)
     nb_by_name = _device_by_name(netbox_data)
+    add_mgmt_iface = _build_proposed_mgmt_interface_rows(
+        matched_rows, by_h, netbox_ifaces
+    )
+    add_nb_interfaces = _build_add_nb_interface_rows(interface_audit)
 
     add_devices = []
     for h in sorted(drift.get("in_maas_not_netbox") or []):
@@ -326,11 +617,34 @@ def _proposed_changes_rows(
         hn = b.get("hostname", "")
         for row in b.get("rows") or []:
             st = row.get("status") or ""
-            if st == "OK":
-                continue
             notes = row.get("notes") or ""
             maas_vlan = str(row.get("maas_vlan") or "—")
             nb_vlan = str(row.get("nb_vlan") or "—")
+
+            # NOT_IN_NETBOX: dedicated "create interface" table (add_nb_interfaces), not NIC drift.
+            if st == "NOT_IN_NETBOX":
+                continue
+
+            # Full inventory for MAC’d interfaces only (with or without IP on MAAS); OK rows included.
+            if st == "OK":
+                update_nic.append([
+                    hn,
+                    row.get("maas_if") or "",
+                    str(row.get("maas_fabric") or "—"),
+                    row.get("maas_mac") or "",
+                    row.get("maas_ips") or "—",
+                    row.get("nb_if") or "—",
+                    row.get("nb_mac") or "—",
+                    row.get("nb_ips") or "—",
+                    maas_vlan,
+                    nb_vlan,
+                    "OK",
+                    "—",
+                    "No change",
+                    "None",
+                ])
+                continue
+
             statuses = []
             reasons = []
             actions = []
@@ -369,6 +683,7 @@ def _proposed_changes_rows(
             update_nic.append([
                 hn,
                 row.get("maas_if") or "",
+                str(row.get("maas_fabric") or "—"),
                 row.get("maas_mac") or "",
                 row.get("maas_ips") or "",
                 row.get("nb_if") or "—",
@@ -422,6 +737,8 @@ def _proposed_changes_rows(
         "add_prefixes": add_prefixes,
         "add_fips": add_fips,
         "update_nic": update_nic,
+        "add_nb_interfaces": add_nb_interfaces,
+        "add_mgmt_iface": add_mgmt_iface,
         "review_orphans": review_orphans,
         "review_serial": review_serial,
         "review_bmc": review_bmc,
@@ -440,6 +757,7 @@ def format_drift_report(
     os_floating_gaps=None,
     netbox_prefix_count=0,
     interface_audit=None,
+    netbox_ifaces=None,
 ):
     """
     Return {"drift": str, "reference": str}.
@@ -494,8 +812,7 @@ def format_drift_report(
         if scope_meta.get("maas_unmatched_fabrics_more"):
             maas_unmatched.append(f"... +{scope_meta['maas_unmatched_fabrics_more']} more")
         _maas_fabric_noisy = r"(?i)^fabric-\d+$"
-        # scope_meta["maas_fabrics_after"]: fabrics from drift NICs + extra fabric-<n> when not
-        # redundant vs a scope-matching named fabric (views._merge_scope_fabrics_named_plus_opaque).
+        # scope_meta["maas_fabrics_after"]: distinct per-NIC MAAS fabrics for MAC'd interfaces on scoped hosts.
         _maas_fab_in_scope_label = "MAAS fabrics fetched (in-scope)"
         drift_lines.extend(_ascii_table(
             ["Check", "Value"],
@@ -556,7 +873,14 @@ def format_drift_report(
     # --- Phase 0 (design doc) — counts only ---
     drift_lines.append("")
     drift_lines.extend(_banner("PHASE 0 — DRIFT CATEGORIES (design doc)"))
-    drift_lines.append("  NetBox = design / IPAM; MAAS = bare-metal + MACs; OpenStack = runtime.  sync/DRIFT_DESIGN.md")
+    drift_lines.append(
+        "  NetBox = design / IPAM; MAAS = bare-metal + MACs + power/OOB (IPMI/Redfish/iDRAC-class); "
+        "OpenStack = runtime.  sync/DRIFT_DESIGN.md"
+    )
+    drift_lines.append(
+        "  MAAS→NetBox sync based on this drift is intended to update data NICs and "
+        "out-of-band/management (device OOB IP, mgmt interfaces) from MAAS, not only hosts."
+    )
     drift_lines.append("  Identity: Device hostname (+ serial); Interface MAC (+ name); FIP = IP + project.")
     drift_lines.append("")
     pc = _phase0_category_counts(
@@ -583,6 +907,10 @@ def format_drift_report(
                 ["Matched: placement/lifecycle hints (CHECK)", str(pc["check_hosts"])],
                 ["Device serial validation needed (NB serial empty)", str(serial_validation_needed)],
                 ["Interface rows not OK (excl. OK)", str(pc["iface_not_ok"])],
+                [
+                    "MAAS NIC with no NetBox interface (NOT_IN_NETBOX)",
+                    str(pc["maas_nic_missing_nb"]),
+                ],
                 [
                     "Physical NIC vlan-drift (MAAS VID vs NB untagged)",
                     str(pc["vlan_drift_nic"]),
@@ -635,6 +963,7 @@ def format_drift_report(
             ["OpenStack FIP gaps", str(pc["fip_gaps"])],
             ["Physical NIC VLAN_DRIFT", str(pc["vlan_drift_nic"])],
             ["VLAN unverified NICs", str(pc["vlan_unverified_nic"])],
+            ["MAAS NICs missing in NetBox (new interface)", str(pc["maas_nic_missing_nb"])],
         ],
     ))
 
@@ -647,11 +976,31 @@ def format_drift_report(
         matched_rows,
         os_subnet_gaps or [],
         os_floating_gaps or [],
+        netbox_ifaces=netbox_ifaces,
     )
     drift_lines.append("")
-    drift_lines.extend(_banner("PROPOSED CHANGES (PREVIEW ONLY)", "-"))
-    drift_lines.append("  Important: Drift Audit does not apply these changes to NetBox.")
-    drift_lines.append("  Safety: No automatic deletion is performed by this workflow.")
+    drift_lines.extend(_banner("PROPOSED CHANGES (DRIFT → MAAS→NETBOX SYNC)", "-"))
+    drift_lines.append("  Read-only here: this Drift Audit screen does not write to NetBox.")
+    drift_lines.append(
+        "  MAAS→NetBox reconciliation/sync that uses this drift as its source of truth is "
+        "intended to apply the categories below, including:"
+    )
+    drift_lines.append(
+        "    • Data NICs — create missing NetBox interfaces; update MAC, untagged VLAN, and "
+        "interface IP assignments from MAAS where this report shows gaps or drift."
+    )
+    drift_lines.append(
+        "    • Out-of-band / management — from MAAS power (IPMI, Redfish, iDRAC-class, …): "
+        "align Device OOB IP with MAAS BMC; create or update dedicated management interfaces "
+        "(e.g. ipmi / idrac / bmc), mgmt_only, and IP from MAAS (no credentials in this report)."
+    )
+    drift_lines.append(
+        "    • OpenStack → NetBox IPAM rows in section A when your sync workflow enables them."
+    )
+    drift_lines.append(
+        "  Safety: this audit UI performs no writes and no automatic deletion; your sync "
+        "policies apply at reconciliation time."
+    )
     drift_lines.append("")
 
     drift_lines.append("  A) Add to NetBox")
@@ -686,29 +1035,122 @@ def format_drift_report(
         ))
 
     drift_lines.append("")
-    drift_lines.append("  B) Update in NetBox")
+    drift_lines.append("  B) Interfaces in NetBox (create + update)")
     drift_lines.extend(_ascii_table(
         ["Category", "Count", "Meaning"],
         [
-            ["NIC drift updates (per interface)", str(len(prop["update_nic"])), "Combined VLAN/IP/MAC interface alignment actions"],
+            [
+                "New NetBox interfaces (MAAS NIC, no NB MAC match)",
+                str(len(prop["add_nb_interfaces"])),
+                "Sync: create dcim.Interface from MAAS name/MAC/IP/VLAN — table below",
+            ],
+            [
+                "NIC drift (MAAS MAC matched an existing NB interface)",
+                str(len(prop["update_nic"])),
+                "Sync: update existing NB interfaces (MAC/VLAN/IP/name) per MAAS where drift",
+            ],
+            [
+                "OOB / BMC from MAAS power (IPMI, Redfish, iDRAC, …)",
+                str(len(prop["add_mgmt_iface"])),
+                "Sync target: device OOB + mgmt dcim.Interface from MAAS bmc_ip / power_type",
+            ],
         ],
     ))
-    if prop["update_nic"]:
-        drift_lines.append("  NIC drift updates (single per-interface table)")
+    if prop["add_nb_interfaces"]:
+        drift_lines.append(
+            "  Interfaces missing in NetBox — proposed new dcim.Interface (from MAAS; preview only)"
+        )
+        drift_lines.append(
+            "    MAAS reported this MAC on no NetBox interface (by MAC or name+empty MAC)."
+        )
         drift_lines.extend(_ascii_table(
-            ["Host", "MAAS intf", "MAAS MAC", "MAAS IPs", "NB intf", "NB MAC", "NB IPs", "MAAS VLAN", "NB VLAN", "Status", "Reason", "Proposed Action", "Risk"],
+            [
+                "Host",
+                "NB site",
+                "NB location",
+                "MAAS intf",
+                "MAAS fabric",
+                "MAAS MAC",
+                "MAAS IPs",
+                "MAAS VLAN",
+                "Suggested NB name",
+                "Proposed properties (from MAAS)",
+                "Proposed action",
+                "Risk",
+            ],
+            prop["add_nb_interfaces"],
+            dynamic_columns=True,
+        ))
+    if prop["update_nic"]:
+        drift_lines.append("  NIC inventory + drift (existing NetBox interfaces only; IP may be empty)")
+        drift_lines.append(
+            "    Not-OK examples: MAC_MISMATCH, IP_GAP, VLAN_DRIFT, OK_NAME_DIFF, combined statuses. "
+            "(Rows with no NB interface are in the table above.)"
+        )
+        drift_lines.extend(_ascii_table(
+            [
+                "Host",
+                "MAAS intf",
+                "MAAS fabric",
+                "MAAS MAC",
+                "MAAS IPs",
+                "NB intf",
+                "NB MAC",
+                "NB IPs",
+                "MAAS VLAN",
+                "NB VLAN",
+                "Status",
+                "Reason",
+                "Proposed Action",
+                "Risk",
+            ],
             prop["update_nic"],
             dynamic_columns=True,
         ))
 
+    if prop["add_mgmt_iface"]:
+        drift_lines.append(
+            "  OOB / IPMI / iDRAC / management — from MAAS power (no credentials in this report)"
+        )
+        drift_lines.append(
+            "    Intended sync: for each host, bring NetBox in line with MAAS BMC IP and "
+            "power driver (create mgmt interface + assign IP, set OOB, mgmt_only, naming) "
+            "per Status / Proposed action below."
+        )
+        drift_lines.append(
+            "    Includes hosts with power_type but no BMC IP in MAAS API (NO_BMC_IP); "
+            "MAAS BMC MAC/VLAN when present in power_parameters; NetBox mgmt MAC/VLAN on iface w/ BMC IP."
+        )
+        drift_lines.extend(_ascii_table(
+            [
+                "Host",
+                "MAAS system_id",
+                "MAAS BMC IP",
+                "MAAS power_type",
+                "MAAS BMC MAC",
+                "MAAS BMC VLAN hint",
+                "Suggested NB iface",
+                "NetBox OOB",
+                "NB IP coverage",
+                "NB iface w/ IP",
+                "NB mgmt MAC",
+                "NB mgmt VLAN",
+                "Status",
+                "Proposed action",
+                "Risk",
+            ],
+            prop["add_mgmt_iface"],
+            dynamic_columns=True,
+        ))
+
     drift_lines.append("")
-    drift_lines.append("  C) Review required (no auto-apply)")
+    drift_lines.append("  C) Review required (sync may skip or flag per policy)")
     drift_lines.extend(_ascii_table(
         ["Category", "Count", "Meaning"],
         [
             ["NetBox orphan devices", str(len(prop["review_orphans"])), "Device exists in NetBox but not in MAAS"],
             ["Serial validation required", str(len(prop["review_serial"])), "NetBox serial missing; validate identity"],
-            ["BMC vs OOB mismatch", str(len(prop["review_bmc"])), "MAAS BMC differs from NetBox OOB"],
+            ["BMC vs OOB mismatch", str(len(prop["review_bmc"])), "MAAS BMC differs from NetBox OOB — often merged into mgmt sync above"],
         ],
     ))
     if prop["review_orphans"]:
@@ -738,7 +1180,7 @@ def format_drift_report(
     drift_lines.append("  PROPOSED CHANGES SUMMARY")
     total_props = (
         len(prop["add_devices"]) + len(prop["add_prefixes"]) + len(prop["add_fips"]) +
-        len(prop["update_nic"]) +
+        len(prop["update_nic"]) + len(prop["add_nb_interfaces"]) + len(prop["add_mgmt_iface"]) +
         len(prop["review_orphans"]) + len(prop["review_serial"]) + len(prop["review_bmc"])
     )
     drift_lines.extend(_ascii_table(
@@ -747,7 +1189,9 @@ def format_drift_report(
             ["Add: Devices", str(len(prop["add_devices"]))],
             ["Add: Prefixes", str(len(prop["add_prefixes"]))],
             ["Add: Floating IPs", str(len(prop["add_fips"]))],
-            ["Update: NIC drift (combined)", str(len(prop["update_nic"]))],
+            ["NIC drift (existing NB interface)", str(len(prop["update_nic"]))],
+            ["New NetBox interfaces (MAAS NIC, no NB match)", str(len(prop["add_nb_interfaces"]))],
+            ["OOB/BMC from MAAS power", str(len(prop["add_mgmt_iface"]))],
             ["Review: Orphans", str(len(prop["review_orphans"]))],
             ["Review: Serial", str(len(prop["review_serial"]))],
             ["Review: BMC/OOB", str(len(prop["review_bmc"]))],
@@ -772,7 +1216,7 @@ def format_drift_report(
 
     # Matched-host drift reference table intentionally suppressed to keep report concise.
 
-    # NIC drift is shown in Proposed Changes as a single combined per-interface table.
+    # Full NIC inventory (all MAC’d interfaces + statuses) is in Proposed Changes section B.
 
     # OpenStack details are intentionally hidden from on-screen drift output.
 
@@ -797,6 +1241,7 @@ def build_drift_report_xlsx(
     os_floating_gaps=None,
     netbox_prefix_count=0,
     interface_audit=None,
+    netbox_ifaces=None,
 ):
     """
     Build an Excel (.xlsx) workbook from the same inputs as format_drift_report.
@@ -856,6 +1301,7 @@ def build_drift_report_xlsx(
     ws_sum.append(["Matched — CHECK (placement/lifecycle)", str(pc["check_hosts"])])
     ws_sum.append(["Serial validation needed (NB serial empty)", str(serial_validation_needed)])
     ws_sum.append(["Interface rows not OK", str(pc["iface_not_ok"])])
+    ws_sum.append(["MAAS NIC no NetBox interface (NOT_IN_NETBOX)", str(pc["maas_nic_missing_nb"])])
     ws_sum.append(["VLAN drift NICs", str(pc["vlan_drift_nic"])])
     ws_sum.append(["VLAN unverified NICs", str(pc["vlan_unverified_nic"])])
     ws_sum.append(["NetBox-only NICs", str(pc["nb_only_nic"])])
@@ -944,14 +1390,17 @@ def build_drift_report_xlsx(
         matched_rows,
         os_subnet_gaps or [],
         os_floating_gaps or [],
+        netbox_ifaces=netbox_ifaces,
     )
     ws_sum.append([])
-    ws_sum.append(["Proposed changes (preview only)", "", ""])
+    ws_sum.append(["Proposed changes: audit read-only; basis for MAAS→NetBox sync", "", ""])
     _append_header(ws_sum, ["Bucket", "Count"])
     ws_sum.append(["Add: Devices", str(len(prop["add_devices"]))])
     ws_sum.append(["Add: Prefixes", str(len(prop["add_prefixes"]))])
     ws_sum.append(["Add: Floating IPs", str(len(prop["add_fips"]))])
-    ws_sum.append(["Update: NIC drift (combined)", str(len(prop["update_nic"]))])
+    ws_sum.append(["NIC drift (existing NB interface)", str(len(prop["update_nic"]))])
+    ws_sum.append(["New NetBox interfaces (MAAS NIC, no NB match)", str(len(prop["add_nb_interfaces"]))])
+    ws_sum.append(["OOB/BMC from MAAS power", str(len(prop["add_mgmt_iface"]))])
     ws_sum.append(["Review: Orphans", str(len(prop["review_orphans"]))])
     ws_sum.append(["Review: Serial", str(len(prop["review_serial"]))])
     ws_sum.append(["Review: BMC/OOB", str(len(prop["review_bmc"]))])
@@ -960,16 +1409,23 @@ def build_drift_report_xlsx(
 
     # --- Proposed changes (full list) ---
     ws_prop = _sheet("Proposed changes")
-    ws_prop.append(["Preview only: Drift Audit does not apply changes to NetBox."])
+    ws_prop.append(["This sheet lists drift; the audit UI does not write to NetBox."])
     ws_prop.cell(row=1, column=1).font = header_font
-    ws_prop.append(["Safety: No automatic deletion is performed by this workflow."])
+    ws_prop.append([
+        "MAAS→NetBox sync driven by this drift is intended to apply: data NICs (create/update), "
+        "and OOB/mgmt from MAAS power (IPMI, Redfish, iDRAC-class): OOB IP + mgmt interfaces.",
+    ])
     ws_prop.cell(row=2, column=1).font = header_font
+    ws_prop.append(["Safety: no automatic deletion in this audit; sync policies apply at reconcile time."])
+    ws_prop.cell(row=3, column=1).font = header_font
     ws_prop.append([])
     _append_header(ws_prop, ["Section", "Count"])
     ws_prop.append(["Add: Devices from MAAS", len(prop["add_devices"])])
     ws_prop.append(["Add: Prefixes from OpenStack", len(prop["add_prefixes"])])
     ws_prop.append(["Add: Floating IPs from OpenStack", len(prop["add_fips"])])
-    ws_prop.append(["Update: NIC drift (combined)", len(prop["update_nic"])])
+    ws_prop.append(["NIC drift (existing NB interface)", len(prop["update_nic"])])
+    ws_prop.append(["New NetBox interfaces (MAAS NIC, no NB match)", len(prop["add_nb_interfaces"])])
+    ws_prop.append(["OOB/BMC from MAAS power", len(prop["add_mgmt_iface"])])
     ws_prop.append(["Review: NetBox orphans", len(prop["review_orphans"])])
     ws_prop.append(["Review: Serial validation", len(prop["review_serial"])])
     ws_prop.append(["Review: BMC vs OOB mismatch", len(prop["review_bmc"])])
@@ -998,9 +1454,63 @@ def build_drift_report_xlsx(
         prop["add_fips"],
     )
     _append_block(
-        "B) NIC drift updates (single per-interface table)",
-        ["Host", "MAAS intf", "MAAS MAC", "MAAS IPs", "NB intf", "NB MAC", "NB IPs", "MAAS VLAN", "NB VLAN", "Status", "Reason", "Proposed Action", "Risk"],
+        "B) Interfaces missing in NetBox — proposed new dcim.Interface (MAAS NIC, no NB match)",
+        [
+            "Host",
+            "NB site",
+            "NB location",
+            "MAAS intf",
+            "MAAS fabric",
+            "MAAS MAC",
+            "MAAS IPs",
+            "MAAS VLAN",
+            "Suggested NB name",
+            "Proposed properties (from MAAS)",
+            "Proposed action",
+            "Risk",
+        ],
+        prop["add_nb_interfaces"],
+    )
+    _append_block(
+        "B) NIC inventory + drift (existing NetBox interfaces; MAAS MAC matched NB)",
+        [
+            "Host",
+            "MAAS intf",
+            "MAAS fabric",
+            "MAAS MAC",
+            "MAAS IPs",
+            "NB intf",
+            "NB MAC",
+            "NB IPs",
+            "MAAS VLAN",
+            "NB VLAN",
+            "Status",
+            "Reason",
+            "Proposed Action",
+            "Risk",
+        ],
         prop["update_nic"],
+    )
+    _append_block(
+        "B) OOB / IPMI / iDRAC / mgmt — MAAS power → NetBox sync targets (no credentials here)",
+        [
+            "Host",
+            "MAAS system_id",
+            "MAAS BMC IP",
+            "MAAS power_type",
+            "MAAS BMC MAC",
+            "MAAS BMC VLAN hint",
+            "Suggested NB iface",
+            "NetBox OOB",
+            "NB IP coverage",
+            "NB iface w/ IP",
+            "NB mgmt MAC",
+            "NB mgmt VLAN",
+            "Status",
+            "Proposed action",
+            "Risk",
+        ],
+        prop["add_mgmt_iface"],
     )
     _append_block(
         "C) NetBox orphan devices (orphaned)",

@@ -22,6 +22,14 @@ def _parse_vid(val) -> Optional[int]:
         return None
 
 
+def _maas_iface_row_fabric(m: dict, mi: dict) -> str:
+    """Per-NIC MAAS fabric (iface_fabric) with fallback to machine fabric_name."""
+    f = (mi.get("iface_fabric") or "").strip()
+    if f and f != "-":
+        return f
+    return (m.get("fabric_name") or "").strip()
+
+
 def _normalize_mac(mac: str) -> str:
     if not mac:
         return ""
@@ -48,7 +56,7 @@ def build_maas_netbox_interface_audit(
     netbox_ifaces: hostname -> list of {name, mac, ips, mgmt_only}
     netbox_audit: hostname -> {site_slug, location_name, ...} for per-device context columns.
     maas_iface_filter: optional (machine_dict, iface_dict) -> bool; False drops the MAAS NIC from
-        this audit (e.g. unconfigured / out-of-scope interfaces — keeps drift safe for NetBox apply).
+        this audit. Default from views keeps only interfaces with a MAC (L2 identity for NB match).
     """
     by_h = {}
     for m in maas_data.get("machines") or []:
@@ -88,10 +96,11 @@ def build_maas_netbox_interface_audit(
             maas_ip_str = ", ".join(maas_ips) if maas_ips else "—"
             itype = (mi.get("type") or "")[:12]
             maas_vlan = str(mi.get("vlan_vid") or "")[:8] or "—"
+            row_fab = (_maas_iface_row_fabric(m, mi) or m.get("fabric_name") or "-")[:14]
 
             if not mac:
                 rows.append({
-                    "maas_fabric": m_fab,
+                    "maas_fabric": row_fab,
                     "maas_pool": m_pool,
                     "nb_site": ctx_site,
                     "nb_location": ctx_loc,
@@ -123,7 +132,7 @@ def build_maas_netbox_interface_audit(
                         matched_by_name = True
                     elif cmac != mac:
                         rows.append({
-                            "maas_fabric": m_fab,
+                            "maas_fabric": row_fab,
                             "maas_pool": m_pool,
                             "nb_site": ctx_site,
                             "nb_location": ctx_loc,
@@ -151,7 +160,7 @@ def build_maas_netbox_interface_audit(
             if not nb:
                 n_mac = sum(1 for x in nb_list if _normalize_mac(x.get("mac") or ""))
                 rows.append({
-                    "maas_fabric": m_fab,
+                    "maas_fabric": row_fab,
                     "maas_pool": m_pool,
                     "nb_site": ctx_site,
                     "nb_location": ctx_loc,
@@ -235,7 +244,7 @@ def build_maas_netbox_interface_audit(
                 nb_mac_out = mac
 
             rows.append({
-                "maas_fabric": m_fab,
+                "maas_fabric": row_fab,
                 "maas_pool": m_pool,
                 "nb_site": ctx_site,
                 "nb_location": ctx_loc,

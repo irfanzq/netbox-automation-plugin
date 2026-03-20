@@ -85,13 +85,11 @@
     opacity: 0.65;
     font-size: 0.7rem;
   }
-  #maas-drift-scope > summary,
-  .maas-drift-locations-details > summary {
+  #maas-drift-scope > summary {
     cursor: pointer;
     user-select: none;
   }
-  #maas-drift-scope > summary::-webkit-details-marker,
-  .maas-drift-locations-details > summary::-webkit-details-marker {
+  #maas-drift-scope > summary::-webkit-details-marker {
     display: none;
   }
 </style>
@@ -109,7 +107,7 @@
       <h5 class="card-header">{% trans "MAAS / OpenStack Sync" %}</h5>
       <div class="card-body">
         <p class="card-text mb-2">
-          {% trans "Compare MAAS machines with NetBox devices (hosts and NICs) and, optionally, OpenStack subnets and floating IPs with NetBox IPAM. Read-only drift report — no changes are written." %}
+          {% trans "Compare MAAS with NetBox: devices, data NICs (MAC/IP/VLAN drift and missing interfaces), and out-of-band / management from MAAS power (IPMI, Redfish, iDRAC-class BMC IP and power type). Optionally OpenStack subnets and floating IPs vs NetBox IPAM. This page runs a read-only drift audit (no writes). MAAS→NetBox reconciliation or sync that is driven by this drift is intended to apply the same categories—including creating or updating management interfaces and device OOB IP from MAAS—per your sync policies." %}
         </p>
         {% if form.non_field_errors %}
           <div class="alert alert-danger">{{ form.non_field_errors }}</div>
@@ -149,36 +147,28 @@
                   <div class="form-text">{{ form.sites.help_text }}</div>
                 </div>
                 <div class="col-12">
-                  <details class="maas-drift-locations-details border rounded p-2 bg-body">
-                    <summary class="fw-semibold small">
-                      {% trans "Locations (optional)" %} —
-                      <span class="fw-normal text-muted">{% trans "Expand to filter by NetBox location and related OpenStack scope." %}</span>
-                    </summary>
-                    <div class="mt-2">
-                      <label class="form-label mb-1" for="{{ form.locations.id_for_label }}" id="maas-lbl-locations">{{ form.locations.label }}</label>
-                      <div
-                        class="maas-sync-multiselect position-relative"
-                        data-ms-placeholder="{% trans 'Select locations…' %}"
-                        data-ms-all-label="{% trans 'All locations (no filter)' %}"
-                        data-ms-n-selected="{% trans 'locations selected' %}"
-                      >
-                        {{ form.locations }}
-                        <button
-                          type="button"
-                          class="btn btn-outline-secondary w-100 text-start d-flex justify-content-between align-items-center maas-sync-ms-toggle"
-                          aria-haspopup="listbox"
-                          aria-expanded="false"
-                          aria-labelledby="maas-lbl-locations"
-                        >
-                          <span class="maas-sync-ms-summary text-truncate"></span>
-                          <span class="maas-sync-ms-caret" aria-hidden="true">▼</span>
-                        </button>
-                        <div class="maas-sync-ms-panel position-absolute border rounded bg-body shadow-sm" role="listbox"></div>
-                      </div>
-                      {% if form.locations.errors %}<div class="invalid-feedback d-block">{{ form.locations.errors }}</div>{% endif %}
-                      <div class="form-text">{{ form.locations.help_text }}</div>
-                    </div>
-                  </details>
+                  <label class="form-label mb-1" for="{{ form.locations.id_for_label }}" id="maas-lbl-locations">{{ form.locations.label }} ({% trans "optional" %})</label>
+                  <div
+                    class="maas-sync-multiselect position-relative"
+                    data-ms-placeholder="{% trans 'Select locations…' %}"
+                    data-ms-all-label="{% trans 'All locations (no filter)' %}"
+                    data-ms-n-selected="{% trans 'locations selected' %}"
+                  >
+                    {{ form.locations }}
+                    <button
+                      type="button"
+                      class="btn btn-outline-secondary w-100 text-start d-flex justify-content-between align-items-center maas-sync-ms-toggle"
+                      aria-haspopup="listbox"
+                      aria-expanded="false"
+                      aria-labelledby="maas-lbl-locations"
+                    >
+                      <span class="maas-sync-ms-summary text-truncate"></span>
+                      <span class="maas-sync-ms-caret" aria-hidden="true">▼</span>
+                    </button>
+                    <div class="maas-sync-ms-panel position-absolute border rounded bg-body shadow-sm" role="listbox"></div>
+                  </div>
+                  {% if form.locations.errors %}<div class="invalid-feedback d-block">{{ form.locations.errors }}</div>{% endif %}
+                  <div class="form-text">{{ form.locations.help_text }}</div>
                 </div>
                 <div class="col-12 d-flex flex-wrap gap-2">
                   <button type="submit" class="btn btn-primary">{% trans "Run drift audit" %}</button>
