@@ -109,9 +109,6 @@ def _fabric_matches_locations(fabric_name: str, selected_location_names: set[str
     return False
 
 
-_OPAQUE_FABRIC_RE = re.compile(r"^fabric-\d+$", re.I)
-
-
 def _maas_effective_dns_name(m: dict) -> str:
     """FQDN / DNS name for scope matching (hostname + domain from MAAS)."""
     return (m.get("dns_name") or m.get("fqdn") or m.get("hostname") or "").strip()
@@ -124,79 +121,17 @@ def _maas_iface_row_fabric(m: dict, mi: dict) -> str:
     return (m.get("fabric_name") or "").strip()
 
 
-def _maas_machine_has_non_opaque_iface(m: dict) -> bool:
-    """True if any MAAS NIC with MAC uses a non fabric-<n> fabric (real fabric name)."""
-    for mi in m.get("interfaces") or []:
-        if not (mi.get("mac") or "").strip():
-            continue
-        fab = _maas_iface_row_fabric(m, mi)
-        if fab and not _OPAQUE_FABRIC_RE.match(fab):
-            return True
-    return False
-
-
-def _maas_scope_tokens_from_selection(selected_location_names: set, selected_sites: set) -> set[str]:
-    """NetBox location names + site slugs used for MAAS NIC / fabric fuzzy matching."""
-    tokens: set[str] = set()
-    for loc in selected_location_names or []:
-        s = (loc or "").strip()
-        if s:
-            tokens.add(s)
-    for site in selected_sites or []:
-        s = (site or "").strip()
-        if s:
-            tokens.add(s)
-    return tokens
-
-
-def _maas_machine_has_location_matching_non_opaque_iface(m: dict, tokens: set) -> bool:
-    """
-    True if this host has a non-opaque fabric that fuzzy-matches selected site/location tokens
-    (machine-level fabric_name and/or per-NIC fabric). Used to drop redundant fabric-<n> NICs
-    only when birch-fabric (etc.) actually matches scope — not unrelated named fabrics.
-    """
-    if not tokens:
-        return False
-    mf = (m.get("fabric_name") or "").strip()
-    if mf and mf != "-" and not _OPAQUE_FABRIC_RE.match(mf):
-        if _fabric_matches_locations(mf, tokens):
-            return True
-    for mi in m.get("interfaces") or []:
-        if not (mi.get("mac") or "").strip():
-            continue
-        fab = _maas_iface_row_fabric(m, mi)
-        if fab and not _OPAQUE_FABRIC_RE.match(fab) and _fabric_matches_locations(fab, tokens):
-            return True
-    return False
-
-
 def _make_maas_iface_filter(selected_location_names: set, selected_sites: set):
     """
-    MAAS NICs included in drift / NetBox-apply path:
-    - Drop NICs with no MAC (unconfigured / bond children without L2 identity here).
-    - Unscoped: drop fabric-<n> when the host has any other named (non-opaque) fabric.
-    - Scoped (sites/locations selected): include every MAC'd NIC on machines already in MAAS scope
-      except drop fabric-<n> when the host has a location/site-matching named fabric elsewhere
-      (no blanket drop of opaque NICs; avoids losing L2 rows for NetBox-only or DNS-scoped hosts).
+    Include MAAS interfaces that have a MAC — required for L2 identity vs NetBox (match by MAC).
+
+    Interfaces without MAC in MAAS (some VLAN/bond children, placeholders) are skipped here;
+    they are not comparable to NetBox NICs the same way.
     """
-    tokens = _maas_scope_tokens_from_selection(selected_location_names or set(), selected_sites or set())
+    _ = (selected_location_names, selected_sites)  # call-site compatibility; scope is upstream
 
     def filt(m: dict, mi: dict) -> bool:
-        if not (mi.get("mac") or "").strip():
-            return False
-        ifab = _maas_iface_row_fabric(m, mi)
-        if not tokens:
-            if ifab and _OPAQUE_FABRIC_RE.match(ifab) and _maas_machine_has_non_opaque_iface(m):
-                return False
-            return True
-        # Scoped machines only: drop opaque only if a scope-matching real fabric exists on host
-        if ifab and _OPAQUE_FABRIC_RE.match(ifab):
-            if _maas_machine_has_location_matching_non_opaque_iface(m, tokens):
-                return False
-            return True
-        # All other MAC'd NICs on scoped hosts stay in drift (fabric/DNS heuristics optional;
-        # host list is already narrowed by NetBox + MAAS rules).
-        return True
+        return bool((mi.get("mac") or "").strip())
 
     return filt
 
@@ -215,81 +150,6 @@ def _unique_fabrics_from_filtered_maas_interfaces(machines, iface_filt):
             k = raw.casefold()
             if k not in seen:
                 seen[k] = raw
-    return sorted(seen.values(), key=lambda x: x.casefold())
-
-
-def _maas_opaque_fabrics_from_machines(machines) -> list[str]:
-    """Distinct fabric-<n> names from any MAAS NIC (with MAC) on these machines (for scope list)."""
-    seen: dict[str, str] = {}
-    for m in machines or []:
-        for mi in m.get("interfaces") or []:
-            if not (mi.get("mac") or "").strip():
-                continue
-            raw = _maas_iface_row_fabric(m, mi)
-            if not raw or raw == "-" or not _OPAQUE_FABRIC_RE.match(raw):
-                continue
-            raw = re.sub(r"\s+", " ", raw)
-            k = raw.casefold()
-            if k not in seen:
-                seen[k] = raw
-    return sorted(seen.values(), key=lambda x: x.casefold())
-
-
-def _maas_machines_using_fabric(machines, fabric: str) -> list:
-    """Hosts (machine dicts) that have at least one MAC’d NIC on the given fabric."""
-    fc = (fabric or "").strip().casefold()
-    if not fc:
-        return []
-    out = []
-    seen_h: set[str] = set()
-    for m in machines or []:
-        h = (m.get("hostname") or "").strip()
-        for mi in m.get("interfaces") or []:
-            if not (mi.get("mac") or "").strip():
-                continue
-            if _maas_iface_row_fabric(m, mi).strip().casefold() != fc:
-                continue
-            if h and h not in seen_h:
-                seen_h.add(h)
-                out.append(m)
-            break
-    return out
-
-
-def _merge_scope_fabrics_named_plus_opaque(
-    machines,
-    fabrics_from_filtered_nics: list[str],
-    scope_tokens: set[str] | None = None,
-) -> list[str]:
-    """
-    Scope fabric list = named fabrics from NICs that pass the drift filter, plus opaque
-    fabric-<n> only when not redundant. Redundant means every host on that opaque also has
-    a non-opaque fabric that matches scope tokens (when scoped); unscoped, any named fabric.
-    """
-    seen: dict[str, str] = {}
-    for raw in fabrics_from_filtered_nics or []:
-        if not raw or raw == "-":
-            continue
-        k = raw.casefold()
-        if k not in seen:
-            seen[k] = raw
-    opaque_candidates = _maas_opaque_fabrics_from_machines(machines)
-    for raw in opaque_candidates:
-        k = raw.casefold()
-        if k in seen:
-            continue
-        hosts = _maas_machines_using_fabric(machines, raw)
-        if not hosts:
-            continue
-        if scope_tokens:
-            redundant = all(
-                _maas_machine_has_location_matching_non_opaque_iface(m, scope_tokens) for m in hosts
-            )
-        else:
-            redundant = all(_maas_machine_has_non_opaque_iface(m) for m in hosts)
-        if redundant:
-            continue
-        seen[k] = raw
     return sorted(seen.values(), key=lambda x: x.casefold())
 
 
@@ -512,6 +372,7 @@ class MAASOpenStackSyncView(LoginRequiredMixin, View):
                         os_floating_gaps=cached.get("os_floating_gaps"),
                         netbox_prefix_count=cached.get("netbox_prefix_count", 0),
                         interface_audit=cached.get("interface_audit"),
+                        netbox_ifaces=cached.get("netbox_ifaces"),
                     )
                     report_drift = report_out.get("drift", "") if isinstance(report_out, dict) else report_out
                     report_reference = report_out.get("reference", "") if isinstance(report_out, dict) else ""
@@ -653,6 +514,7 @@ class MAASOpenStackSyncView(LoginRequiredMixin, View):
 
         matched_rows = None
         interface_audit = None
+        netbox_ifaces_for_report = None
         audit_map = None
         os_subnet_hints = None
         os_subnet_gaps = None
@@ -764,22 +626,13 @@ class MAASOpenStackSyncView(LoginRequiredMixin, View):
             # Recompute drift counts from scoped host/device sets.
             drift = compute_maas_netbox_drift(maas_data, netbox_data)
 
-        # NIC filter: unscoped = drop redundant opaque vs any named fabric; scoped = keep all
-        # MAC'd NICs except opaque when a scope-matching named fabric exists on the host.
-        _maas_scope_tok = _maas_scope_tokens_from_selection(
-            selected_location_names or set(),
-            selected_sites or set(),
-        )
+        # NIC filter: MAC only — host scope is from NetBox + MAAS DNS/fabric above.
         _iface_filt = _make_maas_iface_filter(
             selected_location_names or set(),
             selected_sites or set(),
         )
-        scope_meta["maas_fabrics_after"] = _merge_scope_fabrics_named_plus_opaque(
-            maas_data.get("machines"),
-            _unique_fabrics_from_filtered_maas_interfaces(
-                maas_data.get("machines"), _iface_filt
-            ),
-            scope_tokens=_maas_scope_tok if _maas_scope_tok else None,
+        scope_meta["maas_fabrics_after"] = _unique_fabrics_from_filtered_maas_interfaces(
+            maas_data.get("machines"), _iface_filt
         )
 
         if not netbox_data.get("error"):
@@ -796,6 +649,7 @@ class MAASOpenStackSyncView(LoginRequiredMixin, View):
             mn_final = maas_h_final & nb_h_final
             audit_map_final = fetch_netbox_audit_detail_for_names(mn_final)
             nb_if_final = fetch_netbox_interfaces_for_names(mn_final)
+            netbox_ifaces_for_report = nb_if_final
             interface_audit = build_maas_netbox_interface_audit(
                 mn_final,
                 maas_data,
@@ -824,6 +678,7 @@ class MAASOpenStackSyncView(LoginRequiredMixin, View):
             os_floating_gaps=os_floating_gaps,
             netbox_prefix_count=netbox_prefix_count,
             interface_audit=interface_audit,
+            netbox_ifaces=netbox_ifaces_for_report,
         )
         report_drift = report_out.get("drift", "") if isinstance(report_out, dict) else report_out
         report_reference = report_out.get("reference", "") if isinstance(report_out, dict) else ""
@@ -864,6 +719,7 @@ class MAASOpenStackSyncView(LoginRequiredMixin, View):
                 "os_floating_gaps": os_floating_gaps,
                 "netbox_prefix_count": netbox_prefix_count,
                 "interface_audit": interface_audit,
+                "netbox_ifaces": netbox_ifaces_for_report,
             })
         except Exception as e:
             logger.debug("Could not cache drift audit for XLSX reuse: %s", e)
@@ -921,6 +777,7 @@ class DriftAuditDownloadXlsxView(LoginRequiredMixin, View):
                 os_floating_gaps=cached.get("os_floating_gaps"),
                 netbox_prefix_count=cached.get("netbox_prefix_count", 0),
                 interface_audit=cached.get("interface_audit"),
+                netbox_ifaces=cached.get("netbox_ifaces"),
             )
         except Exception as e:
             logger.exception("XLSX export failed: %s", e)

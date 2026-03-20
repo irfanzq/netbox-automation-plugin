@@ -94,37 +94,119 @@ def _bmc_from_machine_or_power_op(j: dict) -> str:
     return ""
 
 
-def _maas_rest_fetch_bmc(maas_url: str, api_key: str, system_id: str, verify_tls: bool) -> str:
+def _normalize_mac_eth(s: str) -> str:
+    """Return aa:bb:... lowercase if input looks like a 6-octet MAC, else ""."""
+    if not s or not isinstance(s, str):
+        return ""
+    s = str(s).strip().lower().replace("-", ":")
+    parts = [p for p in s.split(":") if p]
+    if len(parts) != 6:
+        return ""
+    try:
+        return ":".join(f"{int(p, 16):02x}" for p in parts)
+    except ValueError:
+        return ""
+
+
+def _bmc_hints_from_power_dict(d: dict | None) -> dict:
     """
-    BMC from MAAS: normal machine read often omits power_parameters (null) for non-admin keys.
-    MAAS also exposes machine power-parameters via op=power_parameters (admin only); see
-    https://maas.io/docs/machine — same for python-libmaas vs raw REST.
+    Best-effort BMC MAC / VLAN hints from MAAS power_parameters or flat op=power_parameters.
+    Field names vary by driver (IPMI, Redfish, etc.); often absent.
+    """
+    out = {"mac": "", "vlan": ""}
+    if not isinstance(d, dict):
+        return out
+    mac_keys = (
+        "power_mac",
+        "bmc_mac",
+        "ipmi_mac",
+        "mac_address",
+        "ether_mac",
+        "redfish_mac",
+    )
+    vlan_keys = ("power_vlan", "bmc_vlan", "vlan_id", "vlan")
+    for k in mac_keys:
+        raw = d.get(k)
+        if raw is None:
+            continue
+        nm = _normalize_mac_eth(str(raw))
+        if nm:
+            out["mac"] = nm
+            break
+    for k in vlan_keys:
+        raw = d.get(k)
+        if raw is None or raw == "":
+            continue
+        vs = str(raw).strip()
+        if vs.lower() in ("none", "null", "-"):
+            continue
+        out["vlan"] = vs[:24]
+        break
+    return out
+
+
+def _extract_bmc_hints_from_machine_json(j: dict) -> dict:
+    """Merge nested power_parameters and flat keys (some MAAS ops return flat JSON)."""
+    if not isinstance(j, dict):
+        return {"mac": "", "vlan": ""}
+    pp = j.get("power_parameters")
+    h1 = _bmc_hints_from_power_dict(pp if isinstance(pp, dict) else None)
+    h2 = _bmc_hints_from_power_dict(j)
+    mac = h1.get("mac") or h2.get("mac") or ""
+    vlan = h1.get("vlan") or h2.get("vlan") or ""
+    return {"mac": mac, "vlan": vlan}
+
+
+def _merge_bmc_hint_dicts(a: dict, b: dict) -> dict:
+    out = {"mac": (a or {}).get("mac") or "", "vlan": (a or {}).get("vlan") or ""}
+    if b:
+        if not out["mac"] and b.get("mac"):
+            out["mac"] = b["mac"]
+        if not out["vlan"] and b.get("vlan"):
+            out["vlan"] = b["vlan"]
+    return out
+
+
+def _maas_rest_fetch_bmc_and_hints(
+    maas_url: str, api_key: str, system_id: str, verify_tls: bool
+) -> tuple:
+    """
+    BMC IP plus MAC/VLAN hints from MAAS machine + op=power_parameters responses.
+    Hints are merged across all successful JSON bodies (often only present with admin key).
     """
     parts = api_key.split(":", 2)
     if len(parts) != 3 or not system_id:
-        return ""
+        return "", {"mac": "", "vlan": ""}
     ck, tk, ts = parts[0], parts[1], parts[2]
     base = _maas_rest_base(maas_url)
     try:
         import requests
         from requests_oauthlib import OAuth1
     except ImportError:
-        return ""
+        return "", {"mac": "", "vlan": ""}
     auth = OAuth1(ck, "", tk, ts, signature_method="PLAINTEXT")
+
+    hints_acc = {"mac": "", "vlan": ""}
+    ip_acc = ""
+
+    def _consume(j):
+        nonlocal hints_acc, ip_acc
+        if not isinstance(j, dict):
+            return
+        hints_acc = _merge_bmc_hint_dicts(
+            hints_acc, _extract_bmc_hints_from_machine_json(j)
+        )
+        if not ip_acc:
+            ip_acc = _bmc_from_machine_or_power_op(j) or ""
 
     for path in (f"{base}/api/2.0/machines/{system_id}/", f"{base}/api/2.0/nodes/{system_id}/"):
         try:
             r = requests.get(path, auth=auth, verify=verify_tls, timeout=45)
             if r.status_code == 200:
-                j = r.json()
-                if isinstance(j, dict):
-                    bmc = _bmc_from_machine_or_power_op(j)
-                    if bmc:
-                        return bmc
+                _consume(r.json())
         except Exception:
             logger.debug("MAAS BMC fetch %s", path, exc_info=True)
 
-    # Admin-only: full power config including IPMI power_address (403 otherwise)
     for path in (f"{base}/api/2.0/machines/{system_id}/", f"{base}/api/2.0/nodes/{system_id}/"):
         try:
             r = requests.get(
@@ -142,11 +224,7 @@ def _maas_rest_fetch_bmc(maas_url: str, api_key: str, system_id: str, verify_tls
                 continue
             if r.status_code != 200:
                 continue
-            j = r.json()
-            if isinstance(j, dict):
-                bmc = _bmc_from_machine_or_power_op(j)
-                if bmc:
-                    return bmc
+            _consume(r.json())
         except Exception:
             logger.debug("MAAS power_parameters op %s", path, exc_info=True)
 
@@ -161,17 +239,18 @@ def _maas_rest_fetch_bmc(maas_url: str, api_key: str, system_id: str, verify_tls
         if r.status_code == 200:
             j = r.json()
             if isinstance(j, dict):
-                bmc = _bmc_from_machine_or_power_op(j)
-                if bmc:
-                    return bmc
-            if isinstance(j, list) and j and isinstance(j[0], dict):
-                bmc = _bmc_from_machine_or_power_op(j[0])
-                if bmc:
-                    return bmc
+                _consume(j)
+            elif isinstance(j, list) and j and isinstance(j[0], dict):
+                _consume(j[0])
     except Exception:
         logger.debug("MAAS machines op=power_parameters", exc_info=True)
 
-    return ""
+    return ip_acc, hints_acc
+
+
+def _maas_rest_fetch_bmc(maas_url: str, api_key: str, system_id: str, verify_tls: bool) -> str:
+    """Backward-compatible: BMC IP only."""
+    return _maas_rest_fetch_bmc_and_hints(maas_url, api_key, system_id, verify_tls)[0]
 
 
 def _maas_rest_base(maas_url: str) -> str:
@@ -315,32 +394,47 @@ def _enrich_machines_fabric_rest(
 def _enrich_machines_bmc_rest(
     machines: list, maas_url: str, maas_api_key: str, verify_tls: bool
 ) -> None:
-    """Fill bmc_ip via REST for machines missing it (parallel)."""
+    """
+    Fill bmc_ip via REST when missing; merge BMC MAC/VLAN hints when those are missing
+    (same responses often carry power_parameters only with admin key).
+    """
     need = [
         i
         for i, mm in enumerate(machines)
-        if mm.get("system_id") and not (str(mm.get("bmc_ip") or "").strip())
+        if mm.get("system_id")
+        and (
+            not (str(mm.get("bmc_ip") or "").strip())
+            or not (str(mm.get("bmc_mac") or "").strip())
+        )
     ]
     if not need:
         return
 
     def fetch_idx(i: int) -> tuple:
         mm = machines[i]
-        return (
-            i,
-            _maas_rest_fetch_bmc(maas_url, maas_api_key, mm["system_id"], verify_tls),
+        ip_h, hints = _maas_rest_fetch_bmc_and_hints(
+            maas_url, maas_api_key, mm["system_id"], verify_tls
         )
+        return i, ip_h, hints
 
-    # One GET chain per machine (read + op=power_parameters); parallelize for UI drift latency
     max_workers = min(32, max(8, len(need)))
     try:
         with ThreadPoolExecutor(max_workers=max_workers) as ex:
             futures = [ex.submit(fetch_idx, i) for i in need]
             for fut in as_completed(futures):
                 try:
-                    i, bmc = fut.result()
+                    i, bmc, hints = fut.result()
                     if bmc:
                         machines[i]["bmc_ip"] = bmc
+                    if hints:
+                        if hints.get("mac") and not (
+                            str(machines[i].get("bmc_mac") or "").strip()
+                        ):
+                            machines[i]["bmc_mac"] = hints["mac"]
+                        if hints.get("vlan") and not (
+                            str(machines[i].get("bmc_vlan") or "").strip()
+                        ):
+                            machines[i]["bmc_vlan"] = hints["vlan"]
                 except Exception:
                     pass
     except Exception:
@@ -769,6 +863,9 @@ async def fetch_maas_data(maas_url: str, maas_api_key: str, maas_insecure: bool)
                     ifaces = rest_if
                     fabric_name = rest_fab if rest_fab != "-" else fabric_name
             bmc_ip = ""
+            bmc_mac = ""
+            bmc_vlan = ""
+            power_type_str = ""
             serial = ""
             try:
                 md = getattr(m, "_data", None)
@@ -776,6 +873,16 @@ async def fetch_maas_data(maas_url: str, maas_api_key: str, maas_insecure: bool)
                     bmc_ip = _bmc_ip_from_power(
                         md.get("power_parameters"), md.get("power_type")
                     )
+                    _bh = _extract_bmc_hints_from_machine_json(md)
+                    bmc_mac = (_bh.get("mac") or "").strip()
+                    bmc_vlan = (_bh.get("vlan") or "").strip()
+                    pt_raw = md.get("power_type")
+                    if isinstance(pt_raw, dict):
+                        power_type_str = str(
+                            pt_raw.get("name") or pt_raw.get("type") or ""
+                        ).strip()
+                    else:
+                        power_type_str = str(pt_raw or "").strip()
                     serial = (
                         (md.get("serial") or "")
                         or (md.get("serial_number") or "")
@@ -800,6 +907,9 @@ async def fetch_maas_data(maas_url: str, maas_api_key: str, maas_insecure: bool)
                 "status_name": status_name,
                 "interfaces": ifaces,
                 "bmc_ip": bmc_ip,
+                "bmc_mac": bmc_mac,
+                "bmc_vlan": bmc_vlan,
+                "power_type": power_type_str,
             })
         _enrich_machines_fabric_rest(
             result["machines"], maas_url, maas_api_key, not maas_insecure, fabric_catalog
