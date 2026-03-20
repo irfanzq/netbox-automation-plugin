@@ -43,6 +43,30 @@ from django.conf import settings
 OPENSTACK_DEFAULT_REGION_NAME = "birch"
 
 
+def _parse_csv_allowlist(raw):
+    """Comma-separated tokens (project names or UUIDs)."""
+    if raw is None:
+        return []
+    if isinstance(raw, (list, tuple)):
+        return [str(x).strip() for x in raw if str(x).strip()]
+    s = str(raw).strip()
+    if not s:
+        return []
+    return [p.strip() for p in s.split(",") if p.strip()]
+
+
+def _bool_coerce(x):
+    return str(x).lower() in ("1", "true", "yes")
+
+
+def _openstack_project_allowlist_from_cfg(cfg, cfg_key, env_key):
+    """Allowlist from plugin config (list/str) or env CSV."""
+    raw = cfg.get(cfg_key)
+    if raw is not None and raw != "":
+        return _parse_csv_allowlist(raw)
+    return _parse_csv_allowlist(os.environ.get(env_key, ""))
+
+
 def _plugin_config():
     """Return the maas_openstack_sync section of plugin config."""
     plugins_config = getattr(settings, "PLUGINS_CONFIG", {}) or {}
@@ -102,7 +126,7 @@ def get_sync_config():
         # Application credentials (alternative to username/password)
         "openstack_application_credential_id": get_cfg("openstack_application_credential_id", "OPENSTACK_APPLICATION_CREDENTIAL_ID", ""),
         "openstack_application_credential_secret": get_cfg("openstack_application_credential_secret", "OPENSTACK_APPLICATION_CREDENTIAL_SECRET", ""),
-        # NetBox (API from container/worker — often needs NETBOX_SSL_VERIFY=false for internal CA)
+        # NetBox (local ORM in this app). URL/token kept for compatibility with existing configs.
         "netbox_url": get_cfg("netbox_url", "NETBOX_URL", ""),
         "netbox_token": get_cfg("netbox_token", "NETBOX_TOKEN", ""),
         "netbox_ssl_verify": get_cfg(
@@ -112,19 +136,22 @@ def get_sync_config():
             lambda x: str(x).lower() in ("1", "true", "yes"),
         ),
         "netbox_ca_bundle": get_cfg("netbox_ca_bundle", "NETBOX_CA_BUNDLE", "") or None,
-        # Only if you must compare MAAS to a *different* NetBox over HTTP
-        "netbox_sync_use_remote_api": get_cfg(
-            "netbox_sync_use_remote_api",
-            "NETBOX_SYNC_USE_REMOTE_API",
-            "false",
-            lambda x: str(x).lower() in ("1", "true", "yes"),
-        ),
         # OpenStack TLS (DNS must resolve inside Docker — use internal URL or extra_hosts)
         "openstack_insecure": get_cfg(
             "openstack_insecure",
             "OPENSTACK_INSECURE",
             "false",
             lambda x: str(x).lower() in ("1", "true", "yes"),
+        ),
+        # Multi-project Neutron audit: list all Keystone projects user can access, or only OPENSTACK_PROJECT_ALLOWLIST
+        "openstack_audit_all_projects": get_cfg(
+            "openstack_audit_all_projects",
+            "OPENSTACK_AUDIT_ALL_PROJECTS",
+            "false",
+            _bool_coerce,
+        ),
+        "openstack_project_allowlist": _openstack_project_allowlist_from_cfg(
+            cfg, "openstack_project_allowlist", "OPENSTACK_PROJECT_ALLOWLIST"
         ),
         # Site derivation: fabric -> NetBox site slug, pool -> site or tenant (optional)
         "site_mapping_fabric": cfg.get("site_mapping_fabric") or {},  # e.g. {"birch-fabric": "birch"}
@@ -163,6 +190,8 @@ def get_openstack_configs():
             "openstack_application_credential_id": full["openstack_application_credential_id"],
             "openstack_application_credential_secret": full["openstack_application_credential_secret"],
             "openstack_insecure": full["openstack_insecure"],
+            "openstack_audit_all_projects": full["openstack_audit_all_projects"],
+            "openstack_project_allowlist": list(full["openstack_project_allowlist"] or []),
         })
 
     # Second cloud (OPENSTACK_2_* env only)
@@ -173,6 +202,8 @@ def get_openstack_configs():
 
         region2 = (_e2("REGION_NAME") or "").strip() or OPENSTACK_DEFAULT_REGION_NAME
         label2 = (_e2("LABEL") or "").strip() or region2 or "OpenStack 2"
+        audit2 = str(_e2("AUDIT_ALL_PROJECTS", "false")).lower() in ("1", "true", "yes")
+        allow2 = _parse_csv_allowlist(_e2("PROJECT_ALLOWLIST", ""))
         configs.append({
             "label": label2,
             "openstack_auth_url": auth2.rstrip("/"),
@@ -187,6 +218,8 @@ def get_openstack_configs():
             "openstack_application_credential_id": _e2("APPLICATION_CREDENTIAL_ID", ""),
             "openstack_application_credential_secret": _e2("APPLICATION_CREDENTIAL_SECRET", ""),
             "openstack_insecure": str(_e2("INSECURE", "false")).lower() in ("1", "true", "yes"),
+            "openstack_audit_all_projects": audit2,
+            "openstack_project_allowlist": allow2,
         })
 
     return configs
