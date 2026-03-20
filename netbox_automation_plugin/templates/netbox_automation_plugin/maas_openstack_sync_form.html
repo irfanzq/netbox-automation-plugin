@@ -53,6 +53,47 @@
     font-size: 1rem;
     font-weight: 500;
   }
+  /* Collapsible multi-select: dropdown + checkboxes (synced to hidden native select) */
+  .maas-sync-multiselect .maas-sync-ms-toggle {
+    min-height: 38px;
+  }
+  .maas-sync-multiselect .maas-sync-ms-panel {
+    display: none;
+    top: 100%;
+    left: 0;
+    right: 0;
+    margin-top: 2px;
+    max-height: 280px;
+    overflow-y: auto;
+    z-index: 1055;
+    padding: 0.35rem 0;
+  }
+  .maas-sync-multiselect .maas-sync-ms-panel .form-check {
+    padding-left: 2rem;
+  }
+  .maas-sync-multiselect .maas-sync-ms-panel .form-check-input {
+    margin-left: -1.5rem;
+    cursor: pointer;
+  }
+  .maas-sync-multiselect .maas-sync-ms-panel .form-check-label {
+    cursor: pointer;
+    user-select: none;
+  }
+  .maas-sync-multiselect .maas-sync-ms-caret {
+    flex-shrink: 0;
+    margin-left: 0.5rem;
+    opacity: 0.65;
+    font-size: 0.7rem;
+  }
+  #maas-drift-scope > summary,
+  .maas-drift-locations-details > summary {
+    cursor: pointer;
+    user-select: none;
+  }
+  #maas-drift-scope > summary::-webkit-details-marker,
+  .maas-drift-locations-details > summary::-webkit-details-marker {
+    display: none;
+  }
 </style>
 <div id="drift-audit-loading-overlay" aria-hidden="true">
   <div class="drift-loading-content">
@@ -64,32 +105,89 @@
 </div>
 <div class="row">
   <div class="col">
-    <div class="card">
+    <div class="card mb-3">
       <h5 class="card-header">{% trans "MAAS / OpenStack Sync" %}</h5>
       <div class="card-body">
         <p class="card-text mb-2">
           {% trans "Compare MAAS machines with NetBox devices (hosts and NICs) and, optionally, OpenStack subnets and floating IPs with NetBox IPAM. Read-only drift report — no changes are written." %}
         </p>
-        <form method="post" action="" class="drift-audit-form">
-          {% csrf_token %}
-          {{ form.mode }}
-          <div class="row g-2 align-items-end">
-            <div class="col-md-4">
-              <label class="form-label mb-1">{{ form.sites.label }}</label>
-              {{ form.sites }}
-              <div class="form-text">{{ form.sites.help_text }}</div>
-            </div>
-            <div class="col-md-5">
-              <label class="form-label mb-1">{{ form.locations.label }}</label>
-              {{ form.locations }}
-              <div class="form-text">{{ form.locations.help_text }}</div>
-            </div>
-            <div class="col-md-3 d-flex flex-wrap gap-2">
-              <button type="submit" class="btn btn-primary">{% trans "Run drift audit" %}</button>
-              <button type="submit" name="format" value="xlsx" class="btn btn-outline-success">{% trans "Download as Excel (.xlsx)" %}</button>
-            </div>
+        {% if form.non_field_errors %}
+          <div class="alert alert-danger">{{ form.non_field_errors }}</div>
+        {% endif %}
+        <details id="maas-drift-scope" class="border rounded p-2 mb-2 bg-body-secondary bg-opacity-25" {% if not audit_done %}open{% endif %}>
+          <summary class="fw-semibold text-body">
+            {% trans "Scope filters (optional)" %} —
+            <span class="fw-normal text-muted">{% trans "Leave empty for a full report (all sites and locations). Expand to narrow scope." %}</span>
+          </summary>
+          <div class="mt-3">
+            <form method="post" action="" class="drift-audit-form">
+              {% csrf_token %}
+              {{ form.mode }}
+              <div class="row g-3">
+                <div class="col-12">
+                  <label class="form-label mb-1" for="{{ form.sites.id_for_label }}" id="maas-lbl-sites">{{ form.sites.label }}</label>
+                  <div
+                    class="maas-sync-multiselect position-relative"
+                    data-ms-placeholder="{% trans 'Select sites…' %}"
+                    data-ms-all-label="{% trans 'All sites (no filter)' %}"
+                    data-ms-n-selected="{% trans 'sites selected' %}"
+                  >
+                    {{ form.sites }}
+                    <button
+                      type="button"
+                      class="btn btn-outline-secondary w-100 text-start d-flex justify-content-between align-items-center maas-sync-ms-toggle"
+                      aria-haspopup="listbox"
+                      aria-expanded="false"
+                      aria-labelledby="maas-lbl-sites"
+                    >
+                      <span class="maas-sync-ms-summary text-truncate"></span>
+                      <span class="maas-sync-ms-caret" aria-hidden="true">▼</span>
+                    </button>
+                    <div class="maas-sync-ms-panel position-absolute border rounded bg-body shadow-sm" role="listbox"></div>
+                  </div>
+                  {% if form.sites.errors %}<div class="invalid-feedback d-block">{{ form.sites.errors }}</div>{% endif %}
+                  <div class="form-text">{{ form.sites.help_text }}</div>
+                </div>
+                <div class="col-12">
+                  <details class="maas-drift-locations-details border rounded p-2 bg-body">
+                    <summary class="fw-semibold small">
+                      {% trans "Locations (optional)" %} —
+                      <span class="fw-normal text-muted">{% trans "Expand to filter by NetBox location and related OpenStack scope." %}</span>
+                    </summary>
+                    <div class="mt-2">
+                      <label class="form-label mb-1" for="{{ form.locations.id_for_label }}" id="maas-lbl-locations">{{ form.locations.label }}</label>
+                      <div
+                        class="maas-sync-multiselect position-relative"
+                        data-ms-placeholder="{% trans 'Select locations…' %}"
+                        data-ms-all-label="{% trans 'All locations (no filter)' %}"
+                        data-ms-n-selected="{% trans 'locations selected' %}"
+                      >
+                        {{ form.locations }}
+                        <button
+                          type="button"
+                          class="btn btn-outline-secondary w-100 text-start d-flex justify-content-between align-items-center maas-sync-ms-toggle"
+                          aria-haspopup="listbox"
+                          aria-expanded="false"
+                          aria-labelledby="maas-lbl-locations"
+                        >
+                          <span class="maas-sync-ms-summary text-truncate"></span>
+                          <span class="maas-sync-ms-caret" aria-hidden="true">▼</span>
+                        </button>
+                        <div class="maas-sync-ms-panel position-absolute border rounded bg-body shadow-sm" role="listbox"></div>
+                      </div>
+                      {% if form.locations.errors %}<div class="invalid-feedback d-block">{{ form.locations.errors }}</div>{% endif %}
+                      <div class="form-text">{{ form.locations.help_text }}</div>
+                    </div>
+                  </details>
+                </div>
+                <div class="col-12 d-flex flex-wrap gap-2">
+                  <button type="submit" class="btn btn-primary">{% trans "Run drift audit" %}</button>
+                  <button type="submit" name="format" value="xlsx" class="btn btn-outline-success">{% trans "Download as Excel (.xlsx)" %}</button>
+                </div>
+              </div>
+            </form>
           </div>
-        </form>
+        </details>
         <p class="small text-muted mt-1 mb-0">{% trans "Download as Excel: runs the audit, shows the report, and triggers the file download." %}</p>
         <script>
           (function() {
@@ -102,9 +200,146 @@
               });
             });
           })();
+          (function() {
+            function escId(s) {
+              return String(s).replace(/[^a-zA-Z0-9_-]/g, "_");
+            }
+            function initMaasSyncMultiselect(wrap) {
+              var sel = wrap.querySelector("select[multiple].maas-sync-ms-native");
+              var btn = wrap.querySelector(".maas-sync-ms-toggle");
+              var summary = wrap.querySelector(".maas-sync-ms-summary");
+              var panel = wrap.querySelector(".maas-sync-ms-panel");
+              if (!sel || !btn || !summary || !panel) return;
+
+              var placeholder = wrap.getAttribute("data-ms-placeholder") || "Select…";
+              var allLabel = wrap.getAttribute("data-ms-all-label") || "All";
+              var nSuffix = wrap.getAttribute("data-ms-n-selected") || "selected";
+
+              function updateSummary() {
+                var opts = Array.prototype.slice.call(sel.options);
+                var selected = opts.filter(function(o) { return o.selected; });
+                var allOpt = opts.filter(function(o) { return o.value === "__all__"; })[0];
+                if (allOpt && allOpt.selected && selected.length === 1) {
+                  summary.textContent = allLabel;
+                  return;
+                }
+                if (selected.length === 0) {
+                  summary.textContent = placeholder;
+                  return;
+                }
+                if (selected.length === 1) {
+                  summary.textContent = selected[0].textContent;
+                  return;
+                }
+                summary.textContent = selected.length + " " + nSuffix;
+              }
+
+              function syncCheckboxesFromSelect() {
+                panel.querySelectorAll("input[type=checkbox][data-ms-opt]").forEach(function(cb) {
+                  var val = cb.getAttribute("data-ms-opt");
+                  var opt = Array.prototype.slice.call(sel.options).filter(function(o) {
+                    return o.value === val;
+                  })[0];
+                  cb.checked = !!(opt && opt.selected);
+                });
+              }
+
+              function buildPanel() {
+                panel.innerHTML = "";
+                Array.prototype.forEach.call(sel.options, function(opt) {
+                  var safe = escId(sel.name + "_" + opt.value);
+                  var div = document.createElement("div");
+                  div.className = "form-check mx-2 my-1";
+                  div.setAttribute("role", "option");
+                  var cb = document.createElement("input");
+                  cb.type = "checkbox";
+                  cb.className = "form-check-input";
+                  cb.id = "maas_ms_" + safe;
+                  cb.setAttribute("data-ms-opt", opt.value);
+                  var lab = document.createElement("label");
+                  lab.className = "form-check-label";
+                  lab.setAttribute("for", cb.id);
+                  lab.textContent = opt.textContent;
+                  div.appendChild(cb);
+                  div.appendChild(lab);
+                  panel.appendChild(div);
+                  if (opt.value === "__all__") {
+                    var hr = document.createElement("hr");
+                    hr.className = "dropdown-divider my-1 mx-2";
+                    panel.appendChild(hr);
+                  }
+                  cb.addEventListener("change", function() {
+                    var val = cb.getAttribute("data-ms-opt");
+                    var o = Array.prototype.slice.call(sel.options).filter(function(x) {
+                      return x.value === val;
+                    })[0];
+                    if (!o) return;
+                    if (val === "__all__") {
+                      if (cb.checked) {
+                        Array.prototype.forEach.call(sel.options, function(x) {
+                          x.selected = x.value === "__all__";
+                        });
+                      } else {
+                        o.selected = false;
+                      }
+                    } else {
+                      var allO = Array.prototype.slice.call(sel.options).filter(function(x) {
+                        return x.value === "__all__";
+                      })[0];
+                      if (allO) allO.selected = false;
+                      o.selected = cb.checked;
+                    }
+                    syncCheckboxesFromSelect();
+                    updateSummary();
+                  });
+                });
+                syncCheckboxesFromSelect();
+                updateSummary();
+              }
+
+              buildPanel();
+
+              btn.addEventListener("click", function(e) {
+                e.preventDefault();
+                e.stopPropagation();
+                var open = panel.style.display === "block";
+                document.querySelectorAll(".maas-sync-ms-panel").forEach(function(p) {
+                  p.style.display = "none";
+                });
+                document.querySelectorAll(".maas-sync-ms-toggle").forEach(function(b) {
+                  b.setAttribute("aria-expanded", "false");
+                });
+                if (!open) {
+                  panel.style.display = "block";
+                  btn.setAttribute("aria-expanded", "true");
+                }
+              });
+
+              panel.addEventListener("click", function(e) {
+                e.stopPropagation();
+              });
+            }
+
+            document.querySelectorAll(".maas-sync-multiselect").forEach(initMaasSyncMultiselect);
+
+            if (!window.__maasSyncMsDocClick) {
+              window.__maasSyncMsDocClick = true;
+              document.addEventListener("click", function() {
+                document.querySelectorAll(".maas-sync-ms-panel").forEach(function(p) {
+                  p.style.display = "none";
+                });
+                document.querySelectorAll(".maas-sync-ms-toggle").forEach(function(b) {
+                  b.setAttribute("aria-expanded", "false");
+                });
+              });
+            }
+          })();
         </script>
+      </div>
+    </div>
+
         {% if audit_done and audit_summary %}
-          <div class="card mt-3 border-info">
+          <div class="card mb-3 border-info">
             <h5 class="card-header">{% trans "Drift data sources" %}</h5>
             <div class="card-body py-2 small">
               <div class="row g-2">
@@ -200,7 +435,7 @@
               tab-size: 8;
             }
           </style>
-          <div class="card mt-3">
+          <div class="card mb-3">
             <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">
               <h5 class="mb-0">{% trans "Drift Audit Report" %}</h5>
               <form method="post" action="" class="d-inline drift-audit-form">
@@ -256,8 +491,6 @@
             })();
           </script>
         {% endif %}
-      </div>
-    </div>
   </div>
 </div>
 {% endblock %}

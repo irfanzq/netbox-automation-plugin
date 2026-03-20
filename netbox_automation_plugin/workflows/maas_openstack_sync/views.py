@@ -252,8 +252,14 @@ class MAASOpenStackSyncView(LoginRequiredMixin, View):
 
     def post(self, request):
         site_choices, location_choices, location_meta = _list_site_location_choices()
+        # Empty <select multiple> is often omitted from POST entirely; normalize so the audit always runs.
+        post_data = request.POST.copy()
+        if "sites" not in post_data:
+            post_data.setlist("sites", [])
+        if "locations" not in post_data:
+            post_data.setlist("locations", [])
         form = MAASOpenStackSyncForm(
-            request.POST,
+            post_data,
             site_choices=site_choices,
             location_choices=location_choices,
         )
@@ -344,7 +350,7 @@ class MAASOpenStackSyncView(LoginRequiredMixin, View):
         fabrics_before = sorted({
             (m.get("fabric_name") or "").strip()
             for m in maas_machines_before
-            if (m.get("fabric_name") or "").strip()
+            if (m.get("fabric_name") or "").strip() and (m.get("fabric_name") or "").strip() != "-"
         })
         scope_meta["maas_all_fabrics"] = fabrics_before
 
@@ -503,6 +509,11 @@ class MAASOpenStackSyncView(LoginRequiredMixin, View):
             scope_meta["openstack_fips_after"] = len((openstack_data or {}).get("floating_ips") or [])
             scope_meta["openstack_unmatched_network_names"] = []
             scope_meta["openstack_unmatched_network_names_more"] = 0
+        scope_meta["openstack_network_names_after"] = sorted({
+            (n.get("name") or "").strip()
+            for n in ((openstack_data or {}).get("networks") or [])
+            if (n.get("name") or "").strip()
+        })
 
         # Apply MAAS-side scope after audit maps are built:
         # include hosts in selected NB scope OR hosts with MAAS fabric fuzzy-matching selected locations.
@@ -552,6 +563,11 @@ class MAASOpenStackSyncView(LoginRequiredMixin, View):
             # Recompute drift counts from scoped host/device sets.
             drift = compute_maas_netbox_drift(maas_data, netbox_data)
         scope_meta["maas_machines_after"] = len(maas_data.get("machines") or [])
+        scope_meta["maas_fabrics_after"] = sorted({
+            (m.get("fabric_name") or "").strip()
+            for m in (maas_data.get("machines") or [])
+            if (m.get("fabric_name") or "").strip() and (m.get("fabric_name") or "").strip() != "-"
+        })
         scope_meta["coverage_status"] = (
             "PASS"
             if not maas_data.get("error") and not netbox_data.get("error") and not ((openstack_data or {}).get("error"))
