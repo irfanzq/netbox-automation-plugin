@@ -19,7 +19,13 @@ class MAASOpenStackSyncForm(forms.Form):
         label=_("Sites"),
         required=False,
         choices=(),
-        widget=forms.SelectMultiple(attrs={"size": 8, "class": "form-select"}),
+        widget=forms.SelectMultiple(
+            attrs={
+                "class": "form-select maas-sync-ms-native d-none",
+                "aria-hidden": "true",
+                "tabindex": "-1",
+            }
+        ),
         help_text=_("Optional. Limit report to selected NetBox sites."),
     )
 
@@ -27,7 +33,13 @@ class MAASOpenStackSyncForm(forms.Form):
         label=_("Locations"),
         required=False,
         choices=(),
-        widget=forms.SelectMultiple(attrs={"size": 10, "class": "form-select"}),
+        widget=forms.SelectMultiple(
+            attrs={
+                "class": "form-select maas-sync-ms-native d-none",
+                "aria-hidden": "true",
+                "tabindex": "-1",
+            }
+        ),
         help_text=_("Optional. Select one or more NetBox locations."),
     )
 

@@ -5,6 +5,7 @@ XLSX export via build_drift_report_xlsx() for download (openpyxl); Google Sheets
 """
 
 from io import BytesIO
+import re
 
 _MAX_MAAS_MISSING_ROWS = 500
 _MAX_OS_NETWORKS = 40
@@ -16,6 +17,43 @@ _MAX_NOTES_COL = 42
 _NOTES_COL_MAX_WIDTH = 8000
 # Matched-hosts style tables: full cell text per column (no mid-cell truncation)
 _DYNAMIC_COL_CAP = 10000
+
+
+def _dedupe_keep_order(items):
+    seen = set()
+    out = []
+    for raw in (items or []):
+        s = (str(raw or "")).strip()
+        if not s:
+            continue
+        k = s.lower()
+        if k in seen:
+            continue
+        seen.add(k)
+        out.append(s)
+    return out
+
+
+def _format_inventory_list(items, *, noisy_regex=None, noisy_label="auto-generated", sample=20):
+    vals = _dedupe_keep_order(items)
+    if not vals:
+        return "(none)"
+    if not noisy_regex:
+        return ", ".join(vals)
+    pat = re.compile(noisy_regex)
+    noisy = [v for v in vals if pat.match(v)]
+    named = [v for v in vals if not pat.match(v)]
+    parts = []
+    if named:
+        parts.append(f"named ({len(named)}): {', '.join(named)}")
+    if noisy:
+        show = noisy[:sample]
+        more = len(noisy) - len(show)
+        txt = ", ".join(show)
+        if more > 0:
+            txt = f"{txt}, ... +{more} more"
+        parts.append(f"{noisy_label} ({len(noisy)}): {txt}")
+    return " | ".join(parts) if parts else "(none)"
 
 
 def _maas_machine_by_hostname(maas_data):
@@ -466,12 +504,28 @@ def format_drift_report(
                     f"{scope_meta.get('openstack_fips_after', 0)} / {scope_meta.get('openstack_fips_before', 0)}",
                 ],
                 [
-                    "MAAS all fabrics (pre-scope)",
-                    ", ".join(scope_meta.get("maas_all_fabrics") or []) or "(none)",
+                    "MAAS all fabrics (pre-scope, summarized)",
+                    _format_inventory_list(
+                        scope_meta.get("maas_all_fabrics") or [],
+                        noisy_regex=r"^fabric-\d+$",
+                        noisy_label="fabric-<number>",
+                    ),
+                ],
+                [
+                    "MAAS fabrics fetched (in-scope)",
+                    _format_inventory_list(
+                        scope_meta.get("maas_fabrics_after") or [],
+                        noisy_regex=r"^fabric-\d+$",
+                        noisy_label="fabric-<number>",
+                    ),
                 ],
                 [
                     "OpenStack all network names (pre-scope)",
-                    ", ".join(scope_meta.get("openstack_all_network_names") or []) or "(none)",
+                    _format_inventory_list(scope_meta.get("openstack_all_network_names") or []),
+                ],
+                [
+                    "OpenStack network names fetched (in-scope)",
+                    _format_inventory_list(scope_meta.get("openstack_network_names_after") or []),
                 ],
                 ["MAAS unmatched fabrics (sample)", ", ".join(maas_unmatched) or "(none)"],
                 ["OpenStack unmatched network names (sample)", ", ".join(os_unmatched) or "(none)"],
@@ -828,12 +882,28 @@ def build_drift_report_xlsx(
             f"{scope_meta.get('openstack_fips_after', 0)} / {scope_meta.get('openstack_fips_before', 0)}",
         ])
         ws_sum.append([
-            "MAAS all fabrics (pre-scope)",
-            ", ".join(scope_meta.get("maas_all_fabrics") or []) or "(none)",
+            "MAAS all fabrics (pre-scope, summarized)",
+            _format_inventory_list(
+                scope_meta.get("maas_all_fabrics") or [],
+                noisy_regex=r"^fabric-\d+$",
+                noisy_label="fabric-<number>",
+            ),
+        ])
+        ws_sum.append([
+            "MAAS fabrics fetched (in-scope)",
+            _format_inventory_list(
+                scope_meta.get("maas_fabrics_after") or [],
+                noisy_regex=r"^fabric-\d+$",
+                noisy_label="fabric-<number>",
+            ),
         ])
         ws_sum.append([
             "OpenStack all network names (pre-scope)",
-            ", ".join(scope_meta.get("openstack_all_network_names") or []) or "(none)",
+            _format_inventory_list(scope_meta.get("openstack_all_network_names") or []),
+        ])
+        ws_sum.append([
+            "OpenStack network names fetched (in-scope)",
+            _format_inventory_list(scope_meta.get("openstack_network_names_after") or []),
         ])
         maas_unmatched = list(scope_meta.get("maas_unmatched_fabrics") or [])
         if scope_meta.get("maas_unmatched_fabrics_more"):
