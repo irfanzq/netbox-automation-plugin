@@ -13,7 +13,6 @@ DRIFT_AUDIT_CACHE_TIMEOUT = 600  # seconds
 from netbox_automation_plugin.sync.config import get_sync_config, get_openstack_configs
 from netbox_automation_plugin.sync.clients.maas_client import fetch_maas_data_sync
 from netbox_automation_plugin.sync.clients.netbox_client import (
-    fetch_netbox_data,
     fetch_netbox_data_local,
     fetch_netbox_audit_detail_for_names,
     fetch_netbox_interfaces_for_names,
@@ -36,7 +35,6 @@ from django.http import HttpResponse
 from django.urls import reverse
 
 import logging
-import os
 
 logger = logging.getLogger("netbox_automation_plugin")
 
@@ -67,7 +65,6 @@ def _audit_summary_from_payload(payload):
     drift = payload.get("drift") or {}
     matched_rows = payload.get("matched_rows")
     interface_audit = payload.get("interface_audit")
-    use_remote_netbox = payload.get("use_remote_netbox", False)
     return {
         "maas_ok": not maas_data.get("error"),
         "maas_machines": len(maas_data.get("machines") or []),
@@ -84,7 +81,6 @@ def _audit_summary_from_payload(payload):
         "openstack_cred_missing": bool((openstack_data or {}).get("openstack_cred_missing")),
         "matched_hostnames": len(matched_rows or []),
         "interface_audit_hosts": len((interface_audit or {}).get("hosts") or []),
-        "use_remote_netbox": use_remote_netbox,
         "drift_matched": drift.get("matched_count", 0),
     }
 
@@ -128,7 +124,6 @@ class MAASOpenStackSyncView(LoginRequiredMixin, View):
                         os_subnet_gaps=cached.get("os_subnet_gaps"),
                         os_floating_gaps=cached.get("os_floating_gaps"),
                         netbox_prefix_count=cached.get("netbox_prefix_count", 0),
-                        use_remote_netbox=cached.get("use_remote_netbox", False),
                         interface_audit=cached.get("interface_audit"),
                     )
                     report_drift = report_out.get("drift", "") if isinstance(report_out, dict) else report_out
@@ -162,21 +157,8 @@ class MAASOpenStackSyncView(LoginRequiredMixin, View):
             config.get("maas_insecure", True),
         )
 
-        # 2) NetBox — ORM inside this app (no NETBOX_URL / token / DNS)
-        use_remote_netbox = str(
-            config.get("netbox_sync_use_remote_api") or os.environ.get("NETBOX_SYNC_USE_REMOTE_API", "")
-        ).lower() in ("1", "true", "yes")
-        if use_remote_netbox:
-            base_url = request.build_absolute_uri("/").rstrip("/") if request else ""
-            netbox_data = fetch_netbox_data(
-                config.get("netbox_url") or "",
-                config.get("netbox_token") or "",
-                base_url_fallback=base_url,
-                ssl_verify=config.get("netbox_ssl_verify", True),
-                ca_bundle=config.get("netbox_ca_bundle") or None,
-            )
-        else:
-            netbox_data = fetch_netbox_data_local()
+        # 2) NetBox — local ORM only (same process as NetBox app)
+        netbox_data = fetch_netbox_data_local()
 
         # 3) OpenStack — one or more clouds (OPENSTACK_* and optional OPENSTACK_2_*); merge into one dataset
         openstack_configs = get_openstack_configs()
@@ -216,16 +198,18 @@ class MAASOpenStackSyncView(LoginRequiredMixin, View):
                     merged["error"] = "; ".join(errors)
                 elif errors:
                     merged["error"] = None  # partial success; report combined data
-                # Per-cloud counts so report can show "data from N clouds" for validation
-                merged["_cloud_summary"] = [
-                    {
+                # Per-cloud counts and errors so report can show "data from N clouds" and why one failed
+                merged["_cloud_summary"] = []
+                for r in all_results:
+                    data = r.get("data") or {}
+                    err = data.get("error")
+                    merged["_cloud_summary"].append({
                         "label": r.get("label") or "OpenStack",
-                        "networks": len((r.get("data") or {}).get("networks") or []),
-                        "subnets": len((r.get("data") or {}).get("subnets") or []),
-                        "floating_ips": len((r.get("data") or {}).get("floating_ips") or []),
-                    }
-                    for r in all_results
-                ]
+                        "networks": len(data.get("networks") or []),
+                        "subnets": len(data.get("subnets") or []),
+                        "floating_ips": len(data.get("floating_ips") or []),
+                        "error": (err[:200] if err else None),
+                    })
                 openstack_data = merged
                 logger.info(
                     "OpenStack merge: %d clouds -> %d networks, %d subnets, %d FIPs (clouds: %s)",
@@ -245,7 +229,7 @@ class MAASOpenStackSyncView(LoginRequiredMixin, View):
         os_subnet_gaps = None
         os_floating_gaps = []
         netbox_prefix_count = 0
-        if not use_remote_netbox and not netbox_data.get("error"):
+        if not netbox_data.get("error"):
             maas_h = {
                 (m.get("hostname") or "").strip()
                 for m in (maas_data.get("machines") or [])
@@ -285,7 +269,6 @@ class MAASOpenStackSyncView(LoginRequiredMixin, View):
             os_subnet_gaps=os_subnet_gaps,
             os_floating_gaps=os_floating_gaps,
             netbox_prefix_count=netbox_prefix_count,
-            use_remote_netbox=use_remote_netbox,
             interface_audit=interface_audit,
         )
         report_drift = report_out.get("drift", "") if isinstance(report_out, dict) else report_out
@@ -311,7 +294,6 @@ class MAASOpenStackSyncView(LoginRequiredMixin, View):
             ),
             "matched_hostnames": len(matched_rows or []),
             "interface_audit_hosts": len((interface_audit or {}).get("hosts") or []),
-            "use_remote_netbox": use_remote_netbox,
             "drift_matched": drift.get("matched_count", 0),
         }
 
@@ -327,7 +309,6 @@ class MAASOpenStackSyncView(LoginRequiredMixin, View):
                 "os_subnet_gaps": os_subnet_gaps,
                 "os_floating_gaps": os_floating_gaps,
                 "netbox_prefix_count": netbox_prefix_count,
-                "use_remote_netbox": use_remote_netbox,
                 "interface_audit": interface_audit,
             })
         except Exception as e:
@@ -385,7 +366,6 @@ class DriftAuditDownloadXlsxView(LoginRequiredMixin, View):
                 os_subnet_gaps=cached.get("os_subnet_gaps"),
                 os_floating_gaps=cached.get("os_floating_gaps"),
                 netbox_prefix_count=cached.get("netbox_prefix_count", 0),
-                use_remote_netbox=cached.get("use_remote_netbox", False),
                 interface_audit=cached.get("interface_audit"),
             )
         except Exception as e:

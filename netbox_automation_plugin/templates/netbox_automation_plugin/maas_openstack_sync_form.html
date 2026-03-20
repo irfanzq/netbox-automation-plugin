@@ -106,10 +106,7 @@
                 </div>
                 <div class="col-md-4">
                   <strong>{% trans "NetBox (this DB)" %}</strong>
-                  {% if audit_summary.use_remote_netbox %}
-                    <span class="badge text-bg-warning">{% trans "Remote API" %}</span>
-                    <div class="text-muted">{% trans "Matched hosts / NIC audit need local ORM — limited in this mode." %}</div>
-                  {% elif audit_summary.netbox_ok %}
+                  {% if audit_summary.netbox_ok %}
                     <span class="badge text-bg-success">OK</span>
                     <span class="text-muted">— {{ audit_summary.netbox_devices }} {% trans "devices" %}, {% trans "matched" %} {{ audit_summary.drift_matched }}</span>
                   {% else %}
@@ -134,7 +131,7 @@
                   {% endif %}
                 </div>
               </div>
-              {% if not audit_summary.use_remote_netbox and audit_summary.netbox_ok %}
+              {% if audit_summary.netbox_ok %}
                 <div class="mt-2 text-muted">
                   {% trans "Report sections" %}:
                   <strong>{% trans "Matched hosts" %}</strong> {{ audit_summary.matched_hostnames }} —

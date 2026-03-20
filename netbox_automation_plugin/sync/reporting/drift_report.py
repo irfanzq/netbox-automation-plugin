@@ -103,7 +103,6 @@ def _phase0_category_counts(
     interface_audit,
     os_subnet_gaps,
     os_floating_gaps,
-    use_remote_netbox,
 ):
     maas_only = len(drift.get("in_maas_not_netbox") or [])
     nb_only_dev = len(drift.get("in_netbox_not_maas") or [])
@@ -123,7 +122,7 @@ def _phase0_category_counts(
             notes = row.get("notes") or ""
             if "VLAN unverified:" in notes:
                 vlan_unverified_nic += 1
-    if use_remote_netbox or os_subnet_gaps is None:
+    if os_subnet_gaps is None:
         sub_gaps = None
     else:
         sub_gaps = len(os_subnet_gaps or [])
@@ -187,6 +186,141 @@ def _nb_only_nic_flat_rows(interface_audit):
     return out
 
 
+def _count_hints(matched_rows, needle: str) -> int:
+    c = 0
+    for r in (matched_rows or []):
+        for h in (r.get("hints") or []):
+            if needle in (h or ""):
+                c += 1
+                break
+    return c
+
+
+def _device_by_name(netbox_data):
+    out = {}
+    for d in (netbox_data or {}).get("devices") or []:
+        n = (d.get("name") or "").strip()
+        if n:
+            out[n] = d
+    return out
+
+
+def _proposed_changes_rows(
+    maas_data,
+    netbox_data,
+    drift,
+    interface_audit,
+    matched_rows,
+    os_subnet_gaps,
+    os_floating_gaps,
+):
+    """Build user-friendly proposed change buckets (preview only)."""
+    by_h = _maas_machine_by_hostname(maas_data)
+    nb_by_name = _device_by_name(netbox_data)
+
+    add_devices = []
+    for h in sorted(drift.get("in_maas_not_netbox") or []):
+        m = by_h.get(h, {})
+        add_devices.append([
+            h,
+            str(m.get("zone_name", "-")),
+            str(m.get("pool_name", "-")),
+            str(m.get("status_name", "-")),
+            str(m.get("system_id", "")),
+            "maas-discovered",
+            "Create device + interfaces",
+        ])
+
+    add_prefixes = []
+    for g in (os_subnet_gaps or []):
+        add_prefixes.append([
+            g.get("cidr", ""),
+            g.get("network_name", "-"),
+            g.get("network_id", ""),
+            "-",
+            "Create Prefix",
+        ])
+
+    add_fips = []
+    for g in (os_floating_gaps or []):
+        add_fips.append([
+            g.get("floating_ip", ""),
+            g.get("fixed_ip_address", "-"),
+            g.get("project_name") or g.get("project_id") or "-",
+            "-",
+            "Create IPAddress",
+        ])
+
+    update_vlan = []
+    update_ip = []
+    for b in (interface_audit or {}).get("hosts") or []:
+        hn = b.get("hostname", "")
+        for row in b.get("rows") or []:
+            st = row.get("status") or ""
+            if st.startswith("VLAN_DRIFT"):
+                update_vlan.append([
+                    hn,
+                    row.get("maas_if") or "",
+                    row.get("maas_vlan") or "—",
+                    row.get("nb_vlan") or "—",
+                    "Update NetBox interface untagged VLAN",
+                    "High",
+                ])
+            if "IP_GAP" in st:
+                update_ip.append([
+                    hn,
+                    row.get("maas_if") or "",
+                    (row.get("notes") or "").replace("\n", " "),
+                    "Add missing IP to NetBox interface",
+                    "Medium",
+                ])
+
+    review_orphans = []
+    for n in sorted(drift.get("in_netbox_not_maas") or []):
+        d = nb_by_name.get(n, {})
+        review_orphans.append([
+            n,
+            d.get("site_slug", "-"),
+            d.get("status", "-"),
+            "orphaned",
+            "Review; do not auto-delete",
+            "Medium",
+        ])
+
+    review_serial = []
+    review_bmc = []
+    for r in (matched_rows or []):
+        if "NB serial empty — correlate system_id" in (r.get("hints") or []):
+            review_serial.append([
+                r.get("hostname", ""),
+                str(r.get("maas_system_id", "")),
+                str(r.get("netbox_serial", "")),
+                "Manual validation",
+                "High",
+            ])
+        maas_bmc = str(r.get("maas_bmc") or "—")
+        nb_oob = str(r.get("netbox_oob") or "—")
+        if maas_bmc != "—" and nb_oob != "—" and maas_bmc.lower() != nb_oob.lower():
+            review_bmc.append([
+                r.get("hostname", ""),
+                maas_bmc,
+                nb_oob,
+                "Review/correct OOB field",
+                "High",
+            ])
+
+    return {
+        "add_devices": add_devices,
+        "add_prefixes": add_prefixes,
+        "add_fips": add_fips,
+        "update_vlan": update_vlan,
+        "update_ip": update_ip,
+        "review_orphans": review_orphans,
+        "review_serial": review_serial,
+        "review_bmc": review_bmc,
+    }
+
+
 def format_drift_report(
     maas_data,
     netbox_data,
@@ -198,7 +332,6 @@ def format_drift_report(
     os_subnet_gaps=None,
     os_floating_gaps=None,
     netbox_prefix_count=0,
-    use_remote_netbox=False,
     interface_audit=None,
 ):
     """
@@ -253,8 +386,9 @@ def format_drift_report(
         interface_audit,
         os_subnet_gaps,
         os_floating_gaps,
-        use_remote_netbox,
     )
+    serial_validation_needed = _count_hints(matched_rows, "NB serial empty")
+    bmc_oob_mismatch = _count_hints(matched_rows, "MAAS BMC ")
     sub_txt = str(pc["sub_gaps"]) if pc["sub_gaps"] is not None else "N/A (local ORM)"
     nb_orphan_note = (
         f"{pc['nb_only_dev']} (names hidden in this report)"
@@ -265,9 +399,10 @@ def format_drift_report(
         _ascii_table(
             ["Drift category", "Count / note"],
             [
-                ["MAAS machine → no NetBox Device", str(pc["maas_only"])],
-                ["NetBox Device → no MAAS hostname (orphans)", nb_orphan_note],
+                ["MAAS-only runtime-discovered (tag: maas-discovered)", str(pc["maas_only"])],
+                ["NetBox-only orphan devices (tag: orphaned)", nb_orphan_note],
                 ["Matched: placement/lifecycle hints (CHECK)", str(pc["check_hosts"])],
+                ["Device serial validation needed (NB serial empty)", str(serial_validation_needed)],
                 ["Interface rows not OK (excl. OK)", str(pc["iface_not_ok"])],
                 [
                     "Physical NIC vlan-drift (MAAS VID vs NB untagged)",
@@ -280,10 +415,173 @@ def format_drift_report(
                 ["NetBox-only NICs (MAC not on MAAS)", str(pc["nb_only_nic"])],
                 ["OpenStack subnet → no exact Prefix", sub_txt],
                 ["OpenStack FIP → no NetBox IPAddress", str(pc["fip_gaps"])],
+                ["MAAS BMC vs NetBox OOB mismatch", str(bmc_oob_mismatch)],
                 ["LLDP vs cabling", "not in audit yet"],
             ],
         )
     )
+
+    # --- High-risk summary (design doc: review-first deltas) ---
+    drift_lines.append("")
+    drift_lines.extend(_banner("HIGH-RISK DIFFERENCES (review first)", "-"))
+    drift_lines.append("  Definition (v1): OS FIP/IPAM gaps, OS subnet/prefix gaps, VLAN_DRIFT, serial validation gaps, BMC/OOB mismatch.")
+    hr_rows = []
+    hr_total = 0
+    for name, val in [
+        ("OpenStack FIP not in NetBox IPAddress", pc["fip_gaps"]),
+        ("OpenStack subnet without exact Prefix", pc["sub_gaps"] if pc["sub_gaps"] is not None else "N/A"),
+        ("Physical NIC VLAN_DRIFT", pc["vlan_drift_nic"]),
+        ("Serial validation needed (NB serial empty)", serial_validation_needed),
+        ("MAAS BMC vs NetBox OOB mismatch", bmc_oob_mismatch),
+    ]:
+        hr_rows.append([name, str(val)])
+        if isinstance(val, int):
+            hr_total += val
+    drift_lines.extend(_ascii_table(["High-risk category", "Count"], hr_rows))
+    drift_lines.append(f"  High-risk total (numeric categories): {hr_total}")
+
+    # --- Metrics (design doc summary statistics) ---
+    drift_lines.append("")
+    drift_lines.extend(_banner("METRICS (this run)", "-"))
+    drift_lines.extend(_ascii_table(
+        ["Metric", "Value"],
+        [
+            ["MAAS machines", str(len(maas_data.get("machines") or []))],
+            ["NetBox devices", str(len(netbox_data.get("devices") or []))],
+            ["Matched hostnames", str(drift.get("matched_count", 0))],
+            ["MAAS-only runtime-discovered", str(pc["maas_only"])],
+            ["NetBox-only orphan devices", str(pc["nb_only_dev"])],
+            ["Serial validation needed", str(serial_validation_needed)],
+            ["OpenStack subnet gaps", sub_txt],
+            ["OpenStack FIP gaps", str(pc["fip_gaps"])],
+            ["Physical NIC VLAN_DRIFT", str(pc["vlan_drift_nic"])],
+            ["VLAN unverified NICs", str(pc["vlan_unverified_nic"])],
+        ],
+    ))
+
+    # --- Proposed changes (preview only; full list, uncapped) ---
+    prop = _proposed_changes_rows(
+        maas_data,
+        netbox_data,
+        drift,
+        interface_audit,
+        matched_rows,
+        os_subnet_gaps or [],
+        os_floating_gaps or [],
+    )
+    drift_lines.append("")
+    drift_lines.extend(_banner("PROPOSED CHANGES (PREVIEW ONLY)", "-"))
+    drift_lines.append("  Important: Drift Audit does not apply these changes to NetBox.")
+    drift_lines.append("")
+
+    drift_lines.append("  A) Add to NetBox")
+    drift_lines.extend(_ascii_table(
+        ["Category", "Count", "Meaning"],
+        [
+            ["Devices from MAAS", str(len(prop["add_devices"])), "Machine in MAAS, missing in NetBox"],
+            ["Prefixes from OpenStack", str(len(prop["add_prefixes"])), "Subnet in OpenStack, missing Prefix"],
+            ["Floating IPs from OpenStack", str(len(prop["add_fips"])), "FIP in OpenStack, missing IPAddress"],
+        ],
+    ))
+    if prop["add_devices"]:
+        drift_lines.append("  Devices to create from MAAS (`maas-discovered`)")
+        drift_lines.extend(_ascii_table(
+            ["Hostname", "Zone", "Pool", "MAAS Status", "System ID", "Proposed Tag", "Proposed Action"],
+            prop["add_devices"],
+            dynamic_columns=True,
+        ))
+    if prop["add_prefixes"]:
+        drift_lines.append("  Prefixes to create from OpenStack")
+        drift_lines.extend(_ascii_table(
+            ["CIDR", "Network Name", "Network ID", "Cloud", "Proposed Action"],
+            prop["add_prefixes"],
+            dynamic_columns=True,
+        ))
+    if prop["add_fips"]:
+        drift_lines.append("  Floating IPs to create in NetBox IPAM")
+        drift_lines.extend(_ascii_table(
+            ["Floating IP", "Fixed IP", "Project", "Cloud", "Proposed Action"],
+            prop["add_fips"],
+            dynamic_columns=True,
+        ))
+
+    drift_lines.append("")
+    drift_lines.append("  B) Update in NetBox")
+    drift_lines.extend(_ascii_table(
+        ["Category", "Count", "Meaning"],
+        [
+            ["Interface VLAN updates", str(len(prop["update_vlan"])), "MAAS VLAN differs from NetBox untagged VLAN"],
+            ["Interface IP alignment updates", str(len(prop["update_ip"])), "IP present on MAAS interface but missing on NetBox interface"],
+        ],
+    ))
+    if prop["update_vlan"]:
+        drift_lines.append("  Interface VLAN updates")
+        drift_lines.extend(_ascii_table(
+            ["Host", "Interface", "MAAS VLAN", "NetBox VLAN", "Proposed Action", "Risk"],
+            prop["update_vlan"],
+            dynamic_columns=True,
+        ))
+    if prop["update_ip"]:
+        drift_lines.append("  Interface IP alignment updates")
+        drift_lines.extend(_ascii_table(
+            ["Host", "Interface", "Missing IP details", "Proposed Action", "Risk"],
+            prop["update_ip"],
+            dynamic_columns=True,
+        ))
+
+    drift_lines.append("")
+    drift_lines.append("  C) Review required (no auto-apply)")
+    drift_lines.extend(_ascii_table(
+        ["Category", "Count", "Meaning"],
+        [
+            ["NetBox orphan devices", str(len(prop["review_orphans"])), "Device exists in NetBox but not in MAAS"],
+            ["Serial validation required", str(len(prop["review_serial"])), "NetBox serial missing; validate identity"],
+            ["BMC vs OOB mismatch", str(len(prop["review_bmc"])), "MAAS BMC differs from NetBox OOB"],
+        ],
+    ))
+    if prop["review_orphans"]:
+        drift_lines.append("  NetBox orphan devices (`orphaned`)")
+        drift_lines.extend(_ascii_table(
+            ["Hostname", "Site", "Status", "Proposed Tag", "Proposed Action", "Risk"],
+            prop["review_orphans"],
+            dynamic_columns=True,
+        ))
+    if prop["review_serial"]:
+        drift_lines.append("  Serial validation required")
+        drift_lines.extend(_ascii_table(
+            ["Hostname", "MAAS System ID", "NetBox Serial", "Proposed Action", "Risk"],
+            prop["review_serial"],
+            dynamic_columns=True,
+        ))
+    if prop["review_bmc"]:
+        drift_lines.append("  BMC vs OOB mismatch")
+        drift_lines.extend(_ascii_table(
+            ["Hostname", "MAAS BMC", "NetBox OOB", "Proposed Action", "Risk"],
+            prop["review_bmc"],
+            dynamic_columns=True,
+        ))
+
+    drift_lines.append("")
+    drift_lines.append("  PROPOSED CHANGES SUMMARY")
+    total_props = (
+        len(prop["add_devices"]) + len(prop["add_prefixes"]) + len(prop["add_fips"]) +
+        len(prop["update_vlan"]) + len(prop["update_ip"]) +
+        len(prop["review_orphans"]) + len(prop["review_serial"]) + len(prop["review_bmc"])
+    )
+    drift_lines.extend(_ascii_table(
+        ["Bucket", "Count"],
+        [
+            ["Add: Devices", str(len(prop["add_devices"]))],
+            ["Add: Prefixes", str(len(prop["add_prefixes"]))],
+            ["Add: Floating IPs", str(len(prop["add_fips"]))],
+            ["Update: VLAN", str(len(prop["update_vlan"]))],
+            ["Update: Interface IPs", str(len(prop["update_ip"]))],
+            ["Review: Orphans", str(len(prop["review_orphans"]))],
+            ["Review: Serial", str(len(prop["review_serial"]))],
+            ["Review: BMC/OOB", str(len(prop["review_bmc"]))],
+            ["Total proposed records", str(total_props)],
+        ],
+    ))
 
     # --- GAPS: MAAS-only hosts ---
     drift_lines.append("")
@@ -294,7 +592,7 @@ def format_drift_report(
     drift_lines.append("")
 
     maas_only = sorted(drift.get("in_maas_not_netbox") or [])
-    drift_lines.append(f"  [MAAS] Machines with no NetBox Device: {len(maas_only)}")
+    drift_lines.append(f"  [MAAS] MAAS-only runtime-discovered (no NetBox Device): {len(maas_only)}")
     if maas_data.get("error"):
         drift_lines.append("    (MAAS error)")
     elif maas_only:
@@ -326,7 +624,7 @@ def format_drift_report(
     if matched_with_drift:
         drift_lines.append("")
         drift_lines.extend(_banner("MATCHED HOSTS WITH DRIFT (review needed)", "-"))
-        drift_lines.append("  What sync would do: update site/role/serial from MAAS or flag for review.")
+        drift_lines.append("  Forward-looking (Full Sync): update site/role/serial from MAAS or flag for review.")
         drift_lines.append("")
         mrows = []
         for r in matched_with_drift:
@@ -352,7 +650,7 @@ def format_drift_report(
     if nic_drift_rows:
         drift_lines.append("")
         drift_lines.extend(_banner("NIC DRIFT (interfaces not OK)", "-"))
-        drift_lines.append("  What sync would do: align interface/VLAN/IP from MAAS.")
+        drift_lines.append("  Forward-looking (Full Sync): align interface/VLAN/IP from MAAS.")
         drift_lines.append("")
         drift_lines.extend(_ascii_table(
             ["host", "MAAS intf", "MAAS MAC", "NB intf", "status", "note"],
@@ -385,7 +683,7 @@ def format_drift_report(
         drift_lines.append("")
     if openstack_data and openstack_data.get("error"):
         drift_lines.append("  [OpenStack] Subnet / FIP gaps: API error")
-    elif use_remote_netbox or os_subnet_gaps is None:
+    elif os_subnet_gaps is None:
         drift_lines.append("  [OpenStack] Subnet vs Prefix: not evaluated (use local NetBox ORM).")
     else:
         drift_lines.append(f"  [OpenStack] Subnets without exact Prefix: {len(os_subnet_gaps or [])}")
@@ -440,45 +738,20 @@ def format_drift_report(
 
     if matched_rows:
         ref_lines.append("")
-        ref_lines.extend(_banner("MATCHED HOSTS (all)"))
-        ref_lines.append("  Full list: site / status / serial / BMC / notes.")
-        ref_lines.append("")
-        mh_headers = [
-            "host", "MAAS zone", "MAAS pool", "MAAS st", "NB site", "NB st",
-            "MAAS fab", "NB loc", "sys_id", "serial", "pri IP", "VRF", "VLANs",
-            "OS FIP", "MAAS BMC", "NB OOB", "notes",
-        ]
-        mrows = []
-        for r in matched_rows:
-            notes = "; ".join(r.get("hints") or []) or "—"
-            ser = str(r.get("netbox_serial", ""))
-            if ser == "(empty)":
-                ser = "—"
-            mrows.append([
-                r["hostname"],
-                str(r.get("maas_zone", "")),
-                str(r.get("maas_pool", "")),
-                str(r.get("maas_status", "")),
-                str(r.get("netbox_site", "")),
-                str(r.get("netbox_status", "")),
-                str(r.get("maas_fabric", "")),
-                str(r.get("netbox_location", "")),
-                str(r.get("maas_system_id", "")),
-                ser,
-                str(r.get("netbox_primary_ip", "")),
-                str(r.get("netbox_vrf", "")),
-                str(r.get("netbox_vlans", "")),
-                str(r.get("openstack_fip", "")),
-                str(r.get("maas_bmc", "")),
-                str(r.get("netbox_oob", "")),
-                notes,
-            ])
-        ref_lines.extend(
-            _ascii_table(mh_headers, mrows, notes_col_idx=len(mh_headers) - 1, dynamic_columns=True)
-        )
-        ref_lines.append(f"  ({len(matched_rows)} matched hosts)")
+        ref_lines.extend(_banner("MATCHED HOSTS (full table suppressed on-screen)", "-"))
+        ref_lines.append("  Suppressed to keep the audit concise; calculations remain unchanged.")
+        ref_lines.append("  Use XLSX export for the full matched-host matrix when needed.")
+        ref_lines.extend(_ascii_table(
+            ["Metric", "Value"],
+            [
+                ["Matched hosts", str(len(matched_rows))],
+                ["Hosts with CHECK/hints", str(len(_matched_hosts_with_drift(matched_rows)))],
+                ["Serial validation needed", str(serial_validation_needed)],
+                ["BMC vs OOB mismatch", str(bmc_oob_mismatch)],
+            ],
+        ))
 
-    if interface_audit and interface_audit.get("hosts") and not use_remote_netbox:
+    if interface_audit and interface_audit.get("hosts"):
         ref_lines.append("")
         ref_lines.extend(_banner("MAAS <-> NetBox INTERFACES (per device)"))
         ref_lines.append("  Each row: one MAAS NIC. NetBox columns when same MAC exists.")
@@ -515,10 +788,6 @@ def format_drift_report(
                 ]
                 ref_lines.extend(_ascii_table(["NB intf", "MAC", "IPs"], nrows, max_col=20))
             ref_lines.append("")
-    elif use_remote_netbox:
-        ref_lines.append("")
-        ref_lines.append("  (Interface audit requires local NetBox ORM.)")
-
     if openstack_data and not openstack_data.get("error"):
         ref_lines.append("")
         ref_lines.extend(_banner("OPENSTACK REFERENCE"))
@@ -566,7 +835,6 @@ def build_drift_report_xlsx(
     os_subnet_gaps=None,
     os_floating_gaps=None,
     netbox_prefix_count=0,
-    use_remote_netbox=False,
     interface_audit=None,
 ):
     """
@@ -632,23 +900,55 @@ def build_drift_report_xlsx(
         interface_audit,
         os_subnet_gaps,
         os_floating_gaps or [],
-        use_remote_netbox,
     )
+    serial_validation_needed = _count_hints(matched_rows, "NB serial empty")
+    bmc_oob_mismatch = _count_hints(matched_rows, "MAAS BMC ")
     sub_txt = str(pc["sub_gaps"]) if pc["sub_gaps"] is not None else "N/A"
     ws_sum.append([])
     ws_sum.append(["Phase 0 — Drift categories", "", ""])
     _append_header(ws_sum, ["Category", "Count"])
-    ws_sum.append(["MAAS only (no NetBox Device)", str(pc["maas_only"])])
-    ws_sum.append(["NetBox only (no MAAS hostname)", str(pc["nb_only_dev"])])
+    ws_sum.append(["MAAS-only runtime-discovered (maas-discovered)", str(pc["maas_only"])])
+    ws_sum.append(["NetBox-only orphan devices (orphaned)", str(pc["nb_only_dev"])])
     ws_sum.append(["Matched — CHECK (placement/lifecycle)", str(pc["check_hosts"])])
+    ws_sum.append(["Serial validation needed (NB serial empty)", str(serial_validation_needed)])
     ws_sum.append(["Interface rows not OK", str(pc["iface_not_ok"])])
     ws_sum.append(["VLAN drift NICs", str(pc["vlan_drift_nic"])])
     ws_sum.append(["VLAN unverified NICs", str(pc["vlan_unverified_nic"])])
     ws_sum.append(["NetBox-only NICs", str(pc["nb_only_nic"])])
     ws_sum.append(["OpenStack subnet gaps", sub_txt])
     ws_sum.append(["OpenStack FIP gaps", str(pc["fip_gaps"])])
+    ws_sum.append(["MAAS BMC vs NetBox OOB mismatch", str(bmc_oob_mismatch)])
+    ws_sum.append([])
+    ws_sum.append(["High-risk differences (v1)", "", ""])
+    _append_header(ws_sum, ["High-risk category", "Count"])
+    ws_sum.append(["OpenStack FIP not in NetBox IPAddress", str(pc["fip_gaps"])])
+    ws_sum.append(["OpenStack subnet without exact Prefix", sub_txt])
+    ws_sum.append(["Physical NIC VLAN_DRIFT", str(pc["vlan_drift_nic"])])
+    ws_sum.append(["Serial validation needed", str(serial_validation_needed)])
+    ws_sum.append(["MAAS BMC vs NetBox OOB mismatch", str(bmc_oob_mismatch)])
     ws_sum.append([])
     ws_sum.append(["MAAS <-> NetBox matched hostnames", str(drift.get("matched_count", 0)), ""])
+
+    prop = _proposed_changes_rows(
+        maas_data,
+        netbox_data,
+        drift,
+        interface_audit,
+        matched_rows,
+        os_subnet_gaps or [],
+        os_floating_gaps or [],
+    )
+    ws_sum.append([])
+    ws_sum.append(["Proposed changes (preview only)", "", ""])
+    _append_header(ws_sum, ["Bucket", "Count"])
+    ws_sum.append(["Add: Devices", str(len(prop["add_devices"]))])
+    ws_sum.append(["Add: Prefixes", str(len(prop["add_prefixes"]))])
+    ws_sum.append(["Add: Floating IPs", str(len(prop["add_fips"]))])
+    ws_sum.append(["Update: VLAN", str(len(prop["update_vlan"]))])
+    ws_sum.append(["Update: Interface IPs", str(len(prop["update_ip"]))])
+    ws_sum.append(["Review: Orphans", str(len(prop["review_orphans"]))])
+    ws_sum.append(["Review: Serial", str(len(prop["review_serial"]))])
+    ws_sum.append(["Review: BMC/OOB", str(len(prop["review_bmc"]))])
 
     # --- Matched hosts with drift only (same as on-screen report) ---
     matched_with_drift = _matched_hosts_with_drift(matched_rows)
@@ -731,6 +1031,70 @@ def build_drift_report_xlsx(
                     (n.get("name") or n.get("id") or "")[:60],
                     (n.get("id") or "")[:40],
                 ])
+
+    # --- Proposed changes (full list) ---
+    ws_prop = _sheet("Proposed changes")
+    ws_prop.append(["Preview only: Drift Audit does not apply changes to NetBox."])
+    ws_prop.cell(row=1, column=1).font = header_font
+    ws_prop.append([])
+    _append_header(ws_prop, ["Section", "Count"])
+    ws_prop.append(["Add: Devices from MAAS", len(prop["add_devices"])])
+    ws_prop.append(["Add: Prefixes from OpenStack", len(prop["add_prefixes"])])
+    ws_prop.append(["Add: Floating IPs from OpenStack", len(prop["add_fips"])])
+    ws_prop.append(["Update: Interface VLAN", len(prop["update_vlan"])])
+    ws_prop.append(["Update: Interface IP alignment", len(prop["update_ip"])])
+    ws_prop.append(["Review: NetBox orphans", len(prop["review_orphans"])])
+    ws_prop.append(["Review: Serial validation", len(prop["review_serial"])])
+    ws_prop.append(["Review: BMC vs OOB mismatch", len(prop["review_bmc"])])
+
+    def _append_block(title, headers, rows):
+        ws_prop.append([])
+        ws_prop.append([title])
+        ws_prop.cell(row=ws_prop.max_row, column=1).font = header_font
+        _append_header(ws_prop, headers)
+        for row in rows:
+            ws_prop.append(list(row))
+
+    _append_block(
+        "A) Devices to create from MAAS (maas-discovered)",
+        ["Hostname", "Zone", "Pool", "MAAS Status", "System ID", "Proposed Tag", "Proposed Action"],
+        prop["add_devices"],
+    )
+    _append_block(
+        "A) Prefixes to create from OpenStack",
+        ["CIDR", "Network Name", "Network ID", "Cloud", "Proposed Action"],
+        prop["add_prefixes"],
+    )
+    _append_block(
+        "A) Floating IPs to create in NetBox IPAM",
+        ["Floating IP", "Fixed IP", "Project", "Cloud", "Proposed Action"],
+        prop["add_fips"],
+    )
+    _append_block(
+        "B) Interface VLAN updates",
+        ["Host", "Interface", "MAAS VLAN", "NetBox VLAN", "Proposed Action", "Risk"],
+        prop["update_vlan"],
+    )
+    _append_block(
+        "B) Interface IP alignment updates",
+        ["Host", "Interface", "Missing IP details", "Proposed Action", "Risk"],
+        prop["update_ip"],
+    )
+    _append_block(
+        "C) NetBox orphan devices (orphaned)",
+        ["Hostname", "Site", "Status", "Proposed Tag", "Proposed Action", "Risk"],
+        prop["review_orphans"],
+    )
+    _append_block(
+        "C) Serial validation required",
+        ["Hostname", "MAAS System ID", "NetBox Serial", "Proposed Action", "Risk"],
+        prop["review_serial"],
+    )
+    _append_block(
+        "C) BMC vs OOB mismatch",
+        ["Hostname", "MAAS BMC", "NetBox OOB", "Proposed Action", "Risk"],
+        prop["review_bmc"],
+    )
 
     buf = BytesIO()
     wb.save(buf)

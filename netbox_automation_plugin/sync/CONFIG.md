@@ -56,20 +56,22 @@ Optional (application credentials instead of user/password):
 
 **NetBox (drift audit vs MAAS):** By default the plugin reads **this NetBox’s database** (Django ORM), same idea as VLAN deployment — **no `NETBOX_URL`, token, or DNS** to yourself.
 
-Only if you must compare MAAS to a **different** NetBox over HTTP:
-
-| Variable | Description |
-|----------|-------------|
-| `NETBOX_SYNC_USE_REMOTE_API` | `true` to use pynetbox instead of local DB |
-| `NETBOX_URL` | Remote API base |
-| `NETBOX_TOKEN` | API token |
-| `NETBOX_SSL_VERIFY` / `NETBOX_CA_BUNDLE` | TLS options for remote API |
-
 **OpenStack from Docker:** If `birch.cloud.whitefiber.com` does not resolve inside the container, use an **internal auth URL** or add **`extra_hosts`** in Compose. `OPENSTACK_INSECURE=true` only skips TLS verification; it does not fix DNS.
 
 | Variable | Description |
 |----------|-------------|
 | `OPENSTACK_INSECURE` | `true` to skip TLS verify for Keystone/API (e.g. dev CAs) |
+
+**Multi-project Neutron audit (optional):** By default the plugin uses a single Keystone project (`OS_PROJECT_NAME` / `OS_PROJECT_ID`). To compare drift against **all projects** the user can access (networks/subnets/FIPs merged with dedupe by resource id), set:
+
+| Variable | Description |
+|----------|-------------|
+| `OPENSTACK_AUDIT_ALL_PROJECTS` | `true` — list projects via Keystone, then run Neutron list APIs in each project scope. Shared resources appear once (deduped by id). |
+| `OPENSTACK_PROJECT_ALLOWLIST` | Comma-separated **project names or UUIDs**. If set **without** `OPENSTACK_AUDIT_ALL_PROJECTS`, only these projects are scanned (no Keystone list). If set **with** `OPENSTACK_AUDIT_ALL_PROJECTS`, the Keystone list is filtered to this set. |
+
+For the **second cloud** (`OPENSTACK_2_*`): `OPENSTACK_2_AUDIT_ALL_PROJECTS` and `OPENSTACK_2_PROJECT_ALLOWLIST` behave the same.
+
+**Notes:** Listing projects requires a user/token that can call Keystone’s project API; **application credentials** are often single-project — if listing fails, the plugin falls back to one project from your existing `OS_PROJECT_NAME` / project id. Projects where Neutron returns 403 are skipped with a warning; partial data is still returned if at least one project succeeds.
 
 ### Plugin config (optional override)
 
