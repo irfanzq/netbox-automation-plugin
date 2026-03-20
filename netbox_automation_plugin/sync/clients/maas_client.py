@@ -694,18 +694,30 @@ async def fetch_maas_data(maas_url: str, maas_api_key: str, maas_insecure: bool)
                     ifaces = rest_if
                     fabric_name = rest_fab if rest_fab != "-" else fabric_name
             bmc_ip = ""
+            serial = ""
             try:
                 md = getattr(m, "_data", None)
                 if isinstance(md, dict):
                     bmc_ip = _bmc_ip_from_power(
                         md.get("power_parameters"), md.get("power_type")
                     )
+                    serial = (
+                        (md.get("serial") or "")
+                        or (md.get("serial_number") or "")
+                        or (md.get("product_serial") or "")
+                    )
             except Exception:
                 pass
+            if not serial:
+                serial = (
+                    (getattr(m, "serial", None) or "")
+                    or (getattr(m, "serial_number", None) or "")
+                )
             result["machines"].append({
                 "hostname": short_name,
                 "fqdn": raw_name if raw_name != short_name else "",
                 "system_id": getattr(m, "system_id", ""),
+                "serial": str(serial).strip(),
                 "zone_name": zone_name,
                 "pool_name": pool_name,
                 "fabric_name": fabric_name,

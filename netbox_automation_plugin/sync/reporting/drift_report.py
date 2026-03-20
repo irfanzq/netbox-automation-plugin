@@ -316,8 +316,10 @@ def _proposed_changes_rows(
                 hn,
                 row.get("maas_if") or "",
                 row.get("maas_mac") or "",
+                row.get("maas_ips") or "",
                 row.get("nb_if") or "—",
                 row.get("nb_mac") or "—",
+                row.get("nb_ips") or "—",
                 maas_vlan,
                 nb_vlan,
                 ", ".join(dict.fromkeys(statuses)),
@@ -344,6 +346,7 @@ def _proposed_changes_rows(
         if "NB serial empty — correlate system_id" in (r.get("hints") or []):
             review_serial.append([
                 r.get("hostname", ""),
+                str(r.get("maas_serial", "")),
                 str(r.get("maas_system_id", "")),
                 str(r.get("netbox_serial", "")),
                 "Manual validation",
@@ -423,6 +426,58 @@ def format_drift_report(
         if netbox_prefix_count:
             inv_rows.append(["IPAM Prefix objects", str(netbox_prefix_count)])
         drift_lines.extend(_ascii_table(["Metric", "Count"], inv_rows))
+
+    scope_meta = (drift or {}).get("scope_meta") or {}
+    if scope_meta:
+        drift_lines.append("")
+        drift_lines.extend(_banner("SCOPE COVERAGE CHECK", "-"))
+        sel_sites = ", ".join(scope_meta.get("selected_sites") or []) or "(all)"
+        sel_locs = ", ".join(scope_meta.get("selected_locations") or []) or "(all)"
+        os_unmatched = list(scope_meta.get("openstack_unmatched_network_names") or [])
+        if scope_meta.get("openstack_unmatched_network_names_more"):
+            os_unmatched.append(f"... +{scope_meta['openstack_unmatched_network_names_more']} more")
+        maas_unmatched = list(scope_meta.get("maas_unmatched_fabrics") or [])
+        if scope_meta.get("maas_unmatched_fabrics_more"):
+            maas_unmatched.append(f"... +{scope_meta['maas_unmatched_fabrics_more']} more")
+        drift_lines.extend(_ascii_table(
+            ["Check", "Value"],
+            [
+                ["Coverage status", str(scope_meta.get("coverage_status") or "PARTIAL")],
+                ["Selected sites", sel_sites],
+                ["Selected locations", sel_locs],
+                [
+                    "MAAS machines included / fetched",
+                    f"{scope_meta.get('maas_machines_after', 0)} / {scope_meta.get('maas_machines_before', 0)}",
+                ],
+                [
+                    "NetBox devices included / fetched",
+                    f"{scope_meta.get('netbox_devices_after', 0)} / {scope_meta.get('netbox_devices_before', 0)}",
+                ],
+                [
+                    "OpenStack nets included / fetched",
+                    f"{scope_meta.get('openstack_networks_after', 0)} / {scope_meta.get('openstack_networks_before', 0)}",
+                ],
+                [
+                    "OpenStack subnets included / fetched",
+                    f"{scope_meta.get('openstack_subnets_after', 0)} / {scope_meta.get('openstack_subnets_before', 0)}",
+                ],
+                [
+                    "OpenStack FIPs included / fetched",
+                    f"{scope_meta.get('openstack_fips_after', 0)} / {scope_meta.get('openstack_fips_before', 0)}",
+                ],
+                [
+                    "MAAS all fabrics (pre-scope)",
+                    ", ".join(scope_meta.get("maas_all_fabrics") or []) or "(none)",
+                ],
+                [
+                    "OpenStack all network names (pre-scope)",
+                    ", ".join(scope_meta.get("openstack_all_network_names") or []) or "(none)",
+                ],
+                ["MAAS unmatched fabrics (sample)", ", ".join(maas_unmatched) or "(none)"],
+                ["OpenStack unmatched network names (sample)", ", ".join(os_unmatched) or "(none)"],
+            ],
+            dynamic_columns=True,
+        ))
 
     # --- Phase 0 (design doc) — counts only ---
     drift_lines.append("")
@@ -567,7 +622,7 @@ def format_drift_report(
     if prop["update_nic"]:
         drift_lines.append("  NIC drift updates (single per-interface table)")
         drift_lines.extend(_ascii_table(
-            ["Host", "MAAS intf", "MAAS MAC", "NB intf", "NB MAC", "MAAS VLAN", "NB VLAN", "Status", "Reason", "Proposed Action", "Risk"],
+            ["Host", "MAAS intf", "MAAS MAC", "MAAS IPs", "NB intf", "NB MAC", "NB IPs", "MAAS VLAN", "NB VLAN", "Status", "Reason", "Proposed Action", "Risk"],
             prop["update_nic"],
             dynamic_columns=True,
         ))
@@ -593,7 +648,7 @@ def format_drift_report(
     if prop["review_serial"]:
         drift_lines.append("  Serial validation required")
         drift_lines.extend(_ascii_table(
-            ["Hostname", "MAAS System ID", "NetBox Serial", "Proposed Action", "Risk"],
+            ["Hostname", "MAAS Serial", "MAAS System ID", "NetBox Serial", "Proposed Action", "Risk"],
             prop["review_serial"],
             dynamic_columns=True,
         ))
@@ -641,31 +696,7 @@ def format_drift_report(
     else:
         drift_lines.append("    (none)")
 
-    # --- Matched hosts with drift only (CHECK or hints) ---
-    matched_with_drift = _matched_hosts_with_drift(matched_rows)
-    if matched_with_drift:
-        drift_lines.append("")
-        drift_lines.extend(_banner("MATCHED HOSTS WITH DRIFT (review needed)", "-"))
-        drift_lines.append("  Forward-looking (Full Sync): update site/role/serial from MAAS or flag for review.")
-        drift_lines.append("")
-        mrows = []
-        for r in matched_with_drift:
-            notes = _dedupe_note_parts("; ".join(r.get("hints") or [])) or "—"
-            if r.get("place_match") == "CHECK":
-                notes = ("CHECK; " + notes) if notes != "—" else "CHECK"
-            mrows.append([
-                r.get("hostname", ""),
-                str(r.get("maas_zone", "")),
-                str(r.get("netbox_site", "")),
-                notes,
-            ])
-        drift_lines.extend(_ascii_table(
-            ["host", "MAAS zone", "NB site", "drift note"],
-            mrows,
-            notes_col_idx=3,
-            dynamic_columns=True,
-        ))
-        drift_lines.append(f"  ({len(matched_with_drift)} hosts with drift)")
+    # Matched-host drift reference table intentionally suppressed to keep report concise.
 
     # NIC drift is shown in Proposed Changes as a single combined per-interface table.
 
@@ -768,6 +799,51 @@ def build_drift_report_xlsx(
     ws_sum.append([])
     ws_sum.append(["MAAS <-> NetBox matched hostnames", str(drift.get("matched_count", 0)), ""])
 
+    scope_meta = (drift or {}).get("scope_meta") or {}
+    if scope_meta:
+        ws_sum.append([])
+        ws_sum.append(["Scope coverage check", "", ""])
+        _append_header(ws_sum, ["Check", "Value"])
+        ws_sum.append(["Coverage status", str(scope_meta.get("coverage_status") or "PARTIAL")])
+        ws_sum.append(["Selected sites", ", ".join(scope_meta.get("selected_sites") or []) or "(all)"])
+        ws_sum.append(["Selected locations", ", ".join(scope_meta.get("selected_locations") or []) or "(all)"])
+        ws_sum.append([
+            "MAAS machines included / fetched",
+            f"{scope_meta.get('maas_machines_after', 0)} / {scope_meta.get('maas_machines_before', 0)}",
+        ])
+        ws_sum.append([
+            "NetBox devices included / fetched",
+            f"{scope_meta.get('netbox_devices_after', 0)} / {scope_meta.get('netbox_devices_before', 0)}",
+        ])
+        ws_sum.append([
+            "OpenStack nets included / fetched",
+            f"{scope_meta.get('openstack_networks_after', 0)} / {scope_meta.get('openstack_networks_before', 0)}",
+        ])
+        ws_sum.append([
+            "OpenStack subnets included / fetched",
+            f"{scope_meta.get('openstack_subnets_after', 0)} / {scope_meta.get('openstack_subnets_before', 0)}",
+        ])
+        ws_sum.append([
+            "OpenStack FIPs included / fetched",
+            f"{scope_meta.get('openstack_fips_after', 0)} / {scope_meta.get('openstack_fips_before', 0)}",
+        ])
+        ws_sum.append([
+            "MAAS all fabrics (pre-scope)",
+            ", ".join(scope_meta.get("maas_all_fabrics") or []) or "(none)",
+        ])
+        ws_sum.append([
+            "OpenStack all network names (pre-scope)",
+            ", ".join(scope_meta.get("openstack_all_network_names") or []) or "(none)",
+        ])
+        maas_unmatched = list(scope_meta.get("maas_unmatched_fabrics") or [])
+        if scope_meta.get("maas_unmatched_fabrics_more"):
+            maas_unmatched.append(f"... +{scope_meta['maas_unmatched_fabrics_more']} more")
+        os_unmatched = list(scope_meta.get("openstack_unmatched_network_names") or [])
+        if scope_meta.get("openstack_unmatched_network_names_more"):
+            os_unmatched.append(f"... +{scope_meta['openstack_unmatched_network_names_more']} more")
+        ws_sum.append(["MAAS unmatched fabrics (sample)", ", ".join(maas_unmatched) or "(none)"])
+        ws_sum.append(["OpenStack unmatched network names (sample)", ", ".join(os_unmatched) or "(none)"])
+
     prop = _proposed_changes_rows(
         maas_data,
         netbox_data,
@@ -788,21 +864,7 @@ def build_drift_report_xlsx(
     ws_sum.append(["Review: Serial", str(len(prop["review_serial"]))])
     ws_sum.append(["Review: BMC/OOB", str(len(prop["review_bmc"]))])
 
-    # --- Matched hosts with drift only (same as on-screen report) ---
-    matched_with_drift = _matched_hosts_with_drift(matched_rows)
-    if matched_with_drift:
-        ws_mh = _sheet("Matched hosts with drift")
-        _append_header(ws_mh, ["host", "MAAS zone", "NB site", "drift note"])
-        for r in matched_with_drift:
-            notes = _dedupe_note_parts("; ".join(r.get("hints") or [])) or "—"
-            if r.get("place_match") == "CHECK":
-                notes = ("CHECK; " + notes) if notes != "—" else "CHECK"
-            ws_mh.append([
-                r.get("hostname", ""),
-                str(r.get("maas_zone", "")),
-                str(r.get("netbox_site", "")),
-                notes,
-            ])
+    # Matched-host drift worksheet intentionally suppressed to match on-screen report.
 
     # --- Proposed changes (full list) ---
     ws_prop = _sheet("Proposed changes")
@@ -845,7 +907,7 @@ def build_drift_report_xlsx(
     )
     _append_block(
         "B) NIC drift updates (single per-interface table)",
-        ["Host", "MAAS intf", "MAAS MAC", "NB intf", "NB MAC", "MAAS VLAN", "NB VLAN", "Status", "Reason", "Proposed Action", "Risk"],
+        ["Host", "MAAS intf", "MAAS MAC", "MAAS IPs", "NB intf", "NB MAC", "NB IPs", "MAAS VLAN", "NB VLAN", "Status", "Reason", "Proposed Action", "Risk"],
         prop["update_nic"],
     )
     _append_block(
@@ -855,7 +917,7 @@ def build_drift_report_xlsx(
     )
     _append_block(
         "C) Serial validation required",
-        ["Hostname", "MAAS System ID", "NetBox Serial", "Proposed Action", "Risk"],
+        ["Hostname", "MAAS Serial", "MAAS System ID", "NetBox Serial", "Proposed Action", "Risk"],
         prop["review_serial"],
     )
     _append_block(

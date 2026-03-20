@@ -103,6 +103,8 @@ def _collect_neutron(conn, project_label: str) -> tuple[list, list, list]:
             "id": sn.id,
             "cidr": getattr(sn, "cidr", ""),
             "network_id": getattr(sn, "network_id", ""),
+            "name": getattr(sn, "name", "") or "",
+            "description": getattr(sn, "description", "") or "",
         })
 
     for fip in conn.network.ips(floating=True):
@@ -113,6 +115,7 @@ def _collect_neutron(conn, project_label: str) -> tuple[list, list, list]:
             "id": getattr(fip, "id", ""),
             "project_id": str(tid)[:36] if tid else "",
             "project_name": project_label,
+            "floating_network_id": getattr(fip, "floating_network_id", "") or "",
         })
 
     return networks, subnets, floating_ips
