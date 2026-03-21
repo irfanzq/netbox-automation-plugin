@@ -228,22 +228,56 @@ def _html_cell_content(s) -> str:
     return html.escape(raw, quote=False).replace("\n", "<br />")
 
 
+def _html_col_is_mac(header) -> bool:
+    """True for column headers that represent a MAC address (not substrings like 'machines')."""
+    return re.search(r"(?i)\bMAC\b", str(header or "")) is not None
+
+
+def _html_col_is_risk(header) -> bool:
+    return str(header or "").strip().lower() == "risk"
+
+
+def _html_th_class(header) -> str:
+    h = str(header or "")
+    base = "small align-bottom"
+    if _html_col_is_mac(h):
+        return f"{base} text-nowrap font-monospace"
+    if _html_col_is_risk(h):
+        return f"{base} text-nowrap"
+    return base
+
+
+def _html_td_class(header, col_idx, notes_col_idx=None) -> str:
+    h = str(header or "")
+    parts = []
+    if _html_col_is_mac(h):
+        parts.extend(["align-top", "text-nowrap", "font-monospace"])
+    elif _html_col_is_risk(h):
+        parts.extend(["align-top", "text-nowrap"])
+    else:
+        # Bootstrap text-break: wrap long strings so text columns stay reasonably narrow (early HTML behavior).
+        parts.extend(["align-top", "text-break"])
+    if notes_col_idx is not None and col_idx == notes_col_idx:
+        parts.append("text-muted")
+    return " ".join(parts)
+
+
 def _html_table(headers, rows, *, notes_col_idx=None):
     if not headers:
         return ""
     n = len(headers)
+    hdr_strs = [str(h) for h in headers]
     ths = "".join(
-        f'<th scope="col" class="small align-bottom">{_html_cell_content(h)}</th>'
-        for h in headers
+        f'<th scope="col" class="{_html_th_class(h)}">{_html_cell_content(h)}</th>'
+        for h in hdr_strs
     )
     body_parts = []
     for r in rows:
         padded = list(r[:n]) + [""] * (n - min(len(r), n))
         tds = []
         for i, cell in enumerate(padded):
-            cls = "align-top text-break"
-            if notes_col_idx is not None and i == notes_col_idx:
-                cls += " text-muted"
+            h = hdr_strs[i] if i < len(hdr_strs) else ""
+            cls = _html_td_class(h, i, notes_col_idx)
             tds.append(f'<td class="{cls}">{_html_cell_content(cell)}</td>')
         body_parts.append("<tr>" + "".join(tds) + "</tr>")
     return (
@@ -1029,9 +1063,6 @@ def format_drift_report(
         maas_unmatched = list(scope_meta.get("maas_unmatched_fabrics") or [])
         if scope_meta.get("maas_unmatched_fabrics_more"):
             maas_unmatched.append(f"... +{scope_meta['maas_unmatched_fabrics_more']} more")
-        _maas_fabric_noisy = r"(?i)^fabric-\d+$"
-        # scope_meta["maas_fabrics_after"]: distinct per-NIC MAAS fabrics for MAC'd interfaces on scoped hosts.
-        _maas_fab_in_scope_label = "MAAS fabrics fetched (in-scope)"
         e.table(
             ["Check", "Value"],
             [
@@ -1057,30 +1088,6 @@ def format_drift_report(
                 [
                     "OpenStack FIPs included / fetched",
                     f"{scope_meta.get('openstack_fips_after', 0)} / {scope_meta.get('openstack_fips_before', 0)}",
-                ],
-                [
-                    "MAAS all fabrics (pre-scope, summarized)",
-                    _format_inventory_list(
-                        scope_meta.get("maas_all_fabrics") or [],
-                        noisy_regex=_maas_fabric_noisy,
-                        noisy_label="fabric-<number>",
-                    ),
-                ],
-                [
-                    _maas_fab_in_scope_label,
-                    _format_inventory_list(
-                        scope_meta.get("maas_fabrics_after") or [],
-                        noisy_regex=_maas_fabric_noisy,
-                        noisy_label="fabric-<number>",
-                    ),
-                ],
-                [
-                    "OpenStack all network names (pre-scope)",
-                    _format_inventory_list(scope_meta.get("openstack_all_network_names") or []),
-                ],
-                [
-                    "OpenStack network names fetched (in-scope)",
-                    _format_inventory_list(scope_meta.get("openstack_network_names_after") or []),
                 ],
                 ["MAAS unmatched fabrics (sample)", ", ".join(maas_unmatched) or "(none)"],
                 ["OpenStack unmatched network names (sample)", ", ".join(os_unmatched) or "(none)"],
@@ -1464,32 +1471,6 @@ def build_drift_report_xlsx(
         ws_sum.append([
             "OpenStack FIPs included / fetched",
             f"{scope_meta.get('openstack_fips_after', 0)} / {scope_meta.get('openstack_fips_before', 0)}",
-        ])
-        _x_maas_fabric_noisy = r"(?i)^fabric-\d+$"
-        _x_maas_fab_in_scope_label = "MAAS fabrics fetched (in-scope)"
-        ws_sum.append([
-            "MAAS all fabrics (pre-scope, summarized)",
-            _format_inventory_list(
-                scope_meta.get("maas_all_fabrics") or [],
-                noisy_regex=_x_maas_fabric_noisy,
-                noisy_label="fabric-<number>",
-            ),
-        ])
-        ws_sum.append([
-            _x_maas_fab_in_scope_label,
-            _format_inventory_list(
-                scope_meta.get("maas_fabrics_after") or [],
-                noisy_regex=_x_maas_fabric_noisy,
-                noisy_label="fabric-<number>",
-            ),
-        ])
-        ws_sum.append([
-            "OpenStack all network names (pre-scope)",
-            _format_inventory_list(scope_meta.get("openstack_all_network_names") or []),
-        ])
-        ws_sum.append([
-            "OpenStack network names fetched (in-scope)",
-            _format_inventory_list(scope_meta.get("openstack_network_names_after") or []),
         ])
         maas_unmatched = list(scope_meta.get("maas_unmatched_fabrics") or [])
         if scope_meta.get("maas_unmatched_fabrics_more"):
