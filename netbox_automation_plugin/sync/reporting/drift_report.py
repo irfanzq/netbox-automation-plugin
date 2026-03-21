@@ -1,6 +1,6 @@
 """
 Generate human-readable drift audit report from MAAS, NetBox, and OpenStack data.
-Uses ASCII tables (+---+) for readability in <pre> or plain text.
+Default UI output uses Bootstrap HTML tables; set use_html=False for ASCII (+---+) plain text.
 XLSX export via build_drift_report_xlsx() for download (openpyxl); Google Sheets opens .xlsx.
 
 Copy in this module distinguishes **host data NICs** (Ethernet MAC/IP/VLAN) from **BMC / OOB**
@@ -10,7 +10,9 @@ which documents the management attachment — not the same as in-band NICs.
 """
 
 from io import BytesIO
+import html
 import re
+import textwrap
 
 _MAX_MAAS_MISSING_ROWS = 500
 _MAX_OS_NETWORKS = 40
@@ -22,6 +24,9 @@ _MAX_NOTES_COL = 42
 _NOTES_COL_MAX_WIDTH = 8000
 # Matched-hosts style tables: full cell text per column (no mid-cell truncation)
 _DYNAMIC_COL_CAP = 10000
+# ASCII tables: cap column width and wrap long cells so one outlier row does not pad every row.
+_ASCII_COL_WRAP_DEFAULT = 96
+_ASCII_NOTES_COL_WRAP = 200
 
 
 def _dedupe_keep_order(items):
@@ -86,11 +91,32 @@ def _maas_machine_by_hostname(maas_data):
     return out
 
 
-def _cell(s, w):
-    s = str(s).replace("\n", " ").replace("\r", "") if s is not None else ""
-    if len(s) > w:
+def _normalize_ascii_cell(s):
+    return str(s).replace("\n", " ").replace("\r", "") if s is not None else ""
+
+
+def _cell(s, w, *, truncate=True):
+    s = _normalize_ascii_cell(s)
+    if truncate and len(s) > w:
         s = s[: max(1, w - 2)] + ".."
     return s.ljust(w)
+
+
+def _wrap_cell_lines(text: str, width: int) -> list[str]:
+    """Word-wrap cell text to width; no truncation (long tokens split)."""
+    if width < 1:
+        width = 1
+    t = _normalize_ascii_cell(text)
+    if not t:
+        return [""]
+    lines = textwrap.wrap(
+        t,
+        width=width,
+        break_long_words=True,
+        break_on_hyphens=False,
+        replace_whitespace=False,
+    )
+    return lines if lines else [""]
 
 
 def _ascii_table(
@@ -101,21 +127,62 @@ def _ascii_table(
     max_col=None,
     notes_col_idx=None,
     dynamic_columns=True,
+    wrap_max_width=_ASCII_COL_WRAP_DEFAULT,
 ):
     """
-    dynamic_columns: size every column to content (caps: notes col 8000, else 140).
-    One ASCII line per data row — use with horizontal scroll in HTML.
+    dynamic_columns: width per column from content, capped by wrap_max_width, with word wrap
+    (avoids one long cell forcing huge padding on every row). Full text is kept on extra lines.
+    After each logical row (including wrapped multi-line rows), a horizontal rule is printed so
+    continuation lines are not confused with the next record.
+
+    wrap_max_width: None disables wrap cap (legacy: single-line rows, wide columns, may truncate
+    via _cell if over cap). Default 96 balances readability in <pre> without horizontal sprawl.
     """
     if not headers:
         return []
     n = len(headers)
+
+    if dynamic_columns and wrap_max_width is not None:
+        widths = []
+        for i in range(n):
+            w = max(len(_normalize_ascii_cell(headers[i])), 6)
+            for r in rows:
+                if i < len(r):
+                    w = max(w, len(_normalize_ascii_cell(r[i])))
+            cap = wrap_max_width
+            if notes_col_idx is not None and i == notes_col_idx:
+                cap = min(max(cap, _ASCII_NOTES_COL_WRAP), _NOTES_COL_MAX_WIDTH)
+            widths.append(min(w, cap))
+
+        def emit_wrapped_row(cells: list) -> list[str]:
+            padded = list(cells[:n]) + [""] * (n - min(len(cells), n))
+            col_lines = [_wrap_cell_lines(padded[i], widths[i]) for i in range(n)]
+            h = max(len(cl) for cl in col_lines)
+            col_lines = [cl + [""] * (h - len(cl)) for cl in col_lines]
+            lines_out = []
+            for li in range(h):
+                parts = [col_lines[i][li].ljust(widths[i]) for i in range(n)]
+                lines_out.append(
+                    indent + "|" + "|".join(" " + parts[i] + " " for i in range(n)) + "|"
+                )
+            return lines_out
+
+        sep = indent + "+" + "+".join("-" * (w + 2) for w in widths) + "+"
+        out = [sep]
+        out.extend(emit_wrapped_row(headers))
+        out.append(sep)
+        for r in rows:
+            out.extend(emit_wrapped_row(r))
+            out.append(sep)
+        return out
+
     widths = []
     for i in range(n):
         if dynamic_columns:
             w = max(len(str(headers[i])), 6)
             for r in rows:
                 if i < len(r):
-                    cell = str(r[i]).replace("\n", " ").replace("\r", "")
+                    cell = _normalize_ascii_cell(r[i])
                     w = max(w, len(cell))
             if notes_col_idx is not None and i == notes_col_idx:
                 widths.append(min(w, _NOTES_COL_MAX_WIDTH))
@@ -126,7 +193,7 @@ def _ascii_table(
             w = max(len(str(headers[i])), 8)
             for r in rows:
                 if i < len(r):
-                    cell = str(r[i]).replace("\n", " ").replace("\r", "")
+                    cell = _normalize_ascii_cell(r[i])
                     w = max(w, len(cell))
             widths.append(min(w, _NOTES_COL_MAX_WIDTH))
             continue
@@ -154,6 +221,115 @@ def _ascii_table(
 def _banner(title, char="=", width=72):
     line = char * width
     return [line, f"  {title}", line]
+
+
+def _html_cell_content(s) -> str:
+    raw = _normalize_ascii_cell(s)
+    return html.escape(raw, quote=False).replace("\n", "<br />")
+
+
+def _html_table(headers, rows, *, notes_col_idx=None):
+    if not headers:
+        return ""
+    n = len(headers)
+    ths = "".join(
+        f'<th scope="col" class="small align-bottom">{_html_cell_content(h)}</th>'
+        for h in headers
+    )
+    body_parts = []
+    for r in rows:
+        padded = list(r[:n]) + [""] * (n - min(len(r), n))
+        tds = []
+        for i, cell in enumerate(padded):
+            cls = "align-top text-break"
+            if notes_col_idx is not None and i == notes_col_idx:
+                cls += " text-muted"
+            tds.append(f'<td class="{cls}">{_html_cell_content(cell)}</td>')
+        body_parts.append("<tr>" + "".join(tds) + "</tr>")
+    return (
+        '<div class="table-responsive mb-3">'
+        '<table class="table table-sm table-bordered table-striped align-middle mb-0">'
+        f'<thead class="table-light"><tr>{ths}</tr></thead><tbody>'
+        + "".join(body_parts)
+        + "</tbody></table></div>"
+    )
+
+
+class _DriftReportEmitter:
+    __slots__ = ("_html", "_parts")
+
+    def __init__(self, *, use_html: bool = True):
+        self._html = use_html
+        self._parts: list[str] = []
+
+    def banner(self, title: str, char: str = "=") -> None:
+        if self._html:
+            major = char == "="
+            cls = (
+                "drift-rpt-title border-bottom border-2 pb-2 mb-3 mt-3 fw-bold text-body"
+                if major
+                else "drift-rpt-subtitle border-bottom pb-2 mb-2 mt-3 fw-semibold text-body"
+            )
+            self._parts.append(f'<div class="{cls}">{html.escape(title)}</div>')
+        else:
+            self._parts.extend(_banner(title, char))
+
+    def spacer(self) -> None:
+        if self._html:
+            self._parts.append('<div class="drift-rpt-spacer mb-2" aria-hidden="true"></div>')
+        else:
+            self._parts.append("")
+
+    def subtitle(self, text: str) -> None:
+        t = (text or "").strip()
+        if self._html:
+            self._parts.append(
+                f'<div class="text-body-secondary fw-semibold mb-1">{html.escape(t)}</div>'
+            )
+        else:
+            self._parts.append(f"  {t}")
+
+    def paragraph(self, text: str) -> None:
+        t = (text or "").strip()
+        if not t:
+            return
+        if self._html:
+            self._parts.append(f'<p class="small text-body-secondary mb-2">{html.escape(t)}</p>')
+        else:
+            self._parts.append(f"  {t}")
+
+    def error(self, message: str) -> None:
+        if self._html:
+            self._parts.append(
+                '<div class="alert alert-danger py-2 px-3 small mb-2" role="alert">'
+                f"{html.escape(str(message))}</div>"
+            )
+        else:
+            self._parts.append(f"    Error: {message}")
+
+    def line_total(self, text: str) -> None:
+        t = (text or "").strip()
+        if self._html:
+            self._parts.append(f'<p class="small fw-semibold mb-2">{html.escape(t)}</p>')
+        else:
+            self._parts.append(f"  {t}")
+
+    def table(self, headers, rows, **kw) -> None:
+        if self._html:
+            self._parts.append(
+                _html_table(headers, rows, notes_col_idx=kw.get("notes_col_idx"))
+            )
+        else:
+            self._parts.extend(_ascii_table(headers, rows, **kw))
+
+    def render(self) -> str:
+        if self._html:
+            return (
+                '<div class="drift-report-html" style="font-size:0.8125rem">'
+                + "\n".join(self._parts)
+                + "</div>"
+            )
+        return "\n".join(self._parts)
 
 
 def _phase0_category_counts(
@@ -795,40 +971,42 @@ def format_drift_report(
     netbox_prefix_count=0,
     interface_audit=None,
     netbox_ifaces=None,
+    use_html=True,
 ):
     """
-    Return {"drift": str, "reference": str}.
+    Return {"drift": str, "reference": str, "drift_markup": "html"|"text"}.
+
     drift = Phase 0 + drift-only tables (MAAS-only, matched with drift, NIC drift, OS gaps).
     reference = full matched hosts, full per-device NIC audit, OpenStack ref (collapsible in UI).
     OpenStack data is already combined from all configured clouds before being passed here.
+
+    When use_html is True (default), drift is a safe HTML fragment for |safe in templates.
     """
-    drift_lines = []
+    e = _DriftReportEmitter(use_html=use_html)
     ref_lines = []
 
     # --- INVENTORY (compact) ---
-    drift_lines.extend(_banner("INVENTORY"))
-    drift_lines.append("")
-    drift_lines.append("  MAAS")
-    drift_lines.append("")
+    e.banner("INVENTORY")
+    e.spacer()
+    e.subtitle("MAAS")
+    e.spacer()
     if maas_data.get("error"):
-        drift_lines.append(f"    Error: {maas_data['error']}")
+        e.error(f"Error: {maas_data['error']}")
     else:
-        drift_lines.extend(
-            _ascii_table(
-                ["Metric", "Count"],
-                [
-                    ["Zones", str(len(maas_data.get("zones") or []))],
-                    ["Resource pools", str(len(maas_data.get("pools") or []))],
-                    ["Machines", str(len(maas_data.get("machines") or []))],
-                ],
-            )
+        e.table(
+            ["Metric", "Count"],
+            [
+                ["Zones", str(len(maas_data.get("zones") or []))],
+                ["Resource pools", str(len(maas_data.get("pools") or []))],
+                ["Machines", str(len(maas_data.get("machines") or []))],
+            ],
         )
 
-    drift_lines.append("")
-    drift_lines.append("  NetBox (this instance)")
-    drift_lines.append("")
+    e.spacer()
+    e.subtitle("NetBox (this instance)")
+    e.spacer()
     if netbox_data.get("error"):
-        drift_lines.append(f"    Error: {netbox_data['error']}")
+        e.error(f"Error: {netbox_data['error']}")
     else:
         inv_rows = [
             ["Sites", str(len(netbox_data.get("sites") or []))],
@@ -836,13 +1014,13 @@ def format_drift_report(
         ]
         if netbox_prefix_count:
             inv_rows.append(["IPAM Prefix objects", str(netbox_prefix_count)])
-        drift_lines.extend(_ascii_table(["Metric", "Count"], inv_rows))
+        e.table(["Metric", "Count"], inv_rows)
 
     scope_meta = (drift or {}).get("scope_meta") or {}
     if scope_meta:
-        drift_lines.append("")
-        drift_lines.extend(_banner("SCOPE", "-"))
-        drift_lines.append("")
+        e.spacer()
+        e.banner("SCOPE", "-")
+        e.spacer()
         sel_sites = ", ".join(scope_meta.get("selected_sites") or []) or "(all)"
         sel_locs = ", ".join(scope_meta.get("selected_locations") or []) or "(all)"
         os_unmatched = list(scope_meta.get("openstack_unmatched_network_names") or [])
@@ -854,7 +1032,7 @@ def format_drift_report(
         _maas_fabric_noisy = r"(?i)^fabric-\d+$"
         # scope_meta["maas_fabrics_after"]: distinct per-NIC MAAS fabrics for MAC'd interfaces on scoped hosts.
         _maas_fab_in_scope_label = "MAAS fabrics fetched (in-scope)"
-        drift_lines.extend(_ascii_table(
+        e.table(
             ["Check", "Value"],
             [
                 ["Coverage status", str(scope_meta.get("coverage_status") or "PARTIAL")],
@@ -908,15 +1086,13 @@ def format_drift_report(
                 ["OpenStack unmatched network names (sample)", ", ".join(os_unmatched) or "(none)"],
             ],
             dynamic_columns=True,
-        ))
+        )
 
     # --- Phase 0 — drift category counts ---
-    drift_lines.append("")
-    drift_lines.extend(_banner("DRIFT COUNTS"))
-    drift_lines.append(
-        "  Counts for this run (match by hostname and NIC MAC)."
-    )
-    drift_lines.append("")
+    e.spacer()
+    e.banner("DRIFT COUNTS")
+    e.paragraph("Counts for this run (match by hostname and NIC MAC).")
+    e.spacer()
     pc = _phase0_category_counts(
         drift,
         matched_rows,
@@ -932,32 +1108,30 @@ def format_drift_report(
         if pc["nb_only_dev"]
         else "0"
     )
-    drift_lines.extend(
-        _ascii_table(
-            ["Category", "Count"],
-            [
-                ["In MAAS only (not in NetBox)", str(pc["maas_only"])],
-                ["In NetBox only (orphaned tag)", nb_orphan_note],
-                ["Matched — placement needs check", str(pc["check_hosts"])],
-                ["NetBox serial missing", str(serial_validation_needed)],
-                ["NIC rows not OK", str(pc["iface_not_ok"])],
-                ["MAAS NIC missing in NetBox", str(pc["maas_nic_missing_nb"])],
-                ["VLAN mismatch (MAAS vs NetBox)", str(pc["vlan_drift_nic"])],
-                ["VLAN unverified from MAAS", str(pc["vlan_unverified_nic"])],
-                ["NetBox-only NICs (review)", str(pc["nb_only_nic"])],
-                ["OpenStack subnet → no Prefix", sub_txt],
-                ["OpenStack FIP → no IP record", str(pc["fip_gaps"])],
-                ["BMC vs NetBox OOB differs", str(bmc_oob_mismatch)],
-                ["LLDP / cabling", "—"],
-            ],
-        )
+    e.table(
+        ["Category", "Count"],
+        [
+            ["In MAAS only (not in NetBox)", str(pc["maas_only"])],
+            ["In NetBox only (orphaned tag)", nb_orphan_note],
+            ["Matched — placement needs check", str(pc["check_hosts"])],
+            ["NetBox serial missing", str(serial_validation_needed)],
+            ["NIC rows not OK", str(pc["iface_not_ok"])],
+            ["MAAS NIC missing in NetBox", str(pc["maas_nic_missing_nb"])],
+            ["VLAN mismatch (MAAS vs NetBox)", str(pc["vlan_drift_nic"])],
+            ["VLAN unverified from MAAS", str(pc["vlan_unverified_nic"])],
+            ["NetBox-only NICs (review)", str(pc["nb_only_nic"])],
+            ["OpenStack subnet → no Prefix", sub_txt],
+            ["OpenStack FIP → no IP record", str(pc["fip_gaps"])],
+            ["BMC vs NetBox OOB differs", str(bmc_oob_mismatch)],
+            ["LLDP / cabling", "—"],
+        ],
     )
 
     # --- High-risk summary ---
-    drift_lines.append("")
-    drift_lines.extend(_banner("HIGH-RISK (review first)", "-"))
-    drift_lines.append("  Triage these before a sync.")
-    drift_lines.append("")
+    e.spacer()
+    e.banner("HIGH-RISK (review first)", "-")
+    e.paragraph("Triage these before a sync.")
+    e.spacer()
     hr_rows = []
     hr_total = 0
     for name, val in [
@@ -970,14 +1144,14 @@ def format_drift_report(
         hr_rows.append([name, str(val)])
         if isinstance(val, int):
             hr_total += val
-    drift_lines.extend(_ascii_table(["Category", "Count"], hr_rows))
-    drift_lines.append(f"  Total: {hr_total}")
+    e.table(["Category", "Count"], hr_rows)
+    e.line_total(f"Total: {hr_total}")
 
     # --- Run metrics ---
-    drift_lines.append("")
-    drift_lines.extend(_banner("RUN METRICS", "-"))
-    drift_lines.append("")
-    drift_lines.extend(_ascii_table(
+    e.spacer()
+    e.banner("RUN METRICS", "-")
+    e.spacer()
+    e.table(
         ["Metric", "Value"],
         [
             ["MAAS machines", str(len(maas_data.get("machines") or []))],
@@ -992,7 +1166,7 @@ def format_drift_report(
             ["VLAN unverified NICs", str(pc["vlan_unverified_nic"])],
             ["MAAS NIC missing in NetBox", str(pc["maas_nic_missing_nb"])],
         ],
-    ))
+    )
 
     # --- Proposed changes (preview only; full list, uncapped) ---
     prop = _proposed_changes_rows(
@@ -1005,67 +1179,67 @@ def format_drift_report(
         os_floating_gaps or [],
         netbox_ifaces=netbox_ifaces,
     )
-    drift_lines.append("")
-    drift_lines.extend(_banner("PROPOSED CHANGES", "-"))
-    drift_lines.append(
-        "  Read-only. Possible NetBox updates from MAAS and OpenStack — nothing is applied from this screen."
+    e.spacer()
+    e.banner("PROPOSED CHANGES", "-")
+    e.paragraph(
+        "Read-only. Possible NetBox updates from MAAS and OpenStack — nothing is applied from this screen."
     )
-    drift_lines.append("")
+    e.spacer()
 
-    drift_lines.append("  A) Add to NetBox")
-    drift_lines.append("")
-    drift_lines.extend(_ascii_table(
+    e.subtitle("A) Add to NetBox")
+    e.spacer()
+    e.table(
         ["What", "Count", "Note"],
         [
             ["New devices (MAAS)", str(len(prop["add_devices"])), "Not in NetBox yet"],
             ["New prefixes (OpenStack)", str(len(prop["add_prefixes"])), "Subnet not in IPAM"],
             ["New floating IPs (OpenStack)", str(len(prop["add_fips"])), "FIP not in IPAM"],
         ],
-    ))
+    )
     if prop["add_devices"]:
-        drift_lines.append("")
-        drift_lines.append("  Detail — new devices")
-        drift_lines.append("")
-        drift_lines.extend(_ascii_table(
+        e.spacer()
+        e.subtitle("Detail — new devices")
+        e.spacer()
+        e.table(
             ["Hostname", "Zone", "Pool", "MAAS Status", "Proposed Tag", "Proposed Action"],
             prop["add_devices"],
             dynamic_columns=True,
-        ))
+        )
     if prop["add_prefixes"]:
-        drift_lines.append("")
-        drift_lines.append("  Detail — new prefixes")
-        drift_lines.append("")
-        drift_lines.extend(_ascii_table(
+        e.spacer()
+        e.subtitle("Detail — new prefixes")
+        e.spacer()
+        e.table(
             ["CIDR", "Network Name", "Network ID", "Cloud", "Proposed Action"],
             prop["add_prefixes"],
             dynamic_columns=True,
-        ))
+        )
     if prop["add_fips"]:
-        drift_lines.append("")
-        drift_lines.append("  Detail — new floating IPs")
-        drift_lines.append("")
-        drift_lines.extend(_ascii_table(
+        e.spacer()
+        e.subtitle("Detail — new floating IPs")
+        e.spacer()
+        e.table(
             ["Floating IP", "Fixed IP", "Project", "Cloud", "Proposed Action"],
             prop["add_fips"],
             dynamic_columns=True,
-        ))
+        )
 
-    drift_lines.append("")
-    drift_lines.append("  B) NICs and BMC / OOB")
-    drift_lines.append("")
-    drift_lines.extend(_ascii_table(
+    e.spacer()
+    e.subtitle("B) NICs and BMC / OOB")
+    e.spacer()
+    e.table(
         ["What", "Count", "Note"],
         [
             ["New NICs in NetBox", str(len(prop["add_nb_interfaces"])), "MAAS MAC not on device"],
             ["NIC drift", str(len(prop["update_nic"])), "MAAS vs NetBox differs"],
             ["BMC / OOB", str(len(prop["add_mgmt_iface"])), "Power / out-of-band vs NetBox"],
         ],
-    ))
+    )
     if prop["add_nb_interfaces"]:
-        drift_lines.append("")
-        drift_lines.append("  Detail — new NICs")
-        drift_lines.append("")
-        drift_lines.extend(_ascii_table(
+        e.spacer()
+        e.subtitle("Detail — new NICs")
+        e.spacer()
+        e.table(
             [
                 "Host",
                 "NB site",
@@ -1081,12 +1255,12 @@ def format_drift_report(
             ],
             prop["add_nb_interfaces"],
             dynamic_columns=True,
-        ))
+        )
     if prop["update_nic"]:
-        drift_lines.append("")
-        drift_lines.append("  Detail — NIC drift")
-        drift_lines.append("")
-        drift_lines.extend(_ascii_table(
+        e.spacer()
+        e.subtitle("Detail — NIC drift")
+        e.spacer()
+        e.table(
             [
                 "Host",
                 "MAAS intf",
@@ -1105,13 +1279,13 @@ def format_drift_report(
             ],
             prop["update_nic"],
             dynamic_columns=True,
-        ))
+        )
 
     if prop["add_mgmt_iface"]:
-        drift_lines.append("")
-        drift_lines.append("  Detail — BMC / OOB")
-        drift_lines.append("")
-        drift_lines.extend(_ascii_table(
+        e.spacer()
+        e.subtitle("Detail — BMC / OOB")
+        e.spacer()
+        e.table(
             [
                 "Host",
                 "MAAS BMC IP",
@@ -1128,45 +1302,45 @@ def format_drift_report(
             ],
             prop["add_mgmt_iface"],
             dynamic_columns=True,
-        ))
+        )
 
-    drift_lines.append("")
-    drift_lines.append("  C) Review")
-    drift_lines.append("")
-    drift_lines.extend(_ascii_table(
+    e.spacer()
+    e.subtitle("C) Review")
+    e.spacer()
+    e.table(
         ["What", "Count", "Note"],
         [
             ["Orphan devices", str(len(prop["review_orphans"])), "In NetBox, not in MAAS"],
             ["Serial check", str(len(prop["review_serial"])), "NetBox serial empty"],
         ],
-    ))
+    )
     if prop["review_orphans"]:
-        drift_lines.append("")
-        drift_lines.append("  Detail — orphans")
-        drift_lines.append("")
-        drift_lines.extend(_ascii_table(
+        e.spacer()
+        e.subtitle("Detail — orphans")
+        e.spacer()
+        e.table(
             ["Hostname", "Site", "Status", "Proposed Tag", "Proposed Action", "Risk"],
             prop["review_orphans"],
             dynamic_columns=True,
-        ))
+        )
     if prop["review_serial"]:
-        drift_lines.append("")
-        drift_lines.append("  Detail — serials")
-        drift_lines.append("")
-        drift_lines.extend(_ascii_table(
+        e.spacer()
+        e.subtitle("Detail — serials")
+        e.spacer()
+        e.table(
             ["Hostname", "MAAS Serial", "NetBox Serial", "Proposed Action", "Risk"],
             prop["review_serial"],
             dynamic_columns=True,
-        ))
-    drift_lines.append("")
-    drift_lines.append("  Summary")
-    drift_lines.append("")
+        )
+    e.spacer()
+    e.subtitle("Summary")
+    e.spacer()
     total_props = (
         len(prop["add_devices"]) + len(prop["add_prefixes"]) + len(prop["add_fips"]) +
         len(prop["update_nic"]) + len(prop["add_nb_interfaces"]) + len(prop["add_mgmt_iface"]) +
         len(prop["review_orphans"]) + len(prop["review_serial"])
     )
-    drift_lines.extend(_ascii_table(
+    e.table(
         ["Bucket", "Count"],
         [
             ["New devices", str(len(prop["add_devices"]))],
@@ -1179,15 +1353,19 @@ def format_drift_report(
             ["Serials (review)", str(len(prop["review_serial"]))],
             ["Total", str(total_props)],
         ],
-    ))
+    )
 
-    drift_lines.append("")
-    drift_lines.extend(_banner("END OF DRIFT AUDIT", "="))
+    e.spacer()
+    e.banner("END OF DRIFT AUDIT", "=")
 
     # ---------- REFERENCE ----------
     # Hidden intentionally for user-facing output.
 
-    return {"drift": "\n".join(drift_lines), "reference": "\n".join(ref_lines)}
+    return {
+        "drift": e.render(),
+        "reference": "\n".join(ref_lines),
+        "drift_markup": "html" if use_html else "text",
+    }
 
 
 def build_drift_report_xlsx(

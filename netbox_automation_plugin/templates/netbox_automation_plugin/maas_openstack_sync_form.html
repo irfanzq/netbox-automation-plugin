@@ -425,6 +425,13 @@
               vertical-align: top;
               tab-size: 8;
             }
+            .drift-audit-report-scroll .drift-report-html .drift-rpt-title:first-child,
+            .drift-audit-report-scroll .drift-report-html .drift-rpt-subtitle:first-child {
+              margin-top: 0 !important;
+            }
+            .drift-audit-report-scroll .drift-report-html .table {
+              font-size: inherit;
+            }
           </style>
           <div class="card mb-3">
             <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">
@@ -444,7 +451,11 @@
             </div>
             <div class="card-body p-2">
               <div class="drift-audit-report-scroll border rounded bg-body-secondary p-2">
-                <pre class="drift-report-pre mb-0 font-monospace" style="font-size: 0.8rem; line-height: 1.35;">{{ report_drift }}</pre>
+                {% if report_drift_markup == "html" %}
+                  {{ report_drift|safe }}
+                {% else %}
+                  <pre class="drift-report-pre mb-0 font-monospace" style="font-size: 0.8rem; line-height: 1.35;">{{ report_drift }}</pre>
+                {% endif %}
               </div>
               {% if report_reference %}
                 <details class="mt-3">

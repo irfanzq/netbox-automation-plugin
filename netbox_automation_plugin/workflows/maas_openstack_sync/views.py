@@ -375,6 +375,11 @@ class MAASOpenStackSyncView(LoginRequiredMixin, View):
                         netbox_ifaces=cached.get("netbox_ifaces"),
                     )
                     report_drift = report_out.get("drift", "") if isinstance(report_out, dict) else report_out
+                    report_drift_markup = (
+                        report_out.get("drift_markup", "text")
+                        if isinstance(report_out, dict)
+                        else "text"
+                    )
                     report_reference = report_out.get("reference", "") if isinstance(report_out, dict) else ""
                     audit_summary = _audit_summary_from_payload(cached)
                     return render(
@@ -383,6 +388,7 @@ class MAASOpenStackSyncView(LoginRequiredMixin, View):
                         {
                             "form": form,
                             "report_drift": report_drift,
+                            "report_drift_markup": report_drift_markup,
                             "report_reference": report_reference,
                             "audit_done": True,
                             "audit_summary": audit_summary,
@@ -681,6 +687,9 @@ class MAASOpenStackSyncView(LoginRequiredMixin, View):
             netbox_ifaces=netbox_ifaces_for_report,
         )
         report_drift = report_out.get("drift", "") if isinstance(report_out, dict) else report_out
+        report_drift_markup = (
+            report_out.get("drift_markup", "text") if isinstance(report_out, dict) else "text"
+        )
         report_reference = report_out.get("reference", "") if isinstance(report_out, dict) else ""
 
         maas_m = len(maas_data.get("machines") or [])
@@ -731,6 +740,7 @@ class MAASOpenStackSyncView(LoginRequiredMixin, View):
                 {
                     "form": form,
                     "report_drift": report_drift,
+                    "report_drift_markup": report_drift_markup,
                     "report_reference": report_reference,
                     "audit_done": True,
                     "audit_summary": audit_summary,
@@ -747,6 +757,7 @@ class MAASOpenStackSyncView(LoginRequiredMixin, View):
             {
                 "form": form,
                 "report_drift": report_drift,
+                "report_drift_markup": report_drift_markup,
                 "report_reference": report_reference,
                 "audit_done": True,
                 "audit_summary": audit_summary,
