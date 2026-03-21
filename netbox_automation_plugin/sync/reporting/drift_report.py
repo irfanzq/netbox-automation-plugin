@@ -557,11 +557,6 @@ def _build_add_nb_interface_rows(interface_audit):
                 f"MAC {mac}; untagged VLAN {vlan} (from MAAS); "
                 f"IPs: {ips}"
             )
-            action = (
-                f"Add NetBox port named like MAAS '{maas_if}'; set MAC {mac}; "
-                f"untagged VLAN from MAAS VID {vlan} where applicable; "
-                f"assign MAAS IPs on this port (or device primary if policy prefers)"
-            )
             out.append([
                 hn,
                 nb_site,
@@ -577,7 +572,6 @@ def _build_add_nb_interface_rows(interface_audit):
                     else (f"maas-nic-{mac.replace(':', '')[-6:]}" if mac else "maas-nic")
                 ),
                 props,
-                action,
                 "Medium",
             ])
     return sorted(out, key=lambda x: (x[0] or "").lower())
@@ -1083,7 +1077,6 @@ def format_drift_report(
                 "MAAS VLAN",
                 "Suggested NB name",
                 "Proposed properties (from MAAS)",
-                "Proposed action",
                 "Risk",
             ],
             prop["add_nb_interfaces"],
@@ -1469,7 +1462,6 @@ def build_drift_report_xlsx(
             "MAAS VLAN",
             "Suggested NB name",
             "Proposed properties (from MAAS)",
-            "Proposed action",
             "Risk",
         ],
         prop["add_nb_interfaces"],
