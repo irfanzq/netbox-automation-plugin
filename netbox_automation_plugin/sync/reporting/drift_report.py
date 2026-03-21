@@ -27,6 +27,8 @@ _DYNAMIC_COL_CAP = 10000
 # ASCII tables: cap column width and wrap long cells so one outlier row does not pad every row.
 _ASCII_COL_WRAP_DEFAULT = 96
 _ASCII_NOTES_COL_WRAP = 200
+# Per-host orphan table (NetBox-only devices): off by default; drift counts still shown.
+_SHOW_DRIFT_ORPHAN_DETAIL = False
 
 
 def _dedupe_keep_order(items):
@@ -1316,7 +1318,7 @@ def format_drift_report(
             ["Serial check", str(len(prop["review_serial"])), "NetBox serial empty"],
         ],
     )
-    if prop["review_orphans"]:
+    if _SHOW_DRIFT_ORPHAN_DETAIL and prop["review_orphans"]:
         e.spacer()
         e.subtitle("Detail — orphans")
         e.spacer()
@@ -1653,11 +1655,12 @@ def build_drift_report_xlsx(
         ],
         prop["add_mgmt_iface"],
     )
-    _append_block(
-        "C) Orphans",
-        ["Hostname", "Site", "Status", "Proposed Tag", "Proposed Action", "Risk"],
-        prop["review_orphans"],
-    )
+    if _SHOW_DRIFT_ORPHAN_DETAIL:
+        _append_block(
+            "C) Orphans",
+            ["Hostname", "Site", "Status", "Proposed Tag", "Proposed Action", "Risk"],
+            prop["review_orphans"],
+        )
     _append_block(
         "C) Serials",
         ["Hostname", "MAAS Serial", "NetBox Serial", "Proposed Action", "Risk"],
