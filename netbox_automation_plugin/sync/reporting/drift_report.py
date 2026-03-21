@@ -1110,16 +1110,11 @@ def format_drift_report(
     serial_validation_needed = _count_hints(matched_rows, "NB serial empty")
     bmc_oob_mismatch = _count_hints(matched_rows, "MAAS BMC ")
     sub_txt = str(pc["sub_gaps"]) if pc["sub_gaps"] is not None else "N/A (local ORM)"
-    nb_orphan_note = (
-        f"{pc['nb_only_dev']} (names hidden in this report)"
-        if pc["nb_only_dev"]
-        else "0"
-    )
     e.table(
         ["Category", "Count"],
         [
             ["In MAAS only (not in NetBox)", str(pc["maas_only"])],
-            ["In NetBox only (orphaned tag)", nb_orphan_note],
+            ["In NetBox only (orphaned tag)", str(pc["nb_only_dev"])],
             ["Matched — placement needs check", str(pc["check_hosts"])],
             ["NetBox serial missing", str(serial_validation_needed)],
             ["NIC rows not OK", str(pc["iface_not_ok"])],
@@ -1439,11 +1434,6 @@ def build_drift_report_xlsx(
     serial_validation_needed = _count_hints(matched_rows, "NB serial empty")
     bmc_oob_mismatch = _count_hints(matched_rows, "MAAS BMC ")
     sub_txt = str(pc["sub_gaps"]) if pc["sub_gaps"] is not None else "N/A"
-    nb_orphan_note_x = (
-        f"{pc['nb_only_dev']} (names hidden in this report)"
-        if pc["nb_only_dev"]
-        else "0"
-    )
     scope_meta = (drift or {}).get("scope_meta") or {}
     if scope_meta:
         ws_sum.append([])
@@ -1484,7 +1474,7 @@ def build_drift_report_xlsx(
     ws_sum.append(["DRIFT COUNTS", "", ""])
     _append_header(ws_sum, ["Category", "Count"])
     ws_sum.append(["In MAAS only (not in NetBox)", str(pc["maas_only"])])
-    ws_sum.append(["In NetBox only (orphaned tag)", nb_orphan_note_x])
+    ws_sum.append(["In NetBox only (orphaned tag)", str(pc["nb_only_dev"])])
     ws_sum.append(["Matched — placement needs check", str(pc["check_hosts"])])
     ws_sum.append(["NetBox serial missing", str(serial_validation_needed)])
     ws_sum.append(["NIC rows not OK", str(pc["iface_not_ok"])])
