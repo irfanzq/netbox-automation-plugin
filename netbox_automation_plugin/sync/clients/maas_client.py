@@ -10,6 +10,7 @@ We normalize MAAS hostname to the short name (part before first dot) for matchin
 """
 
 import asyncio
+import json
 import logging
 import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -251,6 +252,202 @@ def _maas_rest_fetch_bmc_and_hints(
 def _maas_rest_fetch_bmc(maas_url: str, api_key: str, system_id: str, verify_tls: bool) -> str:
     """Backward-compatible: BMC IP only."""
     return _maas_rest_fetch_bmc_and_hints(maas_url, api_key, system_id, verify_tls)[0]
+
+
+def _maas_serial_is_placeholder(s: str) -> bool:
+    """MAAS often returns 'Unknown' / OEM placeholders until hardware info is present."""
+    if s is None:
+        return True
+    t = str(s).strip().lower()
+    if not t:
+        return True
+    return t in (
+        "unknown",
+        "n/a",
+        "none",
+        "null",
+        "to be filled by oem",
+        "default string",
+        "not specified",
+    )
+
+
+def _serial_from_maas_machine_json(md: dict | None) -> str:
+    """
+    Best-effort hardware serial from MAAS machine JSON (list or detail).
+
+    The UI often shows a value from commissioning stored under ``hardware_info``
+    (system_serial, chassis_serial, …) while top-level ``serial`` stays empty.
+    """
+    if not isinstance(md, dict):
+        return ""
+    candidates: list[str] = []
+    for key in ("serial", "serial_number", "product_serial"):
+        v = md.get(key)
+        if v is not None and str(v).strip():
+            candidates.append(str(v).strip())
+
+    hi = md.get("hardware_info")
+    if isinstance(hi, str) and hi.strip().startswith("{"):
+        try:
+            hi = json.loads(hi)
+        except Exception:
+            hi = None
+    if isinstance(hi, dict):
+        for key in (
+            "system_serial",
+            "chassis_serial",
+            "mainboard_serial",
+            "serial",
+            "serial_number",
+            "product_serial",
+        ):
+            v = hi.get(key)
+            if v is not None and str(v).strip():
+                candidates.append(str(v).strip())
+
+    for c in candidates:
+        if c and not _maas_serial_is_placeholder(c):
+            return c[:256]
+    return ""
+
+
+def _maas_vendor_is_placeholder(s: str) -> bool:
+    """True if MAAS has no usable system/vendor string for naming heuristics."""
+    if s is None:
+        return True
+    t = str(s).strip().lower()
+    if not t:
+        return True
+    return t in (
+        "unknown",
+        "n/a",
+        "none",
+        "null",
+        "to be filled by oem",
+        "to be filled by o.e.m.",
+        "default string",
+        "not specified",
+        "oem",
+    )
+
+
+def _vendor_from_maas_machine_json(md: dict | None) -> str:
+    """
+    Best-effort system vendor / manufacturer from MAAS machine JSON (list or detail).
+
+    Commissioning often stores values under ``hardware_info`` while top-level fields
+    are empty. Used for OOB port naming heuristics (e.g. Dell → suggest ``idrac``).
+    """
+    if not isinstance(md, dict):
+        return ""
+    candidates: list[str] = []
+    for key in (
+        "hardware_vendor",
+        "hardware_manufacturer",
+        "system_vendor",
+        "vendor",
+        "manufacturer",
+        "system_manufacturer",
+    ):
+        v = md.get(key)
+        if v is not None and str(v).strip():
+            candidates.append(str(v).strip())
+
+    hi = md.get("hardware_info")
+    if isinstance(hi, str) and hi.strip().startswith("{"):
+        try:
+            hi = json.loads(hi)
+        except Exception:
+            hi = None
+    if isinstance(hi, dict):
+        for key in (
+            "system_vendor",
+            "vendor",
+            "manufacturer",
+            "system_manufacturer",
+            "hardware_vendor",
+        ):
+            v = hi.get(key)
+            if v is not None and str(v).strip():
+                candidates.append(str(v).strip())
+
+    for c in candidates:
+        if c and not _maas_vendor_is_placeholder(c):
+            return c[:256]
+    return ""
+
+
+def _enrich_machines_serial_rest(
+    machines: list, maas_url: str, maas_api_key: str, verify_tls: bool
+) -> None:
+    """
+    GET machine detail when list payload omitted serial or system vendor (``hardware_info``
+    is often only on the per-machine detail response).
+    """
+    need = [
+        i
+        for i, mm in enumerate(machines)
+        if mm.get("system_id")
+        and (
+            _maas_serial_is_placeholder(str(mm.get("serial") or ""))
+            or _maas_vendor_is_placeholder(str(mm.get("hardware_vendor") or ""))
+        )
+    ]
+    if not need:
+        return
+
+    def fetch_idx(i: int) -> tuple:
+        mm = machines[i]
+        sid = mm["system_id"]
+        base = _maas_rest_base(maas_url)
+        parts = maas_api_key.split(":", 2)
+        if len(parts) != 3:
+            return i, "", ""
+        ck, tk, ts = parts[0], parts[1], parts[2]
+        try:
+            import requests
+            from requests_oauthlib import OAuth1
+        except ImportError:
+            return i, "", ""
+        auth = OAuth1(ck, "", tk, ts, signature_method="PLAINTEXT")
+        s_acc, v_acc = "", ""
+        for path in (f"{base}/api/2.0/machines/{sid}/", f"{base}/api/2.0/nodes/{sid}/"):
+            try:
+                r = requests.get(path, auth=auth, verify=verify_tls, timeout=60)
+                if r.status_code != 200:
+                    continue
+                body = r.json()
+                if not isinstance(body, dict):
+                    continue
+                s2 = _serial_from_maas_machine_json(body)
+                v2 = _vendor_from_maas_machine_json(body)
+                if s2:
+                    s_acc = s2
+                if v2:
+                    v_acc = v2
+                if s_acc and v_acc:
+                    break
+            except Exception:
+                logger.debug("MAAS serial/vendor enrich %s", path, exc_info=True)
+        return i, s_acc, v_acc
+
+    max_workers = min(24, max(8, len(need)))
+    try:
+        with ThreadPoolExecutor(max_workers=max_workers) as ex:
+            for fut in as_completed([ex.submit(fetch_idx, i) for i in need]):
+                try:
+                    i, s, v = fut.result()
+                    if s:
+                        machines[i]["serial"] = s
+                    if v and _maas_vendor_is_placeholder(
+                        str(machines[i].get("hardware_vendor") or "")
+                    ):
+                        machines[i]["hardware_vendor"] = v
+                except Exception:
+                    pass
+    except Exception:
+        logger.debug("Serial enrichment pool failed", exc_info=True)
 
 
 def _maas_rest_base(maas_url: str) -> str:
@@ -756,7 +953,8 @@ def hostname_short(name):
 async def fetch_maas_data(maas_url: str, maas_api_key: str, maas_insecure: bool):
     """
     Fetch machines, zones, and pools from MAAS. Returns a dict with:
-      - machines: list of {hostname, system_id, zone_name, pool_name, status_name}
+      - machines: list of dicts including hostname, system_id, zone_name, pool_name,
+        status_name, power_type, bmc_*, serial, hardware_vendor (from MAAS / hardware_info)
       - zones: list of {name, id}
       - pools: list of {name, id}
       - error: str if connection failed
@@ -867,6 +1065,7 @@ async def fetch_maas_data(maas_url: str, maas_api_key: str, maas_insecure: bool)
             bmc_vlan = ""
             power_type_str = ""
             serial = ""
+            hardware_vendor = ""
             try:
                 md = getattr(m, "_data", None)
                 if isinstance(md, dict):
@@ -883,18 +1082,21 @@ async def fetch_maas_data(maas_url: str, maas_api_key: str, maas_insecure: bool)
                         ).strip()
                     else:
                         power_type_str = str(pt_raw or "").strip()
-                    serial = (
-                        (md.get("serial") or "")
-                        or (md.get("serial_number") or "")
-                        or (md.get("product_serial") or "")
-                    )
+                    serial = _serial_from_maas_machine_json(md)
+                    hardware_vendor = _vendor_from_maas_machine_json(md)
             except Exception:
                 pass
             if not serial:
-                serial = (
-                    (getattr(m, "serial", None) or "")
-                    or (getattr(m, "serial_number", None) or "")
-                )
+                for attr in ("serial", "serial_number"):
+                    v = getattr(m, attr, None)
+                    if v is not None:
+                        s = str(v).strip()
+                        if s and not _maas_serial_is_placeholder(s):
+                            serial = s
+                            break
+            serial = str(serial).strip()
+            if _maas_serial_is_placeholder(serial):
+                serial = ""
             result["machines"].append({
                 "hostname": short_name,
                 "fqdn": raw_name if raw_name != short_name else "",
@@ -910,11 +1112,15 @@ async def fetch_maas_data(maas_url: str, maas_api_key: str, maas_insecure: bool)
                 "bmc_mac": bmc_mac,
                 "bmc_vlan": bmc_vlan,
                 "power_type": power_type_str,
+                "hardware_vendor": str(hardware_vendor).strip(),
             })
         _enrich_machines_fabric_rest(
             result["machines"], maas_url, maas_api_key, not maas_insecure, fabric_catalog
         )
         _enrich_machines_bmc_rest(result["machines"], maas_url, maas_api_key, not maas_insecure)
+        _enrich_machines_serial_rest(
+            result["machines"], maas_url, maas_api_key, not maas_insecure
+        )
     except Exception as e:
         logger.exception("MAAS fetch failed")
         result["error"] = str(e)

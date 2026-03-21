@@ -107,7 +107,7 @@
       <h5 class="card-header">{% trans "MAAS / OpenStack Sync" %}</h5>
       <div class="card-body">
         <p class="card-text mb-2">
-          {% trans "Compare MAAS with NetBox: devices, data NICs (MAC/IP/VLAN drift and missing interfaces), and out-of-band / management from MAAS power (IPMI, Redfish, iDRAC-class BMC IP and power type). Optionally OpenStack subnets and floating IPs vs NetBox IPAM. This page runs a read-only drift audit (no writes). MAAS→NetBox reconciliation or sync that is driven by this drift is intended to apply the same categories—including creating or updating management interfaces and device OOB IP from MAAS—per your sync policies." %}
+          {% trans "Read-only drift audit: MAAS vs NetBox for devices, data NICs (MAC, IP, VLAN, missing interfaces), and BMC / out-of-band from MAAS power. Optionally OpenStack subnets and floating IPs vs IPAM. Nothing is written from this page; sync jobs can use this report per your policies." %}
         </p>
         {% if form.non_field_errors %}
           <div class="alert alert-danger">{{ form.non_field_errors }}</div>
