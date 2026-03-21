@@ -930,11 +930,19 @@ def _maas_interfaces_rest(
             logger.debug("MAAS machine detail %s: %s", url, e)
 
     if last_err:
-        logger.warning(
-            "MAAS REST could not load interfaces for system_id=%s host check MAAS_URL matches UI MAAS. Last: %s",
-            system_id,
-            last_err,
-        )
+        # Normal for uncommissioned / minimal node JSON: 200 but no interface_set — avoid per-host WARNING spam.
+        if "-> 200 but" in last_err and "interface" in last_err.lower():
+            logger.debug(
+                "MAAS REST no embedded interfaces for system_id=%s. Last: %s",
+                system_id,
+                last_err,
+            )
+        else:
+            logger.warning(
+                "MAAS REST could not load interfaces for system_id=%s; check MAAS_URL and API key. Last: %s",
+                system_id,
+                last_err,
+            )
     return [], "-"
 
 

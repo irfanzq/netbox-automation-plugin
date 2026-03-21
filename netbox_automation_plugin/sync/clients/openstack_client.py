@@ -343,14 +343,33 @@ def fetch_openstack_data_for_config(config: dict):
             inner = _fetch_single_project(openstack, config)
         result.update(inner)
     except Exception as e:
-        logger.exception("OpenStack fetch failed")
-        msg = str(e)
-        if "region" in msg.lower() and "not found" in msg.lower():
+        os_config_exc = None
+        try:
+            from openstack.exceptions import ConfigException as os_config_exc
+        except ImportError:
+            pass
+
+        msg = str(e).strip() or repr(e)
+        is_config_exc = os_config_exc is not None and isinstance(e, os_config_exc)
+        if is_config_exc:
+            # Misconfigured clouds.yml / env — full traceback is noise in NetBox logs.
+            logger.warning("OpenStack fetch failed (config): %s", msg)
+        else:
+            logger.exception("OpenStack fetch failed")
+
+        low = msg.lower()
+        region_hint = ("region" in low and "not found" in low) or "region name" in low
+        if region_hint:
             kwargs = _build_connect_kwargs(config, use_config_project_if_unset=True)
             rn = kwargs.get("region_name", "?")
             msg += (
                 f" — Using region_name={rn!r}. Set OS_REGION_NAME (or OPENSTACK_REGION_NAME) "
-                "on the NetBox container to match `openstack region list` (e.g. birch), then restart."
+                "on the NetBox container to match `openstack region list`, then restart."
+            )
+        elif is_config_exc:
+            msg += (
+                " — Check OPENSTACK_* / OS_* env on the NetBox container (auth_url, region, "
+                "project, application credential or user/password) match an `openstack cloud` that works."
             )
         result["error"] = msg
         if "openstack_projects_scanned" not in result:
