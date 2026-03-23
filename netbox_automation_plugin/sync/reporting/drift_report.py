@@ -197,6 +197,34 @@ def _suggest_nb_location_for_fabric(
     return best
 
 
+def _netbox_placement_from_maas_machine(
+    machine: dict,
+    netbox_data: dict,
+    fabric_map: dict,
+    pool_map: dict,
+) -> tuple[str, str, str]:
+    """NB region, site display name, and location for a MAAS-only host (Detail — new devices logic)."""
+    site_slug = _derive_site_slug_from_maas(machine, fabric_map, pool_map)
+    site_meta = _site_meta_for_slug(netbox_data, site_slug) if site_slug else {}
+    nb_site = (
+        (site_meta.get("name") or site_slug or "—").strip() if site_slug else "—"
+    )
+    nb_region = (site_meta.get("region_name") or "—") if site_slug else "—"
+    nb_loc = (
+        _suggest_nb_location_for_fabric(
+            str(machine.get("fabric_name") or ""), site_slug, netbox_data
+        )
+        or "—"
+    )
+    if (not site_slug) and nb_loc not in {"", "—"}:
+        site_slug = _site_slug_for_location_name(netbox_data, nb_loc)
+        if site_slug:
+            site_meta = _site_meta_for_slug(netbox_data, site_slug)
+            nb_site = (site_meta.get("name") or site_slug or "—").strip()
+            nb_region = site_meta.get("region_name") or "—"
+    return nb_region, nb_site, nb_loc
+
+
 def _maas_vendor_product(machine: dict) -> tuple[str, str]:
     hi = machine.get("hardware_info")
     if isinstance(hi, str) and hi.strip().startswith("{"):
@@ -1663,6 +1691,9 @@ def _proposed_changes_rows(
         out = []
         for h in sorted(drift.get("in_maas_not_netbox") or []):
             m = by_h.get(h, {})
+            _, nb_site, nb_loc = _netbox_placement_from_maas_machine(
+                m, netbox_data, _fabric_site_map, _pool_site_map
+            )
             for r in (m.get("interfaces") or []):
                 mac = str(r.get("mac") or "").strip().lower()
                 if not mac:
@@ -1680,8 +1711,8 @@ def _proposed_changes_rows(
                 out.append(
                     [
                         h,
-                        "—",
-                        "—",
+                        nb_site,
+                        nb_loc,
                         maas_if,
                         maas_fab,
                         mac,
@@ -1742,24 +1773,9 @@ def _proposed_changes_rows(
         bmc_ip = str(m.get("bmc_ip") or "—")
         power_type = str(m.get("power_type") or "—")
         bmc_present = "Yes" if (bmc_ip not in {"", "—"} or power_type not in {"", "—"}) else "No"
-        site_slug = _derive_site_slug_from_maas(m, _fabric_site_map, _pool_site_map)
-        site_meta = _site_meta_for_slug(netbox_data, site_slug) if site_slug else {}
-        nb_site = (
-            (site_meta.get("name") or site_slug or "—").strip() if site_slug else "—"
+        nb_region, nb_site, nb_loc = _netbox_placement_from_maas_machine(
+            m, netbox_data, _fabric_site_map, _pool_site_map
         )
-        nb_region = (site_meta.get("region_name") or "—") if site_slug else "—"
-        nb_loc = (
-            _suggest_nb_location_for_fabric(
-                str(m.get("fabric_name") or ""), site_slug, netbox_data
-            )
-            or "—"
-        )
-        if (not site_slug) and nb_loc not in {"", "—"}:
-            site_slug = _site_slug_for_location_name(netbox_data, nb_loc)
-            if site_slug:
-                site_meta = _site_meta_for_slug(netbox_data, site_slug)
-                nb_site = (site_meta.get("name") or site_slug or "—").strip()
-                nb_region = (site_meta.get("region_name") or "—")
         mvendor, mproduct = _maas_vendor_product(m)
         nb_dtype = _resolve_device_type_display(mvendor, mproduct, _dtype_index)
         nb_role = _match_netbox_role_from_hostname(h, netbox_data)
