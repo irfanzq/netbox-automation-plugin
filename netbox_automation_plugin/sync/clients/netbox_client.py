@@ -13,29 +13,79 @@ def fetch_netbox_data_local():
     """
     Read sites and devices from this NetBox via Django ORM (like vlan_deployment).
 
-    Returns: devices [{name, id, site_slug}], sites [{name, slug}], error.
+    Returns: devices [{name, id, site_slug}], sites [{name, slug, region_name, region_slug}],
+    locations [{site_slug, name}], device_types [...], device_roles [...], error.
     """
-    result = {"devices": [], "sites": [], "error": None}
+    result = {
+        "devices": [],
+        "sites": [],
+        "locations": [],
+        "device_types": [],
+        "device_roles": [],
+        "error": None,
+    }
     try:
-        from dcim.models import Device, Site
+        from dcim.models import Device, DeviceRole, DeviceType, Site
 
-        for s in Site.objects.only("name", "slug").iterator():
-            result["sites"].append({"name": s.name or "", "slug": s.slug or ""})
+        for s in Site.objects.select_related("region").only(
+            "name", "slug", "region_id", "region__name", "region__slug"
+        ).iterator():
+            reg_name = ""
+            reg_slug = ""
+            try:
+                if getattr(s, "region_id", None) and s.region:
+                    reg_name = (s.region.name or "").strip()
+                    reg_slug = (getattr(s.region, "slug", None) or "").strip()
+            except Exception:
+                pass
+            result["sites"].append({
+                "name": s.name or "",
+                "slug": s.slug or "",
+                "region_name": reg_name,
+                "region_slug": reg_slug,
+            })
         try:
             from dcim.models import Location
 
             result["locations_count"] = Location.objects.count()
             result["location_lines"] = []
-            for loc in (
+            for i, loc in enumerate(
                 Location.objects.select_related("site")
                 .only("name", "site__slug", "site__name")
-                .order_by("site__slug", "name")[:60]
+                .order_by("site__slug", "name")
+                .iterator()
             ):
                 ss = (loc.site.slug or loc.site.name or "") if loc.site_id else ""
-                result["location_lines"].append(f"{ss}/{loc.name or '-'}")
+                ln = (loc.name or "").strip()
+                if i < 60:
+                    result["location_lines"].append(f"{ss}/{ln or '-'}")
+                if ss and ln:
+                    result["locations"].append({"site_slug": ss, "name": ln})
         except Exception:
             result["locations_count"] = 0
             result["location_lines"] = []
+            result["locations"] = []
+        for dt in DeviceType.objects.select_related("manufacturer").iterator():
+            man = ""
+            try:
+                if dt.manufacturer_id and dt.manufacturer:
+                    man = (dt.manufacturer.name or "").strip()
+            except Exception:
+                pass
+            model = (getattr(dt, "model", None) or "").strip()
+            slug = (getattr(dt, "slug", None) or "").strip()
+            disp = f"{man} {model}".strip() if man else model
+            result["device_types"].append({
+                "slug": slug,
+                "model": model,
+                "manufacturer": man,
+                "display": disp or model or slug,
+            })
+        for role in DeviceRole.objects.only("name", "slug").iterator():
+            result["device_roles"].append({
+                "slug": (getattr(role, "slug", None) or "").strip(),
+                "name": (getattr(role, "name", None) or "").strip(),
+            })
         for d in Device.objects.select_related("site").only(
             "name", "id", "site_id", "site__slug", "site__name"
         ).iterator():

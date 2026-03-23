@@ -12,6 +12,7 @@ which documents the management attachment — not the same as in-band NICs.
 
 from io import BytesIO
 import html
+import json
 import re
 import textwrap
 
@@ -115,6 +116,210 @@ def _maas_machine_by_hostname(maas_data):
         if h:
             out[h] = m
     return out
+
+
+def _nb_tokens(s: str) -> set[str]:
+    return {t for t in re.split(r"[^a-z0-9]+", (s or "").lower()) if t}
+
+
+def _fabric_matches_location_name(fabric_name: str, loc_name: str) -> bool:
+    fab = (fabric_name or "").strip().lower()
+    loc_l = (loc_name or "").strip().lower()
+    if not fab or not loc_l:
+        return False
+    fab_compact = re.sub(r"[^a-z0-9]+", "", fab)
+    loc_compact = re.sub(r"[^a-z0-9]+", "", loc_l)
+    fab_tokens = _nb_tokens(fabric_name)
+    loc_tokens = _nb_tokens(loc_name)
+    if loc_compact and (loc_compact in fab_compact or fab_compact in loc_compact):
+        return True
+    return any(len(t) >= 4 and t in fab_tokens for t in loc_tokens)
+
+
+def _site_meta_for_slug(netbox_data, site_slug: str) -> dict:
+    slug = (site_slug or "").strip()
+    if not slug:
+        return {}
+    for s in netbox_data.get("sites") or []:
+        if (s.get("slug") or "").strip() == slug:
+            return s
+    return {}
+
+
+def _derive_site_slug_from_maas(machine: dict, fabric_map: dict, pool_map: dict) -> str:
+    fab = (machine.get("fabric_name") or "").strip()
+    pool = (machine.get("pool_name") or "").strip()
+    if fab and fab != "-":
+        for k, v in (fabric_map or {}).items():
+            if str(k).strip().lower() == fab.lower():
+                return str(v).strip()
+    if pool and pool != "-":
+        for k, v in (pool_map or {}).items():
+            if str(k).strip().lower() == pool.lower():
+                return str(v).strip()
+    return ""
+
+
+def _suggest_nb_location_for_fabric(
+    fabric_name: str, site_slug: str, netbox_data: dict
+) -> str:
+    fab = (fabric_name or "").strip()
+    if not fab or fab == "-":
+        return ""
+    site_slug = (site_slug or "").strip()
+    best = ""
+    for loc in netbox_data.get("locations") or []:
+        ss = (loc.get("site_slug") or "").strip()
+        if site_slug and ss and ss != site_slug:
+            continue
+        nm = (loc.get("name") or "").strip()
+        if nm and _fabric_matches_location_name(fab, nm):
+            return nm
+    return best
+
+
+def _maas_vendor_product(machine: dict) -> tuple[str, str]:
+    hi = machine.get("hardware_info")
+    if isinstance(hi, str) and hi.strip().startswith("{"):
+        try:
+            hi = json.loads(hi)
+        except Exception:
+            hi = None
+    if not isinstance(hi, dict):
+        hi = {}
+    vendor = (
+        str(machine.get("hardware_vendor") or hi.get("system_vendor") or hi.get("vendor") or "")
+    ).strip()
+    product = (
+        str(
+            hi.get("system_product")
+            or machine.get("product_name")
+            or hi.get("product_name")
+            or hi.get("mainboard_product")
+            or ""
+        )
+    ).strip()
+    if product.lower() in ("unknown", "none", "n/a", ""):
+        product = ""
+    return vendor, product
+
+
+def _match_netbox_device_type_display(
+    vendor: str, product: str, netbox_data: dict
+) -> str:
+    vendor_l = (vendor or "").strip().lower()
+    product_n = (product or "").strip()
+    types_list = netbox_data.get("device_types") or []
+    if not types_list:
+        return "—"
+    if product_n:
+        exact = [dt for dt in types_list if (dt.get("model") or "").strip().lower() == product_n.lower()]
+        if len(exact) == 1:
+            return (exact[0].get("display") or "").strip() or "—"
+        if len(exact) > 1 and vendor_l:
+            vmatch = [
+                dt
+                for dt in exact
+                if (dt.get("manufacturer") or "").strip().lower() == vendor_l
+            ]
+            if len(vmatch) == 1:
+                return (vmatch[0].get("display") or "").strip() or "—"
+            if vmatch:
+                return (vmatch[0].get("display") or "").strip() + f" (ambiguous ×{len(vmatch)})"
+            return (exact[0].get("display") or "").strip() + f" (ambiguous ×{len(exact)})"
+        if len(exact) > 1:
+            return (exact[0].get("display") or "").strip() + f" (ambiguous ×{len(exact)})"
+        slug_hits = [
+            dt for dt in types_list if (dt.get("slug") or "").strip().lower() == product_n.lower()
+        ]
+        if len(slug_hits) == 1:
+            return (slug_hits[0].get("display") or "").strip() or "—"
+    if vendor_l and product_n:
+        both = [
+            dt
+            for dt in types_list
+            if (dt.get("manufacturer") or "").strip().lower() == vendor_l
+            and product_n.lower() in (dt.get("model") or "").strip().lower()
+        ]
+        if len(both) == 1:
+            return (both[0].get("display") or "").strip() or "—"
+    maas_hint = f"{vendor} {product_n}".strip() or vendor or product_n or "MAAS"
+    return f"{maas_hint} (no exact NetBox DeviceType)"
+
+
+def _is_storage_host_role(slug: str, name: str) -> bool:
+    s = (slug or "").strip().lower()
+    n = (name or "").strip().lower()
+    if s == "storage-host" or n == "storage host":
+        return True
+    if "storage" in s and "host" in s and s != "storage":
+        return True
+    if "storage" in n and "host" in n and n.replace(" ", "") != "storage":
+        return True
+    return False
+
+
+def _match_netbox_role_from_hostname(hostname: str, netbox_data: dict) -> str:
+    hn = (hostname or "").strip().lower()
+    if not hn:
+        return "—"
+    roles = netbox_data.get("device_roles") or []
+    if not roles:
+        return "—"
+    tokens = {t for t in re.split(r"[^a-z0-9]+", hn) if t}
+
+    def role_display(r: dict) -> str:
+        name = (r.get("name") or "").strip()
+        slug = (r.get("slug") or "").strip()
+        if name and slug:
+            return f"{name} ({slug})"
+        return name or slug or "—"
+
+    if "gpu" in tokens:
+        for r in roles:
+            s = (r.get("slug") or "").strip().lower()
+            n = (r.get("name") or "").strip().lower()
+            if "gpu" in s and "host" in s:
+                return role_display(r)
+            if "gpu" in n and "host" in n:
+                return role_display(r)
+        return "—"
+
+    # Storage: token "stor" (org naming) OR token "weka" (explicit request), and hostname contains "se-s".
+    if ("stor" in tokens or "weka" in tokens) and "se-s" in hn:
+        candidates = []
+        for r in roles:
+            s = (r.get("slug") or "").strip().lower()
+            n = (r.get("name") or "").strip().lower()
+            if "weka" in tokens:
+                if _is_storage_host_role(s, n):
+                    candidates.append(r)
+                    continue
+            if _is_storage_host_role(s, n):
+                continue
+            if s == "storage" or n == "storage":
+                candidates.append(r)
+            elif "storage" in s and "host" not in s:
+                candidates.append(r)
+            elif "storage" in n and "host" not in n:
+                candidates.append(r)
+        if len(candidates) == 1:
+            return role_display(candidates[0])
+        if len(candidates) > 1:
+            return role_display(candidates[0]) + f" (ambiguous ×{len(candidates)})"
+        return "—"
+
+    if "cpu" in tokens:
+        for r in roles:
+            s = (r.get("slug") or "").strip().lower()
+            n = (r.get("name") or "").strip().lower()
+            if "cpu" in s and "host" in s:
+                return role_display(r)
+            if "cpu" in n and "host" in n:
+                return role_display(r)
+        return "—"
+
+    return "—"
 
 
 def _normalize_ascii_cell(s):
@@ -272,15 +477,31 @@ def _html_col_is_ip(header) -> bool:
     return re.search(r"(?i)\bIP(?:s)?\b", h) is not None
 
 
+def _html_col_should_wrap_text(header) -> bool:
+    """Wrap only narrative/action columns; keep all other columns single-line."""
+    h = str(header or "").strip().lower()
+    wrap_headers = {
+        "reason",
+        "proposed action",
+        "proposed properties (from maas)",
+        "alignment issues",
+        "why this matters",
+        "note",
+    }
+    return h in wrap_headers
+
+
 def _html_th_class(header) -> str:
     h = str(header or "")
-    base = "small align-bottom"
+    base = "small align-bottom text-nowrap"
     if _html_col_is_mac(h):
         return f"{base} text-nowrap font-monospace"
     if _html_col_is_ip(h):
         return f"{base} text-nowrap"
     if _html_col_is_risk(h):
         return f"{base} text-nowrap"
+    if _html_col_should_wrap_text(h):
+        return "small align-bottom"
     return base
 
 
@@ -293,9 +514,11 @@ def _html_td_class(header, col_idx, notes_col_idx=None) -> str:
         parts.extend(["align-top", "text-nowrap"])
     elif _html_col_is_risk(h):
         parts.extend(["align-top", "text-nowrap"])
-    else:
-        # Bootstrap text-break: wrap long strings so text columns stay reasonably narrow (early HTML behavior).
+    elif _html_col_should_wrap_text(h):
+        # Wrap long free-text columns (Reason/Proposed Action/notes) for readability.
         parts.extend(["align-top", "text-break"])
+    else:
+        parts.extend(["align-top", "text-nowrap"])
     if notes_col_idx is not None and col_idx == notes_col_idx:
         parts.append("text-muted")
     return " ".join(parts)
@@ -489,7 +712,6 @@ def _count_hints(matched_rows, needle: str) -> int:
 
 # Substrings of hints from sync/reconciliation/audit_detail.py (placement / lifecycle only).
 _ALIGNMENT_HINT_SUBSTRINGS = (
-    "site vs MAAS zone/pool",
     "MAAS fabric vs NB location",
     "NB location empty — MAAS has fabric",
     "MAAS deployed / NB staged",
@@ -559,12 +781,11 @@ def _alignment_review_rows(matched_rows):
         out.append(
             [
                 r.get("hostname") or "",
-                r.get("maas_zone") or "—",
                 _select_alignment_fabric(r.get("maas_fabric"), r.get("netbox_location")),
-                r.get("maas_pool") or "—",
                 r.get("netbox_site") or "—",
                 r.get("netbox_location") or "—",
-                f"MAAS {(r.get('maas_status') or '-')} / NetBox {(r.get('netbox_status') or '-')}",
+                r.get("maas_status") or "-",
+                r.get("netbox_status") or "-",
                 joined or "—",
             ]
         )
@@ -615,11 +836,11 @@ def _run_metadata_rows(maas_data, netbox_data, openstack_data):
         ["MAAS source", _maas_line()],
         ["OpenStack source", _openstack_line()],
         ["NetBox source", _netbox_line()],
-        ["Match logic", "Hostname + NIC MAC (placement hints when hostname matching is ambiguous)"],
+        ["Match logic", "Hostname + NIC MAC"],
         ["Scope", "Phase 0 audit only (discovery + drift + proposed actions)"],
         [
             "Action mode",
-            "Read-only: no NetBox write, no Git merge, no branch apply from this screen",
+            "Read-only from this screen: no NetBox write. Branch apply/merge is handled in a separate NetBox branch workflow.",
         ],
     ]
 
@@ -671,7 +892,7 @@ def _severity_triage_rows(pc, *, serial_validation_needed: int, bmc_oob_mismatch
             "Low",
             "Matched — review hints",
             str(pc["check_hosts"]),
-            "Inventory completeness issue; resolve mapping confidence.",
+            "Review host alignment/lifecycle hints (fabric vs location, lifecycle state mismatches). NIC/OOB drift is covered in dedicated detail tables.",
         ],
         [
             "Low",
@@ -1108,20 +1329,141 @@ def _proposed_changes_rows(
     netbox_ifaces=None,
 ):
     """Build user-friendly proposed change buckets (preview only)."""
+    try:
+        from netbox_automation_plugin.sync.config import get_sync_config
+
+        _sync = get_sync_config()
+        _fabric_site_map = _sync.get("site_mapping_fabric") or {}
+        _pool_site_map = _sync.get("site_mapping_pool") or {}
+    except Exception:
+        _fabric_site_map, _pool_site_map = {}, {}
+
+    def _primary_mac_from_maas(ifaces):
+        rows = [r for r in (ifaces or []) if str(r.get("mac") or "").strip()]
+        if not rows:
+            return "—"
+        with_ip = [r for r in rows if r.get("ips")]
+        pick = with_ip[0] if with_ip else rows[0]
+        return str(pick.get("mac") or "—")
+
+    def _suggested_oob_from_machine(m):
+        pt = str(m.get("power_type") or "").strip().lower()
+        if "idrac" in pt:
+            return "idrac"
+        if "ipmi" in pt:
+            return "ipmi"
+        vendor = str(m.get("hardware_vendor") or "").strip().lower()
+        if vendor == "dell":
+            return "idrac"
+        return "mgmt"
+
+    def _new_device_nic_rows():
+        out = []
+        for h in sorted(drift.get("in_maas_not_netbox") or []):
+            m = by_h.get(h, {})
+            for r in (m.get("interfaces") or []):
+                mac = str(r.get("mac") or "").strip().lower()
+                if not mac:
+                    continue
+                maas_if = str(r.get("name") or "").strip() or "—"
+                maas_fab = str(r.get("iface_fabric") or m.get("fabric_name") or "—")
+                ips = ", ".join(r.get("ips") or []) or "—"
+                vlan = str(r.get("vlan_vid") or "—")
+                suggested_name = (
+                    maas_if
+                    if maas_if != "—"
+                    else f"maas-nic-{mac.replace(':', '')[-6:]}"
+                )
+                props = f"MAC {mac}; untagged VLAN {vlan} (from MAAS); IPs: {ips}"
+                out.append(
+                    [
+                        h,
+                        "—",
+                        "—",
+                        maas_if,
+                        maas_fab,
+                        mac,
+                        ips,
+                        vlan,
+                        suggested_name,
+                        props,
+                        "Medium",
+                    ]
+                )
+        return sorted(out, key=lambda x: (x[0] or "").lower())
+
+    def _new_device_bmc_rows():
+        out = []
+        for h in sorted(drift.get("in_maas_not_netbox") or []):
+            m = by_h.get(h, {})
+            bmc_ip = str(m.get("bmc_ip") or "").strip()
+            power_type = str(m.get("power_type") or "").strip()
+            if not bmc_ip and not power_type:
+                continue
+            mgmt = _suggested_oob_from_machine(m)
+            action = (
+                f"Create OOB interface '{mgmt}' (management-only)"
+                + (f"; set OOB/BMC IP {bmc_ip}" if bmc_ip else "")
+            )
+            out.append(
+                [
+                    h,
+                    bmc_ip or "—",
+                    power_type or "—",
+                    str(m.get("bmc_mac") or "—"),
+                    mgmt,
+                    action,
+                    "Medium",
+                ]
+            )
+        return sorted(out, key=lambda x: (x[0] or "").lower())
+
     by_h = _maas_machine_by_hostname(maas_data)
-    add_mgmt_iface = _build_proposed_mgmt_interface_rows(
-        matched_rows, by_h, netbox_ifaces
-    )
-    add_nb_interfaces = _build_add_nb_interface_rows(interface_audit)
+    add_mgmt_iface = _build_proposed_mgmt_interface_rows(matched_rows, by_h, netbox_ifaces)
+    add_mgmt_iface_new_devices = _new_device_bmc_rows()
+    add_nb_interfaces = _build_add_nb_interface_rows(interface_audit) + _new_device_nic_rows()
+    add_nb_interfaces = sorted(add_nb_interfaces, key=lambda x: (x[0] or "").lower())
 
     add_devices = []
     for h in sorted(drift.get("in_maas_not_netbox") or []):
         m = by_h.get(h, {})
+        ifaces = m.get("interfaces") or []
+        nic_count = sum(1 for r in ifaces if str(r.get("mac") or "").strip())
+        primary_mac = _primary_mac_from_maas(ifaces)
+        bmc_ip = str(m.get("bmc_ip") or "—")
+        power_type = str(m.get("power_type") or "—")
+        bmc_present = "Yes" if (bmc_ip not in {"", "—"} or power_type not in {"", "—"}) else "No"
+        site_slug = _derive_site_slug_from_maas(m, _fabric_site_map, _pool_site_map)
+        site_meta = _site_meta_for_slug(netbox_data, site_slug) if site_slug else {}
+        nb_site = (
+            (site_meta.get("name") or site_slug or "—").strip() if site_slug else "—"
+        )
+        nb_region = (site_meta.get("region_name") or "—") if site_slug else "—"
+        nb_loc = (
+            _suggest_nb_location_for_fabric(
+                str(m.get("fabric_name") or ""), site_slug, netbox_data
+            )
+            or "—"
+        )
+        nb_status = "—"
+        mvendor, mproduct = _maas_vendor_product(m)
+        nb_dtype = _match_netbox_device_type_display(mvendor, mproduct, netbox_data)
+        nb_role = _match_netbox_role_from_hostname(h, netbox_data)
         add_devices.append([
             h,
-            str(m.get("zone_name", "-")),
-            str(m.get("pool_name", "-")),
+            nb_site,
+            nb_region,
+            nb_loc,
+            nb_status,
+            nb_dtype,
+            nb_role,
+            str(m.get("fabric_name", "-")),
             str(m.get("status_name", "-")),
+            str(m.get("serial") or "—"),
+            power_type,
+            bmc_present,
+            str(nic_count),
+            primary_mac,
             "maas-discovered",
             "Create device + ports",
         ])
@@ -1237,6 +1579,7 @@ def _proposed_changes_rows(
         "update_nic": update_nic,
         "add_nb_interfaces": add_nb_interfaces,
         "add_mgmt_iface": add_mgmt_iface,
+        "add_mgmt_iface_new_devices": add_mgmt_iface_new_devices,
         "review_serial": review_serial,
     }
 
@@ -1269,8 +1612,6 @@ def format_drift_report(
     drift = _drift_for_user_reports(drift)
     e = _DriftReportEmitter(use_html=use_html)
     ref_lines = []
-
-    e.phase0_field_ownership()
 
     # --- INVENTORY (compact) ---
     e.banner("INVENTORY")
@@ -1385,27 +1726,6 @@ def format_drift_report(
         ],
     )
 
-    align_rows = _alignment_review_rows(matched_rows)
-    if align_rows:
-        e.spacer()
-        e.subtitle("Detail — placement & lifecycle alignment")
-        e.spacer()
-        e.table(
-            [
-                "Host",
-                "MAAS zone",
-                "MAAS fabric",
-                "MAAS pool",
-                "NetBox site",
-                "NetBox location",
-                "Lifecycle state",
-                "Alignment issues",
-            ],
-            align_rows,
-            dynamic_columns=True,
-            notes_col_idx=7,
-        )
-
     # --- Severity triage ---
     e.spacer()
     e.banner("SEVERITY TRIAGE (why these matter)", "-")
@@ -1437,6 +1757,26 @@ def format_drift_report(
             ["MAAS NIC missing in NetBox", str(pc["maas_nic_missing_nb"])],
         ],
     )
+
+    align_rows = _alignment_review_rows(matched_rows)
+    if align_rows:
+        e.spacer()
+        e.subtitle("Detail — placement & lifecycle alignment")
+        e.spacer()
+        e.table(
+            [
+                "Host",
+                "MAAS fabric",
+                "NetBox site",
+                "NetBox location",
+                "MAAS state",
+                "NB state",
+                "Alignment issues",
+            ],
+            align_rows,
+            dynamic_columns=True,
+            notes_col_idx=6,
+        )
 
     # --- Proposed changes (preview only; full list, uncapped) ---
     prop = _proposed_changes_rows(
@@ -1471,7 +1811,24 @@ def format_drift_report(
         e.subtitle("Detail — new devices")
         e.spacer()
         e.table(
-            ["Hostname", "Zone", "Pool", "MAAS Status", "Proposed Tag", "Proposed Action"],
+            [
+                "Hostname",
+                "NB site",
+                "NB region",
+                "NB location",
+                "NB status",
+                "NetBox device type",
+                "NetBox role",
+                "MAAS fabric",
+                "MAAS status",
+                "Serial Number",
+                "Power type",
+                "BMC present",
+                "NIC count",
+                "Primary MAC (MAAS)",
+                "Proposed Tag",
+                "Proposed Action",
+            ],
             prop["add_devices"],
             dynamic_columns=True,
         )
@@ -1502,7 +1859,11 @@ def format_drift_report(
         [
             ["New NICs in NetBox", str(len(prop["add_nb_interfaces"])), "MAAS MAC not on device"],
             ["NIC drift", str(len(prop["update_nic"])), "MAAS vs NetBox differs"],
-            ["BMC / OOB", str(len(prop["add_mgmt_iface"])), "Power / out-of-band vs NetBox"],
+            [
+                "BMC / OOB",
+                str(len(prop["add_mgmt_iface"]) + len(prop.get("add_mgmt_iface_new_devices", []))),
+                "Power / out-of-band vs NetBox",
+            ],
         ],
     )
     if prop["add_nb_interfaces"]:
@@ -1548,6 +1909,24 @@ def format_drift_report(
                 "Risk",
             ],
             prop["update_nic"],
+            dynamic_columns=True,
+        )
+
+    if prop.get("add_mgmt_iface_new_devices"):
+        e.spacer()
+        e.subtitle("Detail — new BMC / OOB interfaces")
+        e.spacer()
+        e.table(
+            [
+                "Host",
+                "MAAS BMC IP",
+                "MAAS power_type",
+                "MAAS BMC MAC",
+                "Suggested NB mgmt iface",
+                "Proposed action",
+                "Risk",
+            ],
+            prop["add_mgmt_iface_new_devices"],
             dynamic_columns=True,
         )
 
@@ -1597,7 +1976,8 @@ def format_drift_report(
     e.spacer()
     total_props = (
         len(prop["add_devices"]) + len(prop["add_prefixes"]) + len(prop["add_fips"]) +
-        len(prop["update_nic"]) + len(prop["add_nb_interfaces"]) + len(prop["add_mgmt_iface"]) +
+        len(prop["update_nic"]) + len(prop["add_nb_interfaces"]) +
+        len(prop["add_mgmt_iface"]) + len(prop.get("add_mgmt_iface_new_devices", [])) +
         len(prop["review_serial"])
     )
     e.table(
@@ -1608,7 +1988,7 @@ def format_drift_report(
             ["New floating IPs", str(len(prop["add_fips"]))],
             ["NIC drift", str(len(prop["update_nic"]))],
             ["New NICs", str(len(prop["add_nb_interfaces"]))],
-            ["BMC / OOB", str(len(prop["add_mgmt_iface"]))],
+            ["BMC / OOB", str(len(prop["add_mgmt_iface"]) + len(prop.get("add_mgmt_iface_new_devices", [])))],
             ["Serials (review)", str(len(prop["review_serial"]))],
             ["Total", str(total_props)],
         ],
@@ -1757,27 +2137,6 @@ def build_drift_report_xlsx(
     ws_sum.append(["BMC vs NetBox OOB differs", str(bmc_oob_mismatch)])
     ws_sum.append(["LLDP / cabling", "—"])
     ws_sum.append([])
-    align_rows_x = _alignment_review_rows(matched_rows)
-    if align_rows_x:
-        r_al = ws_sum.max_row + 1
-        ws_sum.append(["Detail — placement & lifecycle alignment", ""])
-        ws_sum.cell(row=r_al, column=1).font = header_font
-        _append_header(
-            ws_sum,
-            [
-                "Host",
-                "MAAS zone",
-                "MAAS fabric",
-                "MAAS pool",
-                "NetBox site",
-                "NetBox location",
-                "Lifecycle state",
-                "Alignment issues",
-            ],
-        )
-        for row in align_rows_x:
-            ws_sum.append(row)
-        ws_sum.append([])
     ws_sum.append(["SEVERITY TRIAGE (why these matter)", "", ""])
     _append_header(ws_sum, ["Severity", "Category", "Count", "Why this matters"])
     for row in _severity_triage_rows(
@@ -1799,6 +2158,27 @@ def build_drift_report_xlsx(
     ws_sum.append(["VLAN mismatch NICs", str(pc["vlan_drift_nic"])])
     ws_sum.append(["VLAN unverified NICs", str(pc["vlan_unverified_nic"])])
     ws_sum.append(["MAAS NIC missing in NetBox", str(pc["maas_nic_missing_nb"])])
+    ws_sum.append([])
+    align_rows_x = _alignment_review_rows(matched_rows)
+    if align_rows_x:
+        r_al = ws_sum.max_row + 1
+        ws_sum.append(["Detail — placement & lifecycle alignment", ""])
+        ws_sum.cell(row=r_al, column=1).font = header_font
+        _append_header(
+            ws_sum,
+            [
+                "Host",
+                "MAAS fabric",
+                "NetBox site",
+                "NetBox location",
+                "MAAS state",
+                "NB state",
+                "Alignment issues",
+            ],
+        )
+        for row in align_rows_x:
+            ws_sum.append(row)
+        ws_sum.append([])
 
     prop = _proposed_changes_rows(
         maas_data,
@@ -1820,6 +2200,7 @@ def build_drift_report_xlsx(
         + len(prop["update_nic"])
         + len(prop["add_nb_interfaces"])
         + len(prop["add_mgmt_iface"])
+        + len(prop.get("add_mgmt_iface_new_devices", []))
         + len(prop["review_serial"])
     )
     ws_sum.append(["New devices", str(len(prop["add_devices"]))])
@@ -1827,7 +2208,7 @@ def build_drift_report_xlsx(
     ws_sum.append(["New floating IPs", str(len(prop["add_fips"]))])
     ws_sum.append(["NIC drift", str(len(prop["update_nic"]))])
     ws_sum.append(["New NICs", str(len(prop["add_nb_interfaces"]))])
-    ws_sum.append(["BMC / OOB", str(len(prop["add_mgmt_iface"]))])
+    ws_sum.append(["BMC / OOB", str(len(prop["add_mgmt_iface"]) + len(prop.get("add_mgmt_iface_new_devices", [])))])
     ws_sum.append(["Serials (review)", str(len(prop["review_serial"]))])
     ws_sum.append(["Total", str(total_props_x)])
 
@@ -1844,7 +2225,7 @@ def build_drift_report_xlsx(
     ws_prop.append(["New floating IPs (OpenStack)", len(prop["add_fips"])])
     ws_prop.append(["NIC drift", len(prop["update_nic"])])
     ws_prop.append(["New NICs", len(prop["add_nb_interfaces"])])
-    ws_prop.append(["BMC / OOB", len(prop["add_mgmt_iface"])])
+    ws_prop.append(["BMC / OOB", len(prop["add_mgmt_iface"]) + len(prop.get("add_mgmt_iface_new_devices", []))])
     ws_prop.append(["Serials (review)", len(prop["review_serial"])])
 
     def _append_block(title, headers, rows):
@@ -1857,7 +2238,24 @@ def build_drift_report_xlsx(
 
     _append_block(
         "A) New devices",
-        ["Hostname", "Zone", "Pool", "MAAS Status", "Proposed Tag", "Proposed Action"],
+        [
+            "Hostname",
+            "NB site",
+            "NB region",
+            "NB location",
+            "NB status",
+            "NetBox device type",
+            "NetBox role",
+            "MAAS fabric",
+            "MAAS status",
+            "Serial Number",
+            "Power type",
+            "BMC present",
+            "NIC count",
+            "Primary MAC (MAAS)",
+            "Proposed Tag",
+            "Proposed Action",
+        ],
         prop["add_devices"],
     )
     _append_block(
@@ -1924,6 +2322,19 @@ def build_drift_report_xlsx(
             "Risk",
         ],
         prop["add_mgmt_iface"],
+    )
+    _append_block(
+        "B) New-device BMC / OOB interfaces",
+        [
+            "Host",
+            "MAAS BMC IP",
+            "MAAS power_type",
+            "MAAS BMC MAC",
+            "Suggested NB mgmt iface",
+            "Proposed action",
+            "Risk",
+        ],
+        prop.get("add_mgmt_iface_new_devices", []),
     )
     _append_block(
         "C) Serials",
