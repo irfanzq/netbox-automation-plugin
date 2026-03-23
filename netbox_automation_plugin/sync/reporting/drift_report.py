@@ -29,6 +29,21 @@ _DYNAMIC_COL_CAP = 10000
 _ASCII_COL_WRAP_DEFAULT = 96
 _ASCII_NOTES_COL_WRAP = 200
 
+_PHASE0_FIELD_OWNERSHIP_TITLE = "Field ownership — Phase 0 drift audit"
+_PHASE0_FIELD_OWNERSHIP_LEAD = (
+    "NetBox is the canonical inventory model in this workflow. "
+    "MAAS and OpenStack supply runtime signals for comparison and gap detection; "
+    "proposed actions are review-gated suggestions to align NetBox and do not run automatically."
+)
+_PHASE0_FIELD_OWNERSHIP_BULLETS = (
+    "Discovery scope in Phase 0: detect new device candidates and drift; do not auto-apply changes.",
+    "MAAS data is used for host/NIC matching and drift visibility (MAC, IP, VLAN observations).",
+    "OOB/BMC values from MAAS power data inform NetBox management documentation alignment.",
+    "OpenStack subnet and floating IP state is used to detect NetBox/IPAM gaps.",
+    "Explicit non-goals for this phase: no blind hostname renames and no deletes from this screen.",
+    "Conflict handling: operational evidence is compared to model intent; NetBox remains authoritative after approved updates.",
+)
+
 
 def _drift_for_user_reports(drift):
     """
@@ -248,11 +263,22 @@ def _html_col_is_risk(header) -> bool:
     return str(header or "").strip().lower() == "risk"
 
 
+def _html_col_is_ip(header) -> bool:
+    """
+    True for column headers representing IP addresses/lists.
+    Matches labels like 'IP', 'IPs', 'OOB IP', 'MAAS BMC IP', etc.
+    """
+    h = str(header or "")
+    return re.search(r"(?i)\bIP(?:s)?\b", h) is not None
+
+
 def _html_th_class(header) -> str:
     h = str(header or "")
     base = "small align-bottom"
     if _html_col_is_mac(h):
         return f"{base} text-nowrap font-monospace"
+    if _html_col_is_ip(h):
+        return f"{base} text-nowrap"
     if _html_col_is_risk(h):
         return f"{base} text-nowrap"
     return base
@@ -263,6 +289,8 @@ def _html_td_class(header, col_idx, notes_col_idx=None) -> str:
     parts = []
     if _html_col_is_mac(h):
         parts.extend(["align-top", "text-nowrap", "font-monospace"])
+    elif _html_col_is_ip(h):
+        parts.extend(["align-top", "text-nowrap"])
     elif _html_col_is_risk(h):
         parts.extend(["align-top", "text-nowrap"])
     else:
@@ -367,6 +395,26 @@ class _DriftReportEmitter:
         else:
             self._parts.extend(_ascii_table(headers, rows, **kw))
 
+    def phase0_field_ownership(self) -> None:
+        """Explain source-of-truth and why MAAS/OS columns feed proposed NetBox actions."""
+        if self._html:
+            lis = "".join(
+                f"<li>{html.escape(b)}</li>" for b in _PHASE0_FIELD_OWNERSHIP_BULLETS
+            )
+            self._parts.append(
+                '<div class="alert alert-info border py-2 px-3 mb-3 small drift-rpt-field-ownership" role="note">'
+                f'<div class="fw-semibold mb-1">{html.escape(_PHASE0_FIELD_OWNERSHIP_TITLE)}</div>'
+                f'<p class="small text-body-secondary mb-2">{html.escape(_PHASE0_FIELD_OWNERSHIP_LEAD)}</p>'
+                f'<ul class="mb-0 ps-3">{lis}</ul></div>'
+            )
+        else:
+            self._parts.extend(_banner(_PHASE0_FIELD_OWNERSHIP_TITLE, "-"))
+            self._parts.append(f"  {_PHASE0_FIELD_OWNERSHIP_LEAD}")
+            self._parts.append("")
+            for b in _PHASE0_FIELD_OWNERSHIP_BULLETS:
+                self._parts.append(f"  • {b}")
+            self._parts.append("")
+
     def render(self) -> str:
         if self._html:
             return (
@@ -420,7 +468,7 @@ def _phase0_category_counts(
 
 
 def _matched_hosts_with_drift(matched_rows):
-    """Rows that have placement CHECK or any hints (so we show only drifting hosts)."""
+    """Rows that have review hints (place_match CHECK) so we show drifting hosts only."""
     if not matched_rows:
         return []
     return [
@@ -437,6 +485,213 @@ def _count_hints(matched_rows, needle: str) -> int:
                 c += 1
                 break
     return c
+
+
+# Substrings of hints from sync/reconciliation/audit_detail.py (placement / lifecycle only).
+_ALIGNMENT_HINT_SUBSTRINGS = (
+    "site vs MAAS zone/pool",
+    "MAAS fabric vs NB location",
+    "NB location empty — MAAS has fabric",
+    "MAAS deployed / NB staged",
+)
+
+
+def _hint_is_placement_alignment(h: str) -> bool:
+    t = (h or "").strip()
+    return any(marker in t for marker in _ALIGNMENT_HINT_SUBSTRINGS)
+
+
+def _is_generic_maas_fabric_name(name: str) -> bool:
+    return re.fullmatch(r"(?i)fabric-\d+", (name or "").strip()) is not None
+
+
+def _split_maas_fabrics(raw) -> list[str]:
+    # MAAS fabric values may be a single name or a delimited list.
+    txt = str(raw or "").strip()
+    if not txt or txt == "—":
+        return []
+    parts = [p.strip() for p in re.split(r"[;,]", txt) if p.strip()]
+    out = []
+    seen = set()
+    for p in parts:
+        k = p.lower()
+        if k in seen:
+            continue
+        seen.add(k)
+        out.append(p)
+    return out
+
+
+def _select_alignment_fabric(maas_fabric_raw, nb_location_raw) -> str:
+    """
+    Prefer location-related MAAS fabric names (e.g. spruce-staging) and ignore
+    generic fabric-#### labels when meaningful names exist.
+    """
+    fabrics = _split_maas_fabrics(maas_fabric_raw)
+    if not fabrics:
+        return "—"
+    non_generic = [f for f in fabrics if not _is_generic_maas_fabric_name(f)]
+    candidates = non_generic or fabrics
+    nb_loc = (nb_location_raw or "").strip().lower()
+    if nb_loc:
+        for f in candidates:
+            fl = f.lower()
+            if nb_loc in fl or fl in nb_loc:
+                return f
+            tokens = [t for t in re.split(r"[-_\s/]+", fl) if t]
+            if nb_loc in tokens:
+                return f
+    return candidates[0]
+
+
+def _alignment_review_rows(matched_rows):
+    """
+    Matched hosts with placement/lifecycle hints only (not serial, NIC, or BMC/OOB —
+    those have dedicated report tables).
+    """
+    out = []
+    for r in matched_rows or []:
+        hints = r.get("hints") or []
+        align = [h for h in hints if _hint_is_placement_alignment(h)]
+        if not align:
+            continue
+        joined = _dedupe_note_parts("; ".join(align))
+        out.append(
+            [
+                r.get("hostname") or "",
+                r.get("maas_zone") or "—",
+                _select_alignment_fabric(r.get("maas_fabric"), r.get("netbox_location")),
+                r.get("maas_pool") or "—",
+                r.get("netbox_site") or "—",
+                r.get("netbox_location") or "—",
+                f"MAAS {(r.get('maas_status') or '-')} / NetBox {(r.get('netbox_status') or '-')}",
+                joined or "—",
+            ]
+        )
+    return sorted(out, key=lambda row: (row[0] or "").lower())
+
+
+def _truncate_run_meta(text: str, max_len: int = 240) -> str:
+    s = (text or "").strip()
+    if not s:
+        return ""
+    if len(s) <= max_len:
+        return s
+    return s[: max_len - 1].rstrip() + "…"
+
+
+def _run_metadata_rows(maas_data, netbox_data, openstack_data):
+    """
+    Trust/context lines for reviewers: source reachability, match policy, scope, action mode.
+    Returns rows for Property / Value tables.
+    """
+    maas_data = maas_data or {}
+    netbox_data = netbox_data or {}
+
+    def _maas_line():
+        err = maas_data.get("error")
+        if err:
+            return f"Failed — {_truncate_run_meta(str(err))}"
+        return "Reachable / success"
+
+    def _netbox_line():
+        err = netbox_data.get("error")
+        if err:
+            return f"Failed — {_truncate_run_meta(str(err))}"
+        return "Reachable / success"
+
+    def _openstack_line():
+        if openstack_data is None:
+            return "Skipped — OpenStack not fetched for this run"
+        osd = openstack_data or {}
+        if osd.get("openstack_cred_missing"):
+            return "Not configured — OpenStack credentials missing"
+        err = osd.get("error")
+        if err:
+            return f"Failed — {_truncate_run_meta(str(err))}"
+        return "Reachable / success"
+
+    return [
+        ["MAAS source", _maas_line()],
+        ["OpenStack source", _openstack_line()],
+        ["NetBox source", _netbox_line()],
+        ["Match logic", "Hostname + NIC MAC (placement hints when hostname matching is ambiguous)"],
+        ["Scope", "Phase 0 audit only (discovery + drift + proposed actions)"],
+        [
+            "Action mode",
+            "Read-only: no NetBox write, no Git merge, no branch apply from this screen",
+        ],
+    ]
+
+
+def _severity_triage_rows(pc, *, serial_validation_needed: int, bmc_oob_mismatch: int):
+    """
+    Severity policy for Phase 0 review.
+    Returns rows: [severity, category, count, why].
+    """
+    sub_count = pc["sub_gaps"] if pc["sub_gaps"] is not None else "N/A"
+    return [
+        [
+            "High",
+            "OpenStack FIP → no IP record",
+            str(pc["fip_gaps"]),
+            "Routable addresses may exist without NetBox/IPAM tracking.",
+        ],
+        [
+            "High",
+            "OpenStack subnet → no Prefix",
+            str(sub_count),
+            "Subnet usage exists but design intent is missing from IPAM.",
+        ],
+        [
+            "High",
+            "VLAN mismatch (MAAS vs NetBox)",
+            str(pc["vlan_drift_nic"]),
+            "Observed VLAN differs from modeled intent; can impact active services.",
+        ],
+        [
+            "High",
+            "BMC vs NetBox OOB differs",
+            str(bmc_oob_mismatch),
+            "Out-of-band access may target the wrong management endpoint.",
+        ],
+        [
+            "Medium",
+            "NIC rows not OK",
+            str(pc["iface_not_ok"]),
+            "Interface-level deltas need review (IP/MAC/VLAN alignment).",
+        ],
+        [
+            "Medium",
+            "MAAS NIC missing in NetBox",
+            str(pc["maas_nic_missing_nb"]),
+            "Operational interfaces are present but not yet modeled.",
+        ],
+        [
+            "Low",
+            "Matched — review hints",
+            str(pc["check_hosts"]),
+            "Inventory completeness issue; resolve mapping confidence.",
+        ],
+        [
+            "Low",
+            "NetBox serial missing",
+            str(serial_validation_needed),
+            "Asset metadata quality gap; usually non-blocking for connectivity.",
+        ],
+        [
+            "Info",
+            "VLAN unverified from MAAS",
+            str(pc["vlan_unverified_nic"]),
+            "Observation is incomplete; confirm before applying intent changes.",
+        ],
+        [
+            "Info",
+            "In MAAS only (not in NetBox)",
+            str(pc["maas_only"]),
+            "Discovery candidate count for onboarding review.",
+        ],
+    ]
 
 
 def _device_by_name(netbox_data):
@@ -1010,12 +1265,23 @@ def format_drift_report(
 
     When use_html is True (default), drift is a safe HTML fragment for |safe in templates.
     """
+    orphaned_nb_count = len((drift or {}).get("in_netbox_not_maas") or [])
     drift = _drift_for_user_reports(drift)
     e = _DriftReportEmitter(use_html=use_html)
     ref_lines = []
 
+    e.phase0_field_ownership()
+
     # --- INVENTORY (compact) ---
     e.banner("INVENTORY")
+    e.spacer()
+    e.subtitle("Run metadata")
+    e.spacer()
+    e.table(
+        ["Property", "Value"],
+        _run_metadata_rows(maas_data, netbox_data, openstack_data),
+        dynamic_columns=True,
+    )
     e.spacer()
     e.subtitle("MAAS")
     e.spacer()
@@ -1101,7 +1367,12 @@ def format_drift_report(
         ["Category", "Count"],
         [
             ["In MAAS only (not in NetBox)", str(pc["maas_only"])],
-            ["Matched — placement needs check", str(pc["check_hosts"])],
+            [
+                "Orphaned NetBox devices (not seen in MAAS this run; read-only here; "
+                "tagging/cleanup deferred to a separate UI workflow because NetBox update sources include netbox-agent, scripts, and manual entries, not just MAAS)",
+                str(orphaned_nb_count),
+            ],
+            ["Matched — review hints", str(pc["check_hosts"])],
             ["NetBox serial missing", str(serial_validation_needed)],
             ["NIC rows not OK", str(pc["iface_not_ok"])],
             ["MAAS NIC missing in NetBox", str(pc["maas_nic_missing_nb"])],
@@ -1114,25 +1385,38 @@ def format_drift_report(
         ],
     )
 
-    # --- High-risk summary ---
+    align_rows = _alignment_review_rows(matched_rows)
+    if align_rows:
+        e.spacer()
+        e.subtitle("Detail — placement & lifecycle alignment")
+        e.spacer()
+        e.table(
+            [
+                "Host",
+                "MAAS zone",
+                "MAAS fabric",
+                "MAAS pool",
+                "NetBox site",
+                "NetBox location",
+                "Lifecycle state",
+                "Alignment issues",
+            ],
+            align_rows,
+            dynamic_columns=True,
+            notes_col_idx=7,
+        )
+
+    # --- Severity triage ---
     e.spacer()
-    e.banner("HIGH-RISK (review first)", "-")
-    e.paragraph("Triage these before a sync.")
+    e.banner("SEVERITY TRIAGE (why these matter)", "-")
+    e.paragraph("Priority rules used in this report for review ordering.")
     e.spacer()
-    hr_rows = []
-    hr_total = 0
-    for name, val in [
-        ("OpenStack FIP → no IP record", pc["fip_gaps"]),
-        ("OpenStack subnet → no Prefix", pc["sub_gaps"] if pc["sub_gaps"] is not None else "N/A"),
-        ("VLAN mismatch (MAAS vs NetBox)", pc["vlan_drift_nic"]),
-        ("NetBox serial missing", serial_validation_needed),
-        ("BMC vs NetBox OOB differs", bmc_oob_mismatch),
-    ]:
-        hr_rows.append([name, str(val)])
-        if isinstance(val, int):
-            hr_total += val
-    e.table(["Category", "Count"], hr_rows)
-    e.line_total(f"Total: {hr_total}")
+    sev_rows = _severity_triage_rows(
+        pc,
+        serial_validation_needed=serial_validation_needed,
+        bmc_oob_mismatch=bmc_oob_mismatch,
+    )
+    e.table(["Severity", "Category", "Count", "Why this matters"], sev_rows)
 
     # --- Run metrics ---
     e.spacer()
@@ -1368,6 +1652,7 @@ def build_drift_report_xlsx(
     except ImportError:
         raise RuntimeError("openpyxl is required for XLSX export. pip install openpyxl")
 
+    orphaned_nb_count = len((drift or {}).get("in_netbox_not_maas") or [])
     drift = _drift_for_user_reports(drift)
 
     wb = Workbook()
@@ -1389,6 +1674,20 @@ def build_drift_report_xlsx(
     ws_sum.title = "Summary"
     ws_sum.append(["Drift audit summary"])
     ws_sum.cell(row=1, column=1).font = header_font
+    ws_sum.append([])
+    r_own = ws_sum.max_row + 1
+    ws_sum.append([_PHASE0_FIELD_OWNERSHIP_TITLE, "", ""])
+    ws_sum.cell(row=r_own, column=1).font = header_font
+    ws_sum.append([_PHASE0_FIELD_OWNERSHIP_LEAD, "", ""])
+    for b in _PHASE0_FIELD_OWNERSHIP_BULLETS:
+        ws_sum.append([f"  • {b}", "", ""])
+    ws_sum.append([])
+    r_rm = ws_sum.max_row + 1
+    ws_sum.append(["RUN METADATA", ""])
+    ws_sum.cell(row=r_rm, column=1).font = header_font
+    _append_header(ws_sum, ["Property", "Value"])
+    for prop, val in _run_metadata_rows(maas_data, netbox_data, openstack_data):
+        ws_sum.append([prop, val])
     ws_sum.append([])
     ws_sum.append(["MAAS", "OK" if not maas_data.get("error") else "Error", ""])
     ws_sum.append(["  Machines", str(len(maas_data.get("machines") or [])), ""])
@@ -1441,7 +1740,13 @@ def build_drift_report_xlsx(
     ws_sum.append(["DRIFT COUNTS", "", ""])
     _append_header(ws_sum, ["Category", "Count"])
     ws_sum.append(["In MAAS only (not in NetBox)", str(pc["maas_only"])])
-    ws_sum.append(["Matched — placement needs check", str(pc["check_hosts"])])
+    ws_sum.append(
+        [
+            "Orphaned NetBox devices (not seen in MAAS this run; read-only here; tagging/cleanup deferred to a separate UI workflow because NetBox update sources include netbox-agent, scripts, and manual entries, not just MAAS)",
+            str(orphaned_nb_count),
+        ]
+    )
+    ws_sum.append(["Matched — review hints", str(pc["check_hosts"])])
     ws_sum.append(["NetBox serial missing", str(serial_validation_needed)])
     ws_sum.append(["NIC rows not OK", str(pc["iface_not_ok"])])
     ws_sum.append(["MAAS NIC missing in NetBox", str(pc["maas_nic_missing_nb"])])
@@ -1452,29 +1757,35 @@ def build_drift_report_xlsx(
     ws_sum.append(["BMC vs NetBox OOB differs", str(bmc_oob_mismatch)])
     ws_sum.append(["LLDP / cabling", "—"])
     ws_sum.append([])
-    ws_sum.append(["HIGH-RISK (review first)", "", ""])
-    _append_header(ws_sum, ["Category", "Count"])
-    ws_sum.append(["OpenStack FIP → no IP record", str(pc["fip_gaps"])])
-    ws_sum.append(
-        [
-            "OpenStack subnet → no Prefix",
-            str(pc["sub_gaps"]) if pc["sub_gaps"] is not None else "N/A",
-        ]
-    )
-    ws_sum.append(["VLAN mismatch (MAAS vs NetBox)", str(pc["vlan_drift_nic"])])
-    ws_sum.append(["NetBox serial missing", str(serial_validation_needed)])
-    ws_sum.append(["BMC vs NetBox OOB differs", str(bmc_oob_mismatch)])
-    hr_total_x = 0
-    for _hr_val in (
-        pc["fip_gaps"],
-        pc["sub_gaps"],
-        pc["vlan_drift_nic"],
-        serial_validation_needed,
-        bmc_oob_mismatch,
+    align_rows_x = _alignment_review_rows(matched_rows)
+    if align_rows_x:
+        r_al = ws_sum.max_row + 1
+        ws_sum.append(["Detail — placement & lifecycle alignment", ""])
+        ws_sum.cell(row=r_al, column=1).font = header_font
+        _append_header(
+            ws_sum,
+            [
+                "Host",
+                "MAAS zone",
+                "MAAS fabric",
+                "MAAS pool",
+                "NetBox site",
+                "NetBox location",
+                "Lifecycle state",
+                "Alignment issues",
+            ],
+        )
+        for row in align_rows_x:
+            ws_sum.append(row)
+        ws_sum.append([])
+    ws_sum.append(["SEVERITY TRIAGE (why these matter)", "", ""])
+    _append_header(ws_sum, ["Severity", "Category", "Count", "Why this matters"])
+    for row in _severity_triage_rows(
+        pc,
+        serial_validation_needed=serial_validation_needed,
+        bmc_oob_mismatch=bmc_oob_mismatch,
     ):
-        if isinstance(_hr_val, int):
-            hr_total_x += _hr_val
-    ws_sum.append(["Total", str(hr_total_x)])
+        ws_sum.append(row)
     ws_sum.append([])
     ws_sum.append(["RUN METRICS", "", ""])
     _append_header(ws_sum, ["Metric", "Value"])
