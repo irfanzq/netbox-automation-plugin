@@ -2,6 +2,7 @@
 Generate human-readable drift audit report from MAAS, NetBox, and OpenStack data.
 Default UI output uses Bootstrap HTML tables; set use_html=False for ASCII (+---+) plain text.
 XLSX export via build_drift_report_xlsx() for download (openpyxl); Google Sheets opens .xlsx.
+NetBox-only device hostnames (in_netbox_not_maas) are cleared for HTML/XLSX and drift audit cache.
 
 Copy in this module distinguishes **host data NICs** (Ethernet MAC/IP/VLAN) from **BMC / OOB**
 (IPMI, iDRAC, Redfish — baseboard management controllers, not “another NIC”). NetBox models OOB
@@ -27,8 +28,16 @@ _DYNAMIC_COL_CAP = 10000
 # ASCII tables: cap column width and wrap long cells so one outlier row does not pad every row.
 _ASCII_COL_WRAP_DEFAULT = 96
 _ASCII_NOTES_COL_WRAP = 200
-# Per-host orphan table (NetBox-only devices): off by default; drift counts still shown.
-_SHOW_DRIFT_ORPHAN_DETAIL = False
+
+
+def _drift_for_user_reports(drift):
+    """
+    Shallow copy of drift for HTML/XLSX output and session cache.
+    Clears in_netbox_not_maas (NetBox-only hostnames are not shown in user reports).
+    """
+    d = dict(drift or {})
+    d["in_netbox_not_maas"] = []
+    return d
 
 
 def _dedupe_keep_order(items):
@@ -376,15 +385,12 @@ def _phase0_category_counts(
     os_floating_gaps,
 ):
     maas_only = len(drift.get("in_maas_not_netbox") or [])
-    nb_only_dev = len(drift.get("in_netbox_not_maas") or [])
     check_hosts = sum(1 for r in (matched_rows or []) if r.get("place_match") == "CHECK")
-    nb_only_nic = 0
     iface_not_ok = 0
     maas_nic_missing_nb = 0
     vlan_drift_nic = 0
     vlan_unverified_nic = 0
     for b in (interface_audit or {}).get("hosts") or []:
-        nb_only_nic += len(b.get("netbox_only") or [])
         for row in b.get("rows") or []:
             st = row.get("status") or ""
             if st != "OK":
@@ -403,9 +409,7 @@ def _phase0_category_counts(
     fip_gaps = len(os_floating_gaps or [])
     return {
         "maas_only": maas_only,
-        "nb_only_dev": nb_only_dev,
         "check_hosts": check_hosts,
-        "nb_only_nic": nb_only_nic,
         "iface_not_ok": iface_not_ok,
         "maas_nic_missing_nb": maas_nic_missing_nb,
         "sub_gaps": sub_gaps,
@@ -599,7 +603,8 @@ def _build_proposed_mgmt_interface_rows(
     Matched hosts: **BMC / OOB** from MAAS power (IPMI, iDRAC, Redfish — not host data NICs).
 
     Compares MAAS BMC IP to NetBox device OOB and to NetBox **OOB ports**.
-    Rows also when power_type is set but BMC IP is missing from the MAAS API.
+    Rows when power_type is set but BMC IP is missing from the MAAS API, or when OOB/BMC is not OK.
+    Aligned BMC/OOB (status OK) is omitted — drift report lists issues only.
     """
     from netbox_automation_plugin.sync.reconciliation.audit_detail import (
         _normalize_mac,
@@ -728,6 +733,8 @@ def _build_proposed_mgmt_interface_rows(
                     status = "REVIEW"
                     risk = "Low"
 
+        if str(status).strip().upper() == "OK":
+            continue
         out.append([
             h,
             bmc,
@@ -824,6 +831,17 @@ def _friendly_note(raw: str) -> str:
     return note or "Review interface data."
 
 
+def _drift_table_status_is_ok_only(display_status: str) -> bool:
+    """
+    True when the drift Status column is only OK (after comma-split).
+    e.g. "OK" or "OK, OK" → skip; "MISSING_NB_VLAN, OK" → False (still drifting).
+    """
+    parts = [p.strip().upper() for p in (display_status or "").split(",") if p.strip()]
+    if not parts:
+        return False
+    return all(p == "OK" for p in parts)
+
+
 def _proposed_changes_rows(
     maas_data,
     netbox_data,
@@ -836,7 +854,6 @@ def _proposed_changes_rows(
 ):
     """Build user-friendly proposed change buckets (preview only)."""
     by_h = _maas_machine_by_hostname(maas_data)
-    nb_by_name = _device_by_name(netbox_data)
     add_mgmt_iface = _build_proposed_mgmt_interface_rows(
         matched_rows, by_h, netbox_ifaces
     )
@@ -878,7 +895,7 @@ def _proposed_changes_rows(
     for b in (interface_audit or {}).get("hosts") or []:
         hn = b.get("hostname", "")
         for row in b.get("rows") or []:
-            st = row.get("status") or ""
+            st = str(row.get("status") or "").strip()
             notes = row.get("notes") or ""
             maas_vlan = str(row.get("maas_vlan") or "—")
             nb_vlan = str(row.get("nb_vlan") or "—")
@@ -887,24 +904,8 @@ def _proposed_changes_rows(
             if st == "NOT_IN_NETBOX":
                 continue
 
-            # Full inventory for MAC’d interfaces only (with or without IP on MAAS); OK rows included.
-            if st == "OK":
-                update_nic.append([
-                    hn,
-                    row.get("maas_if") or "",
-                    str(row.get("maas_fabric") or "—"),
-                    row.get("maas_mac") or "",
-                    row.get("maas_ips") or "—",
-                    row.get("nb_if") or "—",
-                    row.get("nb_mac") or "—",
-                    row.get("nb_ips") or "—",
-                    maas_vlan,
-                    nb_vlan,
-                    "OK",
-                    "—",
-                    "No change",
-                    "None",
-                ])
+            # Drift-only: aligned interfaces are not listed (case-insensitive OK).
+            if st.upper() == "OK":
                 continue
 
             statuses = []
@@ -942,6 +943,10 @@ def _proposed_changes_rows(
                 reasons.append(_dedupe_note_parts(notes) or "Port review needed")
                 actions.append("Review port alignment manually")
 
+            status_cell = ", ".join(dict.fromkeys(statuses))
+            if _drift_table_status_is_ok_only(status_cell):
+                continue
+
             update_nic.append([
                 hn,
                 row.get("maas_if") or "",
@@ -953,23 +958,11 @@ def _proposed_changes_rows(
                 row.get("nb_ips") or "—",
                 maas_vlan,
                 nb_vlan,
-                ", ".join(dict.fromkeys(statuses)),
+                status_cell,
                 "; ".join(dict.fromkeys([r for r in reasons if r])),
                 "; ".join(dict.fromkeys([a for a in actions if a])),
                 risk,
             ])
-
-    review_orphans = []
-    for n in sorted(drift.get("in_netbox_not_maas") or []):
-        d = nb_by_name.get(n, {})
-        review_orphans.append([
-            n,
-            d.get("site_slug", "-"),
-            d.get("status", "-"),
-            "orphaned",
-            "Review only; no automatic deletion",
-            "Medium",
-        ])
 
     review_serial = []
     for r in (matched_rows or []):
@@ -989,7 +982,6 @@ def _proposed_changes_rows(
         "update_nic": update_nic,
         "add_nb_interfaces": add_nb_interfaces,
         "add_mgmt_iface": add_mgmt_iface,
-        "review_orphans": review_orphans,
         "review_serial": review_serial,
     }
 
@@ -1018,6 +1010,7 @@ def format_drift_report(
 
     When use_html is True (default), drift is a safe HTML fragment for |safe in templates.
     """
+    drift = _drift_for_user_reports(drift)
     e = _DriftReportEmitter(use_html=use_html)
     ref_lines = []
 
@@ -1059,12 +1052,6 @@ def format_drift_report(
         e.spacer()
         sel_sites = ", ".join(scope_meta.get("selected_sites") or []) or "(all)"
         sel_locs = ", ".join(scope_meta.get("selected_locations") or []) or "(all)"
-        os_unmatched = list(scope_meta.get("openstack_unmatched_network_names") or [])
-        if scope_meta.get("openstack_unmatched_network_names_more"):
-            os_unmatched.append(f"... +{scope_meta['openstack_unmatched_network_names_more']} more")
-        maas_unmatched = list(scope_meta.get("maas_unmatched_fabrics") or [])
-        if scope_meta.get("maas_unmatched_fabrics_more"):
-            maas_unmatched.append(f"... +{scope_meta['maas_unmatched_fabrics_more']} more")
         e.table(
             ["Check", "Value"],
             [
@@ -1091,8 +1078,6 @@ def format_drift_report(
                     "OpenStack FIPs included / fetched",
                     f"{scope_meta.get('openstack_fips_after', 0)} / {scope_meta.get('openstack_fips_before', 0)}",
                 ],
-                ["MAAS unmatched fabrics (sample)", ", ".join(maas_unmatched) or "(none)"],
-                ["OpenStack unmatched network names (sample)", ", ".join(os_unmatched) or "(none)"],
             ],
             dynamic_columns=True,
         )
@@ -1116,14 +1101,12 @@ def format_drift_report(
         ["Category", "Count"],
         [
             ["In MAAS only (not in NetBox)", str(pc["maas_only"])],
-            ["In NetBox only (orphaned tag)", str(pc["nb_only_dev"])],
             ["Matched — placement needs check", str(pc["check_hosts"])],
             ["NetBox serial missing", str(serial_validation_needed)],
             ["NIC rows not OK", str(pc["iface_not_ok"])],
             ["MAAS NIC missing in NetBox", str(pc["maas_nic_missing_nb"])],
             ["VLAN mismatch (MAAS vs NetBox)", str(pc["vlan_drift_nic"])],
             ["VLAN unverified from MAAS", str(pc["vlan_unverified_nic"])],
-            ["NetBox-only NICs (review)", str(pc["nb_only_nic"])],
             ["OpenStack subnet → no Prefix", sub_txt],
             ["OpenStack FIP → no IP record", str(pc["fip_gaps"])],
             ["BMC vs NetBox OOB differs", str(bmc_oob_mismatch)],
@@ -1162,7 +1145,6 @@ def format_drift_report(
             ["NetBox devices", str(len(netbox_data.get("devices") or []))],
             ["Matched hostnames", str(drift.get("matched_count", 0))],
             ["In MAAS only", str(pc["maas_only"])],
-            ["NetBox orphans", str(pc["nb_only_dev"])],
             ["NetBox serial missing", str(serial_validation_needed)],
             ["OpenStack subnet gaps", sub_txt],
             ["OpenStack FIP gaps", str(pc["fip_gaps"])],
@@ -1314,19 +1296,9 @@ def format_drift_report(
     e.table(
         ["What", "Count", "Note"],
         [
-            ["Orphan devices", str(len(prop["review_orphans"])), "In NetBox, not in MAAS"],
             ["Serial check", str(len(prop["review_serial"])), "NetBox serial empty"],
         ],
     )
-    if _SHOW_DRIFT_ORPHAN_DETAIL and prop["review_orphans"]:
-        e.spacer()
-        e.subtitle("Detail — orphans")
-        e.spacer()
-        e.table(
-            ["Hostname", "Site", "Status", "Proposed Tag", "Proposed Action", "Risk"],
-            prop["review_orphans"],
-            dynamic_columns=True,
-        )
     if prop["review_serial"]:
         e.spacer()
         e.subtitle("Detail — serials")
@@ -1342,7 +1314,7 @@ def format_drift_report(
     total_props = (
         len(prop["add_devices"]) + len(prop["add_prefixes"]) + len(prop["add_fips"]) +
         len(prop["update_nic"]) + len(prop["add_nb_interfaces"]) + len(prop["add_mgmt_iface"]) +
-        len(prop["review_orphans"]) + len(prop["review_serial"])
+        len(prop["review_serial"])
     )
     e.table(
         ["Bucket", "Count"],
@@ -1353,7 +1325,6 @@ def format_drift_report(
             ["NIC drift", str(len(prop["update_nic"]))],
             ["New NICs", str(len(prop["add_nb_interfaces"]))],
             ["BMC / OOB", str(len(prop["add_mgmt_iface"]))],
-            ["Orphans (review)", str(len(prop["review_orphans"]))],
             ["Serials (review)", str(len(prop["review_serial"]))],
             ["Total", str(total_props)],
         ],
@@ -1396,6 +1367,8 @@ def build_drift_report_xlsx(
         from openpyxl.styles import Font
     except ImportError:
         raise RuntimeError("openpyxl is required for XLSX export. pip install openpyxl")
+
+    drift = _drift_for_user_reports(drift)
 
     wb = Workbook()
     header_font = Font(bold=True)
@@ -1464,26 +1437,16 @@ def build_drift_report_xlsx(
             "OpenStack FIPs included / fetched",
             f"{scope_meta.get('openstack_fips_after', 0)} / {scope_meta.get('openstack_fips_before', 0)}",
         ])
-        maas_unmatched = list(scope_meta.get("maas_unmatched_fabrics") or [])
-        if scope_meta.get("maas_unmatched_fabrics_more"):
-            maas_unmatched.append(f"... +{scope_meta['maas_unmatched_fabrics_more']} more")
-        os_unmatched = list(scope_meta.get("openstack_unmatched_network_names") or [])
-        if scope_meta.get("openstack_unmatched_network_names_more"):
-            os_unmatched.append(f"... +{scope_meta['openstack_unmatched_network_names_more']} more")
-        ws_sum.append(["MAAS unmatched fabrics (sample)", ", ".join(maas_unmatched) or "(none)"])
-        ws_sum.append(["OpenStack unmatched network names (sample)", ", ".join(os_unmatched) or "(none)"])
     ws_sum.append([])
     ws_sum.append(["DRIFT COUNTS", "", ""])
     _append_header(ws_sum, ["Category", "Count"])
     ws_sum.append(["In MAAS only (not in NetBox)", str(pc["maas_only"])])
-    ws_sum.append(["In NetBox only (orphaned tag)", str(pc["nb_only_dev"])])
     ws_sum.append(["Matched — placement needs check", str(pc["check_hosts"])])
     ws_sum.append(["NetBox serial missing", str(serial_validation_needed)])
     ws_sum.append(["NIC rows not OK", str(pc["iface_not_ok"])])
     ws_sum.append(["MAAS NIC missing in NetBox", str(pc["maas_nic_missing_nb"])])
     ws_sum.append(["VLAN mismatch (MAAS vs NetBox)", str(pc["vlan_drift_nic"])])
     ws_sum.append(["VLAN unverified from MAAS", str(pc["vlan_unverified_nic"])])
-    ws_sum.append(["NetBox-only NICs (review)", str(pc["nb_only_nic"])])
     ws_sum.append(["OpenStack subnet → no Prefix", sub_txt])
     ws_sum.append(["OpenStack FIP → no IP record", str(pc["fip_gaps"])])
     ws_sum.append(["BMC vs NetBox OOB differs", str(bmc_oob_mismatch)])
@@ -1519,7 +1482,6 @@ def build_drift_report_xlsx(
     ws_sum.append(["NetBox devices", str(len(netbox_data.get("devices") or []))])
     ws_sum.append(["Matched hostnames", str(drift.get("matched_count", 0))])
     ws_sum.append(["In MAAS only", str(pc["maas_only"])])
-    ws_sum.append(["NetBox orphans", str(pc["nb_only_dev"])])
     ws_sum.append(["NetBox serial missing", str(serial_validation_needed)])
     ws_sum.append(["OpenStack subnet gaps", sub_txt])
     ws_sum.append(["OpenStack FIP gaps", str(pc["fip_gaps"])])
@@ -1547,7 +1509,6 @@ def build_drift_report_xlsx(
         + len(prop["update_nic"])
         + len(prop["add_nb_interfaces"])
         + len(prop["add_mgmt_iface"])
-        + len(prop["review_orphans"])
         + len(prop["review_serial"])
     )
     ws_sum.append(["New devices", str(len(prop["add_devices"]))])
@@ -1556,7 +1517,6 @@ def build_drift_report_xlsx(
     ws_sum.append(["NIC drift", str(len(prop["update_nic"]))])
     ws_sum.append(["New NICs", str(len(prop["add_nb_interfaces"]))])
     ws_sum.append(["BMC / OOB", str(len(prop["add_mgmt_iface"]))])
-    ws_sum.append(["Orphans (review)", str(len(prop["review_orphans"]))])
     ws_sum.append(["Serials (review)", str(len(prop["review_serial"]))])
     ws_sum.append(["Total", str(total_props_x)])
 
@@ -1574,7 +1534,6 @@ def build_drift_report_xlsx(
     ws_prop.append(["NIC drift", len(prop["update_nic"])])
     ws_prop.append(["New NICs", len(prop["add_nb_interfaces"])])
     ws_prop.append(["BMC / OOB", len(prop["add_mgmt_iface"])])
-    ws_prop.append(["Orphans (review)", len(prop["review_orphans"])])
     ws_prop.append(["Serials (review)", len(prop["review_serial"])])
 
     def _append_block(title, headers, rows):
@@ -1655,12 +1614,6 @@ def build_drift_report_xlsx(
         ],
         prop["add_mgmt_iface"],
     )
-    if _SHOW_DRIFT_ORPHAN_DETAIL:
-        _append_block(
-            "C) Orphans",
-            ["Hostname", "Site", "Status", "Proposed Tag", "Proposed Action", "Risk"],
-            prop["review_orphans"],
-        )
     _append_block(
         "C) Serials",
         ["Hostname", "MAAS Serial", "NetBox Serial", "Proposed Action", "Risk"],

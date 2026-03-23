@@ -29,8 +29,9 @@ from netbox_automation_plugin.sync.reconciliation.audit_detail import (
 from netbox_automation_plugin.sync.clients.openstack_client import fetch_openstack_data, fetch_all_openstack_data
 from netbox_automation_plugin.sync.reconciliation.maas_netbox import compute_maas_netbox_drift
 from netbox_automation_plugin.sync.reporting.drift_report import (
-    format_drift_report,
+    _drift_for_user_reports,
     build_drift_report_xlsx,
+    format_drift_report,
 )
 from django.http import HttpResponse
 from django.urls import reverse
@@ -255,12 +256,12 @@ def _drift_audit_cache_key(request):
 def _cache_drift_audit(request, payload):
     """Store audit payload for later XLSX download. drift sets -> lists for serialization."""
     key = _drift_audit_cache_key(request)
-    drift = payload.get("drift") or {}
+    drift_raw = payload.get("drift") or {}
     payload = dict(payload)
+    # Do not persist NetBox-only hostnames; same sanitization as HTML/XLSX reports.
     payload["drift"] = {
-        **drift,
-        "in_maas_not_netbox": list(drift.get("in_maas_not_netbox") or []),
-        "in_netbox_not_maas": list(drift.get("in_netbox_not_maas") or []),
+        **_drift_for_user_reports(drift_raw),
+        "in_maas_not_netbox": list(drift_raw.get("in_maas_not_netbox") or []),
     }
     cache.set(key, payload, timeout=DRIFT_AUDIT_CACHE_TIMEOUT)
 
