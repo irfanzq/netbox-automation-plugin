@@ -10,7 +10,9 @@ as **device OOB IP** plus an optional **OOB port** marked management-only in Net
 which documents the management attachment — not the same as in-band NICs.
 """
 
+from collections import defaultdict
 from io import BytesIO
+import difflib
 import html
 import json
 import re
@@ -29,6 +31,12 @@ _DYNAMIC_COL_CAP = 10000
 # ASCII tables: cap column width and wrap long cells so one outlier row does not pad every row.
 _ASCII_COL_WRAP_DEFAULT = 96
 _ASCII_NOTES_COL_WRAP = 200
+
+# MAAS product → NetBox device type: best-score match (index + narrow + score).
+_DT_MATCH_MIN_SCORE = 220.0
+_DT_MATCH_TIE_EPSILON = 24.0
+# Above this many types per vendor, pre-filter candidates before difflib scoring.
+_DT_MATCH_NARROW_MIN = 20
 
 _PHASE0_FIELD_OWNERSHIP_TITLE = "Field ownership — Phase 0 drift audit"
 _PHASE0_FIELD_OWNERSHIP_LEAD = (
@@ -146,6 +154,17 @@ def _site_meta_for_slug(netbox_data, site_slug: str) -> dict:
     return {}
 
 
+def _site_slug_for_location_name(netbox_data, location_name: str) -> str:
+    loc_l = (location_name or "").strip().lower()
+    if not loc_l:
+        return ""
+    for loc in netbox_data.get("locations") or []:
+        nm = (loc.get("name") or "").strip().lower()
+        if nm and nm == loc_l:
+            return (loc.get("site_slug") or "").strip()
+    return ""
+
+
 def _derive_site_slug_from_maas(machine: dict, fabric_map: dict, pool_map: dict) -> str:
     fab = (machine.get("fabric_name") or "").strip()
     pool = (machine.get("pool_name") or "").strip()
@@ -193,58 +212,270 @@ def _maas_vendor_product(machine: dict) -> tuple[str, str]:
     product = (
         str(
             hi.get("system_product")
+            or machine.get("hardware_product")
             or machine.get("product_name")
             or hi.get("product_name")
             or hi.get("mainboard_product")
             or ""
         )
     ).strip()
+    if vendor.lower() in ("unknown", "none", "n/a", ""):
+        vendor = ""
     if product.lower() in ("unknown", "none", "n/a", ""):
         product = ""
     return vendor, product
 
 
-def _match_netbox_device_type_display(
-    vendor: str, product: str, netbox_data: dict
+def _maas_product_sku_tokens(product: str) -> list[str]:
+    """
+    Pull hardware SKU-like tokens from a MAAS product string so we can match NetBox
+    models that only store the short code (e.g. ``R660`` from ``PowerEdge R660``).
+    """
+    p = (product or "").strip()
+    if not p:
+        return []
+    found: set[str] = set()
+    # Dell PowerEdge rack / common patterns
+    for m in re.finditer(r"\bR\d{3,4}[A-Z]{0,4}\b", p, re.I):
+        found.add(m.group(0))
+    for m in re.finditer(r"\bC\d{3,4}[A-Z]{0,4}\b", p, re.I):
+        found.add(m.group(0))
+    for m in re.finditer(r"\bDL\d{3,4}[A-Z]?\b", p, re.I):
+        found.add(m.group(0))
+    for m in re.finditer(r"\bXR\d{3,4}\w*\b", p, re.I):
+        found.add(m.group(0))
+    # Broader alnum product codes (e.g. other vendors)
+    for m in re.finditer(r"\b[A-Z]{1,4}\d{3,5}[A-Z0-9\-]{0,6}\b", p, re.I):
+        found.add(m.group(0))
+    return sorted(found, key=lambda t: (-len(t), t.lower()))
+
+
+def _device_type_contains_sku_token(dt: dict, token: str) -> bool:
+    """True if token appears as its own token in model, slug, or display (not R660 inside R660xs)."""
+    if not token:
+        return False
+    pat = re.compile(
+        rf"(?<![A-Za-z0-9]){re.escape(token)}(?![A-Za-z0-9])",
+        re.I,
+    )
+    for key in ("model", "slug", "display"):
+        s = (dt.get(key) or "").strip()
+        if s and pat.search(s):
+            return True
+    return False
+
+
+def _fold_device_type_text(s: str) -> str:
+    """Lowercase, alnum tokens, single spaces — for similarity and containment."""
+    return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9]+", " ", (s or "").lower())).strip()
+
+
+def _norm_vendor_dtype(v: str) -> str:
+    """Normalize manufacturer string for bucketing (must match MAAS vendor normalization)."""
+    s = re.sub(r"[^a-z0-9]+", " ", str(v or "").lower()).strip()
+    toks = [t for t in s.split() if t]
+    while toks and toks[-1] in {
+        "inc",
+        "incorporated",
+        "corp",
+        "corporation",
+        "ltd",
+        "llc",
+        "co",
+        "company",
+    }:
+        toks.pop()
+    return " ".join(toks)
+
+
+def _build_device_type_match_index(types_list: list) -> dict[str, list[dict]]:
+    """
+    One-time index: normalized manufacturer -> pre-folded NetBox device type rows.
+    Speeds up per-host matching (no repeated string folding; smaller candidate sets).
+    """
+    buckets: dict[str, list[dict]] = defaultdict(list)
+    for dt in types_list or []:
+        if not isinstance(dt, dict):
+            continue
+        man_raw = (dt.get("manufacturer") or "").strip()
+        man_norm = _norm_vendor_dtype(man_raw)
+        model_raw = (dt.get("model") or "").strip()
+        fold_m = _fold_device_type_text(model_raw)
+        fold_d = _fold_device_type_text(dt.get("display") or "")
+        fold_s = _fold_device_type_text((dt.get("slug") or "").replace("-", " "))
+        fold_c = _fold_device_type_text(f"{man_raw} {model_raw}")
+        tok_m = frozenset(fold_m.split()) if fold_m else frozenset()
+        tok_d = frozenset(fold_d.split()) if fold_d else frozenset()
+        tok_c = frozenset(fold_c.split()) if fold_c else frozenset()
+        blob = f"{fold_m}{fold_s}{fold_d}".replace(" ", "").replace("-", "")
+        buckets[man_norm].append(
+            {
+                "dt": dt,
+                "model_lower": model_raw.lower(),
+                "fold_m": fold_m,
+                "fold_d": fold_d,
+                "fold_s": fold_s,
+                "fold_c": fold_c,
+                "tok_m": tok_m,
+                "tok_d": tok_d,
+                "tok_c": tok_c,
+                "blob": blob,
+            }
+        )
+    return dict(buckets)
+
+
+def _narrow_dtype_entries(
+    entries: list[dict],
+    prod_fold: str,
+    prod_nums: list[str],
+    sku_tokens: list[str],
+) -> list[dict]:
+    """Cheap filter before SequenceMatcher when a vendor has many device types."""
+    if len(entries) <= _DT_MATCH_NARROW_MIN:
+        return entries
+    if not prod_fold:
+        return entries
+    prod_word_toks = frozenset(prod_fold.split())
+    narrowed: list[dict] = []
+    sku_slice = sku_tokens[:8]
+    for e in entries:
+        fm = e["fold_m"]
+        if prod_fold == fm or prod_fold in fm or (fm and fm in prod_fold):
+            narrowed.append(e)
+            continue
+        if prod_word_toks & e["tok_m"] or prod_word_toks & e["tok_d"] or prod_word_toks & e["tok_c"]:
+            narrowed.append(e)
+            continue
+        if prod_nums and any(n in e["blob"] for n in prod_nums):
+            narrowed.append(e)
+            continue
+        dt = e["dt"]
+        for t in sku_slice:
+            if _device_type_contains_sku_token(dt, t):
+                narrowed.append(e)
+                break
+    return narrowed if narrowed else entries
+
+
+def _seq_ratio_scaled(prod_fold: str, cand: str, scale: float) -> float:
+    if len(cand) < 1:
+        return 0.0
+    return difflib.SequenceMatcher(None, prod_fold, cand).ratio() * scale
+
+
+def _score_maas_product_vs_dtype_entry(
+    prod_fold: str,
+    product_n: str,
+    sku_tokens: list[str],
+    e: dict,
+) -> float:
+    """Same scoring ideas as before, using pre-folded index entry (faster per host)."""
+    if not prod_fold:
+        return 0.0
+    model = e["fold_m"]
+    disp = e["fold_d"]
+    slug = e["fold_s"]
+    combined = e["fold_c"]
+    dt = e["dt"]
+
+    parts: list[float] = []
+
+    if model == prod_fold:
+        parts.append(1000.0)
+    if model:
+        if prod_fold in model:
+            parts.append(520.0 + min(len(prod_fold), 96) * 1.5)
+        elif model in prod_fold and len(model) >= 3:
+            parts.append(480.0 + min(len(model), 96) * 1.5)
+
+    seen: set[str] = set()
+    for cand in (model, disp, slug, combined):
+        if not cand or cand in seen:
+            continue
+        seen.add(cand)
+        parts.append(_seq_ratio_scaled(prod_fold, cand, 520.0))
+
+    pt = set(prod_fold.split())
+    seen_tok_cands: set[str] = set()
+    for cand in (model, disp, combined):
+        if not cand or cand in seen_tok_cands:
+            continue
+        seen_tok_cands.add(cand)
+        ct = set(cand.split())
+        if not pt or not ct:
+            continue
+        j = len(pt & ct) / len(pt | ct)
+        parts.append(j * 420.0)
+
+    nums = [n for n in re.findall(r"\d{3,5}", product_n) if len(n) >= 3]
+    if nums:
+        blob = e["blob"]
+        matched = sum(1 for n in nums if n in blob)
+        if matched:
+            parts.append(95.0 * matched / len(nums))
+        elif model:
+            parts.append(-75.0)
+
+    for tok in sku_tokens[:6]:
+        if _device_type_contains_sku_token(dt, tok):
+            parts.append(210.0)
+            break
+
+    return max(parts) if parts else 0.0
+
+
+def _resolve_device_type_display(
+    vendor_raw: str,
+    product_n: str,
+    dtype_index: dict[str, list[dict]],
 ) -> str:
-    vendor_l = (vendor or "").strip().lower()
-    product_n = (product or "").strip()
-    types_list = netbox_data.get("device_types") or []
-    if not types_list:
+    """
+    Pick NetBox device type display for MAAS vendor/product using a pre-built index.
+    Logic: exact model+vendor, else scored match among (narrowed) vendor bucket.
+    """
+    vendor_raw = (vendor_raw or "").strip()
+    product_n = (product_n or "").strip()
+    if not vendor_raw or not product_n:
         return "—"
-    if product_n:
-        exact = [dt for dt in types_list if (dt.get("model") or "").strip().lower() == product_n.lower()]
-        if len(exact) == 1:
-            return (exact[0].get("display") or "").strip() or "—"
-        if len(exact) > 1 and vendor_l:
-            vmatch = [
-                dt
-                for dt in exact
-                if (dt.get("manufacturer") or "").strip().lower() == vendor_l
-            ]
-            if len(vmatch) == 1:
-                return (vmatch[0].get("display") or "").strip() or "—"
-            if vmatch:
-                return (vmatch[0].get("display") or "").strip() + f" (ambiguous ×{len(vmatch)})"
-            return (exact[0].get("display") or "").strip() + f" (ambiguous ×{len(exact)})"
-        if len(exact) > 1:
-            return (exact[0].get("display") or "").strip() + f" (ambiguous ×{len(exact)})"
-        slug_hits = [
-            dt for dt in types_list if (dt.get("slug") or "").strip().lower() == product_n.lower()
-        ]
-        if len(slug_hits) == 1:
-            return (slug_hits[0].get("display") or "").strip() or "—"
-    if vendor_l and product_n:
-        both = [
-            dt
-            for dt in types_list
-            if (dt.get("manufacturer") or "").strip().lower() == vendor_l
-            and product_n.lower() in (dt.get("model") or "").strip().lower()
-        ]
-        if len(both) == 1:
-            return (both[0].get("display") or "").strip() or "—"
-    maas_hint = f"{vendor} {product_n}".strip() or vendor or product_n or "MAAS"
-    return f"{maas_hint} (no exact NetBox DeviceType)"
+    vendor_l = _norm_vendor_dtype(vendor_raw)
+    entries = dtype_index.get(vendor_l) or []
+    if not entries:
+        return "—"
+
+    exact_dt = [e["dt"] for e in entries if e["model_lower"] == product_n.lower()]
+    if len(exact_dt) == 1:
+        return (exact_dt[0].get("display") or "").strip() or "—"
+    if len(exact_dt) > 1:
+        return (exact_dt[0].get("display") or "").strip() + f" (ambiguous ×{len(exact_dt)})"
+
+    prod_fold = _fold_device_type_text(product_n)
+    prod_nums = [n for n in re.findall(r"\d{3,5}", product_n) if len(n) >= 3]
+    sku_tokens = _maas_product_sku_tokens(product_n)
+    candidates = _narrow_dtype_entries(entries, prod_fold, prod_nums, sku_tokens)
+
+    scored = [
+        (e["dt"], _score_maas_product_vs_dtype_entry(prod_fold, product_n, sku_tokens, e))
+        for e in candidates
+    ]
+    scored.sort(
+        key=lambda x: (
+            -x[1],
+            -len((x[0].get("model") or "")),
+            (x[0].get("display") or "").lower(),
+        )
+    )
+    best_dt, best_s = scored[0]
+    if best_s < _DT_MATCH_MIN_SCORE:
+        return "—"
+    close = [
+        dt
+        for dt, s in scored
+        if s >= best_s - _DT_MATCH_TIE_EPSILON and s >= _DT_MATCH_MIN_SCORE
+    ]
+    if len(close) > 1:
+        return (close[0].get("display") or "").strip() + f" (ambiguous ×{len(close)})"
+    return (best_dt.get("display") or "").strip() or "—"
 
 
 def _is_storage_host_role(slug: str, name: str) -> bool:
@@ -271,9 +502,23 @@ def _match_netbox_role_from_hostname(hostname: str, netbox_data: dict) -> str:
     def role_display(r: dict) -> str:
         name = (r.get("name") or "").strip()
         slug = (r.get("slug") or "").strip()
-        if name and slug:
-            return f"{name} ({slug})"
         return name or slug or "—"
+
+    def pick_cpu_host() -> str:
+        exact_name = [r for r in roles if (r.get("name") or "").strip().lower() == "cpu host"]
+        if exact_name:
+            return role_display(exact_name[0])
+        exact_slug = [r for r in roles if (r.get("slug") or "").strip().lower() == "cpu-host"]
+        if exact_slug:
+            return role_display(exact_slug[0])
+        for r in roles:
+            s = (r.get("slug") or "").strip().lower()
+            n = (r.get("name") or "").strip().lower()
+            if "cpu" in s and "host" in s:
+                return role_display(r)
+            if "cpu" in n and "host" in n:
+                return role_display(r)
+        return "—"
 
     if "gpu" in tokens:
         for r in roles:
@@ -309,17 +554,101 @@ def _match_netbox_role_from_hostname(hostname: str, netbox_data: dict) -> str:
             return role_display(candidates[0]) + f" (ambiguous ×{len(candidates)})"
         return "—"
 
-    if "cpu" in tokens:
-        for r in roles:
-            s = (r.get("slug") or "").strip().lower()
-            n = (r.get("name") or "").strip().lower()
-            if "cpu" in s and "host" in s:
-                return role_display(r)
-            if "cpu" in n and "host" in n:
-                return role_display(r)
-        return "—"
+    if "cpu" in tokens or "osctrl" in tokens:
+        return pick_cpu_host()
 
     return "—"
+
+
+def _new_device_fabric_display(maas_fabric_raw, nb_location_raw) -> str:
+    """
+    For new-device table, only show human fabric names that match NB location.
+    Generic fabric-#### values are suppressed.
+    """
+    loc = (nb_location_raw or "").strip()
+    if not loc or loc == "—":
+        return "—"
+    fabrics = _split_maas_fabrics(maas_fabric_raw)
+    if not fabrics:
+        return "—"
+    non_generic = [f for f in fabrics if not _is_generic_maas_fabric_name(f)]
+    if not non_generic:
+        return "—"
+    loc_l = loc.lower()
+    for f in non_generic:
+        fl = f.lower()
+        if loc_l in fl or fl in loc_l:
+            return f
+        ftoks = {t for t in re.split(r"[^a-z0-9]+", fl) if t}
+        ltoks = {t for t in re.split(r"[^a-z0-9]+", loc_l) if t}
+        if any(len(t) >= 4 and t in ftoks for t in ltoks):
+            return f
+    return "—"
+
+
+_MAAS_NEW_DEVICE_UNSAFE_STATUSES = {
+    "FAILED_COMMISSIONING",
+    "COMMISSIONING",
+    "TESTING",
+    "RESCUE_MODE",
+    "EXITING_RESCUE_MODE",
+    "RELEASING",
+    "DEPLOYING",
+    "FAILED",
+    "BROKEN",
+}
+
+
+def _norm_maas_status(raw: str) -> str:
+    return re.sub(r"[\s\-]+", "_", str(raw or "").strip()).upper()
+
+
+def _has_usable_maas_fabric(machine: dict) -> bool:
+    fab = str(machine.get("fabric_name") or "").strip().lower()
+    return bool(fab and fab not in {"-", "unknown", "n/a", "none", "null"})
+
+
+def _new_device_candidate_policy(
+    machine: dict,
+    nic_count: int,
+    *,
+    vendor: str = "",
+    product: str = "",
+) -> tuple[bool, str, int]:
+    """
+    Candidate policy for "A) Add to NetBox / Detail — new devices".
+
+    Returns:
+      (is_candidate, note, sort_rank)
+    Lower sort_rank comes first.
+    """
+    st = _norm_maas_status(machine.get("status_name") or machine.get("status"))
+    has_fabric = _has_usable_maas_fabric(machine)
+    has_identity = bool((vendor or "").strip() and (product or "").strip())
+
+    weak_flags = []
+    if nic_count == 0:
+        weak_flags.append("0 NICs")
+    if not has_fabric:
+        weak_flags.append("no MAAS fabric")
+    if not has_identity:
+        weak_flags.append("incomplete identity")
+    weak_note = ", ".join(weak_flags)
+
+    if st in _MAAS_NEW_DEVICE_UNSAFE_STATUSES:
+        return False, f"MAAS status {st} is transient/unsafe for inventory create", 90
+    if st == "DEFAULT" and weak_flags:
+        return False, f"MAAS status DEFAULT with weak data ({weak_note})", 91
+    if weak_flags:
+        return False, f"Weak discovery data ({weak_note})", 92
+
+    rank = {
+        "DEPLOYED": 0,
+        "ACTIVE": 1,
+        "READY": 2,
+        "ALLOCATED": 3,
+    }.get(st, 10)
+    return True, "Candidate", rank
 
 
 def _normalize_ascii_cell(s):
@@ -477,20 +806,6 @@ def _html_col_is_ip(header) -> bool:
     return re.search(r"(?i)\bIP(?:s)?\b", h) is not None
 
 
-def _html_col_should_wrap_text(header) -> bool:
-    """Wrap only narrative/action columns; keep all other columns single-line."""
-    h = str(header or "").strip().lower()
-    wrap_headers = {
-        "reason",
-        "proposed action",
-        "proposed properties (from maas)",
-        "alignment issues",
-        "why this matters",
-        "note",
-    }
-    return h in wrap_headers
-
-
 def _html_th_class(header) -> str:
     h = str(header or "")
     base = "small align-bottom text-nowrap"
@@ -500,8 +815,6 @@ def _html_th_class(header) -> str:
         return f"{base} text-nowrap"
     if _html_col_is_risk(h):
         return f"{base} text-nowrap"
-    if _html_col_should_wrap_text(h):
-        return "small align-bottom"
     return base
 
 
@@ -514,9 +827,6 @@ def _html_td_class(header, col_idx, notes_col_idx=None) -> str:
         parts.extend(["align-top", "text-nowrap"])
     elif _html_col_is_risk(h):
         parts.extend(["align-top", "text-nowrap"])
-    elif _html_col_should_wrap_text(h):
-        # Wrap long free-text columns (Reason/Proposed Action/notes) for readability.
-        parts.extend(["align-top", "text-break"])
     else:
         parts.extend(["align-top", "text-nowrap"])
     if notes_col_idx is not None and col_idx == notes_col_idx:
@@ -985,15 +1295,16 @@ def _netbox_iface_name_suggests_oob(name: str) -> bool:
 def _suggested_netbox_mgmt_interface_name(
     power_type: str,
     hardware_vendor: str | None = None,
+    hardware_product: str | None = None,
 ) -> str:
     """
     MAAS-only hint when **creating** a new OOB port — ``ipmi`` or ``idrac`` only.
 
     - ``power_type`` containing ``redfish`` or ``idrac`` → ``idrac``.
-    - ``power_type`` containing ``ipmi``: if ``hardware_vendor`` contains ``dell``
-      (case-insensitive), suggest ``idrac``; if vendor missing / placeholder → ``ipmi``;
-      otherwise ``ipmi``.
-    - Any other power type → ``ipmi`` (same as before).
+    - ``power_type`` containing ``ipmi``: if vendor **or** product text contains
+      ``dell`` (case-insensitive), suggest ``idrac`` (Dell BMC is iDRAC even when
+      MAAS uses the generic IPMI driver); otherwise ``ipmi``.
+    - Any other power type → ``ipmi``.
 
     Prefer NetBox’s existing port name when the BMC IP is already on an interface
     (``_oob_port_hint_column``).
@@ -1002,8 +1313,10 @@ def _suggested_netbox_mgmt_interface_name(
     if "redfish" in pl or "idrac" in pl:
         return "idrac"
     if "ipmi" in pl:
-        v = (hardware_vendor or "").strip().lower()
-        if v and "dell" in v:
+        combined = (
+            f"{(hardware_vendor or '').strip()} {(hardware_product or '').strip()}"
+        ).lower()
+        if "dell" in combined:
             return "idrac"
         return "ipmi"
     return "ipmi"
@@ -1096,7 +1409,7 @@ def _build_proposed_mgmt_interface_rows(
         bmc = (m.get("bmc_ip") or "").strip()
         pt = (m.get("power_type") or "").strip() or "—"
         maas_oob_new = _suggested_netbox_mgmt_interface_name(
-            pt, m.get("hardware_vendor")
+            pt, m.get("hardware_vendor"), m.get("hardware_product")
         )
         nb_oob = (r.get("netbox_oob") or "").strip()
         maas_mac = (m.get("bmc_mac") or "").strip()
@@ -1346,17 +1659,6 @@ def _proposed_changes_rows(
         pick = with_ip[0] if with_ip else rows[0]
         return str(pick.get("mac") or "—")
 
-    def _suggested_oob_from_machine(m):
-        pt = str(m.get("power_type") or "").strip().lower()
-        if "idrac" in pt:
-            return "idrac"
-        if "ipmi" in pt:
-            return "ipmi"
-        vendor = str(m.get("hardware_vendor") or "").strip().lower()
-        if vendor == "dell":
-            return "idrac"
-        return "mgmt"
-
     def _new_device_nic_rows():
         out = []
         for h in sorted(drift.get("in_maas_not_netbox") or []):
@@ -1400,7 +1702,11 @@ def _proposed_changes_rows(
             power_type = str(m.get("power_type") or "").strip()
             if not bmc_ip and not power_type:
                 continue
-            mgmt = _suggested_oob_from_machine(m)
+            mgmt = _suggested_netbox_mgmt_interface_name(
+                m.get("power_type"),
+                m.get("hardware_vendor"),
+                m.get("hardware_product"),
+            )
             action = (
                 f"Create OOB interface '{mgmt}' (management-only)"
                 + (f"; set OOB/BMC IP {bmc_ip}" if bmc_ip else "")
@@ -1412,6 +1718,7 @@ def _proposed_changes_rows(
                     power_type or "—",
                     str(m.get("bmc_mac") or "—"),
                     mgmt,
+                    bmc_ip or "—",
                     action,
                     "Medium",
                 ]
@@ -1419,12 +1726,14 @@ def _proposed_changes_rows(
         return sorted(out, key=lambda x: (x[0] or "").lower())
 
     by_h = _maas_machine_by_hostname(maas_data)
+    _dtype_index = _build_device_type_match_index(netbox_data.get("device_types") or [])
     add_mgmt_iface = _build_proposed_mgmt_interface_rows(matched_rows, by_h, netbox_ifaces)
     add_mgmt_iface_new_devices = _new_device_bmc_rows()
     add_nb_interfaces = _build_add_nb_interface_rows(interface_audit) + _new_device_nic_rows()
     add_nb_interfaces = sorted(add_nb_interfaces, key=lambda x: (x[0] or "").lower())
 
     add_devices = []
+    add_devices_review_only = []
     for h in sorted(drift.get("in_maas_not_netbox") or []):
         m = by_h.get(h, {})
         ifaces = m.get("interfaces") or []
@@ -1445,28 +1754,49 @@ def _proposed_changes_rows(
             )
             or "—"
         )
-        nb_status = "—"
+        if (not site_slug) and nb_loc not in {"", "—"}:
+            site_slug = _site_slug_for_location_name(netbox_data, nb_loc)
+            if site_slug:
+                site_meta = _site_meta_for_slug(netbox_data, site_slug)
+                nb_site = (site_meta.get("name") or site_slug or "—").strip()
+                nb_region = (site_meta.get("region_name") or "—")
         mvendor, mproduct = _maas_vendor_product(m)
-        nb_dtype = _match_netbox_device_type_display(mvendor, mproduct, netbox_data)
+        nb_dtype = _resolve_device_type_display(mvendor, mproduct, _dtype_index)
         nb_role = _match_netbox_role_from_hostname(h, netbox_data)
-        add_devices.append([
+        maas_fabric_disp = _new_device_fabric_display(str(m.get("fabric_name", "-")), nb_loc)
+        is_candidate, note, status_rank = _new_device_candidate_policy(
+            m, nic_count, vendor=mvendor, product=mproduct
+        )
+        row = [
             h,
-            nb_site,
             nb_region,
+            nb_site,
             nb_loc,
-            nb_status,
             nb_dtype,
             nb_role,
-            str(m.get("fabric_name", "-")),
+            maas_fabric_disp,
             str(m.get("status_name", "-")),
             str(m.get("serial") or "—"),
             power_type,
             bmc_present,
             str(nic_count),
             primary_mac,
-            "maas-discovered",
-            "Create device + ports",
-        ])
+            ("maas-discovered" if is_candidate else "review-only"),
+            (
+                "Create device + ports"
+                if is_candidate
+                else f"Review only — not a safe NetBox add candidate ({note})"
+            ),
+        ]
+        if is_candidate:
+            add_devices.append((status_rank, h.lower(), row))
+        else:
+            add_devices_review_only.append((status_rank, h.lower(), row))
+
+    add_devices = [r for _, _, r in sorted(add_devices, key=lambda x: (x[0], x[1]))]
+    add_devices_review_only = [
+        r for _, _, r in sorted(add_devices_review_only, key=lambda x: (x[0], x[1]))
+    ]
 
     add_prefixes = []
     for g in (os_subnet_gaps or []):
@@ -1574,6 +1904,7 @@ def _proposed_changes_rows(
 
     return {
         "add_devices": add_devices,
+        "add_devices_review_only": add_devices_review_only,
         "add_prefixes": add_prefixes,
         "add_fips": add_fips,
         "update_nic": update_nic,
@@ -1736,7 +2067,11 @@ def format_drift_report(
         serial_validation_needed=serial_validation_needed,
         bmc_oob_mismatch=bmc_oob_mismatch,
     )
-    e.table(["Severity", "Category", "Count", "Why this matters"], sev_rows)
+    e.table(
+        ["Severity", "Category", "Count", "Why this matters"],
+        sev_rows,
+        wrap_max_width=None,
+    )
 
     # --- Run metrics ---
     e.spacer()
@@ -1776,6 +2111,7 @@ def format_drift_report(
             align_rows,
             dynamic_columns=True,
             notes_col_idx=6,
+            wrap_max_width=None,
         )
 
     # --- Proposed changes (preview only; full list, uncapped) ---
@@ -1801,7 +2137,12 @@ def format_drift_report(
     e.table(
         ["What", "Count", "Note"],
         [
-            ["New devices (MAAS)", str(len(prop["add_devices"])), "Not in NetBox yet"],
+            ["New devices (MAAS)", str(len(prop["add_devices"])), "Safe create candidates"],
+            [
+                "Review-only MAAS-only hosts",
+                str(len(prop.get("add_devices_review_only", []))),
+                "Not safe to auto-propose (status/data quality policy)",
+            ],
             ["New prefixes (OpenStack)", str(len(prop["add_prefixes"])), "Subnet not in IPAM"],
             ["New floating IPs (OpenStack)", str(len(prop["add_fips"])), "FIP not in IPAM"],
         ],
@@ -1813,10 +2154,9 @@ def format_drift_report(
         e.table(
             [
                 "Hostname",
-                "NB site",
                 "NB region",
+                "NB site",
                 "NB location",
-                "NB status",
                 "NetBox device type",
                 "NetBox role",
                 "MAAS fabric",
@@ -1831,6 +2171,33 @@ def format_drift_report(
             ],
             prop["add_devices"],
             dynamic_columns=True,
+            wrap_max_width=None,
+        )
+    if prop.get("add_devices_review_only"):
+        e.spacer()
+        e.subtitle("Detail — MAAS-only review-only (not safe add candidates)")
+        e.spacer()
+        e.table(
+            [
+                "Hostname",
+                "NB region",
+                "NB site",
+                "NB location",
+                "NetBox device type",
+                "NetBox role",
+                "MAAS fabric",
+                "MAAS status",
+                "Serial Number",
+                "Power type",
+                "BMC present",
+                "NIC count",
+                "Primary MAC (MAAS)",
+                "Proposed Tag",
+                "Proposed Action",
+            ],
+            prop["add_devices_review_only"],
+            dynamic_columns=True,
+            wrap_max_width=None,
         )
     if prop["add_prefixes"]:
         e.spacer()
@@ -1840,6 +2207,7 @@ def format_drift_report(
             ["CIDR", "Network Name", "Network ID", "Cloud", "Proposed Action"],
             prop["add_prefixes"],
             dynamic_columns=True,
+            wrap_max_width=None,
         )
     if prop["add_fips"]:
         e.spacer()
@@ -1849,6 +2217,7 @@ def format_drift_report(
             ["Floating IP", "Fixed IP", "Project", "Cloud", "Proposed Action"],
             prop["add_fips"],
             dynamic_columns=True,
+            wrap_max_width=None,
         )
 
     e.spacer()
@@ -1886,6 +2255,7 @@ def format_drift_report(
             ],
             prop["add_nb_interfaces"],
             dynamic_columns=True,
+            wrap_max_width=None,
         )
     if prop["update_nic"]:
         e.spacer()
@@ -1910,6 +2280,7 @@ def format_drift_report(
             ],
             prop["update_nic"],
             dynamic_columns=True,
+            wrap_max_width=None,
         )
 
     if prop.get("add_mgmt_iface_new_devices"):
@@ -1923,11 +2294,13 @@ def format_drift_report(
                 "MAAS power_type",
                 "MAAS BMC MAC",
                 "Suggested NB mgmt iface",
+                "NB mgmt iface IP",
                 "Proposed action",
                 "Risk",
             ],
             prop["add_mgmt_iface_new_devices"],
             dynamic_columns=True,
+            wrap_max_width=None,
         )
 
     if prop["add_mgmt_iface"]:
@@ -1951,6 +2324,7 @@ def format_drift_report(
             ],
             prop["add_mgmt_iface"],
             dynamic_columns=True,
+            wrap_max_width=None,
         )
 
     e.spacer()
@@ -1970,6 +2344,7 @@ def format_drift_report(
             ["Hostname", "MAAS Serial", "NetBox Serial", "Proposed Action", "Risk"],
             prop["review_serial"],
             dynamic_columns=True,
+            wrap_max_width=None,
         )
     e.spacer()
     e.subtitle("Summary")
@@ -2204,6 +2579,7 @@ def build_drift_report_xlsx(
         + len(prop["review_serial"])
     )
     ws_sum.append(["New devices", str(len(prop["add_devices"]))])
+    ws_sum.append(["Review-only MAAS-only hosts", str(len(prop.get("add_devices_review_only", [])))])
     ws_sum.append(["New prefixes", str(len(prop["add_prefixes"]))])
     ws_sum.append(["New floating IPs", str(len(prop["add_fips"]))])
     ws_sum.append(["NIC drift", str(len(prop["update_nic"]))])
@@ -2221,6 +2597,7 @@ def build_drift_report_xlsx(
     ws_prop.append([])
     _append_header(ws_prop, ["Section", "Count"])
     ws_prop.append(["New devices (MAAS)", len(prop["add_devices"])])
+    ws_prop.append(["Review-only MAAS-only hosts", len(prop.get("add_devices_review_only", []))])
     ws_prop.append(["New prefixes (OpenStack)", len(prop["add_prefixes"])])
     ws_prop.append(["New floating IPs (OpenStack)", len(prop["add_fips"])])
     ws_prop.append(["NIC drift", len(prop["update_nic"])])
@@ -2240,10 +2617,9 @@ def build_drift_report_xlsx(
         "A) New devices",
         [
             "Hostname",
-            "NB site",
             "NB region",
+            "NB site",
             "NB location",
-            "NB status",
             "NetBox device type",
             "NetBox role",
             "MAAS fabric",
@@ -2257,6 +2633,27 @@ def build_drift_report_xlsx(
             "Proposed Action",
         ],
         prop["add_devices"],
+    )
+    _append_block(
+        "A) MAAS-only review-only (not safe add candidates)",
+        [
+            "Hostname",
+            "NB region",
+            "NB site",
+            "NB location",
+            "NetBox device type",
+            "NetBox role",
+            "MAAS fabric",
+            "MAAS status",
+            "Serial Number",
+            "Power type",
+            "BMC present",
+            "NIC count",
+            "Primary MAC (MAAS)",
+            "Proposed Tag",
+            "Proposed Action",
+        ],
+        prop.get("add_devices_review_only", []),
     )
     _append_block(
         "A) New prefixes",
@@ -2331,6 +2728,7 @@ def build_drift_report_xlsx(
             "MAAS power_type",
             "MAAS BMC MAC",
             "Suggested NB mgmt iface",
+            "NB mgmt iface IP",
             "Proposed action",
             "Risk",
         ],

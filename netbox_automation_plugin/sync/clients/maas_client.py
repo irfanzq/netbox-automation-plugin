@@ -378,6 +378,50 @@ def _vendor_from_maas_machine_json(md: dict | None) -> str:
     return ""
 
 
+def _product_from_maas_machine_json(md: dict | None) -> str:
+    """
+    Best-effort system product / model from MAAS machine JSON (list or detail).
+
+    Used with vendor for OOB port naming (e.g. product string contains ``Dell`` when
+    vendor field is empty).
+    """
+    if not isinstance(md, dict):
+        return ""
+    candidates: list[str] = []
+    for key in (
+        "hardware_product",
+        "hardware_model",
+        "product_name",
+        "system_product",
+        "model",
+    ):
+        v = md.get(key)
+        if v is not None and str(v).strip():
+            candidates.append(str(v).strip())
+
+    hi = md.get("hardware_info")
+    if isinstance(hi, str) and hi.strip().startswith("{"):
+        try:
+            hi = json.loads(hi)
+        except Exception:
+            hi = None
+    if isinstance(hi, dict):
+        for key in (
+            "system_product",
+            "product_name",
+            "hardware_product",
+            "model",
+        ):
+            v = hi.get(key)
+            if v is not None and str(v).strip():
+                candidates.append(str(v).strip())
+
+    for c in candidates:
+        if c and not _maas_vendor_is_placeholder(c):
+            return c[:256]
+    return ""
+
+
 def _enrich_machines_serial_rest(
     machines: list, maas_url: str, maas_api_key: str, verify_tls: bool
 ) -> None:
@@ -403,15 +447,15 @@ def _enrich_machines_serial_rest(
         base = _maas_rest_base(maas_url)
         parts = maas_api_key.split(":", 2)
         if len(parts) != 3:
-            return i, "", ""
+            return i, "", "", ""
         ck, tk, ts = parts[0], parts[1], parts[2]
         try:
             import requests
             from requests_oauthlib import OAuth1
         except ImportError:
-            return i, "", ""
+            return i, "", "", ""
         auth = OAuth1(ck, "", tk, ts, signature_method="PLAINTEXT")
-        s_acc, v_acc = "", ""
+        s_acc, v_acc, p_acc = "", "", ""
         for path in (f"{base}/api/2.0/machines/{sid}/", f"{base}/api/2.0/nodes/{sid}/"):
             try:
                 r = requests.get(path, auth=auth, verify=verify_tls, timeout=60)
@@ -422,28 +466,35 @@ def _enrich_machines_serial_rest(
                     continue
                 s2 = _serial_from_maas_machine_json(body)
                 v2 = _vendor_from_maas_machine_json(body)
+                p2 = _product_from_maas_machine_json(body)
                 if s2:
                     s_acc = s2
                 if v2:
                     v_acc = v2
+                if p2:
+                    p_acc = p2
                 if s_acc and v_acc:
                     break
             except Exception:
                 logger.debug("MAAS serial/vendor enrich %s", path, exc_info=True)
-        return i, s_acc, v_acc
+        return i, s_acc, v_acc, p_acc
 
     max_workers = min(24, max(8, len(need)))
     try:
         with ThreadPoolExecutor(max_workers=max_workers) as ex:
             for fut in as_completed([ex.submit(fetch_idx, i) for i in need]):
                 try:
-                    i, s, v = fut.result()
+                    i, s, v, p = fut.result()
                     if s:
                         machines[i]["serial"] = s
                     if v and _maas_vendor_is_placeholder(
                         str(machines[i].get("hardware_vendor") or "")
                     ):
                         machines[i]["hardware_vendor"] = v
+                    if p and _maas_vendor_is_placeholder(
+                        str(machines[i].get("hardware_product") or "")
+                    ):
+                        machines[i]["hardware_product"] = p
                 except Exception:
                     pass
     except Exception:
@@ -1074,6 +1125,7 @@ async def fetch_maas_data(maas_url: str, maas_api_key: str, maas_insecure: bool)
             power_type_str = ""
             serial = ""
             hardware_vendor = ""
+            hardware_product = ""
             try:
                 md = getattr(m, "_data", None)
                 if isinstance(md, dict):
@@ -1092,6 +1144,7 @@ async def fetch_maas_data(maas_url: str, maas_api_key: str, maas_insecure: bool)
                         power_type_str = str(pt_raw or "").strip()
                     serial = _serial_from_maas_machine_json(md)
                     hardware_vendor = _vendor_from_maas_machine_json(md)
+                    hardware_product = _product_from_maas_machine_json(md)
             except Exception:
                 pass
             if not serial:
@@ -1121,6 +1174,7 @@ async def fetch_maas_data(maas_url: str, maas_api_key: str, maas_insecure: bool)
                 "bmc_vlan": bmc_vlan,
                 "power_type": power_type_str,
                 "hardware_vendor": str(hardware_vendor).strip(),
+                "hardware_product": str(hardware_product).strip(),
             })
         _enrich_machines_fabric_rest(
             result["machines"], maas_url, maas_api_key, not maas_insecure, fabric_catalog
