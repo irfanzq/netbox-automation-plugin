@@ -679,6 +679,47 @@ def _new_device_candidate_policy(
     return True, "Candidate", rank
 
 
+# NetBox DCIM Device.status slugs (same set as dcim.choices.DeviceStatusChoices).
+_NETBOX_DEVICE_STATUS_SLUGS = frozenset({
+    "offline",
+    "active",
+    "planned",
+    "staged",
+    "failed",
+    "inventory",
+    "decommissioning",
+})
+
+
+def _proposed_netbox_status_for_new_maas_device(machine: dict) -> str:
+    """
+    Suggested NetBox device.status when creating a record for a MAAS-only host.
+
+    Maps MAAS lifecycle states we treat as safe for add proposals (see
+    _new_device_candidate_policy / rank keys) to valid NetBox slugs.
+    Deployed and Ready → staged (aligns with “MAAS deployed / NB staged” review pattern).
+    """
+    st = _norm_maas_status(machine.get("status_name") or machine.get("status"))
+    if not st:
+        return "—"
+    if st in _MAAS_NEW_DEVICE_UNSAFE_STATUSES:
+        return "—"
+    # Explicit MAAS → NetBox mappings for common candidate statuses.
+    proposed = {
+        "DEPLOYED": "staged",
+        "READY": "staged",
+        "ACTIVE": "active",
+        "ALLOCATED": "planned",
+        "DEFAULT": "inventory",
+        "NEW": "inventory",
+    }.get(st)
+    if proposed is None:
+        proposed = "staged"
+    if proposed not in _NETBOX_DEVICE_STATUS_SLUGS:
+        return "—"
+    return proposed
+
+
 def _normalize_ascii_cell(s):
     return str(s).replace("\n", " ").replace("\r", "") if s is not None else ""
 
@@ -1783,16 +1824,7 @@ def _proposed_changes_rows(
         is_candidate, note, status_rank = _new_device_candidate_policy(
             m, nic_count, vendor=mvendor, product=mproduct
         )
-        row = [
-            h,
-            nb_region,
-            nb_site,
-            nb_loc,
-            nb_dtype,
-            nb_role,
-            maas_fabric_disp,
-            str(m.get("status_name", "-")),
-            str(m.get("serial") or "—"),
+        tail = [
             power_type,
             bmc_present,
             str(nic_count),
@@ -1804,9 +1836,27 @@ def _proposed_changes_rows(
                 else f"Review only — not a safe NetBox add candidate ({note})"
             ),
         ]
+        head_common = [
+            h,
+            nb_region,
+            nb_site,
+            nb_loc,
+            nb_dtype,
+            nb_role,
+            maas_fabric_disp,
+            str(m.get("status_name", "-")),
+        ]
+        serial = str(m.get("serial") or "—")
         if is_candidate:
+            row = [
+                *head_common,
+                _proposed_netbox_status_for_new_maas_device(m),
+                serial,
+                *tail,
+            ]
             add_devices.append((status_rank, h.lower(), row))
         else:
+            row = [*head_common, serial, *tail]
             add_devices_review_only.append((status_rank, h.lower(), row))
 
     add_devices = [r for _, _, r in sorted(add_devices, key=lambda x: (x[0], x[1]))]
@@ -2177,6 +2227,7 @@ def format_drift_report(
                 "NetBox role",
                 "MAAS fabric",
                 "MAAS status",
+                "NB proposed state",
                 "Serial Number",
                 "Power type",
                 "BMC present",
@@ -2640,6 +2691,7 @@ def build_drift_report_xlsx(
             "NetBox role",
             "MAAS fabric",
             "MAAS status",
+            "NB proposed state",
             "Serial Number",
             "Power type",
             "BMC present",
