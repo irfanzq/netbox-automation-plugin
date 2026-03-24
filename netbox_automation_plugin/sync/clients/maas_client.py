@@ -1162,6 +1162,7 @@ async def fetch_maas_data(maas_url: str, maas_api_key: str, maas_insecure: bool)
                 "hostname": short_name,
                 "fqdn": raw_name if raw_name != short_name else "",
                 "dns_name": dns_name,
+                "domain_name": domain_part,
                 "system_id": getattr(m, "system_id", ""),
                 "serial": str(serial).strip(),
                 "zone_name": zone_name,

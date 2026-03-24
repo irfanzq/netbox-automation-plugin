@@ -112,7 +112,17 @@ def _fabric_matches_locations(fabric_name: str, selected_location_names: set[str
 
 def _maas_effective_dns_name(m: dict) -> str:
     """FQDN / DNS name for scope matching (hostname + domain from MAAS)."""
-    return (m.get("dns_name") or m.get("fqdn") or m.get("hostname") or "").strip()
+    dns = (m.get("dns_name") or "").strip()
+    if dns:
+        return dns
+    fqdn = (m.get("fqdn") or "").strip()
+    if fqdn:
+        return fqdn
+    host = (m.get("hostname") or "").strip()
+    dom = (m.get("domain_name") or m.get("domain") or "").strip()
+    if host and dom and "." not in host:
+        return f"{host}.{dom}"
+    return ""
 
 
 def _maas_iface_row_fabric(m: dict, mi: dict) -> str:
