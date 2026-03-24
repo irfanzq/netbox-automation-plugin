@@ -175,6 +175,73 @@ def _text_matches_locations(text: str, selected_location_names: set[str]) -> boo
     return False
 
 
+def _machine_fabrics(machine: dict) -> set[str]:
+    """All fabric names seen on machine + interfaces (normalized)."""
+    out = set()
+    base = (machine.get("fabric_name") or "").strip()
+    if base and base != "-":
+        out.add(base)
+    for mi in machine.get("interfaces") or []:
+        f = (mi.get("iface_fabric") or "").strip()
+        if f and f != "-":
+            out.add(f)
+    return out
+
+
+def _location_matches_machine_fabrics(location_name: str, machine: dict) -> bool:
+    for fab in _machine_fabrics(machine):
+        if _fabric_matches_locations(fab, {location_name}):
+            return True
+    return False
+
+
+def _fqdn_location_hint(machine: dict, candidate_locations: set[str]) -> str:
+    """
+    Resolve ambiguous host location using MAAS DNS/FQDN text.
+    Prefer longer location names first (more specific token matches).
+    """
+    dns_text = _maas_effective_dns_name(machine)
+    for loc in sorted(candidate_locations or set(), key=lambda x: (-len(x), x.lower())):
+        if _text_matches_locations(dns_text, {loc}):
+            return loc
+    return ""
+
+
+def _scoped_location_decision(
+    machine: dict,
+    selected_location_names: set[str],
+    all_location_names: set[str],
+) -> tuple[bool, str]:
+    """
+    Decide if host belongs in selected location scope.
+
+    If host spans selected and non-selected fabrics, use FQDN/DNS as tie-break.
+    """
+    if not selected_location_names:
+        return False, ""
+
+    selected_hits = {
+        loc for loc in selected_location_names
+        if _location_matches_machine_fabrics(loc, machine)
+    }
+    if not selected_hits:
+        return (_text_matches_locations(_maas_effective_dns_name(machine), selected_location_names), "")
+
+    other_hits = {
+        loc for loc in (all_location_names - selected_location_names)
+        if _location_matches_machine_fabrics(loc, machine)
+    }
+    if not other_hits:
+        chosen = sorted(selected_hits, key=lambda x: x.lower())[0]
+        return True, chosen
+
+    # Host appears on multiple location-like fabrics; force location via DNS/FQDN hint.
+    hinted = _fqdn_location_hint(machine, selected_hits | other_hits)
+    if hinted:
+        return (hinted in selected_location_names), hinted
+    return False, ""
+
+
 def _filter_openstack_by_locations(openstack_data: dict, selected_location_names: set[str]) -> tuple[dict, dict]:
     """
     Scope OpenStack data by selected NB locations using fuzzy text matching:
@@ -345,7 +412,8 @@ class MAASOpenStackSyncView(LoginRequiredMixin, View):
             for k in selected_location_keys
             if k in location_meta
         }
-        # If specific locations are selected, include their parent sites automatically.
+        # Keep parent-site context for display/debug only. Do NOT widen host scope by site
+        # when specific locations are selected; location-scoped runs must stay strict.
         selected_sites |= selected_location_sites
         if all_sites_selected:
             selected_sites = set()
@@ -577,8 +645,14 @@ class MAASOpenStackSyncView(LoginRequiredMixin, View):
 
         # Apply MAAS-side scope after audit maps are built:
         # include hosts in selected NB scope OR hosts with MAAS fabric fuzzy-matching selected locations.
+        host_location_override: dict[str, str] = {}
         if selected_sites or selected_location_names:
             allowed_names = set()
+            all_location_names = {
+                (meta.get("location_name") or "").strip()
+                for meta in (location_meta or {}).values()
+                if (meta.get("location_name") or "").strip()
+            }
             if matched_rows:
                 for r in matched_rows:
                     host = (r.get("hostname") or "").strip()
@@ -586,7 +660,8 @@ class MAASOpenStackSyncView(LoginRequiredMixin, View):
                         continue
                     nb_site = (r.get("netbox_site") or "").strip()
                     nb_loc = (r.get("netbox_location") or "").strip()
-                    if selected_sites and nb_site in selected_sites:
+                    # Location selection is strict: do not include by site-only match.
+                    if (not selected_location_names) and selected_sites and nb_site in selected_sites:
                         allowed_names.add(host)
                     if selected_location_names and nb_loc in selected_location_names:
                         allowed_names.add(host)
@@ -594,10 +669,14 @@ class MAASOpenStackSyncView(LoginRequiredMixin, View):
                 host = (m.get("hostname") or "").strip()
                 if not host:
                     continue
-                if selected_location_names and _fabric_matches_locations(
-                    m.get("fabric_name") or "", selected_location_names
-                ):
-                    allowed_names.add(host)
+                if selected_location_names:
+                    in_scope, chosen_loc = _scoped_location_decision(
+                        m, selected_location_names, all_location_names
+                    )
+                    if in_scope:
+                        allowed_names.add(host)
+                        if chosen_loc:
+                            host_location_override[host] = chosen_loc
                 if selected_location_names and _text_matches_locations(
                     _maas_effective_dns_name(m), selected_location_names
                 ):
@@ -605,7 +684,9 @@ class MAASOpenStackSyncView(LoginRequiredMixin, View):
                 if selected_sites and _text_matches_locations(
                     _maas_effective_dns_name(m), selected_sites
                 ):
-                    allowed_names.add(host)
+                    # Same rule: if locations are selected, ignore site-only DNS matches.
+                    if not selected_location_names:
+                        allowed_names.add(host)
 
             maas_data["machines"] = [
                 m for m in (maas_data.get("machines") or [])
@@ -629,6 +710,10 @@ class MAASOpenStackSyncView(LoginRequiredMixin, View):
             scope_meta["maas_unmatched_fabrics_more"] = max(0, len(unmatched_fabrics) - 20)
             if matched_rows is not None:
                 matched_rows = [r for r in matched_rows if (r.get("hostname") or "").strip() in allowed_names]
+                for r in matched_rows:
+                    h = (r.get("hostname") or "").strip()
+                    if h in host_location_override:
+                        r["maas_fabric"] = host_location_override[h]
 
             # Recompute drift counts from scoped host/device sets.
             drift = compute_maas_netbox_drift(maas_data, netbox_data)
@@ -664,6 +749,15 @@ class MAASOpenStackSyncView(LoginRequiredMixin, View):
                 netbox_audit=audit_map_final,
                 maas_iface_filter=_iface_filt,
             )
+            if interface_audit and host_location_override:
+                for host_row in interface_audit.get("hosts") or []:
+                    h = (host_row.get("hostname") or "").strip()
+                    forced_loc = host_location_override.get(h)
+                    if not forced_loc:
+                        continue
+                    host_row["maas_fabric"] = forced_loc
+                    for nic_row in host_row.get("rows") or []:
+                        nic_row["maas_fabric"] = forced_loc
 
         scope_meta["maas_machines_after"] = len(maas_data.get("machines") or [])
         scope_meta["coverage_status"] = (
