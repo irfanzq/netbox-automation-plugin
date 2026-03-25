@@ -341,7 +341,6 @@ def build_lldp_drift_rows(
                 os_port,
                 nb_port_disp,
                 nb_port_status,
-                os_lldp or "—",
                 action_new,
             ])
             continue
@@ -363,7 +362,6 @@ def build_lldp_drift_rows(
                 os_port,
                 nb_port_disp,
                 nb_port_status,
-                os_lldp,
                 (
                     "Align NetBox peer/cable with OS-discovered switch/port (OpenStack): "
                     f"«{os_switch}» port «{os_port}»"

@@ -54,6 +54,13 @@ Optional (application credentials instead of user/password):
 | `OPENSTACK_2_APPLICATION_CREDENTIAL_ID` / `OPENSTACK_2_APPLICATION_CREDENTIAL_SECRET` | Optional app cred for 2nd cloud |
 | `OPENSTACK_2_INSECURE` | `true` to skip TLS verify for 2nd cloud |
 
+**Drift audit — which OpenStack clouds to query:**
+
+- **No NetBox site and no location** selected in the MAAS / OpenStack Sync form → the audit uses **every** cloud returned by `get_openstack_configs()` (primary `OS_*` plus optional `OPENSTACK_2_*`), merged into one report.
+- **At least one site or location** selected → the plugin looks for the substrings **`birch`** and **`spruce`** (case-insensitive) in the selected **location display names** and **site slugs** (including parent site slugs implied by location choices). For each token found, it keeps only OpenStack configs whose **`openstack_region_name`** or **`label`** (`OPENSTACK_LABEL` / `OPENSTACK_2_LABEL`) contains that same substring. Example: location `Spruce v2` → only the cloud with region or label containing `spruce`; `Birch Staging` → only `birch`. If both appear, both clouds are used. If the selection implies a token but no config matches, it **falls back to all clouds** and logs a warning. If the selection has no `birch`/`spruce` substring, **all** configured clouds are used (cannot infer region from names alone).
+
+Ensure `OS_REGION_NAME` / `OPENSTACK_2_REGION_NAME` and optional labels align with those tokens (e.g. `birch`, `spruce`).
+
 **NetBox (drift audit vs MAAS):** By default the plugin reads **this NetBox’s database** (Django ORM), same idea as VLAN deployment — **no `NETBOX_URL`, token, or DNS** to yourself.
 
 **OpenStack from Docker:** If `birch.cloud.whitefiber.com` does not resolve inside the container, use an **internal auth URL** or add **`extra_hosts`** in Compose. `OPENSTACK_INSECURE=true` only skips TLS verification; it does not fix DNS.

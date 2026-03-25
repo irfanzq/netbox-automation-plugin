@@ -1,5 +1,7 @@
 """Proposed change buckets (NIC drift, new devices, prefixes, etc.)."""
 
+from typing import Any
+
 from netbox_automation_plugin.sync.reporting.drift_report.bmc_oob import (
     _build_proposed_mgmt_interface_rows,
     _suggested_netbox_mgmt_interface_name,
@@ -97,15 +99,29 @@ def _openstack_ironic_bmc_row(openstack_data, hostname: str) -> dict | None:
     return None
 
 
-def _maas_only_host_openstack_columns(openstack_data, hostname: str) -> tuple[str, str, str, str]:
+# Sentinel: _maas_only_host_openstack_columns looks up Ironic row when not passed explicitly.
+_IRONIC_BMC_ROW_LOOKUP = object()
+
+
+def _maas_only_host_openstack_columns(
+    openstack_data,
+    hostname: str,
+    *,
+    ironic_bmc_row: Any = _IRONIC_BMC_ROW_LOOKUP,
+) -> tuple[str, str, str, str]:
     """
     For MAAS-only new-device rows: Ironic lifecycle + catalog region when available.
     Returns: (os_region, os_provision, os_power, os_maintenance).
     Region falls back to any runtime NIC row, then merged openstack_region_name.
     Lifecycle fields are only filled when an Ironic (runtime_bmc) row exists for the host.
+    Pass ironic_bmc_row=dict from _openstack_ironic_bmc_row to avoid a second runtime_bmc scan.
+    Pass ironic_bmc_row=None when the caller already knows there is no Ironic row.
     """
     dash = "—"
-    osr = _openstack_ironic_bmc_row(openstack_data, hostname)
+    if ironic_bmc_row is _IRONIC_BMC_ROW_LOOKUP:
+        osr = _openstack_ironic_bmc_row(openstack_data, hostname)
+    else:
+        osr = ironic_bmc_row  # dict | None
     if not openstack_data or openstack_data.get("error"):
         return dash, dash, dash, dash
 
@@ -663,20 +679,15 @@ def _proposed_changes_rows(
         is_candidate, note, status_rank = _new_device_candidate_policy(
             m, nic_count, vendor=mvendor, product=mproduct
         )
+        osr = _openstack_ironic_bmc_row(openstack_data, h)
         os_reg, os_prov, os_pow, os_maint = _maas_only_host_openstack_columns(
-            openstack_data, h
+            openstack_data, h, ironic_bmc_row=osr
         )
-        _dash = "—"
-        _os3 = (
-            (os_prov or "").strip() not in ("", _dash)
-            and (os_pow or "").strip() not in ("", _dash)
-            and (os_maint or "").strip() not in ("", _dash)
-        )
-        # Ironic provision_state active ⇒ trust OpenStack for lifecycle on this row (else MAAS discovery).
+        # Ironic runtime_bmc row ⇒ correlated in OpenStack (any provision state). Active ⇒ [OS] authority.
         authority_badge = "[OS]" if os_prov == "active" else "[MAAS]"
         if is_candidate:
             proposed_tag = (
-                "openstack+maas-discovered" if _os3 else "maas-discovered"
+                "openstack+maas-discovered" if osr else "maas-discovered"
             )
         else:
             proposed_tag = "review-only"

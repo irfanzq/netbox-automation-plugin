@@ -395,6 +395,81 @@ def _filter_openstack_by_locations(openstack_data: dict, selected_location_names
     return scoped, meta
 
 
+# Substrings in NetBox site slug / location name -> only OpenStack clouds whose
+# `openstack_region_name` or `label` contains the same token (e.g. spruce, birch).
+_OPENSTACK_SCOPE_TOKENS = ("spruce", "birch")
+
+
+def _openstack_scope_tokens_from_netbox(
+    selected_location_names: set[str],
+    selected_sites: set[str],
+) -> set[str]:
+    """
+    Derive coarse OpenStack scope tokens from selected NetBox locations and site slugs.
+    Case-insensitive substring: 'Spruce v2' -> spruce; 'Birch Staging' -> birch.
+    """
+    tokens: set[str] = set()
+    for loc in selected_location_names or set():
+        low = (loc or "").lower()
+        for t in _OPENSTACK_SCOPE_TOKENS:
+            if t in low:
+                tokens.add(t)
+    for site in selected_sites or set():
+        low = (site or "").lower()
+        for t in _OPENSTACK_SCOPE_TOKENS:
+            if t in low:
+                tokens.add(t)
+    return tokens
+
+
+def _filter_openstack_configs_for_drift_scope(
+    configs: list[dict],
+    *,
+    has_netbox_scope: bool,
+    tokens: set[str],
+) -> list[dict]:
+    """
+    - No NetBox site/location selected: use every configured cloud (e.g. birch + spruce).
+    - Site/location selected: if names imply birch and/or spruce, only fetch matching
+      clouds (by region name or label). If nothing matches, fall back to all clouds.
+    - Site/location selected but no birch/spruce substring: fetch all clouds (cannot infer).
+    """
+    if not configs:
+        return configs
+    if not has_netbox_scope:
+        return list(configs)
+    if not tokens:
+        return list(configs)
+
+    picked: list[dict] = []
+    seen: set[tuple[str, str]] = set()
+    for c in configs:
+        rn = (c.get("openstack_region_name") or "").lower()
+        lb = (c.get("label") or "").lower()
+        auth = (c.get("openstack_auth_url") or "").strip()
+        region = (c.get("openstack_region_name") or "").strip()
+        key = (auth, region)
+        if any(tok in rn or tok in lb for tok in tokens) and key not in seen:
+            seen.add(key)
+            picked.append(c)
+
+    if not picked:
+        logger.warning(
+            "OpenStack scope: NetBox selection implied tokens %s but no cloud matched "
+            "region/label (set OS_REGION_NAME, OPENSTACK_2_REGION_NAME, OPENSTACK_LABEL); "
+            "using all configured clouds.",
+            sorted(tokens),
+        )
+        return list(configs)
+
+    logger.info(
+        "OpenStack scope from NetBox: tokens=%s -> clouds=%s",
+        sorted(tokens),
+        [(c.get("label"), c.get("openstack_region_name")) for c in picked],
+    )
+    return picked
+
+
 def _drift_audit_cache_key(request):
     """Per-session key for cached drift audit (so Download Excel does not re-run)."""
     return f"drift_audit:{request.session.session_key or request.user.pk}"
@@ -499,9 +574,15 @@ class MAASOpenStackSyncView(LoginRequiredMixin, View):
             selected_sites = set()
         if all_locations_selected:
             selected_location_names = set()
+        has_netbox_scope = bool(selected_sites or selected_location_names)
+        openstack_scope_tokens = _openstack_scope_tokens_from_netbox(
+            selected_location_names, selected_sites
+        )
         scope_meta = {
             "selected_sites": sorted(selected_sites),
             "selected_locations": sorted(selected_location_names),
+            "openstack_scope_tokens": sorted(openstack_scope_tokens),
+            "openstack_scope_has_netbox_filter": has_netbox_scope,
         }
 
         # If Download Excel: show report and trigger download (via GET endpoint). Cache hit = use cache; miss = run audit below.
@@ -598,8 +679,22 @@ class MAASOpenStackSyncView(LoginRequiredMixin, View):
                 logger.warning("Failed applying NetBox site/location filter: %s", e)
         scope_meta["netbox_devices_after"] = len(netbox_data.get("devices") or [])
 
-        # 3) OpenStack — one or more clouds (OPENSTACK_* and optional OPENSTACK_2_*); merge into one dataset
+        # 3) OpenStack — one or more clouds (OPENSTACK_* and optional OPENSTACK_2_*); merge into one dataset.
+        #    No site/location: fetch all configured clouds. With scope: birch/spruce substrings in NB
+        #    names pick matching clouds only (region name or OPENSTACK_*_LABEL).
         openstack_configs = get_openstack_configs()
+        openstack_configs = _filter_openstack_configs_for_drift_scope(
+            openstack_configs,
+            has_netbox_scope=has_netbox_scope,
+            tokens=openstack_scope_tokens,
+        )
+        scope_meta["openstack_clouds_used"] = [
+            {
+                "label": (c.get("label") or "")[:64],
+                "region": (c.get("openstack_region_name") or "")[:64],
+            }
+            for c in (openstack_configs or [])
+        ]
         openstack_data = None
         all_results = []
         if openstack_configs:
