@@ -27,11 +27,20 @@ from netbox_automation_plugin.sync.reconciliation.audit_detail import (
     openstack_subnets_missing_prefixes,
 )
 from netbox_automation_plugin.sync.clients.openstack_client import fetch_openstack_data, fetch_all_openstack_data
-from netbox_automation_plugin.sync.reconciliation.maas_netbox import compute_maas_netbox_drift
+from netbox_automation_plugin.sync.reconciliation.maas_netbox import (
+    compute_maas_netbox_drift,
+    _hostname_short,
+)
+from netbox_automation_plugin.sync.reporting.drift_report.proposed_lldp_tables import (
+    lldp_switch_hostnames_for_netbox_fetch,
+)
 from netbox_automation_plugin.sync.reporting.drift_report import (
     _drift_for_user_reports,
     build_drift_report_xlsx,
     format_drift_report,
+)
+from netbox_automation_plugin.sync.reporting.drift_report.placement import (
+    _netbox_placement_from_maas_machine,
 )
 from django.http import HttpResponse
 from django.urls import reverse
@@ -39,6 +48,67 @@ from django.urls import reverse
 import logging
 
 logger = logging.getLogger("netbox_automation_plugin")
+
+
+def _netbox_placement_by_hostname_from_devices(netbox_data: dict) -> dict:
+    """Short hostname -> {nb_region, nb_site, nb_location} from full device inventory."""
+    sites = netbox_data.get("sites") or []
+    site_by_slug = {(s.get("slug") or "").strip(): s for s in sites if (s.get("slug") or "").strip()}
+    out: dict[str, dict] = {}
+    for d in netbox_data.get("devices") or []:
+        h = _hostname_short(d.get("name"))
+        if not h:
+            continue
+        slug = (d.get("site_slug") or "").strip()
+        sm = site_by_slug.get(slug, {})
+        region = (d.get("region_name") or "").strip() or (sm.get("region_name") or "").strip()
+        site_disp = (d.get("site_name") or "").strip() or (sm.get("name") or "").strip() or slug
+        loc = (d.get("location_name") or "").strip()
+        out[h] = {"nb_region": region or "—", "nb_site": site_disp or "—", "nb_location": loc or "—"}
+    return out
+
+
+def _trim_maas_only_truly_missing_from_netbox(
+    drift: dict,
+    netbox_all_hostnames: set,
+    scope_meta: dict,
+    *,
+    netbox_placement_by_hostname: dict | None = None,
+) -> None:
+    """
+    Scoped NetBox inventory can make MAAS hosts look missing when they exist under another
+    site/location. Remove those from in_maas_not_netbox and record actual NetBox placement
+    on drift['maas_in_netbox_outside_scope'] for the report.
+    """
+    drift["maas_in_netbox_outside_scope"] = []
+    if not drift:
+        return
+    raw = list(drift.get("in_maas_not_netbox") or [])
+    if not raw or not netbox_all_hostnames:
+        return
+    placement = netbox_placement_by_hostname or {}
+    trimmed: list[str] = []
+    outside: list[list] = []
+    note = (
+        "Present in NetBox but not under the selected site/location filters for this run "
+        "(MAAS DNS/fabric may still match selected scope)."
+    )
+    for h in raw:
+        sh = _hostname_short(h)
+        if sh not in netbox_all_hostnames:
+            trimmed.append(h)
+            continue
+        pl = placement.get(sh, {})
+        outside.append([
+            sh,
+            pl.get("nb_region") or "—",
+            pl.get("nb_site") or "—",
+            pl.get("nb_location") or "—",
+            note,
+        ])
+    scope_meta["drift_maas_only_excluded_already_in_netbox"] = len(outside)
+    drift["in_maas_not_netbox"] = sorted(trimmed, key=lambda x: _hostname_short(x).lower())
+    drift["maas_in_netbox_outside_scope"] = sorted(outside, key=lambda x: (x[0] or "").lower())
 
 
 def _list_site_location_choices():
@@ -497,6 +567,12 @@ class MAASOpenStackSyncView(LoginRequiredMixin, View):
         # 2) NetBox — local ORM only (same process as NetBox app)
         netbox_data = fetch_netbox_data_local()
         scope_meta["netbox_devices_before"] = len(netbox_data.get("devices") or [])
+        netbox_all_hostnames = {
+            _hostname_short(d.get("name"))
+            for d in (netbox_data.get("devices") or [])
+            if _hostname_short(d.get("name"))
+        }
+        netbox_placement_by_hostname = _netbox_placement_by_hostname_from_devices(netbox_data)
 
         # Optional site/location filter scope based on NetBox canonical data.
         if selected_sites or selected_location_names:
@@ -736,6 +812,43 @@ class MAASOpenStackSyncView(LoginRequiredMixin, View):
                     if not selected_location_names:
                         allowed_names.add(host)
 
+            # Fuzzy fabric scope can admit hosts whose modeled NetBox location (Detail — new
+            # devices) is outside the selected set — e.g. fabric "spruce-staging" matches
+            # location "Spruce", while placement resolves to "Birch Staging" via shared
+            # tokens like "staging". Drop MAAS-only rows (not in scoped NetBox inventory)
+            # when proposed nb location does not match selected locations.
+            if selected_location_names:
+                _sync = get_sync_config() or {}
+                _fab_map = _sync.get("site_mapping_fabric") or {}
+                _pool_map = _sync.get("site_mapping_pool") or {}
+                nb_visible = {
+                    (d.get("name") or "").strip()
+                    for d in (netbox_data.get("devices") or [])
+                    if (d.get("name") or "").strip()
+                }
+                by_h_all = {
+                    (m.get("hostname") or "").strip(): m
+                    for m in maas_machines_before
+                    if (m.get("hostname") or "").strip()
+                }
+                for host in list(allowed_names):
+                    if host in nb_visible:
+                        continue
+                    m = by_h_all.get(host)
+                    if not m:
+                        continue
+                    _, _, nb_loc = _netbox_placement_from_maas_machine(
+                        m, netbox_data, _fab_map, _pool_map
+                    )
+                    nb_loc = (nb_loc or "").strip()
+                    if (
+                        nb_loc
+                        and nb_loc != "—"
+                        and nb_loc not in selected_location_names
+                    ):
+                        allowed_names.discard(host)
+                        host_location_override.pop(host, None)
+
             maas_data["machines"] = [
                 m for m in (maas_data.get("machines") or [])
                 if (m.get("hostname") or "").strip() in allowed_names
@@ -766,6 +879,13 @@ class MAASOpenStackSyncView(LoginRequiredMixin, View):
             # Recompute drift counts from scoped host/device sets.
             drift = compute_maas_netbox_drift(maas_data, netbox_data)
 
+        _trim_maas_only_truly_missing_from_netbox(
+            drift,
+            netbox_all_hostnames,
+            scope_meta,
+            netbox_placement_by_hostname=netbox_placement_by_hostname,
+        )
+
         # NIC filter: MAC only — host scope is from NetBox + MAAS DNS/fabric above.
         _iface_filt = _make_maas_iface_filter(
             selected_location_names or set(),
@@ -788,7 +908,9 @@ class MAASOpenStackSyncView(LoginRequiredMixin, View):
             }
             mn_final = maas_h_final & nb_h_final
             audit_map_final = fetch_netbox_audit_detail_for_names(mn_final)
-            nb_if_final = fetch_netbox_interfaces_for_names(mn_final)
+            iface_fetch_names = set(mn_final)
+            iface_fetch_names.update(lldp_switch_hostnames_for_netbox_fetch(openstack_data))
+            nb_if_final = fetch_netbox_interfaces_for_names(iface_fetch_names)
             netbox_ifaces_for_report = nb_if_final
             interface_audit = build_maas_netbox_interface_audit(
                 mn_final,

@@ -411,6 +411,7 @@ def _collect_runtime_nics(conn, networks: list[dict]) -> list[dict]:
                     ),
                     "os_runtime_vlan": runtime_vlan,
                     "tenant_vif_port_id": vif_id,
+                    "local_link": ll_d,
                     "os_lldp": os_lldp,
                 })
     except Exception as e:

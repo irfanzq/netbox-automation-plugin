@@ -123,16 +123,41 @@ def fetch_netbox_data_local():
                 })
         except Exception:
             result["vrfs"] = []
-        for d in Device.objects.select_related("site").only(
-            "name", "id", "site_id", "site__slug", "site__name"
+        for d in Device.objects.select_related("site", "site__region", "location").only(
+            "name",
+            "id",
+            "site_id",
+            "site__slug",
+            "site__name",
+            "site__region_id",
+            "site__region__name",
+            "location_id",
+            "location__name",
         ).iterator():
             site_slug = ""
+            site_name = ""
             if d.site_id and d.site:
                 site_slug = (d.site.slug or d.site.name or "")
+                site_name = (d.site.name or site_slug or "").strip()
+            region_name = ""
+            try:
+                if d.site_id and d.site and getattr(d.site, "region_id", None) and d.site.region:
+                    region_name = (d.site.region.name or "").strip()
+            except Exception:
+                pass
+            location_name = ""
+            try:
+                if getattr(d, "location_id", None) and d.location:
+                    location_name = (d.location.name or "").strip()
+            except Exception:
+                pass
             result["devices"].append({
                 "name": d.name or "",
                 "id": d.pk,
                 "site_slug": site_slug,
+                "site_name": site_name or site_slug,
+                "region_name": region_name,
+                "location_name": location_name,
             })
     except Exception as e:
         logger.exception("NetBox local ORM fetch failed")

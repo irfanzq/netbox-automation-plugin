@@ -666,15 +666,27 @@ def _proposed_changes_rows(
         os_reg, os_prov, os_pow, os_maint = _maas_only_host_openstack_columns(
             openstack_data, h
         )
+        _dash = "—"
+        _os3 = (
+            (os_prov or "").strip() not in ("", _dash)
+            and (os_pow or "").strip() not in ("", _dash)
+            and (os_maint or "").strip() not in ("", _dash)
+        )
         # Ironic provision_state active ⇒ trust OpenStack for lifecycle on this row (else MAAS discovery).
         authority_badge = "[OS]" if os_prov == "active" else "[MAAS]"
+        if is_candidate:
+            proposed_tag = (
+                "openstack+maas-discovered" if _os3 else "maas-discovered"
+            )
+        else:
+            proposed_tag = "review-only"
         tail = [
             power_type,
             bmc_present,
             str(nic_count),
             primary_mac,
             authority_badge,
-            ("maas-discovered" if is_candidate else "review-only"),
+            proposed_tag,
             (
                 "CREATE_NETBOX_DEVICE_AND_PORTS"
                 if is_candidate
@@ -751,7 +763,7 @@ def _proposed_changes_rows(
 
     update_nic = _build_update_nic_rows(interface_audit)
     review_serial = _build_review_serial_rows(matched_rows)
-    lldp_new, lldp_update = build_lldp_drift_rows(openstack_data, netbox_ifaces)
+    lldp_new, lldp_update = build_lldp_drift_rows(openstack_data, netbox_ifaces, maas_data)
 
     return {
         "add_devices": add_devices,

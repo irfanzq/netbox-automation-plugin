@@ -119,7 +119,13 @@ def _run_metadata_rows(maas_data, netbox_data, openstack_data):
     ]
 
 
-def _severity_triage_rows(pc, *, serial_validation_needed: int, bmc_oob_mismatch: int):
+def _severity_triage_rows(
+    pc,
+    *,
+    serial_validation_needed: int,
+    bmc_oob_mismatch: int,
+    netbox_outside_scope: int = 0,
+):
     """
     Severity policy for Phase 0 review.
     Returns rows: [severity, category, count, why].
@@ -185,5 +191,11 @@ def _severity_triage_rows(pc, *, serial_validation_needed: int, bmc_oob_mismatch
             "In MAAS only (not in NetBox)",
             str(pc["maas_only"]),
             "Discovery candidate count for onboarding review.",
+        ],
+        [
+            "Info",
+            "MAAS in scope, NetBox device under other site/location",
+            str(netbox_outside_scope),
+            "Not missing from NetBox; expand site/location filters to include NIC drift for these hosts.",
         ],
     ]

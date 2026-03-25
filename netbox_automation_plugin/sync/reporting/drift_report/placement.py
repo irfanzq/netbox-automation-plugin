@@ -92,6 +92,43 @@ def _fabric_matches_location_name(fabric_name: str, loc_name: str) -> bool:
     return any(len(t) >= 4 and t in fab_tokens for t in loc_tokens)
 
 
+def _location_suggestion_sort_key(fabric_name: str, loc_name: str):
+    """
+    Best key wins (max sort). Used to pick one NetBox location name for a MAAS fabric.
+
+    Multi-word locations like "Birch Staging" must not beat "Staging" when the fabric is
+    "spruce-staging": only the token "staging" overlapped, so coverage ratio is lower.
+    """
+    fab = (fabric_name or "").strip()
+    nm = (loc_name or "").strip()
+    if not fab or fab == "-" or not nm:
+        return None
+    if not _fabric_matches_location_name(fab, nm):
+        return None
+    fab_l = fab.lower()
+    loc_l = nm.lower()
+    fab_compact = re.sub(r"[^a-z0-9]+", "", fab_l)
+    loc_compact = re.sub(r"[^a-z0-9]+", "", loc_l)
+    fab_tokens = _nb_tokens(fab)
+    loc_tokens = _nb_tokens(nm)
+    if loc_compact and loc_compact in fab_compact:
+        return (4, len(loc_compact), nm.lower())
+    if fab_compact and fab_compact in loc_compact:
+        return (3, len(fab_compact), nm.lower())
+    sig = [t for t in loc_tokens if len(t) >= 4]
+    if not sig:
+        sig = [t for t in loc_tokens if t]
+    if not sig:
+        return None
+    hits = sum(1 for t in sig if t in fab_tokens)
+    if hits == 0:
+        return None
+    ratio = hits / len(sig)
+    extra = len(sig) - hits
+    matched_len = sum(len(t) for t in sig if t in fab_tokens)
+    return (2, ratio, -extra, matched_len, nm.lower())
+
+
 def _site_meta_for_slug(netbox_data, site_slug: str) -> dict:
     slug = (site_slug or "").strip()
     if not slug:
@@ -134,15 +171,22 @@ def _suggest_nb_location_for_fabric(
     if not fab or fab == "-":
         return ""
     site_slug = (site_slug or "").strip()
-    best = ""
+    best_nm = ""
+    best_key = None
     for loc in netbox_data.get("locations") or []:
         ss = (loc.get("site_slug") or "").strip()
         if site_slug and ss and ss != site_slug:
             continue
         nm = (loc.get("name") or "").strip()
-        if nm and _fabric_matches_location_name(fab, nm):
-            return nm
-    return best
+        if not nm:
+            continue
+        key = _location_suggestion_sort_key(fab, nm)
+        if key is None:
+            continue
+        if best_key is None or key > best_key:
+            best_key = key
+            best_nm = nm
+    return best_nm
 
 
 def _netbox_placement_from_maas_machine(

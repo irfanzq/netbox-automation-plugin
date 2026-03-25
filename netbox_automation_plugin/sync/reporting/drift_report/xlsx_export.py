@@ -143,6 +143,14 @@ def build_drift_report_xlsx(
     ws_sum.append(["DRIFT COUNTS", "", ""])
     _append_header(ws_sum, ["Category", "Count"])
     ws_sum.append(["In MAAS only (not in NetBox)", str(pc["maas_only"])])
+    _outside_scope = (drift or {}).get("maas_in_netbox_outside_scope") or []
+    _outside_n = len(_outside_scope)
+    ws_sum.append(
+        [
+            "In MAAS scope but already in NetBox under another site/location (detail on Summary)",
+            str(_outside_n),
+        ]
+    )
     ws_sum.append(
         [
             "Orphaned NetBox devices (not seen in MAAS this run; read-only here; tagging/cleanup deferred to a separate UI workflow because NetBox update sources include netbox-agent, scripts, and manual entries, not just MAAS)",
@@ -166,6 +174,7 @@ def build_drift_report_xlsx(
         pc,
         serial_validation_needed=serial_validation_needed,
         bmc_oob_mismatch=bmc_oob_mismatch,
+        netbox_outside_scope=_outside_n,
     ):
         ws_sum.append(row)
     ws_sum.append([])
@@ -184,6 +193,20 @@ def build_drift_report_xlsx(
     ws_sum.append(["VLAN unverified NICs (MAAS fallback)", str(pc["vlan_unverified_nic"])])
     ws_sum.append(["MAAS NIC missing in NetBox", str(pc["maas_nic_missing_nb"])])
     ws_sum.append([])
+    if _outside_scope:
+        r_os = ws_sum.max_row + 1
+        ws_sum.append(["Detail — MAAS in scope, NetBox outside selected site/location", ""])
+        ws_sum.cell(row=r_os, column=1).font = header_font
+        ws_sum.append([
+            "These devices exist in NetBox; the scoped device list omitted them. Not new-device candidates.",
+        ])
+        _append_header(
+            ws_sum,
+            ["Hostname", "NetBox region", "NetBox site", "NetBox location", "Note"],
+        )
+        for row in _outside_scope:
+            ws_sum.append(list(row))
+        ws_sum.append([])
     align_rows_x = _alignment_review_rows(matched_rows)
     if align_rows_x:
         r_al = ws_sum.max_row + 1
@@ -242,8 +265,8 @@ def build_drift_report_xlsx(
     ws_sum.append(["New floating IPs", str(len(prop["add_fips"]))])
     ws_sum.append(["New NICs", str(len(prop["add_nb_interfaces"]))])
     ws_sum.append(["NIC drift", str(len(prop["update_nic"]))])
-    ws_sum.append(["LLDP / Ironic local link (new in NetBox)", str(len(prop.get("lldp_new") or []))])
-    ws_sum.append(["LLDP / Ironic local link (update NetBox)", str(len(prop.get("lldp_update") or []))])
+    ws_sum.append(["LLDP / OS-Discovered (new in NetBox)", str(len(prop.get("lldp_new") or []))])
+    ws_sum.append(["LLDP / OS_Discovered (update NetBox)", str(len(prop.get("lldp_update") or []))])
     ws_sum.append(["BMC / OOB", str(len(prop["add_mgmt_iface"]) + len(prop.get("add_mgmt_iface_new_devices", [])))])
     ws_sum.append(["Serials (review)", str(len(prop["review_serial"]))])
     ws_sum.append(["Total", str(total_props_x)])
@@ -262,8 +285,8 @@ def build_drift_report_xlsx(
     ws_prop.append(["New floating IPs (OpenStack authority)", len(prop["add_fips"])])
     ws_prop.append(["New NICs", len(prop["add_nb_interfaces"])])
     ws_prop.append(["NIC drift", len(prop["update_nic"])])
-    ws_prop.append(["LLDP / Ironic local link (new in NetBox)", len(prop.get("lldp_new") or [])])
-    ws_prop.append(["LLDP / Ironic local link (update NetBox)", len(prop.get("lldp_update") or [])])
+    ws_prop.append(["LLDP / OS-Discovered (new in NetBox)", len(prop.get("lldp_new") or [])])
+    ws_prop.append(["LLDP / OS_Discovered (update NetBox)", len(prop.get("lldp_update") or [])])
     ws_prop.append(["BMC / OOB", len(prop["add_mgmt_iface"]) + len(prop.get("add_mgmt_iface_new_devices", []))])
     ws_prop.append(["Serials (review)", len(prop["review_serial"])])
 
@@ -414,23 +437,30 @@ def build_drift_report_xlsx(
     )
     if prop.get("lldp_new"):
         _append_block(
-            "B) LLDP / Ironic local link (new in NetBox)",
+            "B) LLDP / OS-Discovered (new in NetBox)",
             [
                 "Host",
                 "OS region",
                 "OS MAC",
-                "OS LLDP (Ironic local link)",
+                "MAAS Int",
+                "OS switch",
+                "OS switch MAC",
+                "OS switch port (Ironic)",
+                "NetBox switch port",
+                "NetBox port status",
+                "OS LLDP (raw)",
                 "Proposed action",
             ],
             prop["lldp_new"],
             note=(
-                "Ironic local_link_connection per MAC (often from inspection LLDP). NetBox interface exists "
-                "but peer_summary / cabling text is empty."
+                "OS switch port is always the OpenStack-reported port id. Generic ids (digits, portN) map to NetBox interface "
+                "names when possible; else NetBox switch port repeats OS and status explains. "
+                "Bond/swp/Ethernet-style ids exact-match NetBox only; if absent, status is Switch port missing in NetBox."
             ),
         )
     if prop.get("lldp_update"):
         _append_block(
-            "B) LLDP / Ironic local link (update NetBox)",
+            "B) LLDP / OS_Discovered (update NetBox)",
             [
                 "Host",
                 "OS region",
@@ -440,7 +470,13 @@ def build_drift_report_xlsx(
                 "NB MAC",
                 "NB LLDP / peer (current)",
                 "OS MAC",
-                "OS LLDP (Ironic local link)",
+                "MAAS Int",
+                "OS switch",
+                "OS switch MAC",
+                "OS switch port (Ironic)",
+                "NetBox switch port",
+                "NetBox port status",
+                "OS LLDP (raw)",
                 "Proposed change",
             ],
             prop["lldp_update"],

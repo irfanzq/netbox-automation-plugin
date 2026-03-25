@@ -36,10 +36,16 @@ def emit_drift_counts_and_alignment(
     serial_validation_needed = _count_hints(matched_rows, "NB serial empty")
     bmc_oob_mismatch = _count_hints(matched_rows, "BMC ")
     sub_txt = str(pc["sub_gaps"]) if pc["sub_gaps"] is not None else "N/A (local ORM)"
+    outside_scope = drift.get("maas_in_netbox_outside_scope") or []
+    outside_n = len(outside_scope)
     e.table(
         ["Category", "Count"],
         [
             ["In MAAS only (not in NetBox)", str(pc["maas_only"])],
+            [
+                "In MAAS scope but already in NetBox under another site/location (see detail below)",
+                str(outside_n),
+            ],
             [
                 "Orphaned NetBox devices (not seen in MAAS this run; read-only here; "
                 "tagging/cleanup deferred to a separate UI workflow because NetBox update sources include netbox-agent, scripts, and manual entries, not just MAAS)",
@@ -58,6 +64,22 @@ def emit_drift_counts_and_alignment(
         ],
     )
 
+    if outside_scope:
+        e.spacer()
+        e.subtitle("Detail — MAAS in scope, NetBox record outside selected site/location")
+        e.paragraph(
+            "These hostnames were counted as “MAAS-only” against the filtered NetBox inventory, "
+            "but a full NetBox lookup shows an existing device (often Staging vs Spruce when MAAS "
+            "DNS or fabric names still match the selected scope). They are not missing from NetBox."
+        )
+        e.spacer()
+        e.table(
+            ["Hostname", "NetBox region", "NetBox site", "NetBox location", "Note"],
+            outside_scope,
+            dynamic_columns=True,
+            wrap_max_width=None,
+        )
+
     e.spacer()
     e.banner("SEVERITY TRIAGE (why these matter)", "-")
     e.paragraph("Priority rules used in this report for review ordering.")
@@ -66,6 +88,7 @@ def emit_drift_counts_and_alignment(
         pc,
         serial_validation_needed=serial_validation_needed,
         bmc_oob_mismatch=bmc_oob_mismatch,
+        netbox_outside_scope=outside_n,
     )
     e.table(
         ["Severity", "Category", "Count", "Why this matters"],

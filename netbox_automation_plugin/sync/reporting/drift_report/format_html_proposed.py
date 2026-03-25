@@ -144,14 +144,14 @@ def emit_proposed_change_tables(e, prop):
             ["New NICs in NetBox", str(len(prop["add_nb_interfaces"])), "Runtime/MAAS fallback interface not modeled in NetBox"],
             ["NIC drift", str(len(prop["update_nic"])), "Runtime authority (OS first, MAAS fallback) differs from NetBox"],
             [
-                "LLDP / Ironic local link (new in NetBox)",
+                "LLDP / OS-Discovered (new in NetBox)",
                 str(len(prop.get("lldp_new") or [])),
-                "OS has local_link; NetBox interface has no peer/cable summary",
+                "OS has discovered switch/port; NetBox interface has no peer/cable summary",
             ],
             [
-                "LLDP / Ironic local link (update NetBox)",
+                "LLDP / OS_Discovered (update NetBox)",
                 str(len(prop.get("lldp_update") or [])),
-                "NetBox peer summary differs from Ironic local_link",
+                "NetBox peer summary differs from OS-discovered switch/port",
             ],
             [
                 "BMC / OOB",
@@ -239,10 +239,15 @@ def emit_proposed_change_tables(e, prop):
 
     if prop.get("lldp_new"):
         e.spacer()
-        e.subtitle("Detail — LLDP / Ironic local link (new in NetBox)")
+        e.subtitle("Detail — LLDP / OS-Discovered (new in NetBox)")
         e.paragraph(
-            "Ironic reports switch/port per MAC (typically from inspection LLDP). NetBox has the interface "
-            "but no cable/peer text yet — document cabling or description to match OpenStack."
+            "OpenStack reports switch hostname, chassis MAC, and port id per NIC MAC (inspection LLDP). "
+            "OS switch port is always the raw OpenStack value. For generic ids (e.g. bare numbers), "
+            "NetBox switch port is the matching interface name on the switch device when found; otherwise "
+            "that column repeats the OS id. For bond/swp/Ethernet-style ids, OpenStack is authoritative: "
+            "we only exact-match NetBox; if missing, NetBox port status reads «Switch port missing in NetBox». "
+            "MAAS Int is the MAAS interface name for the same MAC. NetBox has the host interface but no "
+            "cable/peer text yet — document cabling or description to match OpenStack."
         )
         e.spacer()
         e.table(
@@ -250,7 +255,13 @@ def emit_proposed_change_tables(e, prop):
                 "Host",
                 "OS region",
                 "OS MAC",
-                "OS LLDP (Ironic local link)",
+                "MAAS Int",
+                "OS switch",
+                "OS switch MAC",
+                "OS switch port (Ironic)",
+                "NetBox switch port",
+                "NetBox port status",
+                "OS LLDP (raw)",
                 "Proposed action",
             ],
             prop["lldp_new"],
@@ -259,9 +270,9 @@ def emit_proposed_change_tables(e, prop):
         )
     if prop.get("lldp_update"):
         e.spacer()
-        e.subtitle("Detail — LLDP / Ironic local link (update NetBox)")
+        e.subtitle("Detail — LLDP / OS_Discovered (update NetBox)")
         e.paragraph(
-            "NetBox already records a peer/cable summary for this MAC, but it does not match Ironic local_link."
+            "NetBox already records a peer/cable summary for this MAC, but it does not match the OS-discovered data."
         )
         e.spacer()
         e.table(
@@ -274,7 +285,13 @@ def emit_proposed_change_tables(e, prop):
                 "NB MAC",
                 "NB LLDP / peer (current)",
                 "OS MAC",
-                "OS LLDP (Ironic local link)",
+                "MAAS Int",
+                "OS switch",
+                "OS switch MAC",
+                "OS switch port (Ironic)",
+                "NetBox switch port",
+                "NetBox port status",
+                "OS LLDP (raw)",
                 "Proposed change",
             ],
             prop["lldp_update"],
@@ -371,8 +388,8 @@ def emit_proposed_change_tables(e, prop):
             ["New floating IPs", str(len(prop["add_fips"]))],
             ["New NICs", str(len(prop["add_nb_interfaces"]))],
             ["NIC drift", str(len(prop["update_nic"]))],
-            ["LLDP new (NetBox)", str(len(prop.get("lldp_new") or []))],
-            ["LLDP update (NetBox)", str(len(prop.get("lldp_update") or []))],
+            ["LLDP / OS-Discovered (new in NetBox)", str(len(prop.get("lldp_new") or []))],
+            ["LLDP / OS_Discovered (update NetBox)", str(len(prop.get("lldp_update") or []))],
             ["BMC / OOB", str(len(prop["add_mgmt_iface"]) + len(prop.get("add_mgmt_iface_new_devices", [])))],
             ["Serials (review)", str(len(prop["review_serial"]))],
             ["Total", str(total_props)],
