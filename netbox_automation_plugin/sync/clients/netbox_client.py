@@ -22,6 +22,8 @@ def fetch_netbox_data_local():
         "locations": [],
         "device_types": [],
         "device_roles": [],
+        "prefix_roles": [],
+        "vrfs": [],
         "error": None,
     }
     try:
@@ -86,6 +88,41 @@ def fetch_netbox_data_local():
                 "slug": (getattr(role, "slug", None) or "").strip(),
                 "name": (getattr(role, "name", None) or "").strip(),
             })
+        # Prefix roles differ by NetBox version/model location.
+        prefix_roles = []
+        try:
+            from ipam.models import Role as PrefixRole  # NetBox 4.x style
+
+            prefix_roles = PrefixRole.objects.only("name", "slug").iterator()
+        except Exception:
+            try:
+                from extras.models import Role as PrefixRole  # Fallback
+
+                prefix_roles = (
+                    PrefixRole.objects.filter(
+                        content_types__app_label="ipam",
+                        content_types__model__in=("prefix", "iprange"),
+                    )
+                    .only("name", "slug")
+                    .iterator()
+                )
+            except Exception:
+                prefix_roles = []
+        for role in prefix_roles:
+            result["prefix_roles"].append({
+                "slug": (getattr(role, "slug", None) or "").strip(),
+                "name": (getattr(role, "name", None) or "").strip(),
+            })
+        try:
+            from ipam.models import VRF
+
+            for vrf in VRF.objects.only("name", "rd").iterator():
+                result["vrfs"].append({
+                    "name": (getattr(vrf, "name", None) or "").strip(),
+                    "rd": (getattr(vrf, "rd", None) or "").strip(),
+                })
+        except Exception:
+            result["vrfs"] = []
         for d in Device.objects.select_related("site").only(
             "name", "id", "site_id", "site__slug", "site__name"
         ).iterator():

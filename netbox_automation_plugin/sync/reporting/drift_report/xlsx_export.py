@@ -101,7 +101,7 @@ def build_drift_report_xlsx(
         os_floating_gaps or [],
     )
     serial_validation_needed = _count_hints(matched_rows, "NB serial empty")
-    bmc_oob_mismatch = _count_hints(matched_rows, "MAAS BMC ")
+    bmc_oob_mismatch = _count_hints(matched_rows, "BMC ")
     sub_txt = str(pc["sub_gaps"]) if pc["sub_gaps"] is not None else "N/A"
     scope_meta = (drift or {}).get("scope_meta") or {}
     if scope_meta:
@@ -131,6 +131,14 @@ def build_drift_report_xlsx(
             "OpenStack FIPs included / fetched",
             f"{scope_meta.get('openstack_fips_after', 0)} / {scope_meta.get('openstack_fips_before', 0)}",
         ])
+        ws_sum.append([
+            "OpenStack runtime NIC rows",
+            str(len((openstack_data or {}).get("runtime_nics") or [])),
+        ])
+        ws_sum.append([
+            "OpenStack runtime BMC rows",
+            str(len((openstack_data or {}).get("runtime_bmc") or [])),
+        ])
     ws_sum.append([])
     ws_sum.append(["DRIFT COUNTS", "", ""])
     _append_header(ws_sum, ["Category", "Count"])
@@ -145,11 +153,11 @@ def build_drift_report_xlsx(
     ws_sum.append(["NetBox serial missing", str(serial_validation_needed)])
     ws_sum.append(["NIC rows not OK", str(pc["iface_not_ok"])])
     ws_sum.append(["MAAS NIC missing in NetBox", str(pc["maas_nic_missing_nb"])])
-    ws_sum.append(["VLAN mismatch (MAAS vs NetBox)", str(pc["vlan_drift_nic"])])
-    ws_sum.append(["VLAN unverified from MAAS", str(pc["vlan_unverified_nic"])])
+    ws_sum.append(["VLAN mismatch (runtime authority vs NetBox)", str(pc["vlan_drift_nic"])])
+    ws_sum.append(["VLAN unverified from MAAS fallback", str(pc["vlan_unverified_nic"])])
     ws_sum.append(["OpenStack subnet → no Prefix", sub_txt])
     ws_sum.append(["OpenStack FIP → no IP record", str(pc["fip_gaps"])])
-    ws_sum.append(["BMC vs NetBox OOB differs", str(bmc_oob_mismatch)])
+    ws_sum.append(["BMC vs NetBox OOB differs (OS/MAAS fallback)", str(bmc_oob_mismatch)])
     ws_sum.append(["LLDP / cabling", "—"])
     ws_sum.append([])
     ws_sum.append(["SEVERITY TRIAGE (why these matter)", "", ""])
@@ -165,13 +173,15 @@ def build_drift_report_xlsx(
     _append_header(ws_sum, ["Metric", "Value"])
     ws_sum.append(["MAAS machines", str(len(maas_data.get("machines") or []))])
     ws_sum.append(["NetBox devices", str(len(netbox_data.get("devices") or []))])
+    ws_sum.append(["OpenStack runtime NIC rows", str(len((openstack_data or {}).get("runtime_nics") or []))])
+    ws_sum.append(["OpenStack runtime BMC rows", str(len((openstack_data or {}).get("runtime_bmc") or []))])
     ws_sum.append(["Matched hostnames", str(drift.get("matched_count", 0))])
     ws_sum.append(["In MAAS only", str(pc["maas_only"])])
     ws_sum.append(["NetBox serial missing", str(serial_validation_needed)])
     ws_sum.append(["OpenStack subnet gaps", sub_txt])
     ws_sum.append(["OpenStack FIP gaps", str(pc["fip_gaps"])])
-    ws_sum.append(["VLAN mismatch NICs", str(pc["vlan_drift_nic"])])
-    ws_sum.append(["VLAN unverified NICs", str(pc["vlan_unverified_nic"])])
+    ws_sum.append(["VLAN mismatch NICs (OS/MAAS authority)", str(pc["vlan_drift_nic"])])
+    ws_sum.append(["VLAN unverified NICs (MAAS fallback)", str(pc["vlan_unverified_nic"])])
     ws_sum.append(["MAAS NIC missing in NetBox", str(pc["maas_nic_missing_nb"])])
     ws_sum.append([])
     align_rows_x = _alignment_review_rows(matched_rows)
@@ -232,14 +242,14 @@ def build_drift_report_xlsx(
 
     # --- Proposed changes (full list) ---
     ws_prop = _sheet("Proposed changes")
-    ws_prop.append(["Drift detail — read-only; nothing is written to NetBox from this export."])
+    ws_prop.append(["Drift detail — read-only; OpenStack runtime is authoritative where present, MAAS is fallback."])
     ws_prop.cell(row=1, column=1).font = header_font
     ws_prop.append([])
     _append_header(ws_prop, ["Section", "Count"])
-    ws_prop.append(["New devices (MAAS)", len(prop["add_devices"])])
+    ws_prop.append(["New devices (MAAS fallback)", len(prop["add_devices"])])
     ws_prop.append(["Review-only MAAS-only hosts", len(prop.get("add_devices_review_only", []))])
-    ws_prop.append(["New prefixes (OpenStack)", len(prop["add_prefixes"])])
-    ws_prop.append(["New floating IPs (OpenStack)", len(prop["add_fips"])])
+    ws_prop.append(["New prefixes (OpenStack authority)", len(prop["add_prefixes"])])
+    ws_prop.append(["New floating IPs (OpenStack authority)", len(prop["add_fips"])])
     ws_prop.append(["NIC drift", len(prop["update_nic"])])
     ws_prop.append(["New NICs", len(prop["add_nb_interfaces"])])
     ws_prop.append(["BMC / OOB", len(prop["add_mgmt_iface"]) + len(prop.get("add_mgmt_iface_new_devices", []))])
@@ -270,13 +280,14 @@ def build_drift_report_xlsx(
             "BMC present",
             "NIC count",
             "Primary MAC (MAAS)",
+            "Authority",
             "Proposed Tag",
             "Proposed Action",
         ],
         prop["add_devices"],
     )
     _append_block(
-        "A) MAAS-only review-only (not safe add candidates)",
+        "A) MAAS-only hosts (manual review required)",
         [
             "Hostname",
             "NB region",
@@ -291,6 +302,7 @@ def build_drift_report_xlsx(
             "BMC present",
             "NIC count",
             "Primary MAC (MAAS)",
+            "Authority",
             "Proposed Tag",
             "Proposed Action",
         ],
@@ -298,12 +310,32 @@ def build_drift_report_xlsx(
     )
     _append_block(
         "A) New prefixes",
-        ["CIDR", "Network Name", "Network ID", "Cloud", "Proposed Action"],
+        [
+            "CIDR",
+            "Start address",
+            "End address",
+            "Project",
+            "Suggested NB role",
+            "NB status",
+            "Role reason",
+            "Authority",
+            "Proposed Action",
+        ],
         prop["add_prefixes"],
     )
     _append_block(
         "A) New floating IPs",
-        ["Floating IP", "Fixed IP", "Project", "Cloud", "Proposed Action"],
+        [
+            "Floating IP",
+            "Name",
+            "NAT inside IP (from OpenStack fixed IP)",
+            "Project",
+            "NB status",
+            "NB role",
+            "NB VRF",
+            "Decision basis",
+            "Proposed Action",
+        ],
         prop["add_fips"],
     )
     _append_block(
@@ -331,6 +363,7 @@ def build_drift_report_xlsx(
             "MAAS fabric",
             "MAAS MAC",
             "MAAS IPs",
+            "MAAS VLAN",
             "OS MAC",
             "OS runtime IP",
             "OS runtime VLAN",
@@ -338,10 +371,8 @@ def build_drift_report_xlsx(
             "NB intf",
             "NB MAC",
             "NB IPs",
-            "MAAS VLAN",
             "NB VLAN",
             "Status",
-            "Reason",
             "Proposed Action",
             "Risk",
         ],
@@ -354,10 +385,10 @@ def build_drift_report_xlsx(
             "MAAS BMC IP",
             "MAAS power_type",
             "MAAS BMC MAC",
-            "NB OOB port (hint)",
+            "Suggested NB OOB Port",
             "NetBox OOB",
             "NB IP coverage",
-            "NB port w/ BMC IP",
+            "Actual NB Port Carrying BMC IP",
             "NB OOB MAC",
             "OS BMC IP",
             "OS mgmt type",

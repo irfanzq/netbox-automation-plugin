@@ -377,6 +377,11 @@ def build_maas_netbox_matched_rows(
       primary_ip4_host, vrf_name, vlan_vids_summary, device_ips (for FIP join).
     """
     fip_map = _openstack_fip_by_fixed_ip(openstack_data)
+    os_runtime_by_h = {}
+    for rb in (openstack_data or {}).get("runtime_bmc") or []:
+        h = (rb.get("hostname") or "").strip()
+        if h:
+            os_runtime_by_h[h] = rb
     rows = []
     for m in maas_data.get("machines") or []:
         h = (m.get("hostname") or "").strip()
@@ -402,6 +407,20 @@ def build_maas_netbox_matched_rows(
                 hints.append("MAAS deployed / NB staged — consider active")
             if "ready" in maas_st and "active" in nb_st:
                 pass
+        osr = os_runtime_by_h.get(h) or {}
+        os_prov = (osr.get("provision_state") or "").strip().lower()
+        os_power = (osr.get("power_state") or "").strip().lower()
+        os_maint = bool(osr.get("maintenance", False))
+        os_instance_uuid = (osr.get("instance_uuid") or "").strip()
+        os_authority = "openstack_runtime" if osr else "maas_fallback"
+        if osr:
+            # OS-first lifecycle hints.
+            if os_maint and "maintenance" not in nb_st:
+                hints.append("OS maintenance / NB not maintenance — consider maintenance")
+            elif os_prov == "active" and os_instance_uuid and "staged" in nb_st:
+                hints.append("OS active+instance / NB staged — consider active")
+            elif os_prov in {"available", "clean failed"} and "active" in nb_st:
+                hints.append(f"OS {os_prov} / NB active — review lifecycle")
         if not nb.get("serial"):
             hints.append("NB serial empty — compare with MAAS inventory")
         maas_bmc = (m.get("bmc_ip") or "").strip()
@@ -431,6 +450,11 @@ def build_maas_netbox_matched_rows(
             "netbox_vrf": nb.get("vrf_name") or "Global",
             "netbox_vlans": nb.get("vlan_vids_summary") or "—",
             "openstack_fip": os_fip or "—",
+            "os_authority": os_authority,
+            "os_provision_state": os_prov or "—",
+            "os_power_state": os_power or "—",
+            "os_maintenance": "true" if os_maint else "false",
+            "os_instance_uuid": os_instance_uuid or "—",
             "maas_bmc": maas_bmc or "—",
             "netbox_oob": nb_oob or "—",
             "place_match": "OK" if match_ok else "CHECK",
@@ -446,9 +470,14 @@ def openstack_subnet_prefix_hints(openstack_data: dict, netbox_prefixes: set):
     if not openstack_data or openstack_data.get("error"):
         return []
     net_by_id = {
-        n.get("id"): (n.get("name") or "")[:56]
+        n.get("id"): n
         for n in (openstack_data.get("networks") or [])
         if n.get("id")
+    }
+    consumers_by_sid = {
+        (c.get("subnet_id") or ""): c
+        for c in (openstack_data.get("subnet_consumers") or [])
+        if c.get("subnet_id")
     }
     hints = []
     for sn in openstack_data.get("subnets") or []:
@@ -457,10 +486,24 @@ def openstack_subnet_prefix_hints(openstack_data: dict, netbox_prefixes: set):
             continue
         nid = sn.get("network_id") or ""
         exact = cidr in netbox_prefixes
+        net = net_by_id.get(nid) or {}
+        cons = consumers_by_sid.get((sn.get("id") or "")) or {}
         hints.append({
             "cidr": cidr,
+            "subnet_id": (sn.get("id") or "")[:36],
             "network_id": nid[:36] if nid else "",
-            "network_name": net_by_id.get(nid, "")[:48],
+            "network_name": (net.get("name") or "")[:48],
+            "project_name": (sn.get("project_name") or sn.get("project_id") or "-")[:56],
+            "gateway_ip": sn.get("gateway_ip") or "-",
+            "ip_version": sn.get("ip_version") or "-",
+            "provider_network_type": (net.get("provider_network_type") or "")[:24],
+            "provider_segmentation_id": str(net.get("provider_segmentation_id") or ""),
+            "provider_physical_network": (net.get("provider_physical_network") or "")[:40],
+            "consumer_role_bucket": cons.get("role_bucket") or "",
+            "consumer_role_reason": cons.get("role_reason") or "",
+            "consumer_confidence": cons.get("confidence") or "",
+            "consumer_ports_total": int(cons.get("ports_total") or 0),
+            "consumer_top_owners": cons.get("top_owners") or "",
             "exact_prefix_in_netbox": exact,
         })
     return hints
@@ -485,6 +528,16 @@ def openstack_floating_ips_missing_from_netbox(openstack_data: dict):
         logger.warning("Floating IP vs NetBox check skipped: %s", e)
         return []
 
+    net_by_id = {
+        (n.get("id") or ""): n
+        for n in (openstack_data.get("networks") or [])
+        if n.get("id")
+    }
+    subnet_by_id = {
+        (s.get("id") or ""): s
+        for s in (openstack_data.get("subnets") or [])
+        if s.get("id")
+    }
     missing = []
     for f in openstack_data.get("floating_ips") or []:
         ip = (f.get("floating_ip_address") or "").strip()
@@ -502,11 +555,25 @@ def openstack_floating_ips_missing_from_netbox(openstack_data: dict):
         except Exception:
             exists = IPAddress.objects.filter(address=net).exists()
         if not exists:
+            fnid = f.get("floating_network_id") or ""
+            fnet = net_by_id.get(fnid) or {}
+            subnet_name = "-"
+            subnet_ids = fnet.get("subnets") or []
+            if isinstance(subnet_ids, list):
+                for sid in subnet_ids:
+                    sn = subnet_by_id.get(str(sid) or "")
+                    if sn and (sn.get("name") or "").strip():
+                        subnet_name = (sn.get("name") or "").strip()
+                        break
             missing.append({
                 "floating_ip": ip,
                 "fixed_ip_address": f.get("fixed_ip_address") or "-",
                 "id": f.get("id", ""),
+                "port_id": f.get("port_id") or "",
                 "project_name": f.get("project_name") or "-",
                 "project_id": f.get("project_id") or "",
+                "floating_network_id": fnid,
+                "floating_network_name": fnet.get("name") or "-",
+                "floating_subnet_name": subnet_name,
             })
     return missing

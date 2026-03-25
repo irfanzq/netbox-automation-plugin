@@ -101,18 +101,25 @@ def _collect_neutron(conn, project_label: str) -> tuple[list, list, list]:
         networks.append({
             "id": net.id,
             "name": net.name or net.id,
+            "is_router_external": bool(getattr(net, "is_router_external", False)),
             "provider_network_type": getattr(net, "provider_network_type", "") or "",
             "provider_segmentation_id": str(getattr(net, "provider_segmentation_id", "") or ""),
             "provider_physical_network": getattr(net, "provider_physical_network", "") or "",
         })
 
     for sn in conn.network.subnets():
+        tid = getattr(sn, "tenant_id", None) or getattr(sn, "project_id", None) or ""
         subnets.append({
             "id": sn.id,
             "cidr": getattr(sn, "cidr", ""),
             "network_id": getattr(sn, "network_id", ""),
             "name": getattr(sn, "name", "") or "",
             "description": getattr(sn, "description", "") or "",
+            "gateway_ip": getattr(sn, "gateway_ip", "") or "",
+            "ip_version": str(getattr(sn, "ip_version", "") or ""),
+            "enable_dhcp": bool(getattr(sn, "is_dhcp_enabled", False)),
+            "project_id": str(tid)[:36] if tid else "",
+            "project_name": project_label or "",
         })
 
     for fip in conn.network.ips(floating=True):
@@ -127,6 +134,119 @@ def _collect_neutron(conn, project_label: str) -> tuple[list, list, list]:
         })
 
     return networks, subnets, floating_ips
+
+
+def _collect_subnet_consumers(conn, subnets: list[dict], networks: list[dict]) -> list[dict]:
+    """
+    Summarize subnet consumers from Neutron ports (+ Nova server names for compute ports).
+    This powers role inference using runtime consumers rather than naming heuristics.
+    """
+    try:
+        nw = conn.network
+    except Exception:
+        return []
+
+    subnet_ids = {str(s.get("id") or "").strip() for s in (subnets or []) if s.get("id")}
+    if not subnet_ids:
+        return []
+
+    net_by_id = {(n.get("id") or ""): n for n in (networks or []) if n.get("id")}
+
+    server_name_by_id: dict[str, str] = {}
+    try:
+        for srv in conn.compute.servers(details=False):
+            sid = str(getattr(srv, "id", "") or "").strip()
+            if sid:
+                server_name_by_id[sid] = str(getattr(srv, "name", "") or "").strip()
+    except Exception:
+        server_name_by_id = {}
+
+    by_sid: dict[str, dict] = {}
+    for sid in subnet_ids:
+        by_sid[sid] = {
+            "subnet_id": sid,
+            "ports_total": 0,
+            "owners": {},
+            "router_gateway_ports": 0,
+            "router_interface_ports": 0,
+            "floatingip_ports": 0,
+            "compute_ports": 0,
+            "service_ports": 0,
+            "dhcp_ports": 0,
+            "server_storage_hits": 0,
+            "server_vm_hits": 0,
+        }
+
+    for p in nw.ports():
+        owner = str(getattr(p, "device_owner", "") or "").strip().lower()
+        device_id = str(getattr(p, "device_id", "") or "").strip()
+        fixed_ips = getattr(p, "fixed_ips", None) or []
+        for f in fixed_ips:
+            if not isinstance(f, dict):
+                continue
+            sid = str(f.get("subnet_id") or "").strip()
+            if sid not in by_sid:
+                continue
+            row = by_sid[sid]
+            row["ports_total"] += 1
+            row["owners"][owner] = int(row["owners"].get(owner, 0)) + 1
+            if owner.startswith("network:router_gateway"):
+                row["router_gateway_ports"] += 1
+            elif owner.startswith("network:router_interface"):
+                row["router_interface_ports"] += 1
+            elif owner.startswith("network:floatingip"):
+                row["floatingip_ports"] += 1
+            elif owner.startswith("network:dhcp"):
+                row["dhcp_ports"] += 1
+            elif owner.startswith("compute:") or owner == "baremetal:none":
+                row["compute_ports"] += 1
+                nm = server_name_by_id.get(device_id, "").lower()
+                if any(k in nm for k in ("ceph", "storage", "swift", "cinder", "nfs", "gluster")):
+                    row["server_storage_hits"] += 1
+                else:
+                    row["server_vm_hits"] += 1
+            else:
+                row["service_ports"] += 1
+
+    out: list[dict] = []
+    for s in (subnets or []):
+        sid = str(s.get("id") or "").strip()
+        if sid not in by_sid:
+            continue
+        row = by_sid[sid]
+        net = net_by_id.get(str(s.get("network_id") or "").strip(), {})
+        owners_sorted = sorted(
+            ((k, v) for k, v in (row.get("owners") or {}).items() if k),
+            key=lambda kv: kv[1],
+            reverse=True,
+        )
+        top_owners = ", ".join(f"{k}:{v}" for k, v in owners_sorted[:3]) or "-"
+        # Consumer-first bucket inference (no network/project name matching).
+        bucket = "vm"
+        reason = "compute consumers dominate"
+        confidence = "medium"
+        if bool(net.get("is_router_external")) or row["router_gateway_ports"] > 0 or row["floatingip_ports"] > 0:
+            bucket = "public"
+            reason = "external/router-gateway/floating-IP consumers present"
+            confidence = "high"
+        elif row["server_storage_hits"] > 0 and row["server_storage_hits"] >= row["server_vm_hits"]:
+            bucket = "storage"
+            reason = "compute consumers are mostly storage-class nodes"
+            confidence = "medium"
+        elif row["service_ports"] > 0 and row["compute_ports"] == 0:
+            bucket = "admin"
+            reason = "non-compute service consumers only"
+            confidence = "low"
+
+        out.append({
+            "subnet_id": sid,
+            "role_bucket": bucket,
+            "role_reason": reason,
+            "confidence": confidence,
+            "ports_total": row["ports_total"],
+            "top_owners": top_owners,
+        })
+    return out
 
 
 def _collect_runtime_nics(conn, networks: list[dict]) -> list[dict]:
@@ -284,6 +404,12 @@ def _collect_runtime_bmc(conn) -> list[dict]:
                 "power_interface": power_if,
                 "management_interface": mgmt_if,
                 "vendor": vendor,
+                "provision_state": str(getattr(n, "provision_state", "") or "").strip().lower(),
+                "power_state": str(getattr(n, "power_state", "") or "").strip().lower(),
+                "maintenance": bool(getattr(n, "maintenance", False)),
+                "instance_uuid": str(
+                    getattr(n, "instance_uuid", None) or getattr(n, "instance_id", None) or ""
+                ).strip(),
                 "os_bmc_endpoint": endpoint,
                 "os_bmc_ip": bmc_host,
             })
@@ -298,11 +424,13 @@ def _merge_openstack_into_maps(
     fips_by_key: dict,
     runtime_by_key: dict,
     bmc_by_key: dict,
+    subnet_consumers_by_sid: dict,
     networks: list,
     subnets: list,
     floating_ips: list,
     runtime_nics: list,
     runtime_bmc: list,
+    subnet_consumers: list,
 ) -> None:
     for n in networks:
         nid = n.get("id")
@@ -328,6 +456,10 @@ def _merge_openstack_into_maps(
         key = (b.get("hostname") or "").strip().lower()
         if key:
             bmc_by_key[key] = b
+    for sc in subnet_consumers:
+        sid = (sc.get("subnet_id") or "").strip()
+        if sid:
+            subnet_consumers_by_sid[sid] = sc
 
 
 def _allowlist_matches_project(allow_norm: set, proj_id: str, proj_name: str) -> bool:
@@ -378,6 +510,7 @@ def _fetch_single_project(openstack, config: dict) -> dict:
         "floating_ips": [],
         "runtime_nics": [],
         "runtime_bmc": [],
+        "subnet_consumers": [],
         "error": None,
         "openstack_projects_scanned": 1,
     }
@@ -391,11 +524,13 @@ def _fetch_single_project(openstack, config: dict) -> dict:
     n, s, f = _collect_neutron(conn, project_label)
     rn = _collect_runtime_nics(conn, n)
     rb = _collect_runtime_bmc(conn)
+    sc = _collect_subnet_consumers(conn, s, n)
     result["networks"] = n
     result["subnets"] = s
     result["floating_ips"] = f
     result["runtime_nics"] = rn
     result["runtime_bmc"] = rb
+    result["subnet_consumers"] = sc
     return result
 
 
@@ -409,6 +544,7 @@ def _fetch_multi_project(openstack, config: dict, audit_all: bool, allowlist: li
         "floating_ips": [],
         "runtime_nics": [],
         "runtime_bmc": [],
+        "subnet_consumers": [],
         "error": None,
         "openstack_projects_scanned": 0,
     }
@@ -417,6 +553,7 @@ def _fetch_multi_project(openstack, config: dict, audit_all: bool, allowlist: li
     fips_by_key: dict = {}
     runtime_by_key: dict = {}
     bmc_by_key: dict = {}
+    subnet_consumers_by_sid: dict = {}
     scan_errors: list[str] = []
 
     allow_tokens = [str(x).strip() for x in (allowlist or []) if str(x).strip()]
@@ -483,8 +620,20 @@ def _fetch_multi_project(openstack, config: dict, audit_all: bool, allowlist: li
             n, s, f = _collect_neutron(conn, label)
             rn = _collect_runtime_nics(conn, n)
             rb = _collect_runtime_bmc(conn)
+            sc = _collect_subnet_consumers(conn, s, n)
             _merge_openstack_into_maps(
-                nets_by_id, subs_by_id, fips_by_key, runtime_by_key, bmc_by_key, n, s, f, rn, rb
+                nets_by_id,
+                subs_by_id,
+                fips_by_key,
+                runtime_by_key,
+                bmc_by_key,
+                subnet_consumers_by_sid,
+                n,
+                s,
+                f,
+                rn,
+                rb,
+                sc,
             )
             result["openstack_projects_scanned"] += 1
         except Exception as e:
@@ -497,6 +646,7 @@ def _fetch_multi_project(openstack, config: dict, audit_all: bool, allowlist: li
     result["floating_ips"] = list(fips_by_key.values())
     result["runtime_nics"] = list(runtime_by_key.values())
     result["runtime_bmc"] = list(bmc_by_key.values())
+    result["subnet_consumers"] = list(subnet_consumers_by_sid.values())
 
     if result["openstack_projects_scanned"] == 0 and scan_errors:
         result["error"] = "; ".join(scan_errors[:5])
@@ -523,6 +673,7 @@ def fetch_openstack_data_for_config(config: dict):
         "floating_ips": [],
         "runtime_nics": [],
         "runtime_bmc": [],
+        "subnet_consumers": [],
         "error": None,
     }
 

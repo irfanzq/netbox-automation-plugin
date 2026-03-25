@@ -542,6 +542,7 @@ class MAASOpenStackSyncView(LoginRequiredMixin, View):
                     "floating_ips": [],
                     "runtime_nics": [],
                     "runtime_bmc": [],
+                    "subnet_consumers": [],
                     "error": "OpenStack auth URL set but no OS_PASSWORD (or application credential ID/secret). Drift report will omit OpenStack data.",
                     "openstack_cred_missing": True,
                 }
@@ -554,6 +555,7 @@ class MAASOpenStackSyncView(LoginRequiredMixin, View):
                     "floating_ips": [],
                     "runtime_nics": [],
                     "runtime_bmc": [],
+                    "subnet_consumers": [],
                     "error": None,
                 }
                 errors = []
@@ -567,6 +569,7 @@ class MAASOpenStackSyncView(LoginRequiredMixin, View):
                         merged["floating_ips"].extend(data.get("floating_ips") or [])
                         merged["runtime_nics"].extend(data.get("runtime_nics") or [])
                         merged["runtime_bmc"].extend(data.get("runtime_bmc") or [])
+                        merged["subnet_consumers"].extend(data.get("subnet_consumers") or [])
                 if errors and not merged["networks"] and not merged["subnets"] and not merged["floating_ips"]:
                     merged["error"] = "; ".join(errors)
                 elif errors:
@@ -583,6 +586,7 @@ class MAASOpenStackSyncView(LoginRequiredMixin, View):
                         "floating_ips": len(data.get("floating_ips") or []),
                         "runtime_nics": len(data.get("runtime_nics") or []),
                         "runtime_bmc": len(data.get("runtime_bmc") or []),
+                        "subnet_consumers": len(data.get("subnet_consumers") or []),
                         "error": (err[:200] if err else None),
                     })
                 openstack_data = merged

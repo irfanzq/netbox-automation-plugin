@@ -75,6 +75,14 @@ def emit_inventory_scope(e, maas_data, netbox_data, openstack_data, drift, netbo
                     "OpenStack FIPs included / fetched",
                     f"{scope_meta.get('openstack_fips_after', 0)} / {scope_meta.get('openstack_fips_before', 0)}",
                 ],
+                [
+                    "OpenStack runtime NIC rows",
+                    str(len((openstack_data or {}).get("runtime_nics") or [])),
+                ],
+                [
+                    "OpenStack runtime BMC rows",
+                    str(len((openstack_data or {}).get("runtime_bmc") or [])),
+                ],
             ],
             dynamic_columns=True,
         )

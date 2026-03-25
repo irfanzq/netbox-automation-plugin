@@ -39,6 +39,72 @@ def _proposed_changes_rows(
     openstack_data=None,
     netbox_ifaces=None,
 ):
+    def _suggest_prefix_role(g: dict) -> tuple[str, str]:
+        """
+        Suggest best NetBox Prefix role from runtime consumer analysis.
+        Returns: (role_name, reason)
+        """
+        roles = netbox_data.get("prefix_roles") or []
+        bucket = (g.get("consumer_role_bucket") or "").strip().lower()
+        confidence = (g.get("consumer_confidence") or "").strip().lower() or "low"
+        ports_total = int(g.get("consumer_ports_total") or 0)
+        owners = str(g.get("consumer_top_owners") or "-").strip()
+        reason = (
+            str(g.get("consumer_role_reason") or "").strip()
+            or "consumer data unavailable; manual role review required"
+        )
+        if bucket not in {"public", "storage", "vm", "admin"}:
+            return "REVIEW_REQUIRED", f"no reliable consumer bucket (owners: {owners})"
+
+        wanted_tokens = {
+            "public": ("openstack", "public"),
+            "storage": ("openstack", "storage"),
+            "vm": ("openstack", "vm"),
+            "admin": ("openstack", "admin"),
+        }.get(bucket, ("openstack", "vm"))
+
+        def _score_role(role: dict) -> int:
+            txt = f"{role.get('name', '')} {role.get('slug', '')}".lower()
+            if not txt.strip():
+                return -1
+            score = 0
+            if "openstack" in txt:
+                score += 3
+            for t in wanted_tokens:
+                if t in txt:
+                    score += 4
+            return score
+
+        ranked = sorted((r for r in roles), key=_score_role, reverse=True)
+        if ranked and _score_role(ranked[0]) > 0:
+            role = ranked[0].get("name") or ranked[0].get("slug") or "—"
+            return role, f"{reason}; confidence={confidence}; ports={ports_total}; owners={owners}"
+        fallback_name = {
+            "public": "OpenStack Public",
+            "storage": "OpenStack Storage",
+            "vm": "OpenStack VM",
+            "admin": "OpenStack Admin",
+        }.get(bucket, "OpenStack VM")
+        return fallback_name, f"{reason}; confidence={confidence}; ports={ports_total}; owners={owners}"
+
+    def _cidr_start_end(cidr: str) -> tuple[str, str]:
+        try:
+            import ipaddress
+
+            n = ipaddress.ip_network((cidr or "").strip(), strict=False)
+            return str(n.network_address), str(n.broadcast_address)
+        except Exception:
+            return "-", "-"
+
+    def _suggest_prefix_status(g: dict) -> str:
+        ports_total = int(g.get("consumer_ports_total") or 0)
+        conf = str(g.get("consumer_confidence") or "").strip().lower()
+        if ports_total <= 0:
+            return "reserved"
+        if conf in {"high", "medium"}:
+            return "active"
+        return "deprecated"
+
     """Build user-friendly proposed change buckets (preview only)."""
     try:
         from netbox_automation_plugin.sync.config import get_sync_config
@@ -48,6 +114,65 @@ def _proposed_changes_rows(
         _pool_site_map = _sync.get("site_mapping_pool") or {}
     except Exception:
         _fabric_site_map, _pool_site_map = {}, {}
+
+    def _build_vrf_lookup():
+        try:
+            import ipaddress
+            from ipam.models import Prefix
+
+            rows_v4 = []
+            rows_v6 = []
+            for p in Prefix.objects.select_related("vrf").only("prefix", "vrf_id", "vrf__name").iterator():
+                pfx = str(getattr(p, "prefix", "") or "").strip()
+                if not pfx:
+                    continue
+                try:
+                    net = ipaddress.ip_network(pfx, strict=False)
+                except Exception:
+                    continue
+                vrf_name = "Global"
+                try:
+                    if getattr(p, "vrf_id", None) and p.vrf:
+                        vrf_name = (p.vrf.name or "Global").strip()
+                except Exception:
+                    vrf_name = "Global"
+                rec = (net, vrf_name)
+                if net.version == 4:
+                    rows_v4.append(rec)
+                else:
+                    rows_v6.append(rec)
+            rows_v4.sort(key=lambda r: r[0].prefixlen, reverse=True)
+            rows_v6.sort(key=lambda r: r[0].prefixlen, reverse=True)
+            return rows_v4, rows_v6
+        except Exception:
+            return [], []
+
+    _vrf_lookup_v4, _vrf_lookup_v6 = _build_vrf_lookup()
+
+    def _suggest_vrf_for_ip(ip_text: str, *, context: str = "") -> str:
+        try:
+            import ipaddress
+
+            ip_obj = ipaddress.ip_address((ip_text or "").strip())
+        except Exception:
+            return "Global"
+        rows = _vrf_lookup_v4 if ip_obj.version == 4 else _vrf_lookup_v6
+        for net, vrf_name in rows:
+            if ip_obj in net:
+                return vrf_name or "Global"
+        # Fallback: map by context tokens to existing NetBox VRF names.
+        ctx = (context or "").lower()
+        vrfs = [str(v.get("name") or "").strip() for v in (netbox_data.get("vrfs") or []) if str(v.get("name") or "").strip()]
+        def _pick(token: str):
+            for n in vrfs:
+                if token in n.lower():
+                    return n
+            return ""
+        if any(t in ctx for t in ("bgp", "wan", "transit", "external")):
+            picked = _pick("bgp") or _pick("wan")
+            if picked:
+                return picked
+        return "Global"
 
     def _primary_mac_from_maas(ifaces):
         rows = [r for r in (ifaces or []) if str(r.get("mac") or "").strip()]
@@ -109,8 +234,8 @@ def _proposed_changes_rows(
                 m.get("hardware_product"),
             )
             action = (
-                f"Create OOB interface '{mgmt}' (management-only)"
-                + (f"; set OOB/BMC IP {bmc_ip}" if bmc_ip else "")
+                "CREATE_NETBOX_OOB_IFACE"
+                + ("; SET_NETBOX_OOB_IP" if bmc_ip else "")
             )
             out.append(
                 [
@@ -164,11 +289,12 @@ def _proposed_changes_rows(
             bmc_present,
             str(nic_count),
             primary_mac,
+            "[MAAS]",
             ("maas-discovered" if is_candidate else "review-only"),
             (
-                "Create device + ports"
+                "CREATE_NETBOX_DEVICE_AND_PORTS"
                 if is_candidate
-                else f"Review only — not a safe NetBox add candidate ({note})"
+                else f"REVIEW_ONLY_NOT_SAFE_CANDIDATE ({note})"
             ),
         ]
         head_common = [
@@ -201,22 +327,41 @@ def _proposed_changes_rows(
 
     add_prefixes = []
     for g in (os_subnet_gaps or []):
+        role_name, role_reason = _suggest_prefix_role(g)
+        start_addr, end_addr = _cidr_start_end(g.get("cidr", ""))
         add_prefixes.append([
             g.get("cidr", ""),
-            g.get("network_name", "-"),
-            g.get("network_id", ""),
-            "-",
-            "Create Prefix",
+            start_addr,
+            end_addr,
+            g.get("project_name", "-"),
+            role_name,
+            _suggest_prefix_status(g),
+            role_reason,
+            "[OS]",
+            "CREATE_NETBOX_PREFIX_FROM_OS",
         ])
 
     add_fips = []
     for g in (os_floating_gaps or []):
+        fip = g.get("floating_ip", "")
+        fip_name = g.get("floating_subnet_name") or g.get("floating_network_name") or "-"
+        vrf_ctx = " ".join([
+            str(g.get("floating_network_name") or ""),
+            str(g.get("floating_subnet_name") or ""),
+            str(g.get("project_name") or ""),
+        ])
+        nb_vrf = _suggest_vrf_for_ip(fip, context=vrf_ctx)
+        nb_status = "active" if str(g.get("port_id") or "").strip() else "reserved"
         add_fips.append([
-            g.get("floating_ip", ""),
+            fip,
+            fip_name,
             g.get("fixed_ip_address", "-"),
             g.get("project_name") or g.get("project_id") or "-",
-            "-",
-            "Create IPAddress",
+            nb_status,
+            "VIP",
+            nb_vrf,
+            "OpenStack floating IP semantics + NetBox prefix/VRF context",
+            "CREATE_NETBOX_IPADDRESS_FROM_OS_FIP",
         ])
 
     update_nic = _build_update_nic_rows(interface_audit)

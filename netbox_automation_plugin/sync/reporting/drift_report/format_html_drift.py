@@ -15,6 +15,7 @@ def emit_drift_counts_and_alignment(
     drift,
     maas_data,
     netbox_data,
+    openstack_data,
     matched_rows,
     interface_audit,
     os_subnet_gaps,
@@ -23,7 +24,7 @@ def emit_drift_counts_and_alignment(
 ):
     e.spacer()
     e.banner("DRIFT COUNTS")
-    e.paragraph("Counts for this run (match by hostname and NIC MAC).")
+    e.paragraph("Counts for this run (match by hostname and NIC MAC; OpenStack runtime authoritative when present).")
     e.spacer()
     pc = _phase0_category_counts(
         drift,
@@ -33,7 +34,7 @@ def emit_drift_counts_and_alignment(
         os_floating_gaps,
     )
     serial_validation_needed = _count_hints(matched_rows, "NB serial empty")
-    bmc_oob_mismatch = _count_hints(matched_rows, "MAAS BMC ")
+    bmc_oob_mismatch = _count_hints(matched_rows, "BMC ")
     sub_txt = str(pc["sub_gaps"]) if pc["sub_gaps"] is not None else "N/A (local ORM)"
     e.table(
         ["Category", "Count"],
@@ -48,11 +49,11 @@ def emit_drift_counts_and_alignment(
             ["NetBox serial missing", str(serial_validation_needed)],
             ["NIC rows not OK", str(pc["iface_not_ok"])],
             ["MAAS NIC missing in NetBox", str(pc["maas_nic_missing_nb"])],
-            ["VLAN mismatch (MAAS vs NetBox)", str(pc["vlan_drift_nic"])],
-            ["VLAN unverified from MAAS", str(pc["vlan_unverified_nic"])],
+            ["VLAN mismatch (runtime authority vs NetBox)", str(pc["vlan_drift_nic"])],
+            ["VLAN unverified from MAAS fallback", str(pc["vlan_unverified_nic"])],
             ["OpenStack subnet → no Prefix", sub_txt],
             ["OpenStack FIP → no IP record", str(pc["fip_gaps"])],
-            ["BMC vs NetBox OOB differs", str(bmc_oob_mismatch)],
+            ["BMC vs NetBox OOB differs (OS/MAAS fallback)", str(bmc_oob_mismatch)],
             ["LLDP / cabling", "—"],
         ],
     )
@@ -80,13 +81,15 @@ def emit_drift_counts_and_alignment(
         [
             ["MAAS machines", str(len(maas_data.get("machines") or []))],
             ["NetBox devices", str(len(netbox_data.get("devices") or []))],
+            ["OpenStack runtime NIC rows", str(len((openstack_data or {}).get("runtime_nics") or []))],
+            ["OpenStack runtime BMC rows", str(len((openstack_data or {}).get("runtime_bmc") or []))],
             ["Matched hostnames", str(drift.get("matched_count", 0))],
             ["In MAAS only", str(pc["maas_only"])],
             ["NetBox serial missing", str(serial_validation_needed)],
             ["OpenStack subnet gaps", sub_txt],
             ["OpenStack FIP gaps", str(pc["fip_gaps"])],
-            ["VLAN mismatch NICs", str(pc["vlan_drift_nic"])],
-            ["VLAN unverified NICs", str(pc["vlan_unverified_nic"])],
+            ["VLAN mismatch NICs (OS/MAAS authority)", str(pc["vlan_drift_nic"])],
+            ["VLAN unverified NICs (MAAS fallback)", str(pc["vlan_unverified_nic"])],
             ["MAAS NIC missing in NetBox", str(pc["maas_nic_missing_nb"])],
         ],
     )
@@ -102,12 +105,16 @@ def emit_drift_counts_and_alignment(
                 "MAAS fabric",
                 "NetBox site",
                 "NetBox location",
+                "Authority",
+                "OS provision",
+                "OS power",
+                "OS maintenance",
                 "MAAS state",
                 "NB state",
                 "Alignment issues",
             ],
             align_rows,
             dynamic_columns=True,
-            notes_col_idx=6,
+            notes_col_idx=10,
             wrap_max_width=None,
         )

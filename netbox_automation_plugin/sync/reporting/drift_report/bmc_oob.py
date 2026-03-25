@@ -121,6 +121,21 @@ def _nb_iface_carrying_ip(nb_ifaces: list, target_ip: str):
     return None
 
 
+def _first_nb_oob_iface(nb_ifaces: list):
+    """
+    First NetBox interface that looks like OOB (mgmt_only or OOB-like name).
+    Used when BMC IP is not found on any interface, so the table can still show
+    the existing OOB port context instead of empty placeholders.
+    """
+    for iface in nb_ifaces or []:
+        if bool(iface.get("mgmt_only")):
+            return iface
+    for iface in nb_ifaces or []:
+        if _netbox_iface_name_suggests_oob(iface.get("name") or ""):
+            return iface
+    return None
+
+
 def _meaningful_maas_power_type(pt: str) -> bool:
     """True if MAAS reports a concrete power driver (not empty / manual / unknown)."""
     p = (pt or "").strip().lower()
@@ -242,9 +257,33 @@ def _build_proposed_mgmt_interface_rows(
             continue
 
         cov, nb_ifn, cov_note = _netbox_bmc_ip_coverage(nb_list, bmc_effective)
+        cov_ip_used = bmc_effective
+        # If OS runtime BMC IP is authoritative but NB still carries MAAS BMC IP,
+        # show the existing NB coverage/port instead of a misleading NO_IFACE_IP.
+        if (
+            authority == "openstack_runtime"
+            and cov == "NO_IFACE_IP"
+            and bmc
+            and _ip_address_host(bmc) != _ip_address_host(bmc_effective)
+        ):
+            cov2, nb_ifn2, cov_note2 = _netbox_bmc_ip_coverage(nb_list, bmc)
+            if cov2 != "NO_IFACE_IP":
+                cov, nb_ifn, cov_note = cov2, nb_ifn2, cov_note2
+                cov_ip_used = bmc
+        # If no interface currently carries the target BMC IP, still show existing OOB port context.
+        nb_oob_iface = _first_nb_oob_iface(nb_list)
+        if cov == "NO_IFACE_IP" and nb_oob_iface:
+            cov = "OOB_IFACE_IP_MISMATCH"
+            nb_ifn = (nb_oob_iface.get("name") or "—").strip() or "—"
+            cov_note = (
+                "NetBox has an OOB-style interface, but it does not carry the target BMC IP"
+            )
+
         oob_port_hint = _oob_port_hint_column(cov, nb_ifn, mgmt_suggested)
-        oob_match = bool(nb_oob) and _ip_address_host(nb_oob) == _ip_address_host(bmc_effective)
-        nb_detail = _nb_iface_carrying_ip(nb_list, bmc_effective)
+        oob_match = bool(nb_oob) and _ip_address_host(nb_oob) == _ip_address_host(cov_ip_used)
+        nb_detail = _nb_iface_carrying_ip(nb_list, cov_ip_used)
+        if nb_detail is None and cov == "OOB_IFACE_IP_MISMATCH":
+            nb_detail = nb_oob_iface
         nb_mgmt_mac = (nb_detail.get("mac") or "—") if nb_detail else "—"
         nb_mgmt_vid = (
             str(nb_detail.get("untagged_vlan_vid") or "—") if nb_detail else "—"
@@ -252,42 +291,31 @@ def _build_proposed_mgmt_interface_rows(
 
         if oob_match and cov == "MGMT_IFACE":
             status = "OK"
-            action = (
-                "Device OOB + OOB port align with MAAS BMC; keep NetBox port name "
-                f"'{nb_ifn}' (source of truth)"
-            )
+            action = "NO_CHANGE"
             risk = "None"
         elif oob_match and cov == "NO_IFACE_IP":
             status = "ADD_MGMT_IFACE"
-            action = (
-                f"Add NetBox OOB port '{mgmt_suggested}' (management-only), assign BMC IP "
-                f"{bmc_effective}/<prefix> (OOB, not a host NIC)"
-            )
+            action = "ADD_NETBOX_OOB_IFACE; SET_NETBOX_OOB_IP"
             risk = "Medium"
         elif oob_match and cov == "IP_OTHER_IFACE":
             status = "REVIEW"
-            action = (
-                f"BMC IP on NetBox port '{nb_ifn}'; mark as OOB/management-only if needed — "
-                "do not rename to match MAAS power_type; NetBox name is source of truth"
-            )
+            action = "REVIEW_OOB_PORT_CLASSIFICATION"
             risk = "Low"
         elif not oob_match and cov == "MGMT_IFACE":
             status = "SET_OOB"
-            action = (
-                f"Set device OOB IP to {bmc_effective}; BMC IP already on port '{nb_ifn}' "
-                "(keep NetBox port name)"
-            )
+            action = "SET_NETBOX_OOB_IP"
+            risk = "Low"
+        elif not oob_match and cov == "OOB_IFACE_IP_MISMATCH":
+            status = "SET_OOB"
+            action = "SET_NETBOX_OOB_IP; REVIEW_OOB_IFACE_IP"
             risk = "Low"
         elif cov == "NO_IFACE_IP":
             status = "ADD_OOB_AND_MGMT"
-            action = (
-                f"Set device OOB IP to {bmc_effective}; add OOB port '{mgmt_suggested}' "
-                "(management-only) with BMC IP"
-            )
+            action = "SET_NETBOX_OOB_IP; ADD_NETBOX_OOB_IFACE"
             risk = "Medium"
         else:
             status = "REVIEW"
-            action = cov_note or "Align device OOB / OOB port / MAAS BMC"
+            action = "REVIEW_BMC_ALIGNMENT"
             risk = "Medium"
 
         status_before_mac = status
@@ -300,18 +328,13 @@ def _build_proposed_mgmt_interface_rows(
                     risk = "Medium"
                 # Do not keep “everything aligns” copy when MACs disagree.
                 if status_before_mac == "OK":
-                    action = (
-                        f"BMC MAC mismatch: MAAS {maas_mac} vs NetBox port {nb_mgmt_mac} "
-                        f"on '{nb_ifn}'. OOB IP matches MAAS; confirm which MAC is correct."
-                    )
+                    action = "REVIEW_BMC_MAC_MISMATCH"
                 else:
-                    action += (
-                        f" MAC mismatch: MAAS BMC MAC {maas_mac} vs NetBox port {nb_mgmt_mac}."
-                    )
+                    action += "; REVIEW_BMC_MAC_MISMATCH"
         if maas_vlan and nb_mgmt_vid not in ("", "—", "None"):
             if maas_vlan.strip() != str(nb_mgmt_vid).strip():
                 action += (
-                    f" VLAN hint: MAAS {maas_vlan} vs NetBox untagged {nb_mgmt_vid} on BMC port."
+                    "; REVIEW_BMC_VLAN_HINT"
                 )
                 if status == "OK":
                     status = "REVIEW"
@@ -325,12 +348,12 @@ def _build_proposed_mgmt_interface_rows(
                     "",
                 )
             if "BMC MAC mismatch:" in action:
-                action = (
-                    f"Set device OOB IP from OpenStack runtime ({bmc_effective}); "
-                    "BMC MAC validation skipped (not exposed by OpenStack)."
-                )
+                action = "SET_NETBOX_OOB_IP_FROM_OS; SKIP_BMC_MAC_VALIDATION_OS"
                 if status == "REVIEW":
                     status = "SET_OOB_OS"
+
+        if authority == "openstack_runtime" and _ip_address_host(cov_ip_used) != _ip_address_host(bmc_effective):
+            action += "; REPLACE_MAAS_BMC_IP_WITH_OS_BMC_IP"
 
         if str(status).strip().upper() == "OK":
             continue

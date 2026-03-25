@@ -53,6 +53,7 @@ def format_drift_report(
         drift,
         maas_data,
         netbox_data,
+        openstack_data,
         matched_rows,
         interface_audit,
         os_subnet_gaps,

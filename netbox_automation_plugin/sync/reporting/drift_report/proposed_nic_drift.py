@@ -1,9 +1,7 @@
 """NIC drift and serial-review rows for proposed-change buckets."""
 
-from netbox_automation_plugin.sync.reporting.drift_report.misc_utils import _dedupe_note_parts
 from netbox_automation_plugin.sync.reporting.drift_report.proposed_nic_helpers import (
     _drift_table_status_is_ok_only,
-    _friendly_note,
 )
 
 
@@ -30,34 +28,30 @@ def _build_update_nic_rows(interface_audit):
                 continue
 
             statuses = []
-            reasons = []
             actions = []
             risk = "Medium"
 
             if "VLAN_DRIFT" in st:
                 if nb_vlan in {"", "—", "None", "none"}:
                     statuses.append("MISSING_NB_VLAN")
-                    reasons.append(f"NetBox VLAN missing; {authority_label} VLAN present")
                     if authority == "openstack_runtime":
-                        actions.append("Set NetBox untagged VLAN from OpenStack runtime VLAN")
+                        actions.append("SET_NETBOX_UNTAGGED_VLAN")
                     else:
-                        actions.append("Set NetBox untagged VLAN from MAAS VLAN")
+                        actions.append("SET_NETBOX_UNTAGGED_VLAN")
                 else:
                     statuses.append("VLAN_MISMATCH")
-                    reasons.append(f"NetBox VLAN differs from {authority_label} VLAN")
                     if authority == "openstack_runtime":
-                        actions.append("Change NetBox untagged VLAN to match OpenStack runtime VLAN")
+                        actions.append("SET_NETBOX_UNTAGGED_VLAN")
                     else:
-                        actions.append("Change NetBox untagged VLAN to match MAAS VLAN")
+                        actions.append("SET_NETBOX_UNTAGGED_VLAN")
                 risk = "High"
 
             if "IP_GAP" in st:
                 statuses.append("MISSING_NB_IP")
-                reasons.append(_friendly_note(notes))
                 if authority == "openstack_runtime":
-                    actions.append("Add missing OpenStack runtime IP on NetBox port")
+                    actions.append("SET_NETBOX_IP")
                 else:
-                    actions.append("Add missing IP on NetBox port")
+                    actions.append("SET_NETBOX_IP")
 
             note_l = notes.lower()
             if ("netbox mac empty" in note_l) or ("mac mismatch" in note_l) or ("mac-drift" in note_l):
@@ -65,16 +59,14 @@ def _build_update_nic_rows(interface_audit):
                     statuses.append("MAC_MISMATCH")
                 else:
                     statuses.append("MISSING_NB_MAC")
-                reasons.append(f"NetBox MAC missing or mismatched vs {authority_label}")
                 if authority == "openstack_runtime":
-                    actions.append("Set NetBox port MAC from OpenStack runtime MAC for reliable matching")
+                    actions.append("SET_NETBOX_MAC")
                 else:
-                    actions.append("Set NetBox port MAC from MAAS for reliable matching")
+                    actions.append("SET_NETBOX_MAC")
 
             if not statuses:
                 statuses.append(st)
-                reasons.append(_dedupe_note_parts(notes) or "Port review needed")
-                actions.append("Review port alignment manually")
+                actions.append("REVIEW_PORT_ALIGNMENT")
 
             status_cell = ", ".join(dict.fromkeys(statuses))
             if _drift_table_status_is_ok_only(status_cell):
@@ -86,6 +78,7 @@ def _build_update_nic_rows(interface_audit):
                 str(row.get("maas_fabric") or "—"),
                 row.get("maas_mac") or "",
                 row.get("maas_ips") or "",
+                maas_vlan,
                 os_mac,
                 os_ip,
                 os_vlan,
@@ -93,10 +86,8 @@ def _build_update_nic_rows(interface_audit):
                 row.get("nb_if") or "—",
                 row.get("nb_mac") or "—",
                 row.get("nb_ips") or "—",
-                maas_vlan,
                 nb_vlan,
                 status_cell,
-                "; ".join(dict.fromkeys([r for r in reasons if r])),
                 "; ".join(dict.fromkeys([a for a in actions if a])),
                 risk,
             ])

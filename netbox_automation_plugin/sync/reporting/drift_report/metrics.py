@@ -20,7 +20,7 @@ def _phase0_category_counts(
                 iface_not_ok += 1
             if st == "NOT_IN_NETBOX":
                 maas_nic_missing_nb += 1
-            if st.startswith("VLAN_DRIFT"):
+            if st.startswith("VLAN_DRIFT") or st.startswith("OS_RUNTIME_VLAN_DRIFT"):
                 vlan_drift_nic += 1
             notes = row.get("notes") or ""
             if "VLAN unverified:" in notes:
@@ -106,7 +106,11 @@ def _run_metadata_rows(maas_data, netbox_data, openstack_data):
         ["MAAS source", _maas_line()],
         ["OpenStack source", _openstack_line()],
         ["NetBox source", _netbox_line()],
-        ["Match logic", "Hostname + NIC MAC"],
+        [
+            "Authority policy",
+            "OpenStack runtime wins when present (NIC/BMC/lifecycle); MAAS fallback when OS data is missing.",
+        ],
+        ["Match logic", "Hostname + NIC MAC (plus Ironic runtime mapping where available)"],
         ["Scope", "Phase 0 audit only (discovery + drift + proposed actions)"],
         [
             "Action mode",
@@ -136,9 +140,9 @@ def _severity_triage_rows(pc, *, serial_validation_needed: int, bmc_oob_mismatch
         ],
         [
             "High",
-            "VLAN mismatch (MAAS vs NetBox)",
+            "VLAN mismatch (runtime authority vs NetBox)",
             str(pc["vlan_drift_nic"]),
-            "Observed VLAN differs from modeled intent; can impact active services.",
+            "Authoritative runtime VLAN (OpenStack when present, else MAAS) differs from NetBox intent.",
         ],
         [
             "High",
@@ -172,7 +176,7 @@ def _severity_triage_rows(pc, *, serial_validation_needed: int, bmc_oob_mismatch
         ],
         [
             "Info",
-            "VLAN unverified from MAAS",
+            "VLAN unverified from MAAS fallback",
             str(pc["vlan_unverified_nic"]),
             "Observation is incomplete; confirm before applying intent changes.",
         ],
