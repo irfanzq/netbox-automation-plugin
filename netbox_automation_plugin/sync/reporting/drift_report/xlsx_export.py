@@ -21,6 +21,8 @@ from netbox_automation_plugin.sync.reporting.drift_report.proposed_changes impor
     _proposed_changes_rows,
 )
 
+HIDE_LLDP_TABLES = True
+
 
 def build_drift_report_xlsx(
     maas_data,
@@ -84,13 +86,22 @@ def build_drift_report_xlsx(
     for prop, val in _run_metadata_rows(maas_data, netbox_data, openstack_data):
         ws_sum.append([prop, val])
     ws_sum.append([])
+    scope_meta = (drift or {}).get("scope_meta") or {}
+    nb_devices_included = len(netbox_data.get("devices") or [])
+    nb_devices_fetched = int(scope_meta.get("netbox_devices_before") or nb_devices_included)
+    nb_sites_fetched = len(netbox_data.get("sites") or [])
+    nb_sites_included = len({
+        (d.get("site_slug") or "").strip()
+        for d in (netbox_data.get("devices") or [])
+        if (d.get("site_slug") or "").strip()
+    })
     ws_sum.append(["MAAS", "OK" if not maas_data.get("error") else "Error", ""])
     ws_sum.append(["  Machines", str(len(maas_data.get("machines") or [])), ""])
     ws_sum.append(["NetBox", "OK" if not netbox_data.get("error") else "Error", ""])
-    ws_sum.append(["  Devices", str(len(netbox_data.get("devices") or [])), ""])
-    ws_sum.append(["  Sites", str(len(netbox_data.get("sites") or [])), ""])
+    ws_sum.append(["  Devices (included / fetched)", f"{nb_devices_included} / {nb_devices_fetched}", ""])
+    ws_sum.append(["  Sites (included / fetched)", f"{nb_sites_included} / {nb_sites_fetched}", ""])
     if netbox_prefix_count:
-        ws_sum.append(["  IPAM Prefixes", str(netbox_prefix_count), ""])
+        ws_sum.append(["  IPAM Prefixes (included / fetched)", f"{netbox_prefix_count} / {netbox_prefix_count}", ""])
     ws_sum.append([])
     ws_sum.append([])
     pc = _phase0_category_counts(
@@ -103,7 +114,6 @@ def build_drift_report_xlsx(
     serial_validation_needed = _count_hints(matched_rows, "NB serial empty")
     bmc_oob_mismatch = _count_hints(matched_rows, "BMC ")
     sub_txt = str(pc["sub_gaps"]) if pc["sub_gaps"] is not None else "N/A"
-    scope_meta = (drift or {}).get("scope_meta") or {}
     if scope_meta:
         ws_sum.append([])
         ws_sum.append(["SCOPE", "", ""])
@@ -166,7 +176,6 @@ def build_drift_report_xlsx(
     ws_sum.append(["OpenStack subnet → no Prefix", sub_txt])
     ws_sum.append(["OpenStack FIP → no IP record", str(pc["fip_gaps"])])
     ws_sum.append(["BMC vs NetBox OOB differs (OS/MAAS fallback)", str(bmc_oob_mismatch)])
-    ws_sum.append(["LLDP / cabling", "—"])
     ws_sum.append([])
     ws_sum.append(["SEVERITY TRIAGE (why these matter)", "", ""])
     _append_header(ws_sum, ["Severity", "Category", "Count", "Why this matters"])
@@ -180,10 +189,14 @@ def build_drift_report_xlsx(
     ws_sum.append([])
     ws_sum.append(["RUN METRICS", "", ""])
     _append_header(ws_sum, ["Metric", "Value"])
+    os_nics_included = len((openstack_data or {}).get("runtime_nics") or [])
+    os_nics_fetched = int(scope_meta.get("openstack_runtime_nics_before") or os_nics_included)
+    os_bmc_included = len((openstack_data or {}).get("runtime_bmc") or [])
+    os_bmc_fetched = int(scope_meta.get("openstack_runtime_bmc_before") or os_bmc_included)
     ws_sum.append(["MAAS machines", str(len(maas_data.get("machines") or []))])
-    ws_sum.append(["NetBox devices", str(len(netbox_data.get("devices") or []))])
-    ws_sum.append(["OpenStack runtime NIC rows", str(len((openstack_data or {}).get("runtime_nics") or []))])
-    ws_sum.append(["OpenStack runtime BMC rows", str(len((openstack_data or {}).get("runtime_bmc") or []))])
+    ws_sum.append(["NetBox devices (included / fetched)", f"{nb_devices_included} / {nb_devices_fetched}"])
+    ws_sum.append(["OpenStack runtime NIC rows (included / fetched)", f"{os_nics_included} / {os_nics_fetched}"])
+    ws_sum.append(["OpenStack runtime BMC rows (included / fetched)", f"{os_bmc_included} / {os_bmc_fetched}"])
     ws_sum.append(["Matched hostnames", str(drift.get("matched_count", 0))])
     ws_sum.append(["In MAAS only", str(pc["maas_only"])])
     ws_sum.append(["NetBox serial missing", str(serial_validation_needed)])
@@ -251,8 +264,6 @@ def build_drift_report_xlsx(
         len(prop["add_devices"])
         + len(prop["add_prefixes"])
         + len(prop["add_fips"])
-        + len(prop.get("lldp_new") or [])
-        + len(prop.get("lldp_update") or [])
         + len(prop["update_nic"])
         + len(prop["add_nb_interfaces"])
         + len(prop["add_mgmt_iface"])
@@ -265,8 +276,6 @@ def build_drift_report_xlsx(
     ws_sum.append(["New floating IPs", str(len(prop["add_fips"]))])
     ws_sum.append(["New NICs", str(len(prop["add_nb_interfaces"]))])
     ws_sum.append(["NIC drift", str(len(prop["update_nic"]))])
-    ws_sum.append(["LLDP / OS-Discovered (new in NetBox)", str(len(prop.get("lldp_new") or []))])
-    ws_sum.append(["LLDP / OS_Discovered (update NetBox)", str(len(prop.get("lldp_update") or []))])
     ws_sum.append(["BMC / OOB", str(len(prop["add_mgmt_iface"]) + len(prop.get("add_mgmt_iface_new_devices", [])))])
     ws_sum.append(["Serials (review)", str(len(prop["review_serial"]))])
     ws_sum.append(["Total", str(total_props_x)])
@@ -285,8 +294,6 @@ def build_drift_report_xlsx(
     ws_prop.append(["New floating IPs (OpenStack authority)", len(prop["add_fips"])])
     ws_prop.append(["New NICs", len(prop["add_nb_interfaces"])])
     ws_prop.append(["NIC drift", len(prop["update_nic"])])
-    ws_prop.append(["LLDP / OS-Discovered (new in NetBox)", len(prop.get("lldp_new") or [])])
-    ws_prop.append(["LLDP / OS_Discovered (update NetBox)", len(prop.get("lldp_update") or [])])
     ws_prop.append(["BMC / OOB", len(prop["add_mgmt_iface"]) + len(prop.get("add_mgmt_iface_new_devices", []))])
     ws_prop.append(["Serials (review)", len(prop["review_serial"])])
 
@@ -435,7 +442,7 @@ def build_drift_report_xlsx(
         ],
         prop["update_nic"],
     )
-    if prop.get("lldp_new"):
+    if (not HIDE_LLDP_TABLES) and prop.get("lldp_new"):
         _append_block(
             "B) LLDP / OS-Discovered (new in NetBox)",
             [
@@ -457,7 +464,7 @@ def build_drift_report_xlsx(
                 "Bond/swp/Ethernet-style ids exact-match NetBox only; if absent, status is Switch port missing in NetBox."
             ),
         )
-    if prop.get("lldp_update"):
+    if (not HIDE_LLDP_TABLES) and prop.get("lldp_update"):
         _append_block(
             "B) LLDP / OS_Discovered (update NetBox)",
             [

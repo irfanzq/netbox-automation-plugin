@@ -61,6 +61,8 @@ Optional (application credentials instead of user/password):
 
 Ensure `OS_REGION_NAME` / `OPENSTACK_2_REGION_NAME` and optional labels align with those tokens (e.g. `birch`, `spruce`).
 
+**Ironic + Neutron on bare metal:** Runtime rows combine **Ironic ports** (MAC, `local_link` / LLDP hints) with **Neutron** when possible. If the node has **no Nova instance UUID**, the plugin still lists Neutron ports **filtered by that MAC** so inspection/DHCP/orphan ports can fill **runtime IP** and **provider VLAN** when present. Each row also carries **Ironic provision/power** state. If Neutron returns nothing for that MAC, **OS runtime IP/VLAN** may stay empty even though the node exists in Ironic.
+
 **NetBox (drift audit vs MAAS):** By default the plugin reads **this NetBox’s database** (Django ORM), same idea as VLAN deployment — **no `NETBOX_URL`, token, or DNS** to yourself.
 
 **OpenStack from Docker:** If `birch.cloud.whitefiber.com` does not resolve inside the container, use an **internal auth URL** or add **`extra_hosts`** in Compose. `OPENSTACK_INSECURE=true` only skips TLS verification; it does not fix DNS.

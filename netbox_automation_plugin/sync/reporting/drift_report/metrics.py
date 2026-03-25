@@ -152,7 +152,7 @@ def _severity_triage_rows(
         ],
         [
             "High",
-            "BMC vs NetBox OOB differs",
+            "BMC vs NetBox OOB differs (OS/MAAS fallback)",
             str(bmc_oob_mismatch),
             "Out-of-band access may target the wrong management endpoint.",
         ],
@@ -172,7 +172,7 @@ def _severity_triage_rows(
             "Low",
             "Matched — review hints",
             str(pc["check_hosts"]),
-            "Review host alignment/lifecycle hints (fabric vs location, lifecycle state mismatches). NIC/OOB drift is covered in dedicated detail tables.",
+            "Review host alignment/lifecycle hints (fabric vs location, lifecycle state mismatches). NIC and OOB drift are covered in dedicated detail tables.",
         ],
         [
             "Low",

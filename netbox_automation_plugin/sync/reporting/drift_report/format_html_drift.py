@@ -38,6 +38,7 @@ def emit_drift_counts_and_alignment(
     sub_txt = str(pc["sub_gaps"]) if pc["sub_gaps"] is not None else "N/A (local ORM)"
     outside_scope = drift.get("maas_in_netbox_outside_scope") or []
     outside_n = len(outside_scope)
+    scope_meta = (drift or {}).get("scope_meta") or {}
     e.table(
         ["Category", "Count"],
         [
@@ -60,7 +61,6 @@ def emit_drift_counts_and_alignment(
             ["OpenStack subnet → no Prefix", sub_txt],
             ["OpenStack FIP → no IP record", str(pc["fip_gaps"])],
             ["BMC vs NetBox OOB differs (OS/MAAS fallback)", str(bmc_oob_mismatch)],
-            ["LLDP / cabling", "—"],
         ],
     )
 
@@ -99,13 +99,19 @@ def emit_drift_counts_and_alignment(
     e.spacer()
     e.banner("RUN METRICS", "-")
     e.spacer()
+    nb_included = len(netbox_data.get("devices") or [])
+    nb_fetched = int(scope_meta.get("netbox_devices_before") or nb_included)
+    os_nics_included = len((openstack_data or {}).get("runtime_nics") or [])
+    os_nics_fetched = int(scope_meta.get("openstack_runtime_nics_before") or os_nics_included)
+    os_bmc_included = len((openstack_data or {}).get("runtime_bmc") or [])
+    os_bmc_fetched = int(scope_meta.get("openstack_runtime_bmc_before") or os_bmc_included)
     e.table(
         ["Metric", "Value"],
         [
             ["MAAS machines", str(len(maas_data.get("machines") or []))],
-            ["NetBox devices", str(len(netbox_data.get("devices") or []))],
-            ["OpenStack runtime NIC rows", str(len((openstack_data or {}).get("runtime_nics") or []))],
-            ["OpenStack runtime BMC rows", str(len((openstack_data or {}).get("runtime_bmc") or []))],
+            ["NetBox devices (included / fetched)", f"{nb_included} / {nb_fetched}"],
+            ["OpenStack runtime NIC rows (included / fetched)", f"{os_nics_included} / {os_nics_fetched}"],
+            ["OpenStack runtime BMC rows (included / fetched)", f"{os_bmc_included} / {os_bmc_fetched}"],
             ["Matched hostnames", str(drift.get("matched_count", 0))],
             ["In MAAS only", str(pc["maas_only"])],
             ["NetBox serial missing", str(serial_validation_needed)],

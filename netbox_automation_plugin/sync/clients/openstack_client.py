@@ -304,6 +304,83 @@ def _collect_subnet_consumers(conn, subnets: list[dict], networks: list[dict]) -
     return out
 
 
+def _normalize_mac_neutron(mac: str) -> str:
+    if not mac:
+        return ""
+    s = str(mac).strip().lower().replace("-", ":")
+    parts = [p for p in s.split(":") if p]
+    if len(parts) == 6:
+        try:
+            return ":".join(f"{int(p, 16):02x}" for p in parts)
+        except ValueError:
+            pass
+    return s
+
+
+def _neutron_port_dict_from_sdk(p) -> dict:
+    fixed_ips = getattr(p, "fixed_ips", None) or []
+    ip_list: list[str] = []
+    for f in fixed_ips:
+        if isinstance(f, dict):
+            ip = str(f.get("ip_address") or "").strip()
+            if ip:
+                ip_list.append(ip)
+    return {
+        "id": getattr(p, "id", "") or "",
+        "mac": _normalize_mac_neutron(str(getattr(p, "mac_address", "") or "")),
+        "ips": ip_list,
+        "network_id": str(getattr(p, "network_id", "") or "").strip(),
+    }
+
+
+def _neutron_attachment_for_bm_mac(
+    nw,
+    mac_norm: str,
+    cache: dict[str, list[dict]],
+) -> tuple[dict | None, bool]:
+    """
+    When Ironic has no instance_uuid, find Neutron port(s) by MAC (inspection, DHCP,
+    or stale attachment). Returns (chosen_dict_or_none, used_mac_filter).
+    """
+    if not mac_norm:
+        return None, False
+    if mac_norm in cache:
+        rows = cache[mac_norm]
+    else:
+        rows = []
+        try:
+            for p in nw.ports(mac_address=mac_norm):
+                rows.append(_neutron_port_dict_from_sdk(p))
+        except TypeError:
+            try:
+                for p in nw.ports():
+                    pm = str(getattr(p, "mac_address", "") or "").strip().lower().replace("-", ":")
+                    if not pm:
+                        continue
+                    parts = [x for x in pm.split(":") if x]
+                    if len(parts) == 6:
+                        try:
+                            pm = ":".join(f"{int(x, 16):02x}" for x in parts)
+                        except ValueError:
+                            pass
+                    if pm == mac_norm:
+                        rows.append(_neutron_port_dict_from_sdk(p))
+            except Exception:
+                rows = []
+        except Exception:
+            rows = []
+        cache[mac_norm] = rows
+
+    if not rows:
+        return None, False
+    with_ip = [r for r in rows if r.get("ips")]
+    with_net = [r for r in rows if (r.get("network_id") or "").strip()]
+    for pool in (with_ip, with_net, rows):
+        if pool:
+            return pool[0], True
+    return None, False
+
+
 def _collect_runtime_nics(conn, networks: list[dict]) -> list[dict]:
     """
     Best-effort runtime NIC map from Ironic + Neutron:
@@ -317,6 +394,7 @@ def _collect_runtime_nics(conn, networks: list[dict]) -> list[dict]:
         return out
 
     net_by_id = {(n.get("id") or ""): n for n in (networks or []) if n.get("id")}
+    mac_neutron_cache: dict[str, list[dict]] = {}
 
     # Cache Neutron ports by instance_uuid to avoid repeated queries.
     ports_by_instance: dict[str, list[dict]] = {}
@@ -327,19 +405,7 @@ def _collect_runtime_nics(conn, networks: list[dict]) -> list[dict]:
         rows: list[dict] = []
         try:
             for p in nw.ports(device_id=instance_uuid):
-                fixed_ips = getattr(p, "fixed_ips", None) or []
-                ip_list = []
-                for f in fixed_ips:
-                    if isinstance(f, dict):
-                        ip = str(f.get("ip_address") or "").strip()
-                        if ip:
-                            ip_list.append(ip)
-                rows.append({
-                    "id": getattr(p, "id", "") or "",
-                    "mac": str(getattr(p, "mac_address", "") or "").strip().lower(),
-                    "ips": ip_list,
-                    "network_id": str(getattr(p, "network_id", "") or "").strip(),
-                })
+                rows.append(_neutron_port_dict_from_sdk(p))
         except Exception:
             rows = []
         ports_by_instance[instance_uuid] = rows
@@ -357,7 +423,7 @@ def _collect_runtime_nics(conn, networks: list[dict]) -> list[dict]:
             ll_raw = getattr(p, "local_link_connection", None)
             ll_d = _coerce_local_link_dict(ll_raw)
             ports_by_node[node_uuid].append({
-                "mac": str(getattr(p, "address", "") or "").strip().lower(),
+                "mac": _normalize_mac_neutron(str(getattr(p, "address", "") or "")),
                 "physical_network": str(getattr(p, "physical_network", "") or "").strip(),
                 "tenant_vif_port_id": str(internal.get("tenant_vif_port_id") or "").strip(),
                 "local_link": ll_d,
@@ -375,18 +441,34 @@ def _collect_runtime_nics(conn, networks: list[dict]) -> list[dict]:
             nports = ports_by_node.get(node_uuid) or []
             ip_ports = _instance_ports(instance_uuid) if instance_uuid else []
             ip_by_port_id = {r.get("id", ""): r for r in ip_ports if r.get("id")}
-            ip_by_mac = {r.get("mac", ""): r for r in ip_ports if r.get("mac")}
+            ip_by_mac: dict[str, dict] = {}
+            for r in ip_ports:
+                km = _normalize_mac_neutron(r.get("mac", "") or "")
+                if km:
+                    ip_by_mac[km] = r
+
+            prov_st = str(getattr(n, "provision_state", "") or "").strip().lower()
+            pwr_st = str(getattr(n, "power_state", "") or "").strip().lower()
+            maint = bool(getattr(n, "maintenance", False))
 
             for bp in nports:
                 mac = bp.get("mac", "")
                 if not mac:
                     continue
                 chosen = None
+                neutron_via_mac = False
                 vif_id = bp.get("tenant_vif_port_id", "")
+                mac_n = _normalize_mac_neutron(mac)
                 if vif_id and vif_id in ip_by_port_id:
                     chosen = ip_by_port_id[vif_id]
-                elif mac in ip_by_mac:
-                    chosen = ip_by_mac[mac]
+                elif mac_n and mac_n in ip_by_mac:
+                    chosen = ip_by_mac[mac_n]
+                if chosen is None and mac_n:
+                    c2, neutron_via_mac = _neutron_attachment_for_bm_mac(
+                        nw, mac_n, mac_neutron_cache
+                    )
+                    if c2:
+                        chosen = c2
 
                 network_id = (chosen or {}).get("network_id", "")
                 net = net_by_id.get(network_id, {})
@@ -413,6 +495,10 @@ def _collect_runtime_nics(conn, networks: list[dict]) -> list[dict]:
                     "tenant_vif_port_id": vif_id,
                     "local_link": ll_d,
                     "os_lldp": os_lldp,
+                    "ironic_provision_state": prov_st,
+                    "ironic_power_state": pwr_st,
+                    "ironic_maintenance": maint,
+                    "runtime_neutron_via_mac": bool(neutron_via_mac and chosen),
                 })
     except Exception as e:
         logger.info("OpenStack: runtime NIC enrichment skipped: %s", e)

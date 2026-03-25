@@ -9,6 +9,47 @@ from typing import Dict, Optional
 logger = logging.getLogger("netbox_automation_plugin.sync")
 
 
+def _default_os_region_for_payload(openstack_data: Optional[dict]) -> str:
+    """Merged region label, or first os_region seen on any resource (covers scoped runs)."""
+    if not openstack_data or openstack_data.get("error"):
+        return "—"
+    top = str(openstack_data.get("openstack_region_name") or "").strip()
+    if top and top != "—":
+        return top[:32]
+    for key in ("runtime_nics", "runtime_bmc", "networks", "subnets", "floating_ips"):
+        for item in openstack_data.get(key) or []:
+            if isinstance(item, dict):
+                reg = str(item.get("os_region") or "").strip()
+                if reg:
+                    return reg[:32]
+    return "—"
+
+
+def _ironic_summary_for_host(openstack_data: Optional[dict], hostname: str) -> str:
+    """provision/power from any runtime NIC row for this Ironic hostname."""
+    if not openstack_data or not hostname:
+        return ""
+    h = hostname.strip().lower()
+    for rr in openstack_data.get("runtime_nics") or []:
+        if (rr.get("hostname") or "").strip().lower() != h:
+            continue
+        prov = str(rr.get("ironic_provision_state") or "").strip()
+        pwr = str(rr.get("ironic_power_state") or "").strip()
+        if prov or pwr:
+            return f"{prov or '—'}/{pwr or '—'}"
+    return ""
+
+
+def _runtime_nic_row_score(r: dict) -> int:
+    """Prefer rows with Neutron attachment, VLAN, MAC-based Neutron fallback, LLDP."""
+    return (
+        2 * int(bool((r.get("os_ip") or "").strip()))
+        + 2 * int(bool((r.get("os_runtime_vlan") or "").strip()))
+        + int(bool(r.get("runtime_neutron_via_mac")))
+        + int(bool((r.get("local_link") or {})))
+    )
+
+
 def _parse_vid(val) -> Optional[int]:
     """Numeric VLAN ID for comparison, or None if missing/non-numeric."""
     if val is None:
@@ -80,9 +121,9 @@ def build_maas_netbox_interface_audit(
         if prev is None:
             os_runtime_by_host_mac[h][m] = r
             continue
-        # Prefer richer runtime rows (with IP and VLAN).
-        prev_score = int(bool(prev.get("os_ip"))) + int(bool(prev.get("os_runtime_vlan")))
-        cur_score = int(bool(r.get("os_ip"))) + int(bool(r.get("os_runtime_vlan")))
+        # Prefer richer runtime rows (IP/VLAN, Neutron-by-MAC, LLDP).
+        prev_score = _runtime_nic_row_score(prev)
+        cur_score = _runtime_nic_row_score(r)
         if cur_score >= prev_score:
             os_runtime_by_host_mac[h][m] = r
     hosts_out = []
@@ -93,9 +134,9 @@ def build_maas_netbox_interface_audit(
         nb_ctx = nb_audit.get(hostname) or {}
         ctx_site = (nb_ctx.get("site_slug") or "-")[:14]
         ctx_loc = (nb_ctx.get("location_name") or "-")[:16]
-        os_region_default = (
-            (openstack_data or {}).get("openstack_region_name") or "—"
-        )[:32]
+        os_region_default = _default_os_region_for_payload(openstack_data)
+        ironic_line = _ironic_summary_for_host(openstack_data, hostname)
+        ironic_note_done = False
         m_fab = (m.get("fabric_name") or "-")[:14]
         m_pool = (m.get("pool_name") or "-")[:12]
         nb_by_mac = {}
@@ -190,8 +231,23 @@ def build_maas_netbox_interface_audit(
                         x.strip() for x in str(os_nib.get("os_ip") or "").split(",") if x.strip()
                     ]
                 os_vlan_n = str(os_nib.get("os_runtime_vlan") or "").strip()
-                os_auth_n = bool(os_mac_n or os_ip_list_n or os_vlan_n)
+                os_auth_n = bool(
+                    os_mac_n
+                    or os_ip_list_n
+                    or os_vlan_n
+                    or os_nib.get("runtime_neutron_via_mac")
+                )
                 os_region_nib = str(os_nib.get("os_region") or "").strip() or os_region_default
+                nib_notes = (
+                    f"No NetBox interface with this MAC. "
+                    f"Device has {len(nb_list)} interface(s) in NetBox, "
+                    f"{n_mac} with MAC set — fill MACs on NB or rename to match MAAS."
+                )
+                if ironic_line and not os_ip_list_n and not ironic_note_done:
+                    nib_notes += (
+                        f" Ironic: {ironic_line} (no active instance — Neutron IP/VLAN often empty)."
+                    )
+                    ironic_note_done = True
                 rows.append({
                     "maas_fabric": row_fab,
                     "maas_pool": m_pool,
@@ -211,11 +267,7 @@ def build_maas_netbox_interface_audit(
                     "nb_mac": "—",
                     "nb_ips": "—",
                     "status": "NOT_IN_NETBOX",
-                    "notes": (
-                        f"No NetBox interface with this MAC. "
-                        f"Device has {len(nb_list)} interface(s) in NetBox, "
-                        f"{n_mac} with MAC set — fill MACs on NB or rename to match MAAS."
-                    ),
+                    "notes": nib_notes,
                 })
                 continue
 
@@ -230,7 +282,12 @@ def build_maas_netbox_interface_audit(
             os_vlan = str(os_row.get("os_runtime_vlan") or "").strip()
             os_region = str(os_row.get("os_region") or "").strip() or os_region_default
 
-            os_authoritative = bool(os_mac or os_ip_set or os_vlan)
+            os_authoritative = bool(
+                os_mac
+                or os_ip_set
+                or os_vlan
+                or os_row.get("runtime_neutron_via_mac")
+            )
             base_ip_set = os_ip_set if os_authoritative else maas_ip_set
             missing_nb = base_ip_set - nb_ips_set
             nb_name = nb.get("name") or "—"
@@ -325,6 +382,12 @@ def build_maas_netbox_interface_audit(
             else:
                 nb_mac_out = mac
 
+            if ironic_line and not ironic_note_done and not os_ip_list:
+                notes.append(
+                    f"Ironic: {ironic_line} (no active instance — Neutron runtime IP/VLAN often empty)"
+                )
+                ironic_note_done = True
+
             rows.append({
                 "maas_fabric": row_fab,
                 "maas_pool": m_pool,
@@ -399,8 +462,8 @@ def _os_region_for_matched_host(openstack_data: Optional[dict], hostname: str, o
         r = str(nic.get("os_region") or "").strip()
         if r:
             return r[:48]
-    top = str((openstack_data or {}).get("openstack_region_name") or "").strip()
-    return (top[:48] if top else "—")
+    fallback = _default_os_region_for_payload(openstack_data)
+    return fallback[:48] if fallback and fallback != "—" else "—"
 
 
 def build_maas_netbox_matched_rows(

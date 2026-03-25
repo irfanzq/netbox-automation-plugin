@@ -921,6 +921,16 @@ class MAASOpenStackSyncView(LoginRequiredMixin, View):
         if selected_location_names and openstack_data and not openstack_data.get("error"):
             openstack_data, os_scope = _filter_openstack_by_locations(openstack_data, selected_location_names)
             scope_meta.update(os_scope)
+            # If scoping stripped all os_region-tagged resources, keep catalog region(s) from clouds used.
+            reg_top = (openstack_data.get("openstack_region_name") or "").strip()
+            if reg_top in ("", "—"):
+                cr = sorted({
+                    (c.get("region") or "").strip()
+                    for c in (scope_meta.get("openstack_clouds_used") or [])
+                    if (c.get("region") or "").strip()
+                })
+                if cr:
+                    openstack_data["openstack_region_name"] = ", ".join(cr)
             # Recompute OpenStack gap outputs after OpenStack scoping
             if not netbox_data.get("error"):
                 prefix_set = fetch_netbox_prefix_cidrs()

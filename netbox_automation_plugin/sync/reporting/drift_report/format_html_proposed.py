@@ -1,5 +1,7 @@
 """PROPOSED CHANGES and summary tables for the drift HTML/ASCII report."""
 
+HIDE_LLDP_TABLES = True
+
 
 def emit_proposed_change_tables(e, prop):
     e.spacer()
@@ -144,16 +146,6 @@ def emit_proposed_change_tables(e, prop):
             ["New NICs in NetBox", str(len(prop["add_nb_interfaces"])), "Runtime/MAAS fallback interface not modeled in NetBox"],
             ["NIC drift", str(len(prop["update_nic"])), "Runtime authority (OS first, MAAS fallback) differs from NetBox"],
             [
-                "LLDP / OS-Discovered (new in NetBox)",
-                str(len(prop.get("lldp_new") or [])),
-                "OS has discovered switch/port; NetBox interface has no peer/cable summary",
-            ],
-            [
-                "LLDP / OS_Discovered (update NetBox)",
-                str(len(prop.get("lldp_update") or [])),
-                "NetBox peer summary differs from OS-discovered switch/port",
-            ],
-            [
                 "BMC / OOB",
                 str(len(prop["add_mgmt_iface"]) + len(prop.get("add_mgmt_iface_new_devices", []))),
                 "BMC runtime authority (OS first, MAAS fallback) vs NetBox",
@@ -237,17 +229,17 @@ def emit_proposed_change_tables(e, prop):
                 wrap_max_width=None,
             )
 
-    if prop.get("lldp_new"):
+    if (not HIDE_LLDP_TABLES) and prop.get("lldp_new"):
         e.spacer()
         e.subtitle("Detail — LLDP / OS-Discovered (new in NetBox)")
         e.paragraph(
             "OpenStack reports switch hostname, chassis MAC, and port id per NIC MAC (inspection LLDP). "
-            "OS switch port is always the raw OpenStack value. For generic ids (e.g. bare numbers), "
-            "NetBox switch port is the matching interface name on the switch device when found; otherwise "
-            "that column repeats the OS id. For bond/swp/Ethernet-style ids, OpenStack is authoritative: "
-            "we only exact-match NetBox; if missing, NetBox port status reads «Switch port missing in NetBox». "
-            "MAAS Int is the MAAS interface name for the same MAC. NetBox has the host interface but no "
-            "cable/peer text yet — document cabling or description to match OpenStack."
+            "Each row is tied to a **server** NetBox interface: first by **MAC** (same as MAAS/OpenStack), "
+            "or if NetBox has no MAC on that port, by **MAAS interface name** == NetBox interface name. "
+            "«New in NetBox» means that matched interface has **no** peer/cable summary in NetBox for this run "
+            "(not that the interface is missing). «Resolved in NetBox» refers to the **switch** side port name only. "
+            "OS switch port is the raw OpenStack value; generic ids may map to switch Ethernet names. "
+            "MAAS Int is the MAAS name for this MAC."
         )
         e.spacer()
         e.table(
@@ -267,7 +259,7 @@ def emit_proposed_change_tables(e, prop):
             dynamic_columns=True,
             wrap_max_width=None,
         )
-    if prop.get("lldp_update"):
+    if (not HIDE_LLDP_TABLES) and prop.get("lldp_update"):
         e.spacer()
         e.subtitle("Detail — LLDP / OS_Discovered (update NetBox)")
         e.paragraph(
@@ -373,7 +365,6 @@ def emit_proposed_change_tables(e, prop):
     e.spacer()
     total_props = (
         len(prop["add_devices"]) + len(prop["add_prefixes"]) + len(prop["add_fips"]) +
-        len(prop.get("lldp_new") or []) + len(prop.get("lldp_update") or []) +
         len(prop["update_nic"]) + len(prop["add_nb_interfaces"]) +
         len(prop["add_mgmt_iface"]) + len(prop.get("add_mgmt_iface_new_devices", [])) +
         len(prop["review_serial"])
@@ -386,8 +377,6 @@ def emit_proposed_change_tables(e, prop):
             ["New floating IPs", str(len(prop["add_fips"]))],
             ["New NICs", str(len(prop["add_nb_interfaces"]))],
             ["NIC drift", str(len(prop["update_nic"]))],
-            ["LLDP / OS-Discovered (new in NetBox)", str(len(prop.get("lldp_new") or []))],
-            ["LLDP / OS_Discovered (update NetBox)", str(len(prop.get("lldp_update") or []))],
             ["BMC / OOB", str(len(prop["add_mgmt_iface"]) + len(prop.get("add_mgmt_iface_new_devices", [])))],
             ["Serials (review)", str(len(prop["review_serial"]))],
             ["Total", str(total_props)],

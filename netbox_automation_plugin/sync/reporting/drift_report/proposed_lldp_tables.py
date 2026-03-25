@@ -111,6 +111,33 @@ def _find_nb_iface_for_mac(
     return None
 
 
+def _find_nb_iface_by_maas_name(
+    netbox_ifaces: dict | None, hostname: str, maas_ifname: str
+) -> dict | None:
+    """
+    When NetBox has no MAC on the server interface, MAC-based LLDP join fails.
+    Fall back to MAAS interface name == NetBox Interface.name (case-insensitive).
+    Interface names are expected unique per device.
+    """
+    if not netbox_ifaces or not hostname or not maas_ifname:
+        return None
+    want = (maas_ifname or "").strip().lower()
+    if not want or want == "—":
+        return None
+    h = (hostname or "").strip().lower()
+
+    for key, lst in netbox_ifaces.items():
+        if (key or "").strip().lower() != h:
+            continue
+        for row in lst or []:
+            if not isinstance(row, dict):
+                continue
+            nm = (row.get("name") or "").strip().lower()
+            if nm == want:
+                return row
+    return None
+
+
 def _is_explicit_os_port_id(port_id: str) -> bool:
     """
     OS port strings that already name a real interface style (bond/swp/Ethernet/…).
@@ -274,7 +301,8 @@ def build_lldp_drift_rows(
     interface peer/cable summary (peer_summary).
 
     Returns:
-      lldp_new: OS has link data; NetBox has no peer summary for that host+MAC.
+      lldp_new: OS has link data; NetBox has no peer/cable summary on the matched
+        server interface (matched by interface MAC, else by MAAS iface name when MAC is missing in NetBox).
       lldp_update: both have data but normalized strings differ.
     """
     lldp_new: list[list] = []
@@ -309,6 +337,10 @@ def build_lldp_drift_rows(
 
         os_reg = str(r.get("os_region") or openstack_data.get("openstack_region_name") or "—").strip() or "—"
         nb = _find_nb_iface_for_mac(netbox_ifaces, host, mac)
+        nb_matched_by_maas_name = False
+        if nb is None:
+            nb = _find_nb_iface_by_maas_name(netbox_ifaces, host, maas_int)
+            nb_matched_by_maas_name = nb is not None
         nb_peer = str((nb or {}).get("peer_summary") or "").strip()
         nb_site = str((nb or {}).get("nb_site") or "—").strip() or "—"
         nb_loc = str((nb or {}).get("nb_location") or "—").strip() or "—"
@@ -331,6 +363,17 @@ def build_lldp_drift_rows(
             )
 
         if not nb_peer:
+            if nb_matched_by_maas_name and nb:
+                action_new = (
+                    f"NetBox interface «{(nb.get('name') or maas_int)}» matches MAAS name but has no "
+                    "peer/cable summary in the API snapshot (often fixed by setting the interface MAC to "
+                    f"match MAAS/OpenStack «{mac}» so future runs key on MAC). "
+                ) + action_new
+            elif nb is None:
+                action_new = (
+                    "No NetBox server interface matched this MAC (and MAAS name did not match an NB name); "
+                    "model the port or set MAC on the correct NetBox interface. "
+                ) + action_new
             lldp_new.append([
                 host,
                 os_reg,

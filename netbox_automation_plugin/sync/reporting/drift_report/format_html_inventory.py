@@ -4,6 +4,7 @@ from netbox_automation_plugin.sync.reporting.drift_report.metrics import _run_me
 
 
 def emit_inventory_scope(e, maas_data, netbox_data, openstack_data, drift, netbox_prefix_count):
+    scope_meta = (drift or {}).get("scope_meta") or {}
     e.banner("INVENTORY")
     e.spacer()
     e.subtitle("Run metadata")
@@ -34,15 +35,22 @@ def emit_inventory_scope(e, maas_data, netbox_data, openstack_data, drift, netbo
     if netbox_data.get("error"):
         e.error(f"Error: {netbox_data['error']}")
     else:
+        sites_fetched = len(netbox_data.get("sites") or [])
+        devices_included = len(netbox_data.get("devices") or [])
+        devices_fetched = int(scope_meta.get("netbox_devices_before") or devices_included)
+        sites_included = len({
+            (d.get("site_slug") or "").strip()
+            for d in (netbox_data.get("devices") or [])
+            if (d.get("site_slug") or "").strip()
+        })
         inv_rows = [
-            ["Sites", str(len(netbox_data.get("sites") or []))],
-            ["Devices", str(len(netbox_data.get("devices") or []))],
+            ["Sites (included / fetched)", f"{sites_included} / {sites_fetched}"],
+            ["Devices (included / fetched)", f"{devices_included} / {devices_fetched}"],
         ]
         if netbox_prefix_count:
-            inv_rows.append(["IPAM Prefix objects", str(netbox_prefix_count)])
+            inv_rows.append(["IPAM Prefix objects (included / fetched)", f"{netbox_prefix_count} / {netbox_prefix_count}"])
         e.table(["Metric", "Count"], inv_rows)
 
-    scope_meta = (drift or {}).get("scope_meta") or {}
     if scope_meta:
         e.spacer()
         e.banner("SCOPE", "-")
