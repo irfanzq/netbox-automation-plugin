@@ -114,6 +114,39 @@ def _annotate_openstack_payload(payload: dict, region: str) -> None:
                 item["os_region"] = reg
 
 
+def _coerce_local_link_dict(raw) -> dict:
+    """Normalize Ironic local_link_connection to a plain dict."""
+    if not raw:
+        return {}
+    if isinstance(raw, dict):
+        return {str(k): ("" if v is None else str(v)).strip() for k, v in raw.items()}
+    try:
+        return {
+            "switch_id": str(getattr(raw, "switch_id", "") or "").strip(),
+            "port_id": str(getattr(raw, "port_id", "") or "").strip(),
+            "switch_info": str(getattr(raw, "switch_info", "") or "").strip(),
+        }
+    except Exception:
+        return {}
+
+
+def _format_os_lldp_from_local_link(ll: dict) -> str:
+    """Human-readable string from Ironic local_link_connection (LLDP-style)."""
+    if not ll:
+        return ""
+    sinfo = (ll.get("switch_info") or "").strip()
+    sid = (ll.get("switch_id") or ll.get("switch_chassis_id") or "").strip()
+    pid = (ll.get("port_id") or "").strip()
+    parts: list[str] = []
+    if sinfo:
+        parts.append(sinfo)
+    if sid:
+        parts.append(f"switch {sid}")
+    if pid:
+        parts.append(f"port {pid}")
+    return " · ".join(parts)
+
+
 def _collect_neutron(conn, project_label: str) -> tuple[list, list, list]:
     networks = []
     subnets = []
@@ -321,10 +354,13 @@ def _collect_runtime_nics(conn, networks: list[dict]) -> list[dict]:
             internal = getattr(p, "internal_info", None)
             if not isinstance(internal, dict):
                 internal = {}
+            ll_raw = getattr(p, "local_link_connection", None)
+            ll_d = _coerce_local_link_dict(ll_raw)
             ports_by_node[node_uuid].append({
                 "mac": str(getattr(p, "address", "") or "").strip().lower(),
                 "physical_network": str(getattr(p, "physical_network", "") or "").strip(),
                 "tenant_vif_port_id": str(internal.get("tenant_vif_port_id") or "").strip(),
+                "local_link": ll_d,
             })
 
         for n in bm.nodes(details=True):
@@ -357,6 +393,8 @@ def _collect_runtime_nics(conn, networks: list[dict]) -> list[dict]:
                 net_type = str(net.get("provider_network_type") or "").strip().lower()
                 seg = str(net.get("provider_segmentation_id") or "").strip()
                 runtime_vlan = seg if net_type == "vlan" and seg else ""
+                ll_d = bp.get("local_link") if isinstance(bp.get("local_link"), dict) else {}
+                os_lldp = _format_os_lldp_from_local_link(ll_d)
 
                 out.append({
                     "hostname": hostname,
@@ -373,6 +411,7 @@ def _collect_runtime_nics(conn, networks: list[dict]) -> list[dict]:
                     ),
                     "os_runtime_vlan": runtime_vlan,
                     "tenant_vif_port_id": vif_id,
+                    "os_lldp": os_lldp,
                 })
     except Exception as e:
         logger.info("OpenStack: runtime NIC enrichment skipped: %s", e)

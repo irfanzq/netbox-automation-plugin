@@ -54,7 +54,7 @@ def build_maas_netbox_interface_audit(
     """
     Line-by-line MAAS NIC vs NetBox interface (match by MAC). One entry per matched hostname.
 
-    netbox_ifaces: hostname -> list of {name, mac, ips, mgmt_only}
+    netbox_ifaces: hostname -> list of {name, mac, ips, mgmt_only, peer_summary, nb_site, nb_location, ...}
     netbox_audit: hostname -> {site_slug, location_name, ...} for per-device context columns.
     maas_iface_filter: optional (machine_dict, iface_dict) -> bool; False drops the MAAS NIC from
         this audit. Default from views keeps only interfaces with a MAC (L2 identity for NB match).
@@ -387,6 +387,22 @@ def _openstack_fip_by_fixed_ip(openstack_data: Optional[dict]) -> Dict[str, list
     return m
 
 
+def _os_region_for_matched_host(openstack_data: Optional[dict], hostname: str, osr: dict) -> str:
+    """Catalog region for drift rows (runtime BMC, else any runtime NIC, else merged default)."""
+    reg = str((osr or {}).get("os_region") or "").strip()
+    if reg:
+        return reg[:48]
+    h_lower = (hostname or "").strip().lower()
+    for nic in (openstack_data or {}).get("runtime_nics") or []:
+        if (nic.get("hostname") or "").strip().lower() != h_lower:
+            continue
+        r = str(nic.get("os_region") or "").strip()
+        if r:
+            return r[:48]
+    top = str((openstack_data or {}).get("openstack_region_name") or "").strip()
+    return (top[:48] if top else "—")
+
+
 def build_maas_netbox_matched_rows(
     maas_data: dict, netbox_audit: dict, openstack_data: Optional[dict] = None
 ):
@@ -471,6 +487,7 @@ def build_maas_netbox_matched_rows(
             "netbox_vrf": nb.get("vrf_name") or "Global",
             "netbox_vlans": nb.get("vlan_vids_summary") or "—",
             "openstack_fip": os_fip or "—",
+            "os_region": _os_region_for_matched_host(openstack_data, h, osr),
             "os_authority": os_authority,
             "os_provision_state": os_prov or "—",
             "os_power_state": os_power or "—",

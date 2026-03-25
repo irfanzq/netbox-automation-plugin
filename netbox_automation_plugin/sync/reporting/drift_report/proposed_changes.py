@@ -23,9 +23,115 @@ from netbox_automation_plugin.sync.reporting.drift_report.proposed_nic_drift imp
     _build_review_serial_rows,
     _build_update_nic_rows,
 )
+from netbox_automation_plugin.sync.reporting.drift_report.proposed_lldp_tables import (
+    build_lldp_drift_rows,
+)
 from netbox_automation_plugin.sync.reporting.drift_report.proposed_nic_helpers import (
     _build_add_nb_interface_rows,
 )
+
+
+def _friendly_neutron_owners_line(owners: str) -> str:
+    """Turn OpenStack top_owners like 'compute:nova:62, network:dhcp:3' into plain language."""
+    o = (owners or "").strip()
+    if not o or o == "-":
+        return ""
+    labels = {
+        "compute:nova": "VM NICs (Nova)",
+        "network:dhcp": "DHCP",
+        "network:router_interface": "router link ports",
+        "network:router_gateway": "internet gateway ports",
+        "network:floatingip": "floating IP ports",
+        "baremetal:none": "bare metal (Ironic)",
+    }
+    pieces = []
+    for part in [p.strip() for p in o.split(",") if p.strip()][:3]:
+        segs = part.split(":")
+        if len(segs) < 2:
+            continue
+        try:
+            n = int(segs[-1])
+        except ValueError:
+            continue
+        key = ":".join(segs[:-1]).lower()
+        label = labels.get(key, key.replace("_", " ").replace(":", " "))
+        pieces.append(f"{label} ×{n}")
+    if not pieces:
+        return ""
+    return "Port mix: " + ", ".join(pieces) + "."
+
+
+def _friendly_prefix_role_summary(bucket: str, confidence: str, ports_total: int, owners: str) -> str:
+    """Short, non-technical explanation for the proposed prefix role (HTML/XLSX)."""
+    btxt = {
+        "vm": "This looks like a normal tenant VM network.",
+        "public": "This looks like a public or provider-external network.",
+        "storage": "This looks storage-heavy (many storage-style instance names).",
+        "admin": "This looks like an internal or admin-style network (DHCP/routers/services, not mainly VMs).",
+    }.get((bucket or "").lower(), "Subnet type could not be summarized.")
+
+    ctx = {
+        "high": "We are fairly sure based on live OpenStack data.",
+        "medium": "Reasonable default from OpenStack—verify if the role matters for your process.",
+        "low": "Low certainty—treat the suggested role as a draft until you confirm.",
+    }.get((confidence or "low").strip().lower(), "Certainty is limited.")
+
+    if ports_total <= 0:
+        port_bit = "No Neutron ports were counted for this subnet in the scan."
+    else:
+        port_bit = f"We counted {ports_total} Neutron port(s) on this subnet."
+
+    extra = _friendly_neutron_owners_line(owners)
+    return " ".join(x for x in (btxt, ctx, port_bit, extra) if x).strip()
+
+
+def _openstack_ironic_bmc_row(openstack_data, hostname: str) -> dict | None:
+    if not openstack_data or openstack_data.get("error"):
+        return None
+    h = (hostname or "").strip().lower()
+    if not h:
+        return None
+    for row in openstack_data.get("runtime_bmc") or []:
+        if (row.get("hostname") or "").strip().lower() == h:
+            return row
+    return None
+
+
+def _maas_only_host_openstack_columns(openstack_data, hostname: str) -> tuple[str, str, str, str]:
+    """
+    For MAAS-only new-device rows: Ironic lifecycle + catalog region when available.
+    Returns: (os_region, os_provision, os_power, os_maintenance).
+    Region falls back to any runtime NIC row, then merged openstack_region_name.
+    Lifecycle fields are only filled when an Ironic (runtime_bmc) row exists for the host.
+    """
+    dash = "—"
+    osr = _openstack_ironic_bmc_row(openstack_data, hostname)
+    if not openstack_data or openstack_data.get("error"):
+        return dash, dash, dash, dash
+
+    h = (hostname or "").strip().lower()
+    region = dash
+    if osr:
+        region = str(osr.get("os_region") or "").strip() or region
+    if region == dash and h:
+        for nic in openstack_data.get("runtime_nics") or []:
+            if (nic.get("hostname") or "").strip().lower() != h:
+                continue
+            r = str(nic.get("os_region") or "").strip()
+            if r:
+                region = r[:48]
+                break
+    if region == dash:
+        top = str(openstack_data.get("openstack_region_name") or "").strip()
+        region = top[:48] if top else dash
+
+    if not osr:
+        return region, dash, dash, dash
+
+    prov = str(osr.get("provision_state") or "").strip().lower() or dash
+    pwr = str(osr.get("power_state") or "").strip().lower() or dash
+    maint = "true" if osr.get("maintenance") else "false"
+    return region[:48], prov, pwr, maint
 
 
 def _proposed_changes_rows(
@@ -49,12 +155,17 @@ def _proposed_changes_rows(
         confidence = (g.get("consumer_confidence") or "").strip().lower() or "low"
         ports_total = int(g.get("consumer_ports_total") or 0)
         owners = str(g.get("consumer_top_owners") or "-").strip()
-        reason = (
-            str(g.get("consumer_role_reason") or "").strip()
-            or "consumer data unavailable; manual role review required"
-        )
         if bucket not in {"public", "storage", "vm", "admin"}:
-            return "REVIEW_REQUIRED", f"no reliable consumer bucket (owners: {owners})"
+            tail = ""
+            if ports_total or (owners and owners != "-"):
+                tail = f" ({ports_total} ports; top owners: {owners})"
+            return (
+                "REVIEW_REQUIRED",
+                "OpenStack could not auto-sort this subnet into VM / public / storage / admin from port data. "
+                "Pick a NetBox role manually after checking the network in OpenStack." + tail,
+            )
+
+        summary = _friendly_prefix_role_summary(bucket, confidence, ports_total, owners)
 
         wanted_tokens = {
             "public": ("openstack", "public"),
@@ -78,14 +189,14 @@ def _proposed_changes_rows(
         ranked = sorted((r for r in roles), key=_score_role, reverse=True)
         if ranked and _score_role(ranked[0]) > 0:
             role = ranked[0].get("name") or ranked[0].get("slug") or "—"
-            return role, f"{reason}; confidence={confidence}; ports={ports_total}; owners={owners}"
+            return role, summary
         fallback_name = {
             "public": "OpenStack Public",
             "storage": "OpenStack Storage",
             "vm": "OpenStack VM",
             "admin": "OpenStack Admin",
         }.get(bucket, "OpenStack VM")
-        return fallback_name, f"{reason}; confidence={confidence}; ports={ports_total}; owners={owners}"
+        return fallback_name, summary
 
     def _cidr_start_end(cidr: str) -> tuple[str, str]:
         try:
@@ -97,13 +208,16 @@ def _proposed_changes_rows(
             return "-", "-"
 
     def _suggest_prefix_status(g: dict) -> str:
+        """
+        Suggested NetBox Prefix status for Detail — new prefixes rows.
+        - reserved: zero Neutron ports counted for this subnet in the scan (unused, API gap, or not visible).
+        - active: one or more ports seen (subnet in use in OpenStack).
+        Role confidence belongs in Role reason only; never use deprecated here for "low confidence."
+        """
         ports_total = int(g.get("consumer_ports_total") or 0)
-        conf = str(g.get("consumer_confidence") or "").strip().lower()
         if ports_total <= 0:
             return "reserved"
-        if conf in {"high", "medium"}:
-            return "active"
-        return "deprecated"
+        return "active"
 
     """Build user-friendly proposed change buckets (preview only)."""
     try:
@@ -149,30 +263,290 @@ def _proposed_changes_rows(
 
     _vrf_lookup_v4, _vrf_lookup_v6 = _build_vrf_lookup()
 
-    def _suggest_vrf_for_ip(ip_text: str, *, context: str = "") -> str:
+    def _build_ipaddress_subnet_vrf_votes():
+        """
+        One pass over NetBox IPAddress rows: bucket by /24 (IPv4) or /64 (IPv6),
+        tally VRF from each assignment (fallback when prefix data is thin).
+        """
+        from collections import Counter, defaultdict
+
+        try:
+            from ipam.models import IPAddress
+        except Exception:
+            return {}
+
+        votes: dict[str, Counter] = defaultdict(Counter)
+        try:
+            for row in IPAddress.objects.select_related("vrf").only(
+                "address", "vrf_id", "vrf__name"
+            ).iterator(chunk_size=4000):
+                addr_val = getattr(row, "address", None)
+                if addr_val is None:
+                    continue
+                s = str(addr_val).strip()
+                host = s.split("/", 1)[0].strip() if "/" in s else s
+                try:
+                    import ipaddress
+
+                    ip_o = ipaddress.ip_address(host)
+                except Exception:
+                    continue
+                if ip_o.version == 4:
+                    net = ipaddress.ip_network(f"{ip_o}/24", strict=False)
+                else:
+                    net = ipaddress.ip_network(f"{ip_o}/64", strict=False)
+                key = str(net)
+                vrf_raw = "Global"
+                try:
+                    if getattr(row, "vrf_id", None) and row.vrf:
+                        vrf_raw = (row.vrf.name or "Global").strip() or "Global"
+                except Exception:
+                    vrf_raw = "Global"
+                votes[key][vrf_raw] += 1
+        except Exception:
+            return {}
+        return dict(votes)
+
+    _ip_subnet_vrf_votes = _build_ipaddress_subnet_vrf_votes()
+
+    def _vrf_plurality_from_counter(ct):
+        """Require either unanimous pair or 3+ assignments with a strict plurality."""
+        from collections import Counter
+
+        if not isinstance(ct, Counter) or not ct:
+            return None
+        total = sum(ct.values())
+        if total < 2:
+            return None
+        ranked = ct.most_common()
+        v1, n1 = ranked[0]
+        n2 = ranked[1][1] if len(ranked) > 1 else 0
+        if total >= 2 and n1 == total:
+            return v1
+        if total < 3:
+            return None
+        if n1 > n2:
+            return v1
+        return None
+
+    def _adjacent_subnet_keys_v4(ip_obj):
+        import ipaddress
+
+        ip_int = int(ip_obj)
+        center = ip_int & 0xFFFFFF00
+        keys = []
+        for delta in (-256, 0, 256):
+            n = center + delta
+            if n < 0 or n > 0xFFFFFFFF:
+                continue
+            keys.append(str(ipaddress.ip_network((n, 24))))
+        return keys
+
+    def _adjacent_subnet_keys_v6(ip_obj):
+        import ipaddress
+
+        ip_int = int(ip_obj)
+        step = 1 << 64
+        center = (ip_int // step) * step
+        keys = []
+        for delta in (-step, 0, step):
+            v = center + delta
+            if v < 0:
+                continue
+            try:
+                keys.append(str(ipaddress.ip_network((ipaddress.IPv6Address(v), 64))))
+            except Exception:
+                continue
+        return keys
+
+    def _vrf_from_neighbor_ipaddresses(ip_obj):
+        """
+        Derive VRF from existing IPAddress objects in the same /24 (v4) or /64 (v6),
+        merging the center subnet with immediately adjacent subnets so sparse segments
+        can still reach 3+ samples when neighboring networks share the same routed context.
+        """
+        from collections import Counter
+
+        merged = Counter()
+        if ip_obj.version == 4:
+            key_fn = _adjacent_subnet_keys_v4
+        else:
+            key_fn = _adjacent_subnet_keys_v6
+        for k in key_fn(ip_obj):
+            merged.update(_ip_subnet_vrf_votes.get(k, Counter()))
+        picked = _vrf_plurality_from_counter(merged)
+        return picked
+
+    def _narrowest_containing_prefix_net(ip_obj):
+        """Most specific NetBox prefix network containing ip_obj (IPv4Network / IPv6Network), or None."""
+        rows = _vrf_lookup_v4 if ip_obj.version == 4 else _vrf_lookup_v6
+        best_net = None
+        best_pl = -1
+        for net, _ in rows:
+            if ip_obj not in net:
+                continue
+            pl = int(net.prefixlen)
+            if pl > best_pl:
+                best_pl = pl
+                best_net = net
+        return best_net
+
+    def _vrf_from_longest_containing_prefix(ip_obj):
+        """
+        Most specific NetBox prefix that contains this IP (e.g. /25 wins over /22); uses that prefix's VRF.
+        """
+        from collections import Counter
+
+        rows = _vrf_lookup_v4 if ip_obj.version == 4 else _vrf_lookup_v6
+        best_pl = -1
+        at_best = []
+        for net, vrf_name in rows:
+            if ip_obj not in net:
+                continue
+            pl = int(net.prefixlen)
+            v = (vrf_name or "Global").strip() or "Global"
+            if pl > best_pl:
+                best_pl = pl
+                at_best = [v]
+            elif pl == best_pl:
+                at_best.append(v)
+        if best_pl < 0:
+            return None
+        return Counter(at_best).most_common(1)[0][0]
+
+    def _netbox_ipaddress_vrf_for_host(ip_o):
+        """VRF on the NetBox IPAddress row for this host, if any (/32 or /128 or host/prefix)."""
+        try:
+            import netaddr as na
+            from ipam.models import IPAddress
+        except Exception:
+            return None
+        host = str(ip_o)
+        try:
+            na_net = na.IPNetwork(f"{host}/32" if ip_o.version == 4 else f"{host}/128")
+        except Exception:
+            return None
+        row = None
+        try:
+            row = IPAddress.objects.select_related("vrf").filter(address=str(na_net)).first()
+        except Exception:
+            pass
+        if row is None:
+            try:
+                row = IPAddress.objects.select_related("vrf").filter(address=na_net).first()
+            except Exception:
+                row = None
+        if row is None:
+            try:
+                row = IPAddress.objects.select_related("vrf").filter(address__startswith=f"{host}/").first()
+            except Exception:
+                row = None
+        if not row:
+            return None
+        try:
+            if getattr(row, "vrf_id", None) and row.vrf:
+                return (row.vrf.name or "Global").strip() or "Global"
+        except Exception:
+            return "Global"
+        return "Global"
+
+    def _host_offsets_scan_v4(max_step: int):
+        """Prefer lower neighbors first (.228 → .227, .226, …) then upward, as deployed ranges often cluster."""
+        for d in range(-1, -max_step - 1, -1):
+            yield d
+        for d in range(1, max_step + 1):
+            yield d
+
+    def _host_offsets_scan_v6(max_step: int):
+        for d in range(-1, -max_step - 1, -1):
+            yield d
+        for d in range(1, max_step + 1):
+            yield d
+
+    def _vrf_from_closest_netbox_ipaddresses(ip_obj, *, max_step: int = 24):
+        """
+        Walk numerically adjacent hosts (existing NetBox IPAddress rows), closest first.
+        Neighbors must lie in the same narrowest NetBox prefix as ip_obj when that exists (e.g. stay in /25).
+        Uses strict plurality when 2+ samples; a single existing neighbor still returns its VRF.
+        """
+        import ipaddress
+
+        from collections import Counter
+
+        boundary = _narrowest_containing_prefix_net(ip_obj)
+        scanned = []
+        if ip_obj.version == 4:
+            gen = _host_offsets_scan_v4(max_step)
+            vmax = 0xFFFFFFFF
+        else:
+            gen = _host_offsets_scan_v6(max_step)
+            vmax = None
+        for d in gen:
+            try:
+                n_int = int(ip_obj) + d
+                if n_int < 0:
+                    continue
+                if vmax is not None and n_int > vmax:
+                    continue
+                n_ip = ipaddress.ip_address(n_int)
+                if boundary is not None and n_ip not in boundary:
+                    continue
+            except Exception:
+                continue
+            vrf = _netbox_ipaddress_vrf_for_host(n_ip)
+            if vrf is None:
+                continue
+            scanned.append(vrf)
+            if len(scanned) >= 12:
+                break
+        if not scanned:
+            return None
+        if len(scanned) == 1:
+            return scanned[0]
+        c = Counter(scanned)
+        v1, n1 = c.most_common(1)[0]
+        n2 = c.most_common(2)[1][1] if len(c) > 1 else 0
+        if n1 > n2:
+            return v1
+        return None
+
+    def _suggest_vrf_for_ip(ip_text: str) -> str:
         try:
             import ipaddress
 
             ip_obj = ipaddress.ip_address((ip_text or "").strip())
         except Exception:
             return "Global"
-        rows = _vrf_lookup_v4 if ip_obj.version == 4 else _vrf_lookup_v6
-        for net, vrf_name in rows:
-            if ip_obj in net:
-                return vrf_name or "Global"
-        # Fallback: map by context tokens to existing NetBox VRF names.
-        ctx = (context or "").lower()
-        vrfs = [str(v.get("name") or "").strip() for v in (netbox_data.get("vrfs") or []) if str(v.get("name") or "").strip()]
-        def _pick(token: str):
-            for n in vrfs:
-                if token in n.lower():
-                    return n
-            return ""
-        if any(t in ctx for t in ("bgp", "wan", "transit", "external")):
-            picked = _pick("bgp") or _pick("wan")
-            if picked:
-                return picked
+        lpm = _vrf_from_longest_containing_prefix(ip_obj)
+        if lpm and lpm.lower() != "global":
+            return lpm
+        near = _vrf_from_closest_netbox_ipaddresses(ip_obj)
+        if near:
+            return near
+        if lpm:
+            return lpm
+        nbr = _vrf_from_neighbor_ipaddresses(ip_obj)
+        if nbr:
+            return nbr
         return "Global"
+
+    def _suggest_vrf_for_floating_ip_gap(g: dict) -> str:
+        """
+        Proposed FIP row VRF: prefer fixed (inside) IP. Each address uses the most specific
+        containing NetBox prefix, then numerically adjacent NetBox IP hosts (e.g. .228→.227…),
+        then /24±1 bucket voting as last resort.
+        """
+        fip = str(g.get("floating_ip") or "").strip()
+        fixed = str(g.get("fixed_ip_address") or "").strip()
+        if fixed in {"", "-"}:
+            fixed = ""
+        vrf_pub = _suggest_vrf_for_ip(fip) if fip else "Global"
+        if not fixed:
+            return vrf_pub
+        vrf_fix = _suggest_vrf_for_ip(fixed)
+        if vrf_fix != "Global":
+            return vrf_fix
+        return vrf_pub
 
     def _primary_mac_from_maas(ifaces):
         rows = [r for r in (ifaces or []) if str(r.get("mac") or "").strip()]
@@ -289,12 +663,17 @@ def _proposed_changes_rows(
         is_candidate, note, status_rank = _new_device_candidate_policy(
             m, nic_count, vendor=mvendor, product=mproduct
         )
+        os_reg, os_prov, os_pow, os_maint = _maas_only_host_openstack_columns(
+            openstack_data, h
+        )
+        # Ironic provision_state active ⇒ trust OpenStack for lifecycle on this row (else MAAS discovery).
+        authority_badge = "[OS]" if os_prov == "active" else "[MAAS]"
         tail = [
             power_type,
             bmc_present,
             str(nic_count),
             primary_mac,
-            "[MAAS]",
+            authority_badge,
             ("maas-discovered" if is_candidate else "review-only"),
             (
                 "CREATE_NETBOX_DEVICE_AND_PORTS"
@@ -307,6 +686,10 @@ def _proposed_changes_rows(
             nb_region,
             nb_site,
             nb_loc,
+            os_reg,
+            os_prov,
+            os_pow,
+            os_maint,
             nb_dtype,
             nb_role,
             maas_fabric_disp,
@@ -351,12 +734,7 @@ def _proposed_changes_rows(
     for g in (os_floating_gaps or []):
         fip = g.get("floating_ip", "")
         fip_name = g.get("floating_subnet_name") or g.get("floating_network_name") or "-"
-        vrf_ctx = " ".join([
-            str(g.get("floating_network_name") or ""),
-            str(g.get("floating_subnet_name") or ""),
-            str(g.get("project_name") or ""),
-        ])
-        nb_vrf = _suggest_vrf_for_ip(fip, context=vrf_ctx)
+        nb_vrf = _suggest_vrf_for_floating_ip_gap(g)
         nb_status = "active" if str(g.get("port_id") or "").strip() else "reserved"
         add_fips.append([
             g.get("os_region") or "—",
@@ -367,18 +745,21 @@ def _proposed_changes_rows(
             nb_status,
             "VIP",
             nb_vrf,
-            "OpenStack floating IP semantics + NetBox prefix/VRF context",
+            "NetBox VRF: longest matching prefix, else adjacent host IPs in IPAM, else subnet bucket; fixed IP first",
             "CREATE_NETBOX_IPADDRESS_FROM_OS_FIP",
         ])
 
     update_nic = _build_update_nic_rows(interface_audit)
     review_serial = _build_review_serial_rows(matched_rows)
+    lldp_new, lldp_update = build_lldp_drift_rows(openstack_data, netbox_ifaces)
 
     return {
         "add_devices": add_devices,
         "add_devices_review_only": add_devices_review_only,
         "add_prefixes": add_prefixes,
         "add_fips": add_fips,
+        "lldp_new": lldp_new,
+        "lldp_update": lldp_update,
         "update_nic": update_nic,
         "add_nb_interfaces": add_nb_interfaces,
         "add_mgmt_iface": add_mgmt_iface,

@@ -105,6 +105,7 @@ def emit_drift_counts_and_alignment(
                 "MAAS fabric",
                 "NetBox site",
                 "NetBox location",
+                "OS region",
                 "Authority",
                 "OS provision",
                 "OS power",
@@ -115,6 +116,6 @@ def emit_drift_counts_and_alignment(
             ],
             align_rows,
             dynamic_columns=True,
-            notes_col_idx=10,
+            notes_col_idx=11,
             wrap_max_width=None,
         )

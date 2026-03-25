@@ -82,6 +82,7 @@ def _alignment_review_rows(matched_rows):
                 _select_alignment_fabric(r.get("maas_fabric"), r.get("netbox_location")),
                 r.get("netbox_site") or "—",
                 r.get("netbox_location") or "—",
+                str(r.get("os_region") or "").strip() or "—",
                 "[OS]" if str(r.get("os_authority") or "") == "openstack_runtime" else "[MAAS]",
                 r.get("os_provision_state") or "—",
                 r.get("os_power_state") or "—",

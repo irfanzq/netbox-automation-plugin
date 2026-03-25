@@ -34,6 +34,10 @@ def emit_proposed_change_tables(e, prop):
                 "NB region",
                 "NB site",
                 "NB location",
+                "OS region",
+                "OS provision",
+                "OS power",
+                "OS maintenance",
                 "NetBox device type",
                 "NetBox role",
                 "MAAS fabric",
@@ -62,6 +66,10 @@ def emit_proposed_change_tables(e, prop):
                 "NB region",
                 "NB site",
                 "NB location",
+                "OS region",
+                "OS provision",
+                "OS power",
+                "OS maintenance",
                 "NetBox device type",
                 "NetBox role",
                 "MAAS fabric",
@@ -82,7 +90,11 @@ def emit_proposed_change_tables(e, prop):
     if prop["add_prefixes"]:
         e.spacer()
         e.subtitle("Detail — new prefixes")
-        e.paragraph("Use each row as NetBox Prefix create input (CIDR + OpenStack network/project context).")
+        e.paragraph(
+            "Use each row as NetBox Prefix create input (CIDR + OpenStack network/project context). "
+            "NB status: reserved when no Neutron ports were counted on that subnet in this scan; "
+            "active when at least one port was seen (role certainty is only in Role reason)."
+        )
         e.spacer()
         e.table(
             [
@@ -131,6 +143,16 @@ def emit_proposed_change_tables(e, prop):
         [
             ["New NICs in NetBox", str(len(prop["add_nb_interfaces"])), "Runtime/MAAS fallback interface not modeled in NetBox"],
             ["NIC drift", str(len(prop["update_nic"])), "Runtime authority (OS first, MAAS fallback) differs from NetBox"],
+            [
+                "LLDP / Ironic local link (new in NetBox)",
+                str(len(prop.get("lldp_new") or [])),
+                "OS has local_link; NetBox interface has no peer/cable summary",
+            ],
+            [
+                "LLDP / Ironic local link (update NetBox)",
+                str(len(prop.get("lldp_update") or [])),
+                "NetBox peer summary differs from Ironic local_link",
+            ],
             [
                 "BMC / OOB",
                 str(len(prop["add_mgmt_iface"]) + len(prop.get("add_mgmt_iface_new_devices", []))),
@@ -215,6 +237,51 @@ def emit_proposed_change_tables(e, prop):
                 wrap_max_width=None,
             )
 
+    if prop.get("lldp_new"):
+        e.spacer()
+        e.subtitle("Detail — LLDP / Ironic local link (new in NetBox)")
+        e.paragraph(
+            "Ironic reports switch/port per MAC (typically from inspection LLDP). NetBox has the interface "
+            "but no cable/peer text yet — document cabling or description to match OpenStack."
+        )
+        e.spacer()
+        e.table(
+            [
+                "Host",
+                "OS region",
+                "OS MAC",
+                "OS LLDP (Ironic local link)",
+                "Proposed action",
+            ],
+            prop["lldp_new"],
+            dynamic_columns=True,
+            wrap_max_width=None,
+        )
+    if prop.get("lldp_update"):
+        e.spacer()
+        e.subtitle("Detail — LLDP / Ironic local link (update NetBox)")
+        e.paragraph(
+            "NetBox already records a peer/cable summary for this MAC, but it does not match Ironic local_link."
+        )
+        e.spacer()
+        e.table(
+            [
+                "Host",
+                "OS region",
+                "NB site",
+                "NB location",
+                "NB interface",
+                "NB MAC",
+                "NB LLDP / peer (current)",
+                "OS MAC",
+                "OS LLDP (Ironic local link)",
+                "Proposed change",
+            ],
+            prop["lldp_update"],
+            dynamic_columns=True,
+            wrap_max_width=None,
+        )
+
     if prop.get("add_mgmt_iface_new_devices"):
         e.spacer()
         e.subtitle("Detail — new BMC / OOB interfaces")
@@ -291,6 +358,7 @@ def emit_proposed_change_tables(e, prop):
     e.spacer()
     total_props = (
         len(prop["add_devices"]) + len(prop["add_prefixes"]) + len(prop["add_fips"]) +
+        len(prop.get("lldp_new") or []) + len(prop.get("lldp_update") or []) +
         len(prop["update_nic"]) + len(prop["add_nb_interfaces"]) +
         len(prop["add_mgmt_iface"]) + len(prop.get("add_mgmt_iface_new_devices", [])) +
         len(prop["review_serial"])
@@ -301,8 +369,10 @@ def emit_proposed_change_tables(e, prop):
             ["New devices", str(len(prop["add_devices"]))],
             ["New prefixes", str(len(prop["add_prefixes"]))],
             ["New floating IPs", str(len(prop["add_fips"]))],
-            ["NIC drift", str(len(prop["update_nic"]))],
             ["New NICs", str(len(prop["add_nb_interfaces"]))],
+            ["NIC drift", str(len(prop["update_nic"]))],
+            ["LLDP new (NetBox)", str(len(prop.get("lldp_new") or []))],
+            ["LLDP update (NetBox)", str(len(prop.get("lldp_update") or []))],
             ["BMC / OOB", str(len(prop["add_mgmt_iface"]) + len(prop.get("add_mgmt_iface_new_devices", [])))],
             ["Serials (review)", str(len(prop["review_serial"]))],
             ["Total", str(total_props)],

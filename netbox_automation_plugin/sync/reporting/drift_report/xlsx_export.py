@@ -196,6 +196,11 @@ def build_drift_report_xlsx(
                 "MAAS fabric",
                 "NetBox site",
                 "NetBox location",
+                "OS region",
+                "Authority",
+                "OS provision",
+                "OS power",
+                "OS maintenance",
                 "MAAS state",
                 "NB state",
                 "Alignment issues",
@@ -213,6 +218,7 @@ def build_drift_report_xlsx(
         matched_rows,
         os_subnet_gaps or [],
         os_floating_gaps or [],
+        openstack_data=openstack_data,
         netbox_ifaces=netbox_ifaces,
     )
     ws_sum.append([])
@@ -222,6 +228,8 @@ def build_drift_report_xlsx(
         len(prop["add_devices"])
         + len(prop["add_prefixes"])
         + len(prop["add_fips"])
+        + len(prop.get("lldp_new") or [])
+        + len(prop.get("lldp_update") or [])
         + len(prop["update_nic"])
         + len(prop["add_nb_interfaces"])
         + len(prop["add_mgmt_iface"])
@@ -232,8 +240,10 @@ def build_drift_report_xlsx(
     ws_sum.append(["Review-only MAAS-only hosts", str(len(prop.get("add_devices_review_only", [])))])
     ws_sum.append(["New prefixes", str(len(prop["add_prefixes"]))])
     ws_sum.append(["New floating IPs", str(len(prop["add_fips"]))])
-    ws_sum.append(["NIC drift", str(len(prop["update_nic"]))])
     ws_sum.append(["New NICs", str(len(prop["add_nb_interfaces"]))])
+    ws_sum.append(["NIC drift", str(len(prop["update_nic"]))])
+    ws_sum.append(["LLDP / Ironic local link (new in NetBox)", str(len(prop.get("lldp_new") or []))])
+    ws_sum.append(["LLDP / Ironic local link (update NetBox)", str(len(prop.get("lldp_update") or []))])
     ws_sum.append(["BMC / OOB", str(len(prop["add_mgmt_iface"]) + len(prop.get("add_mgmt_iface_new_devices", [])))])
     ws_sum.append(["Serials (review)", str(len(prop["review_serial"]))])
     ws_sum.append(["Total", str(total_props_x)])
@@ -250,15 +260,19 @@ def build_drift_report_xlsx(
     ws_prop.append(["Review-only MAAS-only hosts", len(prop.get("add_devices_review_only", []))])
     ws_prop.append(["New prefixes (OpenStack authority)", len(prop["add_prefixes"])])
     ws_prop.append(["New floating IPs (OpenStack authority)", len(prop["add_fips"])])
-    ws_prop.append(["NIC drift", len(prop["update_nic"])])
     ws_prop.append(["New NICs", len(prop["add_nb_interfaces"])])
+    ws_prop.append(["NIC drift", len(prop["update_nic"])])
+    ws_prop.append(["LLDP / Ironic local link (new in NetBox)", len(prop.get("lldp_new") or [])])
+    ws_prop.append(["LLDP / Ironic local link (update NetBox)", len(prop.get("lldp_update") or [])])
     ws_prop.append(["BMC / OOB", len(prop["add_mgmt_iface"]) + len(prop.get("add_mgmt_iface_new_devices", []))])
     ws_prop.append(["Serials (review)", len(prop["review_serial"])])
 
-    def _append_block(title, headers, rows):
+    def _append_block(title, headers, rows, *, note=None):
         ws_prop.append([])
         ws_prop.append([title])
         ws_prop.cell(row=ws_prop.max_row, column=1).font = header_font
+        if note:
+            ws_prop.append([note])
         _append_header(ws_prop, headers)
         for row in rows:
             ws_prop.append(list(row))
@@ -270,6 +284,10 @@ def build_drift_report_xlsx(
             "NB region",
             "NB site",
             "NB location",
+            "OS region",
+            "OS provision",
+            "OS power",
+            "OS maintenance",
             "NetBox device type",
             "NetBox role",
             "MAAS fabric",
@@ -293,6 +311,10 @@ def build_drift_report_xlsx(
             "NB region",
             "NB site",
             "NB location",
+            "OS region",
+            "OS provision",
+            "OS power",
+            "OS maintenance",
             "NetBox device type",
             "NetBox role",
             "MAAS fabric",
@@ -323,6 +345,10 @@ def build_drift_report_xlsx(
             "Proposed Action",
         ],
         prop["add_prefixes"],
+        note=(
+            "NB status: reserved when no Neutron ports were counted on that subnet in this scan; "
+            "active when at least one port was seen (role certainty is only in Role reason)."
+        ),
     )
     _append_block(
         "A) New floating IPs",
@@ -386,6 +412,39 @@ def build_drift_report_xlsx(
         ],
         prop["update_nic"],
     )
+    if prop.get("lldp_new"):
+        _append_block(
+            "B) LLDP / Ironic local link (new in NetBox)",
+            [
+                "Host",
+                "OS region",
+                "OS MAC",
+                "OS LLDP (Ironic local link)",
+                "Proposed action",
+            ],
+            prop["lldp_new"],
+            note=(
+                "Ironic local_link_connection per MAC (often from inspection LLDP). NetBox interface exists "
+                "but peer_summary / cabling text is empty."
+            ),
+        )
+    if prop.get("lldp_update"):
+        _append_block(
+            "B) LLDP / Ironic local link (update NetBox)",
+            [
+                "Host",
+                "OS region",
+                "NB site",
+                "NB location",
+                "NB interface",
+                "NB MAC",
+                "NB LLDP / peer (current)",
+                "OS MAC",
+                "OS LLDP (Ironic local link)",
+                "Proposed change",
+            ],
+            prop["lldp_update"],
+        )
     _append_block(
         "B) BMC / OOB",
         [

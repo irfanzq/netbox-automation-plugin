@@ -262,10 +262,71 @@ def fetch_netbox_audit_detail_for_names(names: set):
     return out
 
 
+def _interface_peer_summary(iface) -> str:
+    """
+    Best-effort description of what this interface is cabled to (NetBox versions differ).
+    """
+    parts: list[str] = []
+
+    def _add_remote(remote) -> None:
+        if remote is None:
+            return
+        dev = getattr(remote, "device", None)
+        dn = (getattr(dev, "name", None) or "").strip() if dev is not None else ""
+        inm = (getattr(remote, "name", None) or "").strip()
+        if dn or inm:
+            parts.append(f"{dn}:{inm}".strip(":"))
+
+    try:
+        eps = getattr(iface, "connected_endpoints", None)
+        if callable(eps):
+            eps = eps()
+        if eps is None:
+            eps = []
+        if eps and not isinstance(eps, (list, tuple)):
+            eps = [eps]
+        for ep in eps:
+            _add_remote(ep)
+    except Exception:
+        pass
+
+    if not parts:
+        try:
+            lps = getattr(iface, "link_peers", None)
+            if lps:
+                if not isinstance(lps, (list, tuple)):
+                    lps = [lps]
+                for lp in lps:
+                    parent = getattr(lp, "parent_object", None)
+                    dn = (getattr(parent, "name", None) or "").strip() if parent is not None else ""
+                    inm = (getattr(lp, "name", None) or "").strip()
+                    if dn or inm:
+                        parts.append(f"{dn}:{inm}".strip(":"))
+        except Exception:
+            pass
+
+    if parts:
+        return " | ".join(dict.fromkeys(parts))
+
+    try:
+        cab = getattr(iface, "cable", None)
+        if cab is not None:
+            cid = getattr(cab, "pk", None) or getattr(cab, "id", None)
+            if cid:
+                return f"cable #{cid}"
+            return "cabled"
+    except Exception:
+        pass
+    return ""
+
+
 def fetch_netbox_interfaces_for_names(names: set):
     """
     Per-device interfaces for MAAS-matched hostnames.
-    Returns: device_name -> [{name, mac, ips: [host-only str], mgmt_only}]
+    Returns: device_name -> [{
+      name, mac, ips, mgmt_only, untagged_vlan_vid, ip_vrfs,
+      peer_summary, nb_site, nb_location
+    }]
     """
     out = {}
     if not names:
@@ -277,16 +338,36 @@ def fetch_netbox_interfaces_for_names(names: set):
         from ipam.models import IPAddress
 
         names_list = list(names)[:2000]
-        iface_qs = Interface.objects.select_related("untagged_vlan").prefetch_related(
+        iface_qs = Interface.objects.select_related(
+            "untagged_vlan",
+            "cable",
+        ).prefetch_related(
             Prefetch(
                 "ip_addresses",
                 queryset=IPAddress.objects.select_related("vrf"),
             )
         )
-        devices = Device.objects.filter(name__in=names_list).prefetch_related(
-            Prefetch("interfaces", queryset=iface_qs)
+        select_device = ["site"]
+        try:
+            Device._meta.get_field("location")
+            select_device.append("location")
+        except Exception:
+            pass
+        devices = (
+            Device.objects.filter(name__in=names_list)
+            .select_related(*select_device)
+            .prefetch_related(Prefetch("interfaces", queryset=iface_qs))
         )
         for d in devices:
+            site_nm = ""
+            if d.site_id and d.site:
+                site_nm = (d.site.name or d.site.slug or "").strip()
+            loc_nm = ""
+            try:
+                if getattr(d, "location_id", None) and d.location:
+                    loc_nm = (d.location.name or "").strip()
+            except Exception:
+                pass
             lst = []
             for iface in d.interfaces.all():
                 mac = ""
@@ -303,6 +384,7 @@ def fetch_netbox_interfaces_for_names(names: set):
                     ip_vrfs.append(v or "Global")
                 uv = getattr(iface, "untagged_vlan", None)
                 vid = str(uv.vid) if uv and getattr(uv, "vid", None) is not None else ""
+                peer_summary = _interface_peer_summary(iface)
                 lst.append({
                     "name": iface.name or "",
                     "mac": mac,
@@ -310,6 +392,9 @@ def fetch_netbox_interfaces_for_names(names: set):
                     "mgmt_only": bool(getattr(iface, "mgmt_only", False)),
                     "untagged_vlan_vid": vid,
                     "ip_vrfs": ip_vrfs,
+                    "peer_summary": peer_summary,
+                    "nb_site": site_nm,
+                    "nb_location": loc_nm,
                 })
             out[d.name or ""] = lst
     except Exception:
