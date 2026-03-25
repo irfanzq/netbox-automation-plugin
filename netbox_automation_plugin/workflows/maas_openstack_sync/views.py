@@ -373,10 +373,38 @@ def _filter_openstack_by_locations(openstack_data: dict, selected_location_names
         ):
             filtered_fips.append(f)
 
+    filtered_subnet_ids = {str(s.get("id") or "").strip() for s in filtered_subs if s.get("id")}
+    runtime_before = list(openstack_data.get("runtime_nics") or [])
+    bmc_before = list(openstack_data.get("runtime_bmc") or [])
+    sc_before = list(openstack_data.get("subnet_consumers") or [])
+
+    filtered_runtime = [
+        r
+        for r in runtime_before
+        if isinstance(r, dict)
+        and _openstack_runtime_row_matches_locations(r, selected_location_names, matched_net_ids)
+    ]
+    filtered_bmc = [
+        b
+        for b in bmc_before
+        if isinstance(b, dict) and _openstack_bmc_row_matches_locations(b, selected_location_names)
+    ]
+    filtered_sc = [
+        sc
+        for sc in sc_before
+        if isinstance(sc, dict)
+        and (str(sc.get("subnet_id") or "").strip() in filtered_subnet_ids)
+    ]
+
     scoped = dict(openstack_data)
     scoped["networks"] = filtered_nets
     scoped["subnets"] = filtered_subs
     scoped["floating_ips"] = filtered_fips
+    scoped["runtime_nics"] = filtered_runtime
+    scoped["runtime_bmc"] = filtered_bmc
+    scoped["subnet_consumers"] = filtered_sc
+    scoped["openstack_region_name"] = _openstack_regions_from_scoped_payload(scoped)
+
     unmatched_network_names = sorted({
         (n.get("name") or "").strip()
         for n in nets
@@ -389,6 +417,12 @@ def _filter_openstack_by_locations(openstack_data: dict, selected_location_names
         "openstack_networks_after": len(filtered_nets),
         "openstack_subnets_after": len(filtered_subs),
         "openstack_fips_after": len(filtered_fips),
+        "openstack_runtime_nics_before": len(runtime_before),
+        "openstack_runtime_nics_after": len(filtered_runtime),
+        "openstack_runtime_bmc_before": len(bmc_before),
+        "openstack_runtime_bmc_after": len(filtered_bmc),
+        "openstack_subnet_consumers_before": len(sc_before),
+        "openstack_subnet_consumers_after": len(filtered_sc),
         "openstack_unmatched_network_names": unmatched_network_names[:20],
         "openstack_unmatched_network_names_more": max(0, len(unmatched_network_names) - 20),
     }
@@ -405,21 +439,64 @@ def _openstack_scope_tokens_from_netbox(
     selected_sites: set[str],
 ) -> set[str]:
     """
-    Derive coarse OpenStack scope tokens from selected NetBox locations and site slugs.
+    Derive coarse OpenStack scope tokens for which Keystone clouds to query.
+
+    When **locations** are selected, only **location display names** are used. Parent site
+    slugs are intentionally ignored so a site slug like ``birch-*`` does not pull the Birch
+    cloud when the operator only picked Spruce child locations.
+
+    When **no** locations are selected but **sites** are, site slugs are used.
+
     Case-insensitive substring: 'Spruce v2' -> spruce; 'Birch Staging' -> birch.
     """
+    if selected_location_names:
+        strings = selected_location_names
+    else:
+        strings = selected_sites or set()
     tokens: set[str] = set()
-    for loc in selected_location_names or set():
-        low = (loc or "").lower()
-        for t in _OPENSTACK_SCOPE_TOKENS:
-            if t in low:
-                tokens.add(t)
-    for site in selected_sites or set():
-        low = (site or "").lower()
+    for s in strings:
+        low = (s or "").lower()
         for t in _OPENSTACK_SCOPE_TOKENS:
             if t in low:
                 tokens.add(t)
     return tokens
+
+
+def _openstack_runtime_row_matches_locations(
+    row: dict,
+    selected_location_names: set[str],
+    matched_net_ids: set,
+) -> bool:
+    """Keep Ironic runtime NIC rows that belong to the selected NB location scope."""
+    if _text_matches_locations(row.get("hostname") or "", selected_location_names):
+        return True
+    if _text_matches_locations(str(row.get("os_region") or ""), selected_location_names):
+        return True
+    nid = (row.get("network_id") or "").strip()
+    if nid and nid in matched_net_ids:
+        return True
+    return False
+
+
+def _openstack_bmc_row_matches_locations(row: dict, selected_location_names: set[str]) -> bool:
+    if _text_matches_locations(row.get("hostname") or "", selected_location_names):
+        return True
+    if _text_matches_locations(str(row.get("os_region") or ""), selected_location_names):
+        return True
+    return False
+
+
+def _openstack_regions_from_scoped_payload(scoped: dict) -> str:
+    """Recompute merged top-level region label after per-resource filtering."""
+    regs: set[str] = set()
+    for coll in ("networks", "subnets", "floating_ips", "runtime_nics", "runtime_bmc"):
+        for item in scoped.get(coll) or []:
+            if not isinstance(item, dict):
+                continue
+            r = str(item.get("os_region") or "").strip()
+            if r:
+                regs.add(r)
+    return ", ".join(sorted(regs)) if regs else "—"
 
 
 def _filter_openstack_configs_for_drift_scope(
@@ -432,6 +509,7 @@ def _filter_openstack_configs_for_drift_scope(
     - No NetBox site/location selected: use every configured cloud (e.g. birch + spruce).
     - Site/location selected: if names imply birch and/or spruce, only fetch matching
       clouds (by region name or label). If nothing matches, fall back to all clouds.
+      Tokens come from **location names only** when locations are selected (not parent site slugs).
     - Site/location selected but no birch/spruce substring: fetch all clouds (cannot infer).
     """
     if not configs:
