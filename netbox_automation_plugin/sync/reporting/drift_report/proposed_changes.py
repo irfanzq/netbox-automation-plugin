@@ -526,6 +526,43 @@ def _proposed_changes_rows(
             return v1
         return None
 
+    def _vrf_from_seed_hosts_in_subnet(ip_obj):
+        """
+        Probe seeded hosts in the containing subnet before adjacency:
+        first .1-.10, then .11-.20.
+        """
+        import ipaddress
+        from collections import Counter
+
+        boundary = _narrowest_containing_prefix_net(ip_obj)
+        if boundary is None:
+            # Fallback bucket when no prefix contains this IP.
+            boundary = ipaddress.ip_network(
+                f"{ip_obj}/24" if ip_obj.version == 4 else f"{ip_obj}/64",
+                strict=False,
+            )
+
+        net_i = int(boundary.network_address)
+        bcast_i = int(boundary.broadcast_address)
+        for lo, hi in ((1, 10), (11, 20)):
+            votes = []
+            for off in range(lo, hi + 1):
+                addr_i = net_i + off
+                if addr_i >= bcast_i:
+                    break
+                try:
+                    h = ipaddress.ip_address(addr_i)
+                except Exception:
+                    continue
+                if h not in boundary:
+                    continue
+                vrf = _netbox_ipaddress_vrf_for_host(h)
+                if vrf:
+                    votes.append(vrf)
+            if votes:
+                return Counter(votes).most_common(1)[0][0]
+        return None
+
     def _suggest_vrf_for_ip(ip_text: str) -> str:
         try:
             import ipaddress
@@ -548,21 +585,74 @@ def _proposed_changes_rows(
 
     def _suggest_vrf_for_floating_ip_gap(g: dict) -> str:
         """
-        Proposed FIP row VRF: prefer fixed (inside) IP. Each address uses the most specific
-        containing NetBox prefix, then numerically adjacent NetBox IP hosts (e.g. .228→.227…),
-        then /24±1 bucket voting as last resort.
+        Proposed FIP row VRF: prefer floating (public/WAN) IP first.
+        For floating side, probe seeded subnet hosts first (.1-.10, then .11-.20),
+        then fallback to longest-prefix / adjacent / bucket voting.
         """
+        try:
+            import ipaddress
+        except Exception:
+            ipaddress = None
         fip = str(g.get("floating_ip") or "").strip()
         fixed = str(g.get("fixed_ip_address") or "").strip()
         if fixed in {"", "-"}:
             fixed = ""
+        if fip and ipaddress is not None:
+            try:
+                ip_o = ipaddress.ip_address(fip)
+                vrf_seed = _vrf_from_seed_hosts_in_subnet(ip_o)
+                if vrf_seed and vrf_seed != "Global":
+                    return vrf_seed
+            except Exception:
+                pass
         vrf_pub = _suggest_vrf_for_ip(fip) if fip else "Global"
+        if vrf_pub != "Global":
+            return vrf_pub
         if not fixed:
             return vrf_pub
         vrf_fix = _suggest_vrf_for_ip(fixed)
         if vrf_fix != "Global":
             return vrf_fix
         return vrf_pub
+
+    _prefix_vrf_names = [
+        (v.get("name") or "").strip()
+        for v in (netbox_data.get("vrfs") or [])
+        if (v.get("name") or "").strip()
+    ]
+
+    def _suggest_vrf_for_prefix_gap(g: dict, selected_locations: list[str]) -> str:
+        """
+        Suggest VRF from OpenStack-side text first:
+        network/subnet/project/region strings (plus selected location labels for tie-break).
+        """
+        blob = " ".join([
+            str(g.get("network_name") or ""),
+            str(g.get("project_name") or ""),
+            str(g.get("os_region") or ""),
+            str(g.get("cidr") or ""),
+            " ".join(selected_locations or []),
+        ]).lower()
+        if not blob:
+            return "Global"
+
+        # Exact VRF-name substring in OS strings (preferred).
+        for vrf in _prefix_vrf_names:
+            vl = vrf.lower()
+            if vl == "global":
+                continue
+            if vl and vl in blob:
+                return vrf
+
+        # Token fallback: any long VRF token appears in OS strings.
+        for vrf in _prefix_vrf_names:
+            vl = vrf.lower()
+            if vl == "global":
+                continue
+            tokens = [t for t in vl.replace("-", " ").replace("_", " ").split() if len(t) >= 4]
+            if tokens and any(t in blob for t in tokens):
+                return vrf
+        return "Global"
 
     def _primary_mac_from_maas(ifaces):
         rows = [r for r in (ifaces or []) if str(r.get("mac") or "").strip()]
@@ -571,6 +661,38 @@ def _proposed_changes_rows(
         with_ip = [r for r in rows if r.get("ips")]
         pick = with_ip[0] if with_ip else rows[0]
         return str(pick.get("mac") or "—")
+
+    def _norm_mac_local(mac: str) -> str:
+        s = (mac or "").strip().lower().replace("-", ":")
+        parts = [p for p in s.split(":") if p]
+        if len(parts) == 6:
+            try:
+                return ":".join(f"{int(p, 16):02x}" for p in parts)
+            except ValueError:
+                pass
+        return s
+
+    def _runtime_nic_index_by_host_mac(openstack_payload: dict | None) -> dict[tuple[str, str], dict]:
+        idx: dict[tuple[str, str], dict] = {}
+        for rr in (openstack_payload or {}).get("runtime_nics") or []:
+            if not isinstance(rr, dict):
+                continue
+            h = (rr.get("hostname") or "").strip().lower()
+            m = _norm_mac_local(rr.get("mac") or rr.get("os_mac") or "")
+            if not h or not m:
+                continue
+            key = (h, m)
+            prev = idx.get(key)
+            if prev is None:
+                idx[key] = rr
+                continue
+            prev_score = int(bool(prev.get("os_ip"))) + int(bool(prev.get("os_runtime_vlan")))
+            cur_score = int(bool(rr.get("os_ip"))) + int(bool(rr.get("os_runtime_vlan")))
+            if cur_score >= prev_score:
+                idx[key] = rr
+        return idx
+
+    os_runtime_idx = _runtime_nic_index_by_host_mac(openstack_data)
 
     def _new_device_nic_rows():
         out = []
@@ -593,6 +715,17 @@ def _proposed_changes_rows(
                     else f"maas-nic-{mac.replace(':', '')[-6:]}"
                 )
                 props = f"MAC {mac}; untagged VLAN {vlan} (from MAAS); IPs: {ips}"
+                osr = os_runtime_idx.get(((h or "").strip().lower(), _norm_mac_local(mac))) or {}
+                os_reg = str(
+                    osr.get("os_region") or (openstack_data or {}).get("openstack_region_name") or "—"
+                ).strip() or "—"
+                os_mac = str(osr.get("os_mac") or osr.get("mac") or "—").strip() or "—"
+                os_ip = str(osr.get("os_ip") or "").strip()
+                if not os_ip:
+                    _ips = [str(x).strip() for x in (osr.get("os_ips") or []) if str(x).strip()]
+                    os_ip = ", ".join(_ips) if _ips else "—"
+                os_vlan = str(osr.get("os_runtime_vlan") or "—").strip() or "—"
+                os_has_runtime = bool(osr) and any(x not in {"", "—"} for x in [os_mac, os_ip, os_vlan])
                 out.append(
                     [
                         h,
@@ -603,11 +736,11 @@ def _proposed_changes_rows(
                         mac,
                         ips,
                         vlan,
-                        "—",
-                        "—",
-                        "—",
-                        "—",
-                        "[MAAS]",
+                        os_reg,
+                        os_mac,
+                        os_ip,
+                        os_vlan,
+                        "[OS]" if os_has_runtime else "[MAAS]",
                         suggested_name,
                         props,
                         "Medium",
@@ -736,9 +869,12 @@ def _proposed_changes_rows(
         r for _, _, r in sorted(add_devices_review_only, key=lambda x: (x[0], x[1]))
     ]
 
+    scope_meta = (drift or {}).get("scope_meta") or {}
+    selected_locations = list(scope_meta.get("selected_locations") or [])
     add_prefixes = []
     for g in (os_subnet_gaps or []):
         role_name, role_reason = _suggest_prefix_role(g)
+        vrf_name = _suggest_vrf_for_prefix_gap(g, selected_locations)
         start_addr, end_addr = _cidr_start_end(g.get("cidr", ""))
         add_prefixes.append([
             g.get("os_region") or "—",
@@ -748,6 +884,7 @@ def _proposed_changes_rows(
             g.get("project_name", "-"),
             role_name,
             _suggest_prefix_status(g),
+            vrf_name,
             role_reason,
             "[OS]",
             "CREATE_NETBOX_PREFIX_FROM_OS",
@@ -768,7 +905,7 @@ def _proposed_changes_rows(
             nb_status,
             "VIP",
             nb_vrf,
-            "NetBox VRF: longest matching prefix, else adjacent host IPs in IPAM, else subnet bucket; fixed IP first",
+            "NetBox VRF: floating IP first (public side): probe .1-.10, then .11-.20 in that subnet; fallback longest prefix/adjacent IPs/subnet bucket; fixed IP only as fallback",
             "CREATE_NETBOX_IPADDRESS_FROM_OS_FIP",
         ])
 

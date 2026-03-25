@@ -370,6 +370,7 @@ def build_drift_report_xlsx(
             "Project",
             "Suggested NB role",
             "NB status",
+            "Suggested NB VRF",
             "Role reason",
             "Authority",
             "Proposed Action",
@@ -377,7 +378,8 @@ def build_drift_report_xlsx(
         prop["add_prefixes"],
         note=(
             "NB status: reserved when no Neutron ports were counted on that subnet in this scan; "
-            "active when at least one port was seen (role certainty is only in Role reason)."
+            "active when at least one port was seen (role certainty is only in Role reason). "
+            "Suggested NB VRF is inferred from OpenStack naming signals (network/project/region text)."
         ),
     )
     _append_block(

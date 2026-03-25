@@ -814,7 +814,8 @@ class MAASOpenStackSyncView(LoginRequiredMixin, View):
                 for r in all_results:
                     data = r.get("data") or {}
                     if data.get("error"):
-                        errors.append((r.get("label") or "OpenStack") + ": " + (data["error"][:80] or "error"))
+                        err_txt = str(data.get("error") or "error")
+                        errors.append((r.get("label") or "OpenStack") + ": " + (err_txt[:260]))
                     else:
                         rn = (data.get("openstack_region_name") or "").strip()
                         if rn and rn not in merged_region_labels:

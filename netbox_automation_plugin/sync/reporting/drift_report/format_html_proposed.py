@@ -95,7 +95,8 @@ def emit_proposed_change_tables(e, prop):
         e.paragraph(
             "Use each row as NetBox Prefix create input (CIDR + OpenStack network/project context). "
             "NB status: reserved when no Neutron ports were counted on that subnet in this scan; "
-            "active when at least one port was seen (role certainty is only in Role reason)."
+            "active when at least one port was seen (role certainty is only in Role reason). "
+            "Suggested NB VRF is inferred from OpenStack naming signals (network/project/region text)."
         )
         e.spacer()
         e.table(
@@ -107,6 +108,7 @@ def emit_proposed_change_tables(e, prop):
                 "Project",
                 "Suggested NB role",
                 "NB status",
+                "Suggested NB VRF",
                 "Role reason",
                 "Authority",
                 "Proposed Action",
