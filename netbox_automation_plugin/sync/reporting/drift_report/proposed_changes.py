@@ -756,6 +756,13 @@ def _proposed_changes_rows(
             power_type = str(m.get("power_type") or "").strip()
             if not bmc_ip and not power_type:
                 continue
+            osr = _openstack_ironic_bmc_row(openstack_data, h) or {}
+            os_bmc_ip = str(osr.get("os_bmc_ip") or "").strip()
+            os_mgmt_type = str(
+                osr.get("power_interface") or osr.get("management_interface") or osr.get("driver") or ""
+            ).strip()
+            os_bmc_ep = str(osr.get("os_bmc_endpoint") or "").strip()
+            authority_badge = "[OS]" if (os_bmc_ip or os_bmc_ep or os_mgmt_type) else "[MAAS]"
             mgmt = _suggested_netbox_mgmt_interface_name(
                 m.get("power_type"),
                 m.get("hardware_vendor"),
@@ -773,10 +780,10 @@ def _proposed_changes_rows(
                     str(m.get("bmc_mac") or "—"),
                     mgmt,
                     bmc_ip or "—",
-                    "—",
-                    "—",
-                    "—",
-                    "[MAAS]",
+                    os_bmc_ip or "—",
+                    os_mgmt_type or "—",
+                    os_bmc_ep or "—",
+                    authority_badge,
                     action,
                     "Medium",
                 ]
