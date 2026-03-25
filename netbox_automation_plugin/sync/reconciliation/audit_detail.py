@@ -403,7 +403,7 @@ def build_maas_netbox_interface_audit(
             elif missing_nb:
                 status = "OS_RUNTIME_IP_GAP" if os_authoritative else "IP_GAP"
             elif name_diff_unaligned:
-                status = "OK_NAME_DIFF"
+                status = "NAME_DIFF_ONLY"
             else:
                 status = "OK"
 

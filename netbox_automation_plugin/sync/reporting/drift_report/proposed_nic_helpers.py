@@ -99,4 +99,4 @@ def _drift_table_status_is_ok_only(display_status: str) -> bool:
     parts = [p.strip().upper() for p in (display_status or "").split(",") if p.strip()]
     if not parts:
         return False
-    return all(p == "OK" for p in parts)
+    return all(p in {"OK", "OK_NAME_DIFF", "NAME_DIFF_ONLY"} for p in parts)

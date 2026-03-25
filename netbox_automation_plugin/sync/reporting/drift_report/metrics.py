@@ -16,7 +16,7 @@ def _phase0_category_counts(
     for b in (interface_audit or {}).get("hosts") or []:
         for row in b.get("rows") or []:
             st = row.get("status") or ""
-            if st != "OK":
+            if st not in {"OK", "OK_NAME_DIFF", "NAME_DIFF_ONLY"}:
                 iface_not_ok += 1
             if st == "NOT_IN_NETBOX":
                 maas_nic_missing_nb += 1
