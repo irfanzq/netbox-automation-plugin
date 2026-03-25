@@ -36,6 +36,7 @@ def _proposed_changes_rows(
     matched_rows,
     os_subnet_gaps,
     os_floating_gaps,
+    openstack_data=None,
     netbox_ifaces=None,
 ):
     """Build user-friendly proposed change buckets (preview only)."""
@@ -119,6 +120,10 @@ def _proposed_changes_rows(
                     str(m.get("bmc_mac") or "—"),
                     mgmt,
                     bmc_ip or "—",
+                    "—",
+                    "—",
+                    "—",
+                    "[MAAS]",
                     action,
                     "Medium",
                 ]
@@ -127,7 +132,9 @@ def _proposed_changes_rows(
 
     by_h = _maas_machine_by_hostname(maas_data)
     _dtype_index = _build_device_type_match_index(netbox_data.get("device_types") or [])
-    add_mgmt_iface = _build_proposed_mgmt_interface_rows(matched_rows, by_h, netbox_ifaces)
+    add_mgmt_iface = _build_proposed_mgmt_interface_rows(
+        matched_rows, by_h, netbox_ifaces, openstack_data=openstack_data
+    )
     add_mgmt_iface_new_devices = _new_device_bmc_rows()
     add_nb_interfaces = _build_add_nb_interface_rows(interface_audit) + _new_device_nic_rows()
     add_nb_interfaces = sorted(add_nb_interfaces, key=lambda x: (x[0] or "").lower())

@@ -49,6 +49,7 @@ def build_maas_netbox_interface_audit(
     netbox_ifaces: dict,
     netbox_audit=None,
     maas_iface_filter=None,
+    openstack_data=None,
 ):
     """
     Line-by-line MAAS NIC vs NetBox interface (match by MAC). One entry per matched hostname.
@@ -57,6 +58,8 @@ def build_maas_netbox_interface_audit(
     netbox_audit: hostname -> {site_slug, location_name, ...} for per-device context columns.
     maas_iface_filter: optional (machine_dict, iface_dict) -> bool; False drops the MAAS NIC from
         this audit. Default from views keeps only interfaces with a MAC (L2 identity for NB match).
+    openstack_data: combined OpenStack payload; when runtime NIC rows are present, OS is
+        authoritative for MAC/IP/VLAN on that MAC and MAAS is fallback.
     """
     by_h = {}
     for m in maas_data.get("machines") or []:
@@ -65,6 +68,23 @@ def build_maas_netbox_interface_audit(
             by_h[h] = m
 
     nb_audit = netbox_audit or {}
+
+    # hostname -> mac -> runtime row
+    os_runtime_by_host_mac: dict[str, dict[str, dict]] = defaultdict(dict)
+    for r in (openstack_data or {}).get("runtime_nics") or []:
+        h = (r.get("hostname") or "").strip().lower()
+        m = _normalize_mac(r.get("mac") or r.get("os_mac") or "")
+        if not h or not m:
+            continue
+        prev = os_runtime_by_host_mac[h].get(m)
+        if prev is None:
+            os_runtime_by_host_mac[h][m] = r
+            continue
+        # Prefer richer runtime rows (with IP and VLAN).
+        prev_score = int(bool(prev.get("os_ip"))) + int(bool(prev.get("os_runtime_vlan")))
+        cur_score = int(bool(r.get("os_ip"))) + int(bool(r.get("os_runtime_vlan")))
+        if cur_score >= prev_score:
+            os_runtime_by_host_mac[h][m] = r
     hosts_out = []
     for hostname in sorted(matched_hostnames):
         m = by_h.get(hostname) or {}
@@ -183,13 +203,24 @@ def build_maas_netbox_interface_audit(
 
             nb_ips_set = set(nb.get("ips") or [])
             maas_ip_set = set(maas_ips)
-            missing_nb = maas_ip_set - nb_ips_set
+            os_row = os_runtime_by_host_mac.get(hostname.lower(), {}).get(mac) or {}
+            os_mac = _normalize_mac(os_row.get("os_mac") or os_row.get("mac") or "")
+            os_ip_list = [str(x).strip() for x in (os_row.get("os_ips") or []) if str(x).strip()]
+            if not os_ip_list and (os_row.get("os_ip") or "").strip():
+                os_ip_list = [x.strip() for x in str(os_row.get("os_ip") or "").split(",") if x.strip()]
+            os_ip_set = set(os_ip_list)
+            os_vlan = str(os_row.get("os_runtime_vlan") or "").strip()
+
+            os_authoritative = bool(os_mac or os_ip_set or os_vlan)
+            base_ip_set = os_ip_set if os_authoritative else maas_ip_set
+            missing_nb = base_ip_set - nb_ips_set
             nb_name = nb.get("name") or "—"
             nb_ip_str = ", ".join(nb.get("ips") or []) if nb.get("ips") else "—"
             nb_vlan = str(nb.get("untagged_vlan_vid") or "")[:8] or "—"
             mgmt = "mgmt" if nb.get("mgmt_only") else ""
 
             maas_v = _parse_vid(maas_vlan)
+            os_v = _parse_vid(os_vlan)
             nb_v = _parse_vid(nb_vlan)
 
             notes = []
@@ -198,38 +229,70 @@ def build_maas_netbox_interface_audit(
                     f"Matched by interface name; NetBox MAC empty — set to {mac} for MAC-based audit"
                 )
             vlan_drift = False
-            # Physical untagged VLAN: MAAS vs NetBox (DRIFT_DESIGN — tag vlan-drift)
-            if maas_v is not None and nb_v is not None:
-                if maas_v != nb_v:
+            if os_authoritative:
+                # Runtime VLAN/IP from OpenStack is authoritative when present.
+                if os_v is not None and nb_v is not None:
+                    if os_v != nb_v:
+                        vlan_drift = True
+                        notes.append(f"vlan-drift(os): OpenStack VID {os_v} != NetBox untagged {nb_v}")
+                elif os_v is not None and nb_v is None:
                     vlan_drift = True
-                    notes.append(f"vlan-drift: MAAS VID {maas_v} != NetBox untagged {nb_v}")
-            elif maas_v is not None and nb_v is None:
-                vlan_drift = True
-                notes.append(
-                    f"vlan-drift: MAAS VID {maas_v}; NetBox iface has no untagged VLAN"
-                )
-            elif maas_v is None and nb_v is not None:
-                notes.append(
-                    f"VLAN unverified: NetBox untagged VID={nb_v}; MAAS VID not in API "
-                    f"(UI often name-only — confirm in MAAS API/subnets)"
-                )
+                    notes.append(f"vlan-drift(os): OpenStack VID {os_v}; NetBox iface has no untagged VLAN")
+                elif os_v is None and nb_v is not None:
+                    notes.append(
+                        f"OpenStack runtime VLAN unavailable for MAC {os_mac or mac}; "
+                        f"NetBox untagged VID={nb_v} (kept as-is)"
+                    )
+            else:
+                # Physical untagged VLAN: MAAS vs NetBox (DRIFT_DESIGN — tag vlan-drift)
+                if maas_v is not None and nb_v is not None:
+                    if maas_v != nb_v:
+                        vlan_drift = True
+                        notes.append(f"vlan-drift: MAAS VID {maas_v} != NetBox untagged {nb_v}")
+                elif maas_v is not None and nb_v is None:
+                    vlan_drift = True
+                    notes.append(
+                        f"vlan-drift: MAAS VID {maas_v}; NetBox iface has no untagged VLAN"
+                    )
+                elif maas_v is None and nb_v is not None:
+                    notes.append(
+                        f"VLAN unverified: NetBox untagged VID={nb_v}; MAAS VID not in API "
+                        f"(UI often name-only — confirm in MAAS API/subnets)"
+                    )
 
             if (maas_name or "").lower() != (nb_name or "").lower():
                 notes.append(f"name: MAAS={maas_name} NB={nb_name}")
             if missing_nb:
-                notes.append(f"IP on MAAS not on NB iface: {', '.join(sorted(missing_nb))}")
+                if os_authoritative:
+                    notes.append(
+                        f"IP on OpenStack runtime not on NB iface: {', '.join(sorted(missing_nb))}"
+                    )
+                else:
+                    notes.append(f"IP on MAAS not on NB iface: {', '.join(sorted(missing_nb))}")
             if mgmt:
                 notes.append(mgmt)
-            extra_nb = nb_ips_set - maas_ip_set
+            extra_nb = nb_ips_set - base_ip_set
             if extra_nb and not missing_nb:
                 notes.append(f"NB only IP: {', '.join(sorted(extra_nb)[:4])}")
 
+            mac_mismatch = False
+            if os_authoritative and os_mac and _normalize_mac(nb.get("mac") or ""):
+                if _normalize_mac(nb.get("mac") or "") != os_mac:
+                    mac_mismatch = True
+                    notes.append(f"mac-drift(os): OpenStack MAC {os_mac} != NetBox {nb.get('mac') or '-'}")
+            elif (not os_authoritative) and _normalize_mac(nb.get("mac") or ""):
+                if _normalize_mac(nb.get("mac") or "") != mac:
+                    mac_mismatch = True
+                    notes.append(f"mac-drift: MAAS MAC {mac} != NetBox {nb.get('mac') or '-'}")
+
             if vlan_drift and missing_nb:
-                status = "VLAN_DRIFT+IP_GAP"
+                status = "OS_RUNTIME_VLAN_DRIFT+IP_GAP" if os_authoritative else "VLAN_DRIFT+IP_GAP"
             elif vlan_drift:
-                status = "VLAN_DRIFT"
+                status = "OS_RUNTIME_VLAN_DRIFT" if os_authoritative else "VLAN_DRIFT"
+            elif mac_mismatch:
+                status = "OS_RUNTIME_MAC_MISMATCH" if os_authoritative else "MAC_MISMATCH"
             elif missing_nb:
-                status = "IP_GAP"
+                status = "OS_RUNTIME_IP_GAP" if os_authoritative else "IP_GAP"
             elif notes and any("name:" in n for n in notes):
                 status = "OK_NAME_DIFF"
             else:
@@ -252,6 +315,10 @@ def build_maas_netbox_interface_audit(
                 "maas_vlan": maas_vlan,
                 "maas_mac": mac,
                 "maas_ips": maas_ip_str,
+                "os_mac": os_mac or "—",
+                "os_ip": ", ".join(os_ip_list) if os_ip_list else "—",
+                "os_runtime_vlan": os_vlan or "—",
+                "authority": "openstack_runtime" if os_authoritative else "maas_fallback",
                 "nb_if": nb_name,
                 "nb_mac": nb_mac_out,
                 "nb_vlan": nb_vlan,

@@ -1,12 +1,14 @@
 """
 OpenStack client wrapper using openstacksdk.
 
-Fetches networks, subnets, floating IPs. Used for drift audit and OpenStack visibility sync.
+Fetches networks, subnets, floating IPs, plus optional Ironic/Neutron runtime NIC view
+for bare-metal nodes (hostname + MAC + runtime IP + provider VLAN where available).
 Supports optional multi-project scan (all Keystone projects or a comma-separated allow list).
 """
 
 import logging
 import re
+from collections import defaultdict
 
 from netbox_automation_plugin.sync.config.settings import OPENSTACK_DEFAULT_REGION_NAME
 
@@ -96,7 +98,13 @@ def _collect_neutron(conn, project_label: str) -> tuple[list, list, list]:
     floating_ips = []
 
     for net in conn.network.networks():
-        networks.append({"id": net.id, "name": net.name or net.id})
+        networks.append({
+            "id": net.id,
+            "name": net.name or net.id,
+            "provider_network_type": getattr(net, "provider_network_type", "") or "",
+            "provider_segmentation_id": str(getattr(net, "provider_segmentation_id", "") or ""),
+            "provider_physical_network": getattr(net, "provider_physical_network", "") or "",
+        })
 
     for sn in conn.network.subnets():
         subnets.append({
@@ -121,13 +129,180 @@ def _collect_neutron(conn, project_label: str) -> tuple[list, list, list]:
     return networks, subnets, floating_ips
 
 
+def _collect_runtime_nics(conn, networks: list[dict]) -> list[dict]:
+    """
+    Best-effort runtime NIC map from Ironic + Neutron:
+      hostname/node_uuid + MAC + runtime fixed IP(s) + runtime provider VLAN (if VLAN provider network).
+    """
+    out: list[dict] = []
+    try:
+        bm = conn.baremetal
+        nw = conn.network
+    except Exception:
+        return out
+
+    net_by_id = {(n.get("id") or ""): n for n in (networks or []) if n.get("id")}
+
+    # Cache Neutron ports by instance_uuid to avoid repeated queries.
+    ports_by_instance: dict[str, list[dict]] = {}
+
+    def _instance_ports(instance_uuid: str) -> list[dict]:
+        if instance_uuid in ports_by_instance:
+            return ports_by_instance[instance_uuid]
+        rows: list[dict] = []
+        try:
+            for p in nw.ports(device_id=instance_uuid):
+                fixed_ips = getattr(p, "fixed_ips", None) or []
+                ip_list = []
+                for f in fixed_ips:
+                    if isinstance(f, dict):
+                        ip = str(f.get("ip_address") or "").strip()
+                        if ip:
+                            ip_list.append(ip)
+                rows.append({
+                    "id": getattr(p, "id", "") or "",
+                    "mac": str(getattr(p, "mac_address", "") or "").strip().lower(),
+                    "ips": ip_list,
+                    "network_id": str(getattr(p, "network_id", "") or "").strip(),
+                })
+        except Exception:
+            rows = []
+        ports_by_instance[instance_uuid] = rows
+        return rows
+
+    try:
+        ports_by_node: dict[str, list[dict]] = defaultdict(list)
+        for p in bm.ports(details=True):
+            node_uuid = str(getattr(p, "node_uuid", None) or getattr(p, "node_id", None) or "").strip()
+            if not node_uuid:
+                continue
+            internal = getattr(p, "internal_info", None)
+            if not isinstance(internal, dict):
+                internal = {}
+            ports_by_node[node_uuid].append({
+                "mac": str(getattr(p, "address", "") or "").strip().lower(),
+                "physical_network": str(getattr(p, "physical_network", "") or "").strip(),
+                "tenant_vif_port_id": str(internal.get("tenant_vif_port_id") or "").strip(),
+            })
+
+        for n in bm.nodes(details=True):
+            node_uuid = str(getattr(n, "id", "") or "").strip()
+            if not node_uuid:
+                continue
+            hostname = str(getattr(n, "name", "") or "").strip()
+            instance_uuid = str(
+                getattr(n, "instance_uuid", None) or getattr(n, "instance_id", None) or ""
+            ).strip()
+
+            nports = ports_by_node.get(node_uuid) or []
+            ip_ports = _instance_ports(instance_uuid) if instance_uuid else []
+            ip_by_port_id = {r.get("id", ""): r for r in ip_ports if r.get("id")}
+            ip_by_mac = {r.get("mac", ""): r for r in ip_ports if r.get("mac")}
+
+            for bp in nports:
+                mac = bp.get("mac", "")
+                if not mac:
+                    continue
+                chosen = None
+                vif_id = bp.get("tenant_vif_port_id", "")
+                if vif_id and vif_id in ip_by_port_id:
+                    chosen = ip_by_port_id[vif_id]
+                elif mac in ip_by_mac:
+                    chosen = ip_by_mac[mac]
+
+                network_id = (chosen or {}).get("network_id", "")
+                net = net_by_id.get(network_id, {})
+                net_type = str(net.get("provider_network_type") or "").strip().lower()
+                seg = str(net.get("provider_segmentation_id") or "").strip()
+                runtime_vlan = seg if net_type == "vlan" and seg else ""
+
+                out.append({
+                    "hostname": hostname,
+                    "node_uuid": node_uuid,
+                    "instance_uuid": instance_uuid,
+                    "mac": mac,
+                    "os_mac": mac,
+                    "os_ips": list((chosen or {}).get("ips") or []),
+                    "os_ip": ", ".join((chosen or {}).get("ips") or []) if chosen else "",
+                    "network_id": network_id,
+                    "network_type": net_type,
+                    "provider_physical_network": str(
+                        net.get("provider_physical_network") or bp.get("physical_network") or ""
+                    ),
+                    "os_runtime_vlan": runtime_vlan,
+                    "tenant_vif_port_id": vif_id,
+                })
+    except Exception as e:
+        logger.info("OpenStack: runtime NIC enrichment skipped: %s", e)
+
+    return out
+
+
+def _collect_runtime_bmc(conn) -> list[dict]:
+    """
+    Best-effort BMC view from Ironic node details:
+      hostname, node_uuid, driver/power interfaces, vendor, redfish/ipmi endpoint and parsed host.
+    """
+    out: list[dict] = []
+    try:
+        bm = conn.baremetal
+    except Exception:
+        return out
+
+    for n in bm.nodes(details=True):
+        try:
+            node_uuid = str(getattr(n, "id", "") or "").strip()
+            hostname = str(getattr(n, "name", "") or "").strip()
+            driver = str(getattr(n, "driver", "") or "").strip().lower()
+            power_if = str(getattr(n, "power_interface", "") or "").strip().lower()
+            mgmt_if = str(getattr(n, "management_interface", "") or "").strip().lower()
+            props = getattr(n, "properties", None)
+            if not isinstance(props, dict):
+                props = {}
+            vendor = str(props.get("vendor") or "").strip()
+
+            driver_info = getattr(n, "driver_info", None)
+            if not isinstance(driver_info, dict):
+                driver_info = {}
+
+            endpoint = ""
+            bmc_host = ""
+            for k in ("redfish_address", "ipmi_address", "ilo_address", "address"):
+                v = str(driver_info.get(k) or "").strip()
+                if not v:
+                    continue
+                endpoint = v
+                m = re.match(r"^https?://([^/]+)", v, re.I)
+                bmc_host = (m.group(1).strip() if m else v).strip()
+                bmc_host = bmc_host.split(":", 1)[0]
+                break
+
+            out.append({
+                "hostname": hostname,
+                "node_uuid": node_uuid,
+                "driver": driver,
+                "power_interface": power_if,
+                "management_interface": mgmt_if,
+                "vendor": vendor,
+                "os_bmc_endpoint": endpoint,
+                "os_bmc_ip": bmc_host,
+            })
+        except Exception:
+            continue
+    return out
+
+
 def _merge_openstack_into_maps(
     nets_by_id: dict,
     subs_by_id: dict,
     fips_by_key: dict,
+    runtime_by_key: dict,
+    bmc_by_key: dict,
     networks: list,
     subnets: list,
     floating_ips: list,
+    runtime_nics: list,
+    runtime_bmc: list,
 ) -> None:
     for n in networks:
         nid = n.get("id")
@@ -141,6 +316,18 @@ def _merge_openstack_into_maps(
         key = (f.get("id") or "").strip() or (f.get("floating_ip_address") or "").strip()
         if key:
             fips_by_key[key] = f
+    for r in runtime_nics:
+        key = (
+            (r.get("hostname") or "").strip().lower(),
+            (r.get("mac") or "").strip().lower(),
+            (r.get("node_uuid") or "").strip().lower(),
+        )
+        if key[0] and key[1] and key[2]:
+            runtime_by_key[key] = r
+    for b in runtime_bmc:
+        key = (b.get("hostname") or "").strip().lower()
+        if key:
+            bmc_by_key[key] = b
 
 
 def _allowlist_matches_project(allow_norm: set, proj_id: str, proj_name: str) -> bool:
@@ -189,6 +376,8 @@ def _fetch_single_project(openstack, config: dict) -> dict:
         "networks": [],
         "subnets": [],
         "floating_ips": [],
+        "runtime_nics": [],
+        "runtime_bmc": [],
         "error": None,
         "openstack_projects_scanned": 1,
     }
@@ -200,9 +389,13 @@ def _fetch_single_project(openstack, config: dict) -> dict:
         or "-"
     )
     n, s, f = _collect_neutron(conn, project_label)
+    rn = _collect_runtime_nics(conn, n)
+    rb = _collect_runtime_bmc(conn)
     result["networks"] = n
     result["subnets"] = s
     result["floating_ips"] = f
+    result["runtime_nics"] = rn
+    result["runtime_bmc"] = rb
     return result
 
 
@@ -214,12 +407,16 @@ def _fetch_multi_project(openstack, config: dict, audit_all: bool, allowlist: li
         "networks": [],
         "subnets": [],
         "floating_ips": [],
+        "runtime_nics": [],
+        "runtime_bmc": [],
         "error": None,
         "openstack_projects_scanned": 0,
     }
     nets_by_id: dict = {}
     subs_by_id: dict = {}
     fips_by_key: dict = {}
+    runtime_by_key: dict = {}
+    bmc_by_key: dict = {}
     scan_errors: list[str] = []
 
     allow_tokens = [str(x).strip() for x in (allowlist or []) if str(x).strip()]
@@ -284,7 +481,11 @@ def _fetch_multi_project(openstack, config: dict, audit_all: bool, allowlist: li
                 continue
             conn = openstack.connect(**kwargs)
             n, s, f = _collect_neutron(conn, label)
-            _merge_openstack_into_maps(nets_by_id, subs_by_id, fips_by_key, n, s, f)
+            rn = _collect_runtime_nics(conn, n)
+            rb = _collect_runtime_bmc(conn)
+            _merge_openstack_into_maps(
+                nets_by_id, subs_by_id, fips_by_key, runtime_by_key, bmc_by_key, n, s, f, rn, rb
+            )
             result["openstack_projects_scanned"] += 1
         except Exception as e:
             err = f"{label}: {e}"
@@ -294,6 +495,8 @@ def _fetch_multi_project(openstack, config: dict, audit_all: bool, allowlist: li
     result["networks"] = list(nets_by_id.values())
     result["subnets"] = list(subs_by_id.values())
     result["floating_ips"] = list(fips_by_key.values())
+    result["runtime_nics"] = list(runtime_by_key.values())
+    result["runtime_bmc"] = list(bmc_by_key.values())
 
     if result["openstack_projects_scanned"] == 0 and scan_errors:
         result["error"] = "; ".join(scan_errors[:5])
@@ -314,7 +517,14 @@ def fetch_openstack_data_for_config(config: dict):
     Fetch OpenStack data using a config dict that has openstack_* keys
     (e.g. one entry from get_openstack_configs()). Same return shape as fetch_openstack_data().
     """
-    result = {"networks": [], "subnets": [], "floating_ips": [], "error": None}
+    result = {
+        "networks": [],
+        "subnets": [],
+        "floating_ips": [],
+        "runtime_nics": [],
+        "runtime_bmc": [],
+        "error": None,
+    }
 
     auth_url = config.get("openstack_auth_url") or ""
     if not auth_url:

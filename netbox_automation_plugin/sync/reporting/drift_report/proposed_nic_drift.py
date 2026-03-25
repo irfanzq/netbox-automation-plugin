@@ -16,6 +16,12 @@ def _build_update_nic_rows(interface_audit):
             notes = row.get("notes") or ""
             maas_vlan = str(row.get("maas_vlan") or "—")
             nb_vlan = str(row.get("nb_vlan") or "—")
+            os_vlan = str(row.get("os_runtime_vlan") or "—")
+            os_ip = row.get("os_ip") or "—"
+            os_mac = row.get("os_mac") or "—"
+            authority = str(row.get("authority") or "maas_fallback")
+            authority_label = "OpenStack runtime" if authority == "openstack_runtime" else "MAAS"
+            authority_badge = "[OS]" if authority == "openstack_runtime" else "[MAAS]"
 
             if st == "NOT_IN_NETBOX":
                 continue
@@ -31,27 +37,39 @@ def _build_update_nic_rows(interface_audit):
             if "VLAN_DRIFT" in st:
                 if nb_vlan in {"", "—", "None", "none"}:
                     statuses.append("MISSING_NB_VLAN")
-                    reasons.append("NetBox VLAN missing; MAAS VLAN present")
-                    actions.append("Set NetBox untagged VLAN from MAAS VLAN")
+                    reasons.append(f"NetBox VLAN missing; {authority_label} VLAN present")
+                    if authority == "openstack_runtime":
+                        actions.append("Set NetBox untagged VLAN from OpenStack runtime VLAN")
+                    else:
+                        actions.append("Set NetBox untagged VLAN from MAAS VLAN")
                 else:
                     statuses.append("VLAN_MISMATCH")
-                    reasons.append("NetBox VLAN differs from MAAS VLAN")
-                    actions.append("Change NetBox untagged VLAN to match MAAS VLAN")
+                    reasons.append(f"NetBox VLAN differs from {authority_label} VLAN")
+                    if authority == "openstack_runtime":
+                        actions.append("Change NetBox untagged VLAN to match OpenStack runtime VLAN")
+                    else:
+                        actions.append("Change NetBox untagged VLAN to match MAAS VLAN")
                 risk = "High"
 
             if "IP_GAP" in st:
                 statuses.append("MISSING_NB_IP")
                 reasons.append(_friendly_note(notes))
-                actions.append("Add missing IP on NetBox port")
+                if authority == "openstack_runtime":
+                    actions.append("Add missing OpenStack runtime IP on NetBox port")
+                else:
+                    actions.append("Add missing IP on NetBox port")
 
             note_l = notes.lower()
-            if ("netbox mac empty" in note_l) or ("mac mismatch" in note_l):
+            if ("netbox mac empty" in note_l) or ("mac mismatch" in note_l) or ("mac-drift" in note_l):
                 if "mac mismatch" in note_l:
                     statuses.append("MAC_MISMATCH")
                 else:
                     statuses.append("MISSING_NB_MAC")
-                reasons.append("NetBox MAC missing or mismatched")
-                actions.append("Set NetBox port MAC from MAAS for reliable matching")
+                reasons.append(f"NetBox MAC missing or mismatched vs {authority_label}")
+                if authority == "openstack_runtime":
+                    actions.append("Set NetBox port MAC from OpenStack runtime MAC for reliable matching")
+                else:
+                    actions.append("Set NetBox port MAC from MAAS for reliable matching")
 
             if not statuses:
                 statuses.append(st)
@@ -68,6 +86,10 @@ def _build_update_nic_rows(interface_audit):
                 str(row.get("maas_fabric") or "—"),
                 row.get("maas_mac") or "",
                 row.get("maas_ips") or "",
+                os_mac,
+                os_ip,
+                os_vlan,
+                authority_badge,
                 row.get("nb_if") or "—",
                 row.get("nb_mac") or "—",
                 row.get("nb_ips") or "—",

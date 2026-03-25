@@ -68,6 +68,7 @@ def format_drift_report(
         matched_rows,
         os_subnet_gaps or [],
         os_floating_gaps or [],
+        openstack_data=openstack_data,
         netbox_ifaces=netbox_ifaces,
     )
     emit_proposed_change_tables(e, prop)

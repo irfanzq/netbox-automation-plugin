@@ -540,13 +540,22 @@ class MAASOpenStackSyncView(LoginRequiredMixin, View):
                     "networks": [],
                     "subnets": [],
                     "floating_ips": [],
+                    "runtime_nics": [],
+                    "runtime_bmc": [],
                     "error": "OpenStack auth URL set but no OS_PASSWORD (or application credential ID/secret). Drift report will omit OpenStack data.",
                     "openstack_cred_missing": True,
                 }
             else:
                 all_results = fetch_all_openstack_data(openstack_configs)
                 # Merge all clouds into one dataset; user sees one OpenStack vs NetBox report
-                merged = {"networks": [], "subnets": [], "floating_ips": [], "error": None}
+                merged = {
+                    "networks": [],
+                    "subnets": [],
+                    "floating_ips": [],
+                    "runtime_nics": [],
+                    "runtime_bmc": [],
+                    "error": None,
+                }
                 errors = []
                 for r in all_results:
                     data = r.get("data") or {}
@@ -556,6 +565,8 @@ class MAASOpenStackSyncView(LoginRequiredMixin, View):
                         merged["networks"].extend(data.get("networks") or [])
                         merged["subnets"].extend(data.get("subnets") or [])
                         merged["floating_ips"].extend(data.get("floating_ips") or [])
+                        merged["runtime_nics"].extend(data.get("runtime_nics") or [])
+                        merged["runtime_bmc"].extend(data.get("runtime_bmc") or [])
                 if errors and not merged["networks"] and not merged["subnets"] and not merged["floating_ips"]:
                     merged["error"] = "; ".join(errors)
                 elif errors:
@@ -570,16 +581,30 @@ class MAASOpenStackSyncView(LoginRequiredMixin, View):
                         "networks": len(data.get("networks") or []),
                         "subnets": len(data.get("subnets") or []),
                         "floating_ips": len(data.get("floating_ips") or []),
+                        "runtime_nics": len(data.get("runtime_nics") or []),
+                        "runtime_bmc": len(data.get("runtime_bmc") or []),
                         "error": (err[:200] if err else None),
                     })
                 openstack_data = merged
                 logger.info(
-                    "OpenStack merge: %d clouds -> %d networks, %d subnets, %d FIPs (clouds: %s)",
+                    "OpenStack merge: %d clouds -> %d networks, %d subnets, %d FIPs, %d runtime NIC rows, %d runtime BMC rows (clouds: %s)",
                     len(all_results),
                     len(merged["networks"]),
                     len(merged["subnets"]),
                     len(merged["floating_ips"]),
-                    [(c["label"], c["networks"], c["subnets"], c["floating_ips"]) for c in merged["_cloud_summary"]],
+                    len(merged["runtime_nics"]),
+                    len(merged["runtime_bmc"]),
+                    [
+                        (
+                            c["label"],
+                            c["networks"],
+                            c["subnets"],
+                            c["floating_ips"],
+                            c["runtime_nics"],
+                            c["runtime_bmc"],
+                        )
+                        for c in merged["_cloud_summary"]
+                    ],
                 )
         # Full inventory lists for manual verification (before location filter on OpenStack).
         if openstack_data and not openstack_data.get("error"):
@@ -758,6 +783,7 @@ class MAASOpenStackSyncView(LoginRequiredMixin, View):
                 nb_if_final,
                 netbox_audit=audit_map_final,
                 maas_iface_filter=_iface_filt,
+                openstack_data=openstack_data,
             )
             if interface_audit and host_location_override:
                 for host_row in interface_audit.get("hosts") or []:

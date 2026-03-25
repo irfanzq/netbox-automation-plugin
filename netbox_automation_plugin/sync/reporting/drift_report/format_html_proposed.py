@@ -139,27 +139,51 @@ def emit_proposed_change_tables(e, prop):
         e.spacer()
         e.subtitle("Detail — NIC drift")
         e.spacer()
-        e.table(
-            [
-                "Host",
-                "MAAS intf",
-                "MAAS fabric",
-                "MAAS MAC",
-                "MAAS IPs",
-                "NB intf",
-                "NB MAC",
-                "NB IPs",
-                "MAAS VLAN",
-                "NB VLAN",
-                "Status",
-                "Reason",
-                "Proposed Action",
-                "Risk",
-            ],
-            prop["update_nic"],
-            dynamic_columns=True,
-            wrap_max_width=None,
+        headers = [
+            "Host",
+            "MAAS intf",
+            "MAAS fabric",
+            "MAAS MAC",
+            "MAAS IPs",
+            "OS MAC",
+            "OS runtime IP",
+            "OS runtime VLAN",
+            "Authority",
+            "NB intf",
+            "NB MAC",
+            "NB IPs",
+            "MAAS VLAN",
+            "NB VLAN",
+            "Status",
+            "Reason",
+            "Proposed Action",
+            "Risk",
+        ]
+        os_rows = [r for r in prop["update_nic"] if len(r) > 8 and str(r[8]).strip() == "[OS]"]
+        maas_rows = [r for r in prop["update_nic"] if len(r) > 8 and str(r[8]).strip() != "[OS]"]
+        e.paragraph(
+            f"Authority split: OS runtime={len(os_rows)} row(s), MAAS fallback={len(maas_rows)} row(s)."
         )
+        if os_rows:
+            e.spacer()
+            e.subtitle("Detail — NIC drift (OS runtime authority)")
+            e.spacer()
+            e.table(
+                headers,
+                os_rows,
+                dynamic_columns=True,
+                wrap_max_width=None,
+            )
+        if maas_rows:
+            e.spacer()
+            e.subtitle("Detail — NIC drift (MAAS fallback authority)")
+            e.spacer()
+            e.table(
+                headers,
+                maas_rows,
+                dynamic_columns=True,
+                wrap_max_width=None,
+            )
 
     if prop.get("add_mgmt_iface_new_devices"):
         e.spacer()
@@ -173,6 +197,10 @@ def emit_proposed_change_tables(e, prop):
                 "MAAS BMC MAC",
                 "Suggested NB mgmt iface",
                 "NB mgmt iface IP",
+                "OS BMC IP",
+                "OS mgmt type",
+                "OS BMC endpoint",
+                "Authority",
                 "Proposed action",
                 "Risk",
             ],
@@ -196,6 +224,10 @@ def emit_proposed_change_tables(e, prop):
                 "NB IP coverage",
                 "NB port w/ BMC IP",
                 "NB OOB MAC",
+                "OS BMC IP",
+                "OS mgmt type",
+                "OS BMC endpoint",
+                "Authority",
                 "Status",
                 "Proposed action",
                 "Risk",
