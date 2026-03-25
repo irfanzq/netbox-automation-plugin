@@ -92,6 +92,28 @@ def _build_connect_kwargs(
     return kwargs
 
 
+def _resolved_openstack_region_name(config: dict) -> str:
+    """Keystone/catalog region used for this fetch (aligns with NB site/location naming in many deployments)."""
+    return str(_build_connect_kwargs(config, use_config_project_if_unset=True).get("region_name") or "").strip()
+
+
+def _annotate_openstack_payload(payload: dict, region: str) -> None:
+    """Set top-level openstack_region_name and os_region on each resource dict (multi-cloud merges rely on this)."""
+    reg = (region or "").strip() or "—"
+    payload["openstack_region_name"] = reg
+    for key in (
+        "networks",
+        "subnets",
+        "floating_ips",
+        "runtime_nics",
+        "runtime_bmc",
+        "subnet_consumers",
+    ):
+        for item in payload.get(key) or []:
+            if isinstance(item, dict):
+                item["os_region"] = reg
+
+
 def _collect_neutron(conn, project_label: str) -> tuple[list, list, list]:
     networks = []
     subnets = []
@@ -531,6 +553,7 @@ def _fetch_single_project(openstack, config: dict) -> dict:
     result["runtime_nics"] = rn
     result["runtime_bmc"] = rb
     result["subnet_consumers"] = sc
+    _annotate_openstack_payload(result, _resolved_openstack_region_name(config))
     return result
 
 
@@ -566,6 +589,7 @@ def _fetch_multi_project(openstack, config: dict, audit_all: bool, allowlist: li
     except Exception as e:
         logger.exception("OpenStack multi-project: initial connect failed")
         result["error"] = str(e)
+        _annotate_openstack_payload(result, _resolved_openstack_region_name(config))
         return result
 
     specs: list[dict] = []
@@ -592,12 +616,14 @@ def _fetch_multi_project(openstack, config: dict, audit_all: bool, allowlist: li
             msg = "OpenStack: no projects to scan (empty Keystone list or allowlist filter)."
             logger.warning(msg)
             result["error"] = msg
+            _annotate_openstack_payload(result, _resolved_openstack_region_name(config))
             return result
     else:
         # Allowlist-only mode (no Keystone list)
         specs = _specs_from_allowlist_tokens(allow_tokens)
         if not specs:
             result["error"] = "OpenStack: OPENSTACK_PROJECT_ALLOWLIST is empty."
+            _annotate_openstack_payload(result, _resolved_openstack_region_name(config))
             return result
 
     for sp in specs:
@@ -659,6 +685,7 @@ def _fetch_multi_project(openstack, config: dict, audit_all: bool, allowlist: li
             len(scan_errors),
         )
 
+    _annotate_openstack_payload(result, _resolved_openstack_region_name(config))
     return result
 
 
@@ -680,6 +707,7 @@ def fetch_openstack_data_for_config(config: dict):
     auth_url = config.get("openstack_auth_url") or ""
     if not auth_url:
         result["error"] = "OpenStack auth URL not set (OS_AUTH_URL or OPENSTACK_AUTH_URL)"
+        result["openstack_region_name"] = _resolved_openstack_region_name(config) or "—"
         return result
 
     try:
@@ -688,6 +716,7 @@ def fetch_openstack_data_for_config(config: dict):
         result["error"] = (
             "openstacksdk is not installed. Add it to plugin_requirements.txt and reinstall the plugin."
         )
+        result["openstack_region_name"] = _resolved_openstack_region_name(config) or "—"
         return result
 
     audit_all = bool(config.get("openstack_audit_all_projects"))
@@ -735,6 +764,8 @@ def fetch_openstack_data_for_config(config: dict):
         result["error"] = msg
         if "openstack_projects_scanned" not in result:
             result["openstack_projects_scanned"] = 0
+        # Still record intended region when the API call failed (e.g. wrong region name).
+        result["openstack_region_name"] = _resolved_openstack_region_name(config) or "—"
 
     return result
 

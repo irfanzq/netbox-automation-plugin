@@ -18,8 +18,8 @@ def _build_update_nic_rows(interface_audit):
             os_ip = row.get("os_ip") or "—"
             os_mac = row.get("os_mac") or "—"
             authority = str(row.get("authority") or "maas_fallback")
-            authority_label = "OpenStack runtime" if authority == "openstack_runtime" else "MAAS"
             authority_badge = "[OS]" if authority == "openstack_runtime" else "[MAAS]"
+            os_region = str(row.get("os_region") or "—").strip() or "—"
 
             if st == "NOT_IN_NETBOX":
                 continue
@@ -79,6 +79,7 @@ def _build_update_nic_rows(interface_audit):
                 row.get("maas_mac") or "",
                 row.get("maas_ips") or "",
                 maas_vlan,
+                os_region,
                 os_mac,
                 os_ip,
                 os_vlan,

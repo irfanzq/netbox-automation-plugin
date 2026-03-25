@@ -543,6 +543,7 @@ class MAASOpenStackSyncView(LoginRequiredMixin, View):
                     "runtime_nics": [],
                     "runtime_bmc": [],
                     "subnet_consumers": [],
+                    "openstack_region_name": "—",
                     "error": "OpenStack auth URL set but no OS_PASSWORD (or application credential ID/secret). Drift report will omit OpenStack data.",
                     "openstack_cred_missing": True,
                 }
@@ -556,20 +557,27 @@ class MAASOpenStackSyncView(LoginRequiredMixin, View):
                     "runtime_nics": [],
                     "runtime_bmc": [],
                     "subnet_consumers": [],
+                    "openstack_region_name": "—",
                     "error": None,
                 }
                 errors = []
+                merged_region_labels: list[str] = []
                 for r in all_results:
                     data = r.get("data") or {}
                     if data.get("error"):
                         errors.append((r.get("label") or "OpenStack") + ": " + (data["error"][:80] or "error"))
                     else:
+                        rn = (data.get("openstack_region_name") or "").strip()
+                        if rn and rn not in merged_region_labels:
+                            merged_region_labels.append(rn)
                         merged["networks"].extend(data.get("networks") or [])
                         merged["subnets"].extend(data.get("subnets") or [])
                         merged["floating_ips"].extend(data.get("floating_ips") or [])
                         merged["runtime_nics"].extend(data.get("runtime_nics") or [])
                         merged["runtime_bmc"].extend(data.get("runtime_bmc") or [])
                         merged["subnet_consumers"].extend(data.get("subnet_consumers") or [])
+                if merged_region_labels:
+                    merged["openstack_region_name"] = ", ".join(merged_region_labels)
                 if errors and not merged["networks"] and not merged["subnets"] and not merged["floating_ips"]:
                     merged["error"] = "; ".join(errors)
                 elif errors:
@@ -581,6 +589,7 @@ class MAASOpenStackSyncView(LoginRequiredMixin, View):
                     err = data.get("error")
                     merged["_cloud_summary"].append({
                         "label": r.get("label") or "OpenStack",
+                        "openstack_region_name": (data.get("openstack_region_name") or "")[:64] or None,
                         "networks": len(data.get("networks") or []),
                         "subnets": len(data.get("subnets") or []),
                         "floating_ips": len(data.get("floating_ips") or []),

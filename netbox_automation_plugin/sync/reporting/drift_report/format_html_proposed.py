@@ -86,6 +86,7 @@ def emit_proposed_change_tables(e, prop):
         e.spacer()
         e.table(
             [
+                "OS region",
                 "CIDR",
                 "Start address",
                 "End address",
@@ -106,6 +107,7 @@ def emit_proposed_change_tables(e, prop):
         e.spacer()
         e.table(
             [
+                "OS region",
                 "Floating IP",
                 "Name",
                 "NAT inside IP (from OpenStack fixed IP)",
@@ -150,6 +152,11 @@ def emit_proposed_change_tables(e, prop):
                 "MAAS MAC",
                 "MAAS IPs",
                 "MAAS VLAN",
+                "OS region",
+                "OS MAC",
+                "OS runtime IP",
+                "OS runtime VLAN",
+                "Authority",
                 "Suggested NB name",
                 "Proposed properties (from MAAS)",
                 "Risk",
@@ -169,6 +176,7 @@ def emit_proposed_change_tables(e, prop):
             "MAAS MAC",
             "MAAS IPs",
             "MAAS VLAN",
+            "OS region",
             "OS MAC",
             "OS runtime IP",
             "OS runtime VLAN",
@@ -181,8 +189,8 @@ def emit_proposed_change_tables(e, prop):
             "Proposed Action",
             "Risk",
         ]
-        os_rows = [r for r in prop["update_nic"] if len(r) > 9 and str(r[9]).strip() == "[OS]"]
-        maas_rows = [r for r in prop["update_nic"] if len(r) > 9 and str(r[9]).strip() != "[OS]"]
+        os_rows = [r for r in prop["update_nic"] if len(r) > 10 and str(r[10]).strip() == "[OS]"]
+        maas_rows = [r for r in prop["update_nic"] if len(r) > 10 and str(r[10]).strip() != "[OS]"]
         e.paragraph(
             f"Authority split: OS runtime={len(os_rows)} row(s), MAAS fallback={len(maas_rows)} row(s)."
         )

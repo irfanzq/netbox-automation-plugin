@@ -311,6 +311,7 @@ def build_drift_report_xlsx(
     _append_block(
         "A) New prefixes",
         [
+            "OS region",
             "CIDR",
             "Start address",
             "End address",
@@ -326,6 +327,7 @@ def build_drift_report_xlsx(
     _append_block(
         "A) New floating IPs",
         [
+            "OS region",
             "Floating IP",
             "Name",
             "NAT inside IP (from OpenStack fixed IP)",
@@ -349,6 +351,11 @@ def build_drift_report_xlsx(
             "MAAS MAC",
             "MAAS IPs",
             "MAAS VLAN",
+            "OS region",
+            "OS MAC",
+            "OS runtime IP",
+            "OS runtime VLAN",
+            "Authority",
             "Suggested NB name",
             "Proposed properties (from MAAS)",
             "Risk",
@@ -364,6 +371,7 @@ def build_drift_report_xlsx(
             "MAAS MAC",
             "MAAS IPs",
             "MAAS VLAN",
+            "OS region",
             "OS MAC",
             "OS runtime IP",
             "OS runtime VLAN",

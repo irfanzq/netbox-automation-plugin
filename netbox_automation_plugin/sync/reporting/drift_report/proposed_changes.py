@@ -213,6 +213,11 @@ def _proposed_changes_rows(
                         mac,
                         ips,
                         vlan,
+                        "—",
+                        "—",
+                        "—",
+                        "—",
+                        "[MAAS]",
                         suggested_name,
                         props,
                         "Medium",
@@ -330,6 +335,7 @@ def _proposed_changes_rows(
         role_name, role_reason = _suggest_prefix_role(g)
         start_addr, end_addr = _cidr_start_end(g.get("cidr", ""))
         add_prefixes.append([
+            g.get("os_region") or "—",
             g.get("cidr", ""),
             start_addr,
             end_addr,
@@ -353,6 +359,7 @@ def _proposed_changes_rows(
         nb_vrf = _suggest_vrf_for_ip(fip, context=vrf_ctx)
         nb_status = "active" if str(g.get("port_id") or "").strip() else "reserved"
         add_fips.append([
+            g.get("os_region") or "—",
             fip,
             fip_name,
             g.get("fixed_ip_address", "-"),

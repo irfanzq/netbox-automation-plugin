@@ -93,6 +93,9 @@ def build_maas_netbox_interface_audit(
         nb_ctx = nb_audit.get(hostname) or {}
         ctx_site = (nb_ctx.get("site_slug") or "-")[:14]
         ctx_loc = (nb_ctx.get("location_name") or "-")[:16]
+        os_region_default = (
+            (openstack_data or {}).get("openstack_region_name") or "—"
+        )[:32]
         m_fab = (m.get("fabric_name") or "-")[:14]
         m_pool = (m.get("pool_name") or "-")[:12]
         nb_by_mac = {}
@@ -179,15 +182,30 @@ def build_maas_netbox_interface_audit(
 
             if not nb:
                 n_mac = sum(1 for x in nb_list if _normalize_mac(x.get("mac") or ""))
+                os_nib = os_runtime_by_host_mac.get(hostname.lower(), {}).get(mac) or {}
+                os_mac_n = _normalize_mac(os_nib.get("os_mac") or os_nib.get("mac") or "")
+                os_ip_list_n = [str(x).strip() for x in (os_nib.get("os_ips") or []) if str(x).strip()]
+                if not os_ip_list_n and (os_nib.get("os_ip") or "").strip():
+                    os_ip_list_n = [
+                        x.strip() for x in str(os_nib.get("os_ip") or "").split(",") if x.strip()
+                    ]
+                os_vlan_n = str(os_nib.get("os_runtime_vlan") or "").strip()
+                os_auth_n = bool(os_mac_n or os_ip_list_n or os_vlan_n)
+                os_region_nib = str(os_nib.get("os_region") or "").strip() or os_region_default
                 rows.append({
                     "maas_fabric": row_fab,
                     "maas_pool": m_pool,
                     "nb_site": ctx_site,
                     "nb_location": ctx_loc,
+                    "os_region": os_region_nib,
                     "maas_if": maas_name,
                     "maas_vlan": maas_vlan,
                     "maas_mac": mac,
                     "maas_ips": maas_ip_str,
+                    "os_mac": os_mac_n or "—",
+                    "os_ip": ", ".join(os_ip_list_n) if os_ip_list_n else "—",
+                    "os_runtime_vlan": os_vlan_n or "—",
+                    "authority": "openstack_runtime" if os_auth_n else "maas_fallback",
                     "nb_if": "—",
                     "nb_vlan": "—",
                     "nb_mac": "—",
@@ -210,6 +228,7 @@ def build_maas_netbox_interface_audit(
                 os_ip_list = [x.strip() for x in str(os_row.get("os_ip") or "").split(",") if x.strip()]
             os_ip_set = set(os_ip_list)
             os_vlan = str(os_row.get("os_runtime_vlan") or "").strip()
+            os_region = str(os_row.get("os_region") or "").strip() or os_region_default
 
             os_authoritative = bool(os_mac or os_ip_set or os_vlan)
             base_ip_set = os_ip_set if os_authoritative else maas_ip_set
@@ -311,6 +330,7 @@ def build_maas_netbox_interface_audit(
                 "maas_pool": m_pool,
                 "nb_site": ctx_site,
                 "nb_location": ctx_loc,
+                "os_region": os_region,
                 "maas_if": maas_name,
                 "maas_vlan": maas_vlan,
                 "maas_mac": mac,
@@ -400,14 +420,15 @@ def build_maas_netbox_matched_rows(
             hints.append("MAAS fabric vs NB location — verify mapping")
         elif fab and not loc:
             hints.append("NB location empty — MAAS has fabric")
+        osr = os_runtime_by_h.get(h) or {}
         maas_st = (m.get("status_name") or "").lower()
         nb_st = (nb.get("status") or "").lower()
         if maas_st and nb_st:
-            if "deployed" in maas_st and "staged" in nb_st:
+            # Suppress MAAS lifecycle hints when OS runtime lifecycle data exists.
+            if not osr and "deployed" in maas_st and "staged" in nb_st:
                 hints.append("MAAS deployed / NB staged — consider active")
             if "ready" in maas_st and "active" in nb_st:
                 pass
-        osr = os_runtime_by_h.get(h) or {}
         os_prov = (osr.get("provision_state") or "").strip().lower()
         os_power = (osr.get("power_state") or "").strip().lower()
         os_maint = bool(osr.get("maintenance", False))
@@ -490,6 +511,7 @@ def openstack_subnet_prefix_hints(openstack_data: dict, netbox_prefixes: set):
         cons = consumers_by_sid.get((sn.get("id") or "")) or {}
         hints.append({
             "cidr": cidr,
+            "os_region": (sn.get("os_region") or openstack_data.get("openstack_region_name") or "—")[:32],
             "subnet_id": (sn.get("id") or "")[:36],
             "network_id": nid[:36] if nid else "",
             "network_name": (net.get("name") or "")[:48],
@@ -567,6 +589,7 @@ def openstack_floating_ips_missing_from_netbox(openstack_data: dict):
                         break
             missing.append({
                 "floating_ip": ip,
+                "os_region": (f.get("os_region") or openstack_data.get("openstack_region_name") or "—")[:32],
                 "fixed_ip_address": f.get("fixed_ip_address") or "-",
                 "id": f.get("id", ""),
                 "port_id": f.get("port_id") or "",

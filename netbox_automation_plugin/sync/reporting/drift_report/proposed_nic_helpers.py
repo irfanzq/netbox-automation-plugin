@@ -23,6 +23,12 @@ def _build_add_nb_interface_rows(interface_audit):
             mac = (row.get("maas_mac") or "").strip()
             ips = (row.get("maas_ips") or "—").strip()
             vlan = str(row.get("maas_vlan") or "—")
+            os_mac = (row.get("os_mac") or "—").strip()
+            os_ip = (row.get("os_ip") or "—").strip()
+            os_vlan = str(row.get("os_runtime_vlan") or "—")
+            authority = str(row.get("authority") or "maas_fallback").strip()
+            authority_badge = "[OS]" if authority == "openstack_runtime" else "[MAAS]"
+            os_region = str(row.get("os_region") or "—").strip() or "—"
             props = (
                 f"MAC {mac}; untagged VLAN {vlan} (from MAAS); "
                 f"IPs: {ips}"
@@ -36,6 +42,11 @@ def _build_add_nb_interface_rows(interface_audit):
                 mac,
                 ips,
                 vlan,
+                os_region,
+                os_mac or "—",
+                os_ip or "—",
+                os_vlan or "—",
+                authority_badge,
                 (
                     maas_if
                     if maas_if != "—"
