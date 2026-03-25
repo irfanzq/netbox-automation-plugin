@@ -140,10 +140,19 @@ def build_maas_netbox_interface_audit(
         m_fab = (m.get("fabric_name") or "-")[:14]
         m_pool = (m.get("pool_name") or "-")[:12]
         nb_by_mac = {}
+        lag_members_by_name = defaultdict(set)
+        lag_member_macs_by_name = defaultdict(set)
         for nb in nb_list:
             k = _normalize_mac(nb.get("mac") or "")
             if k:
                 nb_by_mac[k] = nb
+            lag_parent = (nb.get("lag_name") or "").strip().lower()
+            if lag_parent:
+                n = (nb.get("name") or "").strip().lower()
+                if n:
+                    lag_members_by_name[lag_parent].add(n)
+                if k:
+                    lag_member_macs_by_name[lag_parent].add(k)
 
         maas_macs_with_nic = set()
         rows = []
@@ -294,6 +303,8 @@ def build_maas_netbox_interface_audit(
             nb_ip_str = ", ".join(nb.get("ips") or []) if nb.get("ips") else "—"
             nb_vlan = str(nb.get("untagged_vlan_vid") or "")[:8] or "—"
             mgmt = "mgmt" if nb.get("mgmt_only") else ""
+            maas_name_l = (maas_name or "").strip().lower()
+            nb_name_l = (nb_name or "").strip().lower()
 
             maas_v = _parse_vid(maas_vlan)
             os_v = _parse_vid(os_vlan)
@@ -336,8 +347,30 @@ def build_maas_netbox_interface_audit(
                         f"(UI often name-only — confirm in MAAS API/subnets)"
                     )
 
-            if (maas_name or "").lower() != (nb_name or "").lower():
-                notes.append(f"name: MAAS={maas_name} NB={nb_name}")
+            lag_member_aligned = False
+            if maas_name_l and nb_name_l and maas_name_l != nb_name_l:
+                member_names = lag_members_by_name.get(nb_name_l) or set()
+                member_macs = lag_member_macs_by_name.get(nb_name_l) or set()
+                if maas_name_l in member_names:
+                    lag_member_aligned = True
+                elif mac and mac in member_macs:
+                    lag_member_aligned = True
+                elif os_mac and os_mac in member_macs:
+                    lag_member_aligned = True
+                else:
+                    nb_lag_parent = (nb.get("lag_name") or "").strip().lower()
+                    if nb_lag_parent and nb_lag_parent == maas_name_l:
+                        lag_member_aligned = True
+
+            name_diff_unaligned = bool(maas_name_l and nb_name_l and maas_name_l != nb_name_l and not lag_member_aligned)
+            if maas_name_l and nb_name_l and maas_name_l != nb_name_l:
+                if lag_member_aligned:
+                    notes.append(
+                        f"name(aligned-lag): MAAS={maas_name} NB={nb_name} "
+                        f"(same LAG by MAAS/OS MAC membership)"
+                    )
+                else:
+                    notes.append(f"name: MAAS={maas_name} NB={nb_name}")
             if missing_nb:
                 if os_authoritative:
                     notes.append(
@@ -369,7 +402,7 @@ def build_maas_netbox_interface_audit(
                 status = "OS_RUNTIME_MAC_MISMATCH" if os_authoritative else "MAC_MISMATCH"
             elif missing_nb:
                 status = "OS_RUNTIME_IP_GAP" if os_authoritative else "IP_GAP"
-            elif notes and any("name:" in n for n in notes):
+            elif name_diff_unaligned:
                 status = "OK_NAME_DIFF"
             else:
                 status = "OK"

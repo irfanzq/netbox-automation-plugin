@@ -298,14 +298,13 @@ def emit_proposed_change_tables(e, prop):
         e.table(
             [
                 "Host",
+                "OS BMC IP",
+                "OS mgmt type",
                 "MAAS BMC IP",
                 "MAAS power_type",
                 "MAAS BMC MAC",
                 "Suggested NB mgmt iface",
                 "NB mgmt iface IP",
-                "OS BMC IP",
-                "OS mgmt type",
-                "OS BMC endpoint",
                 "Authority",
                 "Proposed action",
                 "Risk",
@@ -322,6 +321,8 @@ def emit_proposed_change_tables(e, prop):
         e.table(
             [
                 "Host",
+                "OS BMC IP",
+                "OS mgmt type",
                 "MAAS BMC IP",
                 "MAAS power_type",
                 "MAAS BMC MAC",
@@ -330,11 +331,7 @@ def emit_proposed_change_tables(e, prop):
                 "NB IP coverage",
                 "Actual NB Port Carrying BMC IP",
                 "NB OOB MAC",
-                "OS BMC IP",
-                "OS mgmt type",
-                "OS BMC endpoint",
                 "Authority",
-                "Status",
                 "Proposed action",
                 "Risk",
             ],

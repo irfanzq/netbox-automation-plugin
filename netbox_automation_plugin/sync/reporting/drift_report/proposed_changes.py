@@ -5,6 +5,7 @@ from typing import Any
 from netbox_automation_plugin.sync.reporting.drift_report.bmc_oob import (
     _build_proposed_mgmt_interface_rows,
     _suggested_netbox_mgmt_interface_name,
+    _suggested_netbox_mgmt_interface_name_from_os,
 )
 from netbox_automation_plugin.sync.reporting.drift_report.device_types import (
     _build_device_type_match_index,
@@ -761,13 +762,19 @@ def _proposed_changes_rows(
             os_mgmt_type = str(
                 osr.get("power_interface") or osr.get("management_interface") or osr.get("driver") or ""
             ).strip()
-            os_bmc_ep = str(osr.get("os_bmc_endpoint") or "").strip()
-            authority_badge = "[OS]" if (os_bmc_ip or os_bmc_ep or os_mgmt_type) else "[MAAS]"
-            mgmt = _suggested_netbox_mgmt_interface_name(
+            maas_mgmt = _suggested_netbox_mgmt_interface_name(
                 m.get("power_type"),
                 m.get("hardware_vendor"),
                 m.get("hardware_product"),
             )
+            os_mgmt = _suggested_netbox_mgmt_interface_name_from_os(
+                vendor=str(osr.get("vendor") or ""),
+                driver=str(osr.get("driver") or ""),
+                power_interface=str(osr.get("power_interface") or ""),
+            )
+            has_os_data = bool(osr) and bool(os_bmc_ip or os_mgmt_type)
+            authority_badge = "[OS]" if has_os_data else "[MAAS]"
+            mgmt = os_mgmt if bool(osr) else maas_mgmt
             action = (
                 "CREATE_NETBOX_OOB_IFACE"
                 + ("; SET_NETBOX_OOB_IP" if bmc_ip else "")
@@ -775,14 +782,13 @@ def _proposed_changes_rows(
             out.append(
                 [
                     h,
+                    os_bmc_ip or "—",
+                    os_mgmt_type or "—",
                     bmc_ip or "—",
                     power_type or "—",
                     str(m.get("bmc_mac") or "—"),
                     mgmt,
                     bmc_ip or "—",
-                    os_bmc_ip or "—",
-                    os_mgmt_type or "—",
-                    os_bmc_ep or "—",
                     authority_badge,
                     action,
                     "Medium",

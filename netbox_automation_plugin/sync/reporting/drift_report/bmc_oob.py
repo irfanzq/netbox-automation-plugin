@@ -46,7 +46,9 @@ def _suggested_netbox_mgmt_interface_name(
     """
     MAAS-only hint when **creating** a new OOB port — ``ipmi`` or ``idrac`` only.
 
-    - ``power_type`` containing ``redfish`` or ``idrac`` → ``idrac``.
+    - ``power_type`` containing ``idrac`` → ``idrac``.
+    - ``power_type`` containing ``redfish``: if vendor/product contains ``dell`` then
+      ``idrac`` else ``ipmi``.
     - ``power_type`` containing ``ipmi``: if vendor **or** product text contains
       ``dell`` (case-insensitive), suggest ``idrac`` (Dell BMC is iDRAC even when
       MAAS uses the generic IPMI driver); otherwise ``ipmi``.
@@ -56,12 +58,16 @@ def _suggested_netbox_mgmt_interface_name(
     (``_oob_port_hint_column``).
     """
     pl = (power_type or "").lower()
-    if "redfish" in pl or "idrac" in pl:
+    combined = (
+        f"{(hardware_vendor or '').strip()} {(hardware_product or '').strip()}"
+    ).lower()
+    if "idrac" in pl:
         return "idrac"
+    if "redfish" in pl:
+        if "dell" in combined:
+            return "idrac"
+        return "ipmi"
     if "ipmi" in pl:
-        combined = (
-            f"{(hardware_vendor or '').strip()} {(hardware_product or '').strip()}"
-        ).lower()
         if "dell" in combined:
             return "idrac"
         return "ipmi"
@@ -203,11 +209,10 @@ def _build_proposed_mgmt_interface_rows(
         pt = (m.get("power_type") or "").strip() or "—"
         os_row = os_bmc_by_h.get(h.lower()) or {}
         os_bmc_ip = (os_row.get("os_bmc_ip") or "").strip()
-        os_bmc_ep = (os_row.get("os_bmc_endpoint") or "").strip()
         os_drv = (os_row.get("driver") or "").strip()
         os_pif = (os_row.get("power_interface") or "").strip()
         os_vendor = (os_row.get("vendor") or "").strip()
-        authority = "openstack_runtime" if os_bmc_ip else "maas_fallback"
+        authority = "openstack_runtime" if os_row else "maas_fallback"
         authority_badge = "[OS]" if authority == "openstack_runtime" else "[MAAS]"
         bmc_effective = os_bmc_ip or bmc
         maas_oob_new = _suggested_netbox_mgmt_interface_name(
@@ -239,6 +244,9 @@ def _build_proposed_mgmt_interface_rows(
             out.append([
                 h,
                 "—",
+                "—",
+                "—",
+                "—",
                 pt,
                 maas_mac or "—",
                 maas_oob_new,
@@ -246,9 +254,6 @@ def _build_proposed_mgmt_interface_rows(
                 cov,
                 nb_ifn,
                 nb_mgmt_mac,
-                "—",
-                "—",
-                "—",
                 authority_badge,
                 status,
                 action,
@@ -359,6 +364,8 @@ def _build_proposed_mgmt_interface_rows(
             continue
         out.append([
             h,
+            os_bmc_ip or "—",
+            (os_drv or os_pif or "—"),
             bmc or "—",
             pt,
             maas_mac or "—",
@@ -367,9 +374,6 @@ def _build_proposed_mgmt_interface_rows(
             cov,
             nb_ifn,
             nb_mgmt_mac,
-            os_bmc_ip or "—",
-            (os_drv or os_pif or "—"),
-            os_bmc_ep or "—",
             authority_badge,
             status,
             action,

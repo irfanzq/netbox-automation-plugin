@@ -350,7 +350,7 @@ def fetch_netbox_interfaces_for_names(names: set):
     Per-device interfaces for MAAS-matched hostnames.
     Returns: device_name -> [{
       name, mac, ips, mgmt_only, untagged_vlan_vid, ip_vrfs,
-      peer_summary, nb_site, nb_location
+      lag_name, peer_summary, nb_site, nb_location
     }]
     """
     out = {}
@@ -409,6 +409,12 @@ def fetch_netbox_interfaces_for_names(names: set):
                     ip_vrfs.append(v or "Global")
                 uv = getattr(iface, "untagged_vlan", None)
                 vid = str(uv.vid) if uv and getattr(uv, "vid", None) is not None else ""
+                lag_name = ""
+                try:
+                    lag_obj = getattr(iface, "lag", None)
+                    lag_name = (getattr(lag_obj, "name", None) or "").strip()
+                except Exception:
+                    lag_name = ""
                 peer_summary = _interface_peer_summary(iface)
                 lst.append({
                     "name": iface.name or "",
@@ -417,6 +423,7 @@ def fetch_netbox_interfaces_for_names(names: set):
                     "mgmt_only": bool(getattr(iface, "mgmt_only", False)),
                     "untagged_vlan_vid": vid,
                     "ip_vrfs": ip_vrfs,
+                    "lag_name": lag_name,
                     "peer_summary": peer_summary,
                     "nb_site": site_nm,
                     "nb_location": loc_nm,
