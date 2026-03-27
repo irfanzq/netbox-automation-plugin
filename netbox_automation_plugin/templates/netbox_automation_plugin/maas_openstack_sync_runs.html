@@ -5,6 +5,7 @@
 {% block title %}{% trans "MAAS/OpenStack Drift Runs" %}{% endblock %}
 
 {% block content %}
+{% trans "All" as hist_scope_unscoped_label %}
 {% trans "Site / location — click to choose…" as hist_scope_placeholder %}
 {% trans "Selected:" as hist_scope_selected_prefix %}
 {% trans "site/location(s) selected" as hist_scope_multi_suffix %}
@@ -74,7 +75,7 @@
           <div>
             <label class="form-label mb-1">{% trans "NetBox site / location (saved run scope)" %}</label>
             <p class="small text-muted mb-2">
-              {% trans "Closed by default. Open the list to pick one or more Site / Location pairs. Leave none checked to include all runs." %}
+              {% trans "Closed by default. Open the list to pick Site / Location pairs. The first option, “All”, limits the list to runs saved with no site or location (those rows show “All (no site/location filter)” in the table). Leave every box unchecked to include all runs." %}
             </p>
             <details class="hist-scope-dropdown border rounded bg-body shadow-sm" id="hist-scope-details">
               <summary class="d-flex align-items-center justify-content-between gap-2 form-select form-select-sm py-2 mb-0">
@@ -87,6 +88,12 @@
                   <button type="button" class="btn btn-outline-secondary btn-sm py-0 px-2 js-hist-clear-checkboxes" data-hist-target="hist-filter-locations">{% trans "Clear" %}</button>
                 </div>
                 <div id="hist-filter-locations" class="hist-scope-panel border rounded bg-body px-2 py-1 small">
+                  <div class="form-check mb-0 py-1 border-bottom">
+                    <input class="form-check-input hist-loc-cb" type="checkbox" name="filter_location" value="{{ hist_filter_unscoped_value }}" id="hist-loc-unscoped"
+                      data-label="{{ hist_scope_unscoped_label|escapejs }}"
+                      {% if hist_filter_unscoped_value in selected_filter_location_keys %}checked{% endif %} />
+                    <label class="form-check-label fw-medium" for="hist-loc-unscoped">{{ hist_scope_unscoped_label }}</label>
+                  </div>
                   {% for key, label in location_choices_for_filter %}
                     <div class="form-check mb-0 py-1">
                       <input class="form-check-input hist-loc-cb" type="checkbox" name="filter_location" value="{{ key }}" id="hist-loc-{{ forloop.counter }}"

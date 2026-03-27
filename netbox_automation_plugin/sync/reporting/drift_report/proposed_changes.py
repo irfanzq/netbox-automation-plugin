@@ -13,9 +13,6 @@ from netbox_automation_plugin.sync.reporting.drift_report.device_types import (
     _match_netbox_role_from_hostname,
     _resolve_device_type_display,
 )
-from netbox_automation_plugin.sync.reporting.drift_report.maas_netbox_status import (
-    discovery_tag_with_proposed_nb_device_status,
-)
 from netbox_automation_plugin.sync.reporting.drift_report.new_device_policy import (
     _new_device_candidate_policy,
     _new_device_fabric_display,
@@ -442,6 +439,66 @@ def _proposed_changes_rows(
                 best_net = net
         return best_net
 
+    def _floating_aligned_container_net(ip_obj):
+        """
+        For floating-IP VRF hints, align to classic routed blocks (IPv4 /24, IPv6 /64) so
+        seeded .1-.10 are x.y.z.1-10 in the same /24 as the floating IP — not the narrowest
+        NetBox Prefix (e.g. /25) whose *prefix* VRF may differ from host assignments.
+        """
+        import ipaddress
+
+        if ip_obj.version == 4:
+            return ipaddress.ip_network(f"{ip_obj}/24", strict=False)
+        return ipaddress.ip_network(f"{ip_obj}/64", strict=False)
+
+    def _vrf_counter_pick_winner(ct):
+        """Plurality; on ties prefer a non-Global VRF."""
+        from collections import Counter
+
+        if not isinstance(ct, Counter) or not ct:
+            return None
+        mc = ct.most_common()
+        top_n = mc[0][1]
+        tops = [v for v, n in mc if n == top_n]
+        if len(tops) == 1:
+            return tops[0]
+        for v in tops:
+            if (v or "").strip().lower() != "global":
+                return v
+        return tops[0]
+
+    def _vrf_from_floating_aligned_seed_ips(ip_obj):
+        """
+        Probe .1-.10 then .11-.20 inside the floating IP's /24 (v4) or /64 (v6).
+        VRF comes only from existing NetBox IPAddress rows (not Prefix VRF).
+        """
+        import ipaddress
+        from collections import Counter
+
+        boundary = _floating_aligned_container_net(ip_obj)
+        net_i = int(boundary.network_address)
+        bcast_i = int(boundary.broadcast_address)
+        for lo, hi in ((1, 10), (11, 20)):
+            votes = []
+            for off in range(lo, hi + 1):
+                addr_i = net_i + off
+                if addr_i > bcast_i:
+                    break
+                try:
+                    h = ipaddress.ip_address(addr_i)
+                except Exception:
+                    continue
+                if h not in boundary:
+                    continue
+                vrf = _netbox_ipaddress_vrf_for_host(h)
+                if vrf is not None:
+                    votes.append(vrf)
+            if votes:
+                picked = _vrf_counter_pick_winner(Counter(votes))
+                if picked:
+                    return picked
+        return None
+
     def _vrf_from_longest_containing_prefix(ip_obj):
         """
         Most specific NetBox prefix that contains this IP (e.g. /25 wins over /22); uses that prefix's VRF.
@@ -514,17 +571,20 @@ def _proposed_changes_rows(
         for d in range(1, max_step + 1):
             yield d
 
-    def _vrf_from_closest_netbox_ipaddresses(ip_obj, *, max_step: int = 24):
+    def _vrf_from_closest_netbox_ipaddresses(
+        ip_obj, *, max_step: int = 24, boundary_net=None
+    ):
         """
         Walk numerically adjacent hosts (existing NetBox IPAddress rows), closest first.
-        Neighbors must lie in the same narrowest NetBox prefix as ip_obj when that exists (e.g. stay in /25).
+        When ``boundary_net`` is set, neighbors must stay inside it (e.g. /24 for floating hints).
+        Otherwise use the narrowest NetBox Prefix containing ``ip_obj``.
         Uses strict plurality when 2+ samples; a single existing neighbor still returns its VRF.
         """
         import ipaddress
 
         from collections import Counter
 
-        boundary = _narrowest_containing_prefix_net(ip_obj)
+        boundary = boundary_net if boundary_net is not None else _narrowest_containing_prefix_net(ip_obj)
         scanned = []
         if ip_obj.version == 4:
             gen = _host_offsets_scan_v4(max_step)
@@ -561,43 +621,6 @@ def _proposed_changes_rows(
             return v1
         return None
 
-    def _vrf_from_seed_hosts_in_subnet(ip_obj):
-        """
-        Probe seeded hosts in the containing subnet before adjacency:
-        first .1-.10, then .11-.20.
-        """
-        import ipaddress
-        from collections import Counter
-
-        boundary = _narrowest_containing_prefix_net(ip_obj)
-        if boundary is None:
-            # Fallback bucket when no prefix contains this IP.
-            boundary = ipaddress.ip_network(
-                f"{ip_obj}/24" if ip_obj.version == 4 else f"{ip_obj}/64",
-                strict=False,
-            )
-
-        net_i = int(boundary.network_address)
-        bcast_i = int(boundary.broadcast_address)
-        for lo, hi in ((1, 10), (11, 20)):
-            votes = []
-            for off in range(lo, hi + 1):
-                addr_i = net_i + off
-                if addr_i >= bcast_i:
-                    break
-                try:
-                    h = ipaddress.ip_address(addr_i)
-                except Exception:
-                    continue
-                if h not in boundary:
-                    continue
-                vrf = _netbox_ipaddress_vrf_for_host(h)
-                if vrf:
-                    votes.append(vrf)
-            if votes:
-                return Counter(votes).most_common(1)[0][0]
-        return None
-
     def _suggest_vrf_for_ip(ip_text: str) -> str:
         try:
             import ipaddress
@@ -618,43 +641,130 @@ def _proposed_changes_rows(
             return nbr
         return "Global"
 
-    def _suggest_vrf_for_floating_ip_gap(g: dict) -> str:
+    def _suggest_vrf_for_floating_address(ip_text: str) -> str:
         """
-        Proposed FIP row VRF: prefer floating (public/WAN) IP first.
-        For floating side, probe seeded subnet hosts first (.1-.10, then .11-.20),
-        then fallback to longest-prefix / adjacent / bucket voting.
+        Prefer NetBox IPAddress evidence in the floating /24|/64 first (seed .1-.20,
+        then closest neighbors in-block). If the block has no usable host rows, use
+        longest-prefix VRF for the subnet *network address* of that aligned block.
+        Finally merge adjacent /24|/64 bucket plurality from other assignments.
         """
         try:
             import ipaddress
         except Exception:
-            ipaddress = None
+            return "Global"
+        t = (ip_text or "").strip()
+        if not t:
+            return "Global"
+        try:
+            ip_o = ipaddress.ip_address(t)
+        except Exception:
+            return "Global"
+        align = _floating_aligned_container_net(ip_o)
+        v = _vrf_from_floating_aligned_seed_ips(ip_o)
+        if v:
+            return v
+        v = _vrf_from_closest_netbox_ipaddresses(ip_o, max_step=24, boundary_net=align)
+        if v:
+            return v
+        lpm_net = _vrf_from_longest_containing_prefix(align.network_address)
+        if lpm_net and (lpm_net or "").strip().lower() != "global":
+            return lpm_net
+        v = _vrf_from_neighbor_ipaddresses(ip_o)
+        if v:
+            return v
+        return "Global"
+
+    def _suggest_vrf_for_floating_ip_gap(g: dict) -> str:
+        """
+        Proposed FIP row VRF: aligned-block IPAddress seeds and neighbors, then prefix VRF
+        for the block network address, then adjacent-subnet bucket vote, then OpenStack
+        network/subnet/project name tokens matched against NetBox VRF names.
+        """
         fip = str(g.get("floating_ip") or "").strip()
         fixed = str(g.get("fixed_ip_address") or "").strip()
         if fixed in {"", "-"}:
             fixed = ""
-        if fip and ipaddress is not None:
-            try:
-                ip_o = ipaddress.ip_address(fip)
-                vrf_seed = _vrf_from_seed_hosts_in_subnet(ip_o)
-                if vrf_seed and vrf_seed != "Global":
-                    return vrf_seed
-            except Exception:
-                pass
-        vrf_pub = _suggest_vrf_for_ip(fip) if fip else "Global"
+        vrf_pub = _suggest_vrf_for_floating_address(fip) if fip else "Global"
         if vrf_pub != "Global":
             return vrf_pub
         if not fixed:
-            return vrf_pub
-        vrf_fix = _suggest_vrf_for_ip(fixed)
+            return _suggest_vrf_from_floating_gap_os_names(g)
+        vrf_fix = _suggest_vrf_for_floating_address(fixed)
         if vrf_fix != "Global":
             return vrf_fix
-        return vrf_pub
+        return _suggest_vrf_from_floating_gap_os_names(g)
 
     _prefix_vrf_names = [
         (v.get("name") or "").strip()
         for v in (netbox_data.get("vrfs") or [])
         if (v.get("name") or "").strip()
     ]
+
+    _FIP_OS_VRF_STOPWORDS = frozenset({
+        "openstack",
+        "network",
+        "subnet",
+        "neutron",
+        "external",
+        "public",
+        "private",
+        "floating",
+        "pool",
+        "the",
+        "and",
+        "for",
+        "with",
+        "from",
+    })
+
+    def _suggest_vrf_from_floating_gap_os_names(g: dict) -> str:
+        """
+        Match floating_network_name / floating_subnet_name / project_name (and region)
+        against NetBox VRF names: full-name substring in OS text first, then score VRFs
+        by how many distinct non-trivial tokens from the OS text appear in each VRF name.
+        Ties: longer VRF name wins (typically more specific, e.g. Birch + WAN + BGP).
+        """
+        import re
+
+        blob = " ".join([
+            str(g.get("floating_network_name") or ""),
+            str(g.get("floating_subnet_name") or ""),
+            str(g.get("project_name") or ""),
+            str(g.get("os_region") or ""),
+        ]).lower()
+        if not blob.strip():
+            return "Global"
+        for vrf in _prefix_vrf_names:
+            vl = vrf.lower()
+            if vl == "global":
+                continue
+            if vl and vl in blob:
+                return vrf
+        tokens = sorted({
+            t
+            for t in re.findall(r"[a-z0-9]+", blob)
+            if len(t) >= 3 and t not in _FIP_OS_VRF_STOPWORDS
+        })
+        if not tokens:
+            return "Global"
+        best_score = 0
+        best_vrfs = []
+        for vrf in _prefix_vrf_names:
+            vl = vrf.lower()
+            if vl == "global":
+                continue
+            score = sum(1 for t in tokens if t in vl)
+            if score > best_score:
+                best_score = score
+                best_vrfs = [vrf]
+            elif score == best_score and score > 0:
+                best_vrfs.append(vrf)
+        if best_score <= 0 or not best_vrfs:
+            return "Global"
+        if len(best_vrfs) == 1:
+            return best_vrfs[0]
+        best_vrfs.sort(key=lambda v: (-len(v), v.lower()))
+        return best_vrfs[0]
 
     def _suggest_vrf_for_prefix_gap(g: dict, selected_locations: list[str]) -> str:
         """
@@ -873,15 +983,12 @@ def _proposed_changes_rows(
         # OpenStack authority is state-gated and requires instance_uuid.
         authority_badge = "[OS]" if _os_is_authoritative_for_host(osr) else "[MAAS]"
         if is_candidate:
-            base_discovery_tag = (
+            proposed_tag = (
                 "openstack+maas-discovered" if osr else "maas-discovered"
             )
         else:
-            base_discovery_tag = "review-only"
+            proposed_tag = "review-only"
         nb_prop_state = proposed_netbox_status_for_new_maas_machine(m, osr)
-        proposed_tag = discovery_tag_with_proposed_nb_device_status(
-            base_discovery_tag, nb_prop_state
-        )
         tail = [
             power_type,
             bmc_present,
@@ -958,7 +1065,6 @@ def _proposed_changes_rows(
             nb_status,
             "VIP",
             nb_vrf,
-            "NetBox VRF: floating IP first (public side): probe .1-.10, then .11-.20 in that subnet; fallback longest prefix/adjacent IPs/subnet bucket; fixed IP only as fallback",
             "CREATE_NETBOX_IPADDRESS_FROM_OS_FIP",
         ])
 

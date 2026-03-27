@@ -154,7 +154,6 @@ def emit_proposed_change_tables(e, prop):
                 "NB status",
                 "NB role",
                 "NB VRF",
-                "Decision basis",
                 "Proposed Action",
             ],
             prop["add_fips"],

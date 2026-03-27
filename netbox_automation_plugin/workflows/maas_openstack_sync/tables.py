@@ -52,7 +52,10 @@ class MAASOpenStackDriftRunTable(tables.Table):
         if not isinstance(locs, list):
             locs = []
         if not sites and not locs:
-            return format_html('<span class="text-muted">{}</span>', _("All (no site/location filter)"))
+            return format_html(
+                '<span class="text-muted">{}</span>',
+                _("All (no site/location filter)"),
+            )
         parts = []
         if sites:
             parts.append(format_html("<strong>{}</strong> {}", _("Sites"), ", ".join(str(s) for s in sites)))
