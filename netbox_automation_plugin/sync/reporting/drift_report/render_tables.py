@@ -1,6 +1,7 @@
 """ASCII and HTML table rendering and drift report emitter."""
 
 import html
+import hashlib
 import re
 import textwrap
 
@@ -200,7 +201,21 @@ def _html_td_class(header, col_idx, notes_col_idx=None) -> str:
     return " ".join(parts)
 
 
-def _html_table(headers, rows, *, notes_col_idx=None):
+def _selection_row_key(selection_key: str, row_idx: int, row_cells: list) -> str:
+    """Stable key for a proposed row; used later for ingestion filtering."""
+    norm = "|".join(_normalize_ascii_cell(c).strip() for c in row_cells)
+    raw = f"{selection_key}|{row_idx}|{norm}".encode("utf-8", errors="ignore")
+    return hashlib.sha1(raw).hexdigest()[:16]
+
+
+def _html_table(
+    headers,
+    rows,
+    *,
+    notes_col_idx=None,
+    selectable=False,
+    selection_key=None,
+):
     if not headers:
         return ""
     n = len(headers)
@@ -209,17 +224,50 @@ def _html_table(headers, rows, *, notes_col_idx=None):
         f'<th scope="col" class="{_html_th_class(h)}">{_html_cell_content(h)}</th>'
         for h in hdr_strs
     )
+    if selectable:
+        ths = (
+            '<th scope="col" class="small align-bottom text-nowrap drift-select-col-header">'
+            '<label class="d-inline-flex align-items-center gap-1 mb-0">'
+            '<input type="checkbox" class="form-check-input mt-0 drift-include-toggle-all" checked />'
+            '<span class="drift-include-label">Include (all)</span>'
+            "</label>"
+            "</th>"
+        ) + ths
     body_parts = []
+    safe_selection_key = re.sub(r"[^a-zA-Z0-9_-]+", "_", str(selection_key or "drift_rows"))
     for r in rows:
         padded = list(r[:n]) + [""] * (n - min(len(r), n))
         tds = []
+        if selectable:
+            row_idx = len(body_parts)
+            row_key = _selection_row_key(safe_selection_key, row_idx, padded)
+            tds.append(
+                '<td class="align-top text-nowrap drift-select-col">'
+                '<input type="checkbox" class="form-check-input drift-include-row" '
+                f'value="{html.escape(row_key)}" data-row-key="{html.escape(row_key)}" checked />'
+                "</td>"
+            )
         for i, cell in enumerate(padded):
             h = hdr_strs[i] if i < len(hdr_strs) else ""
             cls = _html_td_class(h, i, notes_col_idx)
             tds.append(f'<td class="{cls}">{_html_cell_content(cell)}</td>')
         body_parts.append("<tr>" + "".join(tds) + "</tr>")
+    if selectable:
+        table_open = (
+            '<div class="drift-selection-toolbar d-flex justify-content-between align-items-center flex-wrap gap-2 mb-1">'
+            '<div class="d-flex align-items-center gap-2">'
+            '<button type="button" class="btn btn-outline-secondary btn-sm py-0 px-2 drift-select-all-btn">Select all</button>'
+            '<button type="button" class="btn btn-outline-secondary btn-sm py-0 px-2 drift-clear-all-btn">Clear all</button>'
+            "</div>"
+            '<span class="small text-muted drift-selected-count"></span>'
+            "</div>"
+            '<div class="table-responsive mb-3 drift-selectable-table-wrapper" '
+            f'data-selection-key="{html.escape(safe_selection_key)}">'
+        )
+    else:
+        table_open = '<div class="table-responsive mb-3">'
     return (
-        '<div class="table-responsive mb-3">'
+        table_open
         '<table class="table table-sm table-bordered table-striped align-middle mb-0">'
         f'<thead class="table-light"><tr>{ths}</tr></thead><tbody>'
         + "".join(body_parts)
@@ -289,7 +337,13 @@ class _DriftReportEmitter:
     def table(self, headers, rows, **kw) -> None:
         if self._html:
             self._parts.append(
-                _html_table(headers, rows, notes_col_idx=kw.get("notes_col_idx"))
+                _html_table(
+                    headers,
+                    rows,
+                    notes_col_idx=kw.get("notes_col_idx"),
+                    selectable=kw.get("selectable", False),
+                    selection_key=kw.get("selection_key"),
+                )
             )
         else:
             self._parts.extend(_ascii_table(headers, rows, **kw))

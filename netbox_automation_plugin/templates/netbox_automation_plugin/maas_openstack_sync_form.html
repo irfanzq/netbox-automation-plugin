@@ -452,6 +452,14 @@
             .drift-audit-report-scroll .drift-report-html .table {
               font-size: inherit;
             }
+            .drift-selection-toolbar .btn {
+              line-height: 1.15;
+            }
+            .drift-select-col-header,
+            .drift-select-col {
+              width: 1%;
+              white-space: nowrap;
+            }
           </style>
           <div class="card mb-3">
             <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">
@@ -488,6 +496,82 @@
               <p class="small text-muted mt-2 mb-0">{% trans "Excel can be opened in Microsoft Excel or Google Sheets." %}</p>
             </div>
           </div>
+          <script>
+            (function() {
+              function updateState(wrapper) {
+                var table = wrapper.querySelector("table");
+                if (!table) return;
+                var rowBoxes = Array.prototype.slice.call(
+                  table.querySelectorAll("tbody .drift-include-row")
+                );
+                var header = table.querySelector(".drift-include-toggle-all");
+                var label = table.querySelector(".drift-include-label");
+                var count = wrapper.querySelector(".drift-selected-count");
+                if (!rowBoxes.length || !header || !label || !count) return;
+
+                var selected = rowBoxes.filter(function(cb) { return cb.checked; }).length;
+                var total = rowBoxes.length;
+                var state = "mixed";
+                if (selected === total) {
+                  state = "all";
+                  header.checked = true;
+                  header.indeterminate = false;
+                } else if (selected === 0) {
+                  state = "none";
+                  header.checked = false;
+                  header.indeterminate = false;
+                } else {
+                  header.checked = false;
+                  header.indeterminate = false;
+                }
+                label.textContent = "Include (" + state + ")";
+                count.textContent = "Selected: " + selected + " / " + total;
+              }
+
+              function setAll(wrapper, checked) {
+                wrapper.querySelectorAll("tbody .drift-include-row").forEach(function(cb) {
+                  cb.checked = checked;
+                });
+                updateState(wrapper);
+              }
+
+              function initSelectableTable(wrapper) {
+                var table = wrapper.querySelector("table");
+                if (!table || table.getAttribute("data-drift-select-init") === "1") return;
+                table.setAttribute("data-drift-select-init", "1");
+
+                var header = table.querySelector(".drift-include-toggle-all");
+                var selectAllBtn = wrapper.querySelector(".drift-select-all-btn");
+                var clearAllBtn = wrapper.querySelector(".drift-clear-all-btn");
+                var rowBoxes = table.querySelectorAll("tbody .drift-include-row");
+
+                if (header) {
+                  header.addEventListener("change", function() {
+                    setAll(wrapper, !!header.checked);
+                  });
+                }
+                if (selectAllBtn) {
+                  selectAllBtn.addEventListener("click", function() {
+                    setAll(wrapper, true);
+                  });
+                }
+                if (clearAllBtn) {
+                  clearAllBtn.addEventListener("click", function() {
+                    setAll(wrapper, false);
+                  });
+                }
+                rowBoxes.forEach(function(cb) {
+                  cb.addEventListener("change", function() {
+                    updateState(wrapper);
+                  });
+                });
+
+                updateState(wrapper);
+              }
+
+              document.querySelectorAll(".drift-selectable-table-wrapper").forEach(initSelectableTable);
+            })();
+          </script>
         {% endif %}
         {% if auto_download_xlsx and download_xlsx_url %}
           <script>

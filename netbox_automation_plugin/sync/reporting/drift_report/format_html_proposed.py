@@ -57,6 +57,8 @@ def emit_proposed_change_tables(e, prop):
             prop["add_devices"],
             dynamic_columns=True,
             wrap_max_width=None,
+            selectable=True,
+            selection_key="detail_new_devices",
         )
     if prop.get("add_devices_review_only"):
         e.spacer()
@@ -88,6 +90,8 @@ def emit_proposed_change_tables(e, prop):
             prop["add_devices_review_only"],
             dynamic_columns=True,
             wrap_max_width=None,
+            selectable=True,
+            selection_key="detail_review_only_devices",
         )
     if prop["add_prefixes"]:
         e.spacer()
@@ -116,6 +120,8 @@ def emit_proposed_change_tables(e, prop):
             prop["add_prefixes"],
             dynamic_columns=True,
             wrap_max_width=None,
+            selectable=True,
+            selection_key="detail_new_prefixes",
         )
     if prop["add_fips"]:
         e.spacer()
@@ -137,6 +143,8 @@ def emit_proposed_change_tables(e, prop):
             prop["add_fips"],
             dynamic_columns=True,
             wrap_max_width=None,
+            selectable=True,
+            selection_key="detail_new_fips",
         )
 
     e.spacer()
@@ -180,6 +188,8 @@ def emit_proposed_change_tables(e, prop):
             prop["add_nb_interfaces"],
             dynamic_columns=True,
             wrap_max_width=None,
+            selectable=True,
+            selection_key="detail_new_nics",
         )
     if prop["update_nic"]:
         e.spacer()
@@ -219,6 +229,8 @@ def emit_proposed_change_tables(e, prop):
                 os_rows,
                 dynamic_columns=True,
                 wrap_max_width=None,
+                selectable=True,
+                selection_key="detail_nic_drift_os",
             )
         if maas_rows:
             e.spacer()
@@ -229,6 +241,8 @@ def emit_proposed_change_tables(e, prop):
                 maas_rows,
                 dynamic_columns=True,
                 wrap_max_width=None,
+                selectable=True,
+                selection_key="detail_nic_drift_maas",
             )
 
     if (not HIDE_LLDP_TABLES) and prop.get("lldp_new"):
@@ -260,6 +274,8 @@ def emit_proposed_change_tables(e, prop):
             prop["lldp_new"],
             dynamic_columns=True,
             wrap_max_width=None,
+            selectable=True,
+            selection_key="detail_lldp_new",
         )
     if (not HIDE_LLDP_TABLES) and prop.get("lldp_update"):
         e.spacer()
@@ -289,6 +305,8 @@ def emit_proposed_change_tables(e, prop):
             prop["lldp_update"],
             dynamic_columns=True,
             wrap_max_width=None,
+            selectable=True,
+            selection_key="detail_lldp_update",
         )
 
     if prop.get("add_mgmt_iface_new_devices"):
@@ -312,6 +330,8 @@ def emit_proposed_change_tables(e, prop):
             prop["add_mgmt_iface_new_devices"],
             dynamic_columns=True,
             wrap_max_width=None,
+            selectable=True,
+            selection_key="detail_bmc_new_devices",
         )
 
     if prop["add_mgmt_iface"]:
@@ -338,6 +358,8 @@ def emit_proposed_change_tables(e, prop):
             prop["add_mgmt_iface"],
             dynamic_columns=True,
             wrap_max_width=None,
+            selectable=True,
+            selection_key="detail_bmc_existing",
         )
 
     e.spacer()
@@ -358,6 +380,8 @@ def emit_proposed_change_tables(e, prop):
             prop["review_serial"],
             dynamic_columns=True,
             wrap_max_width=None,
+            selectable=True,
+            selection_key="detail_serial_review",
         )
     e.spacer()
     e.subtitle("Summary")
