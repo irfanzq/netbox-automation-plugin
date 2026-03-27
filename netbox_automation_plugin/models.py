@@ -218,3 +218,7 @@ class VLANDeploymentJob(NetBoxModel):
         return f"VLAN Deployment {self.job_type} - {self.get_status_display()} ({self.id})"
 
 
+# Register modular workflow models with Django app registry.
+from .workflows.maas_openstack_sync.history_models import MAASOpenStackDriftRun  # noqa: E402,F401
+
+

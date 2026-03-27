@@ -47,6 +47,9 @@ from django.urls import reverse
 
 import logging
 
+from .history_models import MAASOpenStackDriftRun
+from .history_service import create_drift_run_snapshot
+
 logger = logging.getLogger("netbox_automation_plugin")
 
 
@@ -594,6 +597,10 @@ def _audit_summary_from_payload(payload):
     }
 
 
+def _recent_drift_runs(limit: int = 10):
+    return MAASOpenStackDriftRun.objects.select_related("created_by").order_by("-created")[:limit]
+
+
 class MAASOpenStackSyncView(LoginRequiredMixin, View):
     """
     MAAS / OpenStack Sync workflow.
@@ -607,7 +614,7 @@ class MAASOpenStackSyncView(LoginRequiredMixin, View):
     def get(self, request):
         site_choices, location_choices, _ = _list_site_location_choices()
         form = MAASOpenStackSyncForm(site_choices=site_choices, location_choices=location_choices)
-        return render(request, self.template_name, {"form": form})
+        return render(request, self.template_name, {"form": form, "recent_runs": _recent_drift_runs()})
 
     def post(self, request):
         site_choices, location_choices, location_meta = _list_site_location_choices()
@@ -623,11 +630,11 @@ class MAASOpenStackSyncView(LoginRequiredMixin, View):
             location_choices=location_choices,
         )
         if not form.is_valid():
-            return render(request, self.template_name, {"form": form})
+            return render(request, self.template_name, {"form": form, "recent_runs": _recent_drift_runs()})
 
         mode = (form.cleaned_data.get("mode") or "audit").strip()
         if mode != "audit":
-            return render(request, self.template_name, {"form": form})
+            return render(request, self.template_name, {"form": form, "recent_runs": _recent_drift_runs()})
 
         selected_sites = set(form.cleaned_data.get("sites") or [])
         selected_location_keys = set(form.cleaned_data.get("locations") or [])
@@ -704,6 +711,7 @@ class MAASOpenStackSyncView(LoginRequiredMixin, View):
                             "download_xlsx_url": request.build_absolute_uri(
                                 reverse("plugins:netbox_automation_plugin:maas_openstack_sync_download_xlsx")
                             ),
+                            "recent_runs": _recent_drift_runs(),
                         },
                     )
                 except Exception as e:
@@ -1166,22 +1174,44 @@ class MAASOpenStackSyncView(LoginRequiredMixin, View):
         }
 
         # Store result so "Download as Excel" can use it without re-running the audit
+        snapshot_payload = {
+            "maas_data": maas_data,
+            "netbox_data": netbox_data,
+            "openstack_data": openstack_data,
+            "drift": drift,
+            "matched_rows": matched_rows,
+            "os_subnet_hints": os_subnet_hints,
+            "os_subnet_gaps": os_subnet_gaps,
+            "os_floating_gaps": os_floating_gaps,
+            "netbox_prefix_count": netbox_prefix_count,
+            "interface_audit": interface_audit,
+            "netbox_ifaces": netbox_ifaces_for_report,
+        }
+        snapshot_payload_for_history = snapshot_payload
         try:
-            _cache_drift_audit(request, {
-                "maas_data": maas_data,
-                "netbox_data": netbox_data,
-                "openstack_data": openstack_data,
-                "drift": drift,
-                "matched_rows": matched_rows,
-                "os_subnet_hints": os_subnet_hints,
-                "os_subnet_gaps": os_subnet_gaps,
-                "os_floating_gaps": os_floating_gaps,
-                "netbox_prefix_count": netbox_prefix_count,
-                "interface_audit": interface_audit,
-                "netbox_ifaces": netbox_ifaces_for_report,
-            })
+            _cache_drift_audit(request, snapshot_payload)
+            snapshot_payload_for_history = cache.get(_drift_audit_cache_key(request)) or snapshot_payload
         except Exception as e:
             logger.debug("Could not cache drift audit for XLSX reuse: %s", e)
+
+        audit_run = None
+        try:
+            audit_run = create_drift_run_snapshot(
+                request=request,
+                report_drift=report_drift,
+                report_drift_markup=report_drift_markup,
+                report_reference=report_reference,
+                audit_summary=audit_summary,
+                scope_filters={
+                    "sites": sorted(selected_sites),
+                    "locations": sorted(selected_location_names),
+                    "openstack_tokens": sorted(openstack_scope_tokens),
+                },
+                cache_key=_drift_audit_cache_key(request),
+                payload=snapshot_payload_for_history,
+            )
+        except Exception as e:
+            logger.warning("Could not persist drift run snapshot: %s", e)
 
         if export_xlsx:
             return render(
@@ -1198,6 +1228,8 @@ class MAASOpenStackSyncView(LoginRequiredMixin, View):
                     "download_xlsx_url": request.build_absolute_uri(
                         reverse("plugins:netbox_automation_plugin:maas_openstack_sync_download_xlsx")
                     ),
+                    "recent_runs": _recent_drift_runs(),
+                    "audit_run_id": getattr(audit_run, "id", None),
                 },
             )
 
@@ -1211,6 +1243,8 @@ class MAASOpenStackSyncView(LoginRequiredMixin, View):
                 "report_reference": report_reference,
                 "audit_done": True,
                 "audit_summary": audit_summary,
+                "recent_runs": _recent_drift_runs(),
+                "audit_run_id": getattr(audit_run, "id", None),
             },
         )
 

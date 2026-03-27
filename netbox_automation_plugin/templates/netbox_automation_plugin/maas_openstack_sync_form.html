@@ -109,6 +109,25 @@
         <p class="card-text mb-2">
           {% trans "Read-only drift audit: MAAS vs NetBox for devices, data NICs (MAC, IP, VLAN, missing interfaces), and BMC / out-of-band from MAAS power. Optionally OpenStack subnets and floating IPs vs IPAM. Nothing is written from this page; sync jobs can use this report per your policies." %}
         </p>
+        <div class="border rounded p-2 mb-3 bg-body-secondary bg-opacity-25">
+          <div class="d-flex justify-content-between align-items-center flex-wrap gap-2">
+            <strong>{% trans "Drift run history" %}</strong>
+            <a href="{% url 'plugins:netbox_automation_plugin:maas_openstack_sync_runs' %}" class="btn btn-outline-secondary btn-sm">
+              {% trans "View all runs" %}
+            </a>
+          </div>
+          {% if recent_runs %}
+            <div class="small mt-2 d-flex flex-wrap gap-2">
+              {% for r in recent_runs %}
+                <a href="{% url 'plugins:netbox_automation_plugin:maas_openstack_sync_run_detail' r.id %}" class="badge text-bg-light border text-decoration-none">
+                  #{% firstof r.id "-" %} · {{ r.created|date:"Y-m-d H:i" }}
+                </a>
+              {% endfor %}
+            </div>
+          {% else %}
+            <p class="small text-muted mb-0 mt-2">{% trans "No saved runs yet." %}</p>
+          {% endif %}
+        </div>
         {% if form.non_field_errors %}
           <div class="alert alert-danger">{{ form.non_field_errors }}</div>
         {% endif %}
@@ -467,7 +486,12 @@
           </style>
           <div class="card mb-3">
             <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">
-              <h5 class="mb-0">{% trans "Drift Audit Report" %}</h5>
+              <h5 class="mb-0">
+                {% trans "Drift Audit Report" %}
+                {% if audit_run_id %}
+                  <span class="badge text-bg-secondary ms-1">Run #{{ audit_run_id }}</span>
+                {% endif %}
+              </h5>
               <a href="{% url 'plugins:netbox_automation_plugin:maas_openstack_sync_download_xlsx' %}" class="btn btn-outline-success btn-sm">{% trans "Download as Excel (.xlsx)" %}</a>
             </div>
             <div class="card-body p-2">

@@ -4,6 +4,11 @@ from .workflows.lldp_consistency.views import LLDPConsistencyCheckView
 from .workflows.vlan_deployment.views import VLANDeploymentView, GetCommonInterfacesView, GetVLANsBySiteView, GetInterfacesForSyncView, VLANDeploymentJobsView, VLANDeploymentJobDetailView
 from .workflows.netbox_vlan_tagging.views import VLANTaggingView
 from .workflows.maas_openstack_sync.views import MAASOpenStackSyncView, DriftAuditDownloadXlsxView
+from .workflows.maas_openstack_sync.history_views import (
+    MAASOpenStackSyncRunsView,
+    MAASOpenStackSyncRunDetailView,
+    MAASOpenStackSyncRunDownloadXlsxView,
+)
 
 app_name = "netbox_automation_plugin"
 
@@ -57,6 +62,21 @@ urlpatterns = [
         "maas-openstack-sync/download-xlsx/",
         DriftAuditDownloadXlsxView.as_view(),
         name="maas_openstack_sync_download_xlsx",
+    ),
+    path(
+        "maas-openstack-sync/runs/",
+        MAASOpenStackSyncRunsView.as_view(),
+        name="maas_openstack_sync_runs",
+    ),
+    path(
+        "maas-openstack-sync/runs/<int:run_id>/",
+        MAASOpenStackSyncRunDetailView.as_view(),
+        name="maas_openstack_sync_run_detail",
+    ),
+    path(
+        "maas-openstack-sync/runs/<int:run_id>/download-xlsx/",
+        MAASOpenStackSyncRunDownloadXlsxView.as_view(),
+        name="maas_openstack_sync_run_download_xlsx",
     ),
 ]
 

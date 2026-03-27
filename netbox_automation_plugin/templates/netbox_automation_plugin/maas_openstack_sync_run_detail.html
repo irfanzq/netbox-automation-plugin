@@ -1,0 +1,70 @@
+{% extends 'base/layout.html' %}
+{% load i18n %}
+
+{% block title %}{% trans "Drift Run Detail" %} #{{ run.id }}{% endblock %}
+
+{% block content %}
+<style>
+  .drift-audit-report-scroll {
+    overflow-x: scroll !important;
+    overflow-y: scroll;
+    max-width: 100%;
+    max-height: 70vh;
+    -webkit-overflow-scrolling: touch;
+  }
+  .drift-audit-report-scroll pre.drift-report-pre {
+    display: inline-block !important;
+    white-space: pre !important;
+    max-width: none !important;
+    width: max-content !important;
+    margin: 0;
+    vertical-align: top;
+  }
+</style>
+
+<div class="row">
+  <div class="col">
+    <div class="card mb-3">
+      <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">
+        <h5 class="mb-0">{% trans "Drift Report Run" %} #{{ run.id }}</h5>
+        <div class="d-flex gap-2">
+          <a href="{% url 'plugins:netbox_automation_plugin:maas_openstack_sync_runs' %}" class="btn btn-outline-secondary btn-sm">
+            {% trans "History" %}
+          </a>
+          <a href="{% url 'plugins:netbox_automation_plugin:maas_openstack_sync_run_download_xlsx' run.id %}" class="btn btn-outline-success btn-sm">
+            {% trans "Download as Excel (.xlsx)" %}
+          </a>
+        </div>
+      </div>
+      <div class="card-body py-2 small">
+        <div><strong>{% trans "Status" %}:</strong> {{ run.get_status_display }}</div>
+        <div><strong>{% trans "Created" %}:</strong> {{ run.created }}</div>
+        <div><strong>{% trans "User" %}:</strong> {{ run.created_by|default:"-" }}</div>
+      </div>
+    </div>
+
+    <div class="card mb-3">
+      <div class="card-header">
+        <h5 class="mb-0">{% trans "Saved Drift Report" %}</h5>
+      </div>
+      <div class="card-body p-2">
+        <div class="drift-audit-report-scroll border rounded bg-body-secondary p-2">
+          {% if report_drift_markup == "html" %}
+            {{ report_drift|safe }}
+          {% else %}
+            <pre class="drift-report-pre mb-0 font-monospace" style="font-size: 0.8rem; line-height: 1.35;">{{ report_drift }}</pre>
+          {% endif %}
+        </div>
+        {% if report_reference %}
+          <details class="mt-3">
+            <summary class="btn btn-outline-secondary btn-sm">{% trans "Reference details" %}</summary>
+            <div class="drift-audit-report-scroll border rounded bg-body-secondary p-2 mt-2">
+              <pre class="drift-report-pre mb-0 font-monospace" style="font-size: 0.8rem; line-height: 1.35;">{{ report_reference }}</pre>
+            </div>
+          </details>
+        {% endif %}
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}
