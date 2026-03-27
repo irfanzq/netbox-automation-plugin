@@ -64,6 +64,33 @@ def _select_alignment_fabric(maas_fabric_raw, nb_location_raw) -> str:
     return candidates[0]
 
 
+def _spruce_in_fqdn_blob(record: dict) -> bool:
+    blob = " ".join([
+        str(record.get("maas_dns_name") or ""),
+        str(record.get("maas_fqdn") or ""),
+        str(record.get("hostname") or ""),
+    ]).lower()
+    return "spruce" in blob
+
+
+def _alignment_maas_fabric_display(record: dict) -> str:
+    """
+    When MAAS DNS/FQDN indicates Spruce, list every distinct MAAS fabric on the host
+    whose name starts with 'spruce-' (case-insensitive). Otherwise keep the single-fabric
+    alignment pick vs NetBox location.
+    """
+    if _spruce_in_fqdn_blob(record):
+        fabrics = record.get("maas_fabrics_distinct") or []
+        spruce_fabs = sorted({
+            f.strip()
+            for f in fabrics
+            if str(f).strip().lower().startswith("spruce-")
+        }, key=lambda x: x.casefold())
+        if spruce_fabs:
+            return ", ".join(spruce_fabs)
+    return _select_alignment_fabric(record.get("maas_fabric"), record.get("netbox_location"))
+
+
 def _alignment_review_rows(matched_rows):
     """
     Matched hosts with placement/lifecycle hints only (not serial, NIC, or BMC/OOB —
@@ -79,7 +106,7 @@ def _alignment_review_rows(matched_rows):
         out.append(
             [
                 r.get("hostname") or "",
-                _select_alignment_fabric(r.get("maas_fabric"), r.get("netbox_location")),
+                _alignment_maas_fabric_display(r),
                 r.get("maas_status") or "-",
                 str(r.get("os_region") or "").strip() or "—",
                 r.get("os_provision_state") or "—",

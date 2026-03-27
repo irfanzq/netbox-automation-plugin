@@ -3,10 +3,40 @@ Richer drift detail: matched MAAS↔NetBox rows, OpenStack↔NetBox prefix hints
 """
 
 import logging
+import re
 from collections import defaultdict
 from typing import Dict, Optional
 
 logger = logging.getLogger("netbox_automation_plugin.sync")
+
+
+def _distinct_maas_fabrics_from_machine(m: dict) -> list[str]:
+    """
+    All distinct fabric names for a MAAS machine: machine-level fabric_name
+    (may be comma-separated) plus per-interface iface_fabric.
+    """
+    out: list[str] = []
+    seen: set[str] = set()
+
+    def add(raw: str) -> None:
+        txt = (raw or "").strip()
+        if not txt or txt in ("-", "—"):
+            return
+        for part in re.split(r"[,;]", txt):
+            p = part.strip()
+            if not p or p in ("-", "—"):
+                continue
+            k = p.casefold()
+            if k not in seen:
+                seen.add(k)
+                out.append(p)
+
+    add(str(m.get("fabric_name") or ""))
+    for mi in m.get("interfaces") or []:
+        if not isinstance(mi, dict):
+            continue
+        add(str(mi.get("iface_fabric") or ""))
+    return out
 
 
 def _default_os_region_for_payload(openstack_data: Optional[dict]) -> str:
@@ -569,6 +599,9 @@ def build_maas_netbox_matched_rows(
             os_fip = os_fip[:46] + ".."
         rows.append({
             "hostname": h,
+            "maas_dns_name": (m.get("dns_name") or "").strip(),
+            "maas_fqdn": (m.get("fqdn") or "").strip(),
+            "maas_fabrics_distinct": _distinct_maas_fabrics_from_machine(m),
             "maas_zone": m.get("zone_name") or "-",
             "maas_fabric": m.get("fabric_name") or "-",
             "maas_pool": m.get("pool_name") or "-",
