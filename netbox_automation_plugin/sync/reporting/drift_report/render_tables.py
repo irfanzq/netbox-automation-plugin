@@ -254,6 +254,8 @@ def _html_table(
         body_parts.append("<tr>" + "".join(tds) + "</tr>")
     if selectable:
         table_open = (
+            '<div class="drift-selectable-table mb-3" '
+            f'data-selection-key="{html.escape(safe_selection_key)}">'
             '<div class="drift-selection-toolbar d-flex justify-content-between align-items-center flex-wrap gap-2 mb-1">'
             '<div class="d-flex align-items-center gap-2">'
             '<button type="button" class="btn btn-outline-secondary btn-sm py-0 px-2 drift-select-all-btn">Select all</button>'
@@ -261,18 +263,20 @@ def _html_table(
             "</div>"
             '<span class="small text-muted drift-selected-count"></span>'
             "</div>"
-            '<div class="table-responsive mb-3 drift-selectable-table-wrapper" '
-            f'data-selection-key="{html.escape(safe_selection_key)}">'
+            '<div class="table-responsive drift-selectable-table-wrapper">'
         )
+        table_close = "</div></div>"
     else:
         table_open = '<div class="table-responsive mb-3">'
+        table_close = "</div>"
     return (
         table_open
         +
         '<table class="table table-sm table-bordered table-striped align-middle mb-0">'
         f'<thead class="table-light"><tr>{ths}</tr></thead><tbody>'
         + "".join(body_parts)
-        + "</tbody></table></div>"
+        + "</tbody></table>"
+        + table_close
     )
 
 

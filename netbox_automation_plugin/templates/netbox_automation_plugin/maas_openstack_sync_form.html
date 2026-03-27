@@ -498,15 +498,15 @@
           </div>
           <script>
             (function() {
-              function updateState(wrapper) {
-                var table = wrapper.querySelector("table");
+              function updateState(container) {
+                var table = container.querySelector("table");
                 if (!table) return;
                 var rowBoxes = Array.prototype.slice.call(
                   table.querySelectorAll("tbody .drift-include-row")
                 );
                 var header = table.querySelector(".drift-include-toggle-all");
                 var label = table.querySelector(".drift-include-label");
-                var count = wrapper.querySelector(".drift-selected-count");
+                var count = container.querySelector(".drift-selected-count");
                 if (!rowBoxes.length || !header || !label || !count) return;
 
                 var selected = rowBoxes.filter(function(cb) { return cb.checked; }).length;
@@ -528,48 +528,48 @@
                 count.textContent = "Selected: " + selected + " / " + total;
               }
 
-              function setAll(wrapper, checked) {
-                wrapper.querySelectorAll("tbody .drift-include-row").forEach(function(cb) {
+              function setAll(container, checked) {
+                container.querySelectorAll("tbody .drift-include-row").forEach(function(cb) {
                   cb.checked = checked;
                 });
-                updateState(wrapper);
+                updateState(container);
               }
 
-              function initSelectableTable(wrapper) {
-                var table = wrapper.querySelector("table");
+              function initSelectableTable(container) {
+                var table = container.querySelector("table");
                 if (!table || table.getAttribute("data-drift-select-init") === "1") return;
                 table.setAttribute("data-drift-select-init", "1");
 
                 var header = table.querySelector(".drift-include-toggle-all");
-                var selectAllBtn = wrapper.querySelector(".drift-select-all-btn");
-                var clearAllBtn = wrapper.querySelector(".drift-clear-all-btn");
+                var selectAllBtn = container.querySelector(".drift-select-all-btn");
+                var clearAllBtn = container.querySelector(".drift-clear-all-btn");
                 var rowBoxes = table.querySelectorAll("tbody .drift-include-row");
 
                 if (header) {
                   header.addEventListener("change", function() {
-                    setAll(wrapper, !!header.checked);
+                    setAll(container, !!header.checked);
                   });
                 }
                 if (selectAllBtn) {
                   selectAllBtn.addEventListener("click", function() {
-                    setAll(wrapper, true);
+                    setAll(container, true);
                   });
                 }
                 if (clearAllBtn) {
                   clearAllBtn.addEventListener("click", function() {
-                    setAll(wrapper, false);
+                    setAll(container, false);
                   });
                 }
                 rowBoxes.forEach(function(cb) {
                   cb.addEventListener("change", function() {
-                    updateState(wrapper);
+                    updateState(container);
                   });
                 });
 
-                updateState(wrapper);
+                updateState(container);
               }
 
-              document.querySelectorAll(".drift-selectable-table-wrapper").forEach(initSelectableTable);
+              document.querySelectorAll(".drift-selectable-table").forEach(initSelectableTable);
             })();
           </script>
         {% endif %}
