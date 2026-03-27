@@ -100,6 +100,25 @@ def _openstack_ironic_bmc_row(openstack_data, hostname: str) -> dict | None:
     return None
 
 
+def _os_is_authoritative_for_host(osr: dict | None) -> bool:
+    """
+    Host-level OpenStack authority gate for lifecycle/provisioning columns.
+
+    Rule:
+    - require instance_uuid (non-empty)
+    - require provisioning_state in trusted set
+    """
+    if not osr:
+        return False
+    instance_uuid = str(osr.get("instance_uuid") or "").strip()
+    if not instance_uuid:
+        return False
+    prov = str(osr.get("provision_state") or "").strip().lower()
+    # Keep explicit and conservative: active is deployed; available with instance UUID
+    # is treated as authoritative per operator policy for this environment.
+    return prov in {"active", "available"}
+
+
 # Sentinel: _maas_only_host_openstack_columns looks up Ironic row when not passed explicitly.
 _IRONIC_BMC_ROW_LOOKUP = object()
 
@@ -829,8 +848,8 @@ def _proposed_changes_rows(
         os_reg, os_prov, os_pow, os_maint = _maas_only_host_openstack_columns(
             openstack_data, h, ironic_bmc_row=osr
         )
-        # Ironic runtime_bmc row ⇒ correlated in OpenStack (any provision state). Active ⇒ [OS] authority.
-        authority_badge = "[OS]" if os_prov == "active" else "[MAAS]"
+        # OpenStack authority is state-gated and requires instance_uuid.
+        authority_badge = "[OS]" if _os_is_authoritative_for_host(osr) else "[MAAS]"
         if is_candidate:
             proposed_tag = (
                 "openstack+maas-discovered" if osr else "maas-discovered"

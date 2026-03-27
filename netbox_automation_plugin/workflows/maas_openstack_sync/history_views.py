@@ -2,6 +2,8 @@ from django.contrib.auth.mixins import LoginRequiredMixin
 from django.http import HttpResponse
 from django.shortcuts import get_object_or_404, render
 from django.views import View
+from django_tables2 import RequestConfig
+from datetime import date, timedelta
 
 from netbox_automation_plugin.sync.reporting.drift_report import build_drift_report_xlsx
 
@@ -14,10 +16,36 @@ class MAASOpenStackSyncRunsView(LoginRequiredMixin, View):
 
     def get(self, request):
         runs = MAASOpenStackDriftRun.objects.select_related("created_by").all()
+        preset = (request.GET.get("preset") or "").strip().lower()
+        from_date_raw = (request.GET.get("from_date") or "").strip()
+        to_date_raw = (request.GET.get("to_date") or "").strip()
+
+        if preset == "last_week":
+            runs = runs.filter(created__date__gte=(date.today() - timedelta(days=7)))
+        elif preset == "last_30_days":
+            runs = runs.filter(created__date__gte=(date.today() - timedelta(days=30)))
+        elif preset == "last_3_months":
+            runs = runs.filter(created__date__gte=(date.today() - timedelta(days=90)))
+
+        if from_date_raw:
+            try:
+                runs = runs.filter(created__date__gte=date.fromisoformat(from_date_raw))
+            except ValueError:
+                from_date_raw = ""
+        if to_date_raw:
+            try:
+                runs = runs.filter(created__date__lte=date.fromisoformat(to_date_raw))
+            except ValueError:
+                to_date_raw = ""
+
         table = MAASOpenStackDriftRunTable(runs, orderable=True)
+        RequestConfig(request, paginate={"per_page": 25}).configure(table)
         context = {
             "table": table,
             "run_count": runs.count(),
+            "preset": preset,
+            "from_date": from_date_raw,
+            "to_date": to_date_raw,
         }
         return render(request, self.template_name, context)
 
