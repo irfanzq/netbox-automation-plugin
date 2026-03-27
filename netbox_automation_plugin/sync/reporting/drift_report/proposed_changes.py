@@ -863,7 +863,7 @@ def _proposed_changes_rows(
         nb_dtype = _resolve_device_type_display(mvendor, mproduct, _dtype_index)
         nb_role = _match_netbox_role_from_hostname(h, netbox_data)
         maas_fabric_disp = _new_device_fabric_display(str(m.get("fabric_name", "-")), nb_loc)
-        is_candidate, note, status_rank = _new_device_candidate_policy(
+        is_candidate, _, status_rank = _new_device_candidate_policy(
             m, nic_count, vendor=mvendor, product=mproduct
         )
         osr = _openstack_ironic_bmc_row(openstack_data, h)
@@ -893,7 +893,7 @@ def _proposed_changes_rows(
             (
                 "CREATE_NETBOX_DEVICE_AND_PORTS"
                 if is_candidate
-                else f"REVIEW_ONLY_NOT_SAFE_CANDIDATE ({note})"
+                else "REVIEW_ONLY_NOT_SAFE_CANDIDATE"
             ),
         ]
         head_common = [
