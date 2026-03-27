@@ -21,9 +21,6 @@ from netbox_automation_plugin.sync.reporting.drift_report.proposed_changes impor
     _proposed_changes_rows,
 )
 
-HIDE_LLDP_TABLES = True
-
-
 def build_drift_report_xlsx(
     maas_data,
     netbox_data,
@@ -45,7 +42,7 @@ def build_drift_report_xlsx(
     """
     try:
         from openpyxl import Workbook
-        from openpyxl.styles import Font
+        from openpyxl.styles import Alignment, Font
     except ImportError:
         raise RuntimeError("openpyxl is required for XLSX export. pip install openpyxl")
 
@@ -288,12 +285,15 @@ def build_drift_report_xlsx(
     ws_prop.cell(row=1, column=1).font = header_font
     ws_prop.append([])
     _append_header(ws_prop, ["Section", "Count"])
+    nic_drift_os = [r for r in prop["update_nic"] if len(r) > 10 and str(r[10]).strip() == "[OS]"]
+    nic_drift_maas = [r for r in prop["update_nic"] if len(r) <= 10 or str(r[10]).strip() != "[OS]"]
     ws_prop.append(["New devices (MAAS fallback)", len(prop["add_devices"])])
     ws_prop.append(["Review-only MAAS-only hosts", len(prop.get("add_devices_review_only", []))])
     ws_prop.append(["New prefixes (OpenStack authority)", len(prop["add_prefixes"])])
     ws_prop.append(["New floating IPs (OpenStack authority)", len(prop["add_fips"])])
     ws_prop.append(["New NICs", len(prop["add_nb_interfaces"])])
-    ws_prop.append(["NIC drift", len(prop["update_nic"])])
+    ws_prop.append(["NIC drift (OS runtime authority)", len(nic_drift_os)])
+    ws_prop.append(["NIC drift (MAAS fallback authority)", len(nic_drift_maas)])
     ws_prop.append(["BMC / OOB", len(prop["add_mgmt_iface"]) + len(prop.get("add_mgmt_iface_new_devices", []))])
     ws_prop.append(["Serials (review)", len(prop["review_serial"])])
 
@@ -421,7 +421,7 @@ def build_drift_report_xlsx(
         prop["add_nb_interfaces"],
     )
     _append_block(
-        "B) NIC drift",
+        "B) NIC drift (OS runtime authority)",
         [
             "Host",
             "MAAS intf",
@@ -442,52 +442,32 @@ def build_drift_report_xlsx(
             "Proposed Action",
             "Risk",
         ],
-        prop["update_nic"],
+        nic_drift_os,
     )
-    if (not HIDE_LLDP_TABLES) and prop.get("lldp_new"):
-        _append_block(
-            "B) LLDP / OS-Discovered (new in NetBox)",
-            [
-                "Host",
-                "OS region",
-                "OS MAC",
-                "MAAS Int",
-                "OS switch",
-                "OS switch MAC",
-                "OS switch port (Ironic)",
-                "NetBox switch port",
-                "NetBox port status",
-                "Proposed action",
-            ],
-            prop["lldp_new"],
-            note=(
-                "OS switch port is always the OpenStack-reported port id. Generic ids (digits, portN) map to NetBox interface "
-                "names when possible; else NetBox switch port repeats OS and status explains. "
-                "Bond/swp/Ethernet-style ids exact-match NetBox only; if absent, status is Switch port missing in NetBox."
-            ),
-        )
-    if (not HIDE_LLDP_TABLES) and prop.get("lldp_update"):
-        _append_block(
-            "B) LLDP / OS_Discovered (update NetBox)",
-            [
-                "Host",
-                "OS region",
-                "NB site",
-                "NB location",
-                "NB interface",
-                "NB MAC",
-                "NB LLDP / peer (current)",
-                "OS MAC",
-                "MAAS Int",
-                "OS switch",
-                "OS switch MAC",
-                "OS switch port (Ironic)",
-                "NetBox switch port",
-                "NetBox port status",
-                "Proposed change",
-            ],
-            prop["lldp_update"],
-        )
+    _append_block(
+        "B) NIC drift (MAAS fallback authority)",
+        [
+            "Host",
+            "MAAS intf",
+            "MAAS fabric",
+            "MAAS MAC",
+            "MAAS IPs",
+            "MAAS VLAN",
+            "OS region",
+            "OS MAC",
+            "OS runtime IP",
+            "OS runtime VLAN",
+            "Authority",
+            "NB intf",
+            "NB MAC",
+            "NB IPs",
+            "NB VLAN",
+            "Status",
+            "Proposed Action",
+            "Risk",
+        ],
+        nic_drift_maas,
+    )
     _append_block(
         "B) BMC / OOB",
         [
@@ -530,6 +510,27 @@ def build_drift_report_xlsx(
         ["Hostname", "MAAS Serial", "NetBox Serial", "Proposed Action", "Risk"],
         prop["review_serial"],
     )
+
+    # Improve readability for long text cells in Excel/Sheets.
+    for ws in wb.worksheets:
+        for row in ws.iter_rows(min_row=1, max_row=ws.max_row, min_col=1, max_col=ws.max_column):
+            for cell in row:
+                if cell.value is None:
+                    continue
+                # Keep existing horizontal alignment if present, but always wrap long text.
+                cur = cell.alignment or Alignment()
+                cell.alignment = Alignment(
+                    horizontal=cur.horizontal,
+                    vertical=cur.vertical or "top",
+                    text_rotation=cur.text_rotation,
+                    wrap_text=True,
+                    shrink_to_fit=cur.shrink_to_fit,
+                    indent=cur.indent,
+                )
+        # Give common text-heavy columns more space so wrapped content is easier to scan.
+        ws.column_dimensions["A"].width = max(float(ws.column_dimensions["A"].width or 0), 42.0)
+        if ws.max_column >= 2:
+            ws.column_dimensions["B"].width = max(float(ws.column_dimensions["B"].width or 0), 26.0)
 
     buf = BytesIO()
     wb.save(buf)

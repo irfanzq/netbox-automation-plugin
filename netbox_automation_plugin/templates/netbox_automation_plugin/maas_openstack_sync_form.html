@@ -172,7 +172,11 @@
                 </div>
                 <div class="col-12 d-flex flex-wrap gap-2">
                   <button type="submit" class="btn btn-primary">{% trans "Run drift audit" %}</button>
-                  <button type="submit" name="format" value="xlsx" class="btn btn-outline-success">{% trans "Download as Excel (.xlsx)" %}</button>
+                  {% if audit_done %}
+                    <a href="{% url 'plugins:netbox_automation_plugin:maas_openstack_sync_download_xlsx' %}" class="btn btn-outline-success">{% trans "Download as Excel (.xlsx)" %}</a>
+                  {% else %}
+                    <button type="submit" name="format" value="xlsx" class="btn btn-outline-success">{% trans "Run drift audit + download Excel (.xlsx)" %}</button>
+                  {% endif %}
                 </div>
               </div>
             </form>
@@ -464,18 +468,7 @@
           <div class="card mb-3">
             <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">
               <h5 class="mb-0">{% trans "Drift Audit Report" %}</h5>
-              <form method="post" action="" class="d-inline drift-audit-form">
-                {% csrf_token %}
-                {{ form.mode }}
-                {% for v in form.sites.value %}
-                  <input type="hidden" name="sites" value="{{ v }}" />
-                {% endfor %}
-                {% for v in form.locations.value %}
-                  <input type="hidden" name="locations" value="{{ v }}" />
-                {% endfor %}
-                <input type="hidden" name="format" value="xlsx" />
-                <button type="submit" class="btn btn-outline-success btn-sm">{% trans "Download as Excel (.xlsx)" %}</button>
-              </form>
+              <a href="{% url 'plugins:netbox_automation_plugin:maas_openstack_sync_download_xlsx' %}" class="btn btn-outline-success btn-sm">{% trans "Download as Excel (.xlsx)" %}</a>
             </div>
             <div class="card-body p-2">
               <div class="drift-audit-report-scroll border rounded bg-body-secondary p-2">
@@ -499,6 +492,7 @@
           <script>
             (function() {
               function updateState(container) {
+                if (!container) return;
                 var table = container.querySelector("table");
                 if (!table) return;
                 var rowBoxes = Array.prototype.slice.call(
@@ -529,47 +523,48 @@
               }
 
               function setAll(container, checked) {
+                if (!container) return;
                 container.querySelectorAll("tbody .drift-include-row").forEach(function(cb) {
                   cb.checked = checked;
                 });
                 updateState(container);
               }
 
-              function initSelectableTable(container) {
-                var table = container.querySelector("table");
-                if (!table || table.getAttribute("data-drift-select-init") === "1") return;
-                table.setAttribute("data-drift-select-init", "1");
-
-                var header = table.querySelector(".drift-include-toggle-all");
-                var selectAllBtn = container.querySelector(".drift-select-all-btn");
-                var clearAllBtn = container.querySelector(".drift-clear-all-btn");
-                var rowBoxes = table.querySelectorAll("tbody .drift-include-row");
-
-                if (header) {
-                  header.addEventListener("change", function() {
-                    setAll(container, !!header.checked);
-                  });
-                }
-                if (selectAllBtn) {
-                  selectAllBtn.addEventListener("click", function() {
-                    setAll(container, true);
-                  });
-                }
-                if (clearAllBtn) {
-                  clearAllBtn.addEventListener("click", function() {
-                    setAll(container, false);
-                  });
-                }
-                rowBoxes.forEach(function(cb) {
-                  cb.addEventListener("change", function() {
-                    updateState(container);
-                  });
+              function initAll() {
+                document.querySelectorAll(".drift-selectable-table").forEach(function(container) {
+                  updateState(container);
                 });
-
-                updateState(container);
               }
 
-              document.querySelectorAll(".drift-selectable-table").forEach(initSelectableTable);
+              document.addEventListener("change", function(evt) {
+                var t = evt.target;
+                if (!(t instanceof Element)) return;
+                if (t.matches(".drift-include-toggle-all")) {
+                  setAll(t.closest(".drift-selectable-table"), !!t.checked);
+                  return;
+                }
+                if (t.matches(".drift-include-row")) {
+                  updateState(t.closest(".drift-selectable-table"));
+                }
+              });
+
+              document.addEventListener("click", function(evt) {
+                var t = evt.target;
+                if (!(t instanceof Element)) return;
+                var selectBtn = t.closest(".drift-select-all-btn");
+                if (selectBtn) {
+                  evt.preventDefault();
+                  setAll(selectBtn.closest(".drift-selectable-table"), true);
+                  return;
+                }
+                var clearBtn = t.closest(".drift-clear-all-btn");
+                if (clearBtn) {
+                  evt.preventDefault();
+                  setAll(clearBtn.closest(".drift-selectable-table"), false);
+                }
+              });
+
+              initAll();
             })();
           </script>
         {% endif %}

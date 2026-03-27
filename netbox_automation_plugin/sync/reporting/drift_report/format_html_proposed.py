@@ -1,7 +1,5 @@
 """PROPOSED CHANGES and summary tables for the drift HTML/ASCII report."""
 
-HIDE_LLDP_TABLES = True
-
 
 def emit_proposed_change_tables(e, prop):
     e.spacer()
@@ -244,70 +242,6 @@ def emit_proposed_change_tables(e, prop):
                 selectable=True,
                 selection_key="detail_nic_drift_maas",
             )
-
-    if (not HIDE_LLDP_TABLES) and prop.get("lldp_new"):
-        e.spacer()
-        e.subtitle("Detail — LLDP / OS-Discovered (new in NetBox)")
-        e.paragraph(
-            "OpenStack reports switch hostname, chassis MAC, and port id per NIC MAC (inspection LLDP). "
-            "Each row is tied to a **server** NetBox interface: first by **MAC** (same as MAAS/OpenStack), "
-            "or if NetBox has no MAC on that port, by **MAAS interface name** == NetBox interface name. "
-            "«New in NetBox» means that matched interface has **no** peer/cable summary in NetBox for this run "
-            "(not that the interface is missing). «Resolved in NetBox» refers to the **switch** side port name only. "
-            "OS switch port is the raw OpenStack value; generic ids may map to switch Ethernet names. "
-            "MAAS Int is the MAAS name for this MAC."
-        )
-        e.spacer()
-        e.table(
-            [
-                "Host",
-                "OS region",
-                "OS MAC",
-                "MAAS Int",
-                "OS switch",
-                "OS switch MAC",
-                "OS switch port (Ironic)",
-                "NetBox switch port",
-                "NetBox port status",
-                "Proposed action",
-            ],
-            prop["lldp_new"],
-            dynamic_columns=True,
-            wrap_max_width=None,
-            selectable=True,
-            selection_key="detail_lldp_new",
-        )
-    if (not HIDE_LLDP_TABLES) and prop.get("lldp_update"):
-        e.spacer()
-        e.subtitle("Detail — LLDP / OS_Discovered (update NetBox)")
-        e.paragraph(
-            "NetBox already records a peer/cable summary for this MAC, but it does not match the OS-discovered data."
-        )
-        e.spacer()
-        e.table(
-            [
-                "Host",
-                "OS region",
-                "NB site",
-                "NB location",
-                "NB interface",
-                "NB MAC",
-                "NB LLDP / peer (current)",
-                "OS MAC",
-                "MAAS Int",
-                "OS switch",
-                "OS switch MAC",
-                "OS switch port (Ironic)",
-                "NetBox switch port",
-                "NetBox port status",
-                "Proposed change",
-            ],
-            prop["lldp_update"],
-            dynamic_columns=True,
-            wrap_max_width=None,
-            selectable=True,
-            selection_key="detail_lldp_update",
-        )
 
     if prop.get("add_mgmt_iface_new_devices"):
         e.spacer()
