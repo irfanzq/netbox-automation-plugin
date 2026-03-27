@@ -1,12 +1,26 @@
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from .history_models import MAASOpenStackDriftRun
 
 
 def _safe_json_dict(value: Any) -> dict:
-    return value if isinstance(value, dict) else {}
+    if not isinstance(value, dict):
+        return {}
+    return _json_safe(value)
+
+
+def _json_safe(value: Any):
+    """
+    Convert nested structures to JSON-safe primitives.
+    Falls back to string conversion for unsupported objects.
+    """
+    try:
+        return json.loads(json.dumps(value, default=str))
+    except Exception:
+        return {}
 
 
 def create_drift_run_snapshot(
@@ -32,5 +46,5 @@ def create_drift_run_snapshot(
         audit_summary=_safe_json_dict(audit_summary),
         scope_filters=_safe_json_dict(scope_filters),
         source_cache_key=(cache_key or "")[:200],
-        snapshot_payload=payload or {},
+        snapshot_payload=_safe_json_dict(payload),
     )
