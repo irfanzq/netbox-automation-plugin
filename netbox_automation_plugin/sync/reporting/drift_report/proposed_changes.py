@@ -100,6 +100,18 @@ def _openstack_ironic_bmc_row(openstack_data, hostname: str) -> dict | None:
     return None
 
 
+def _os_host_authority_map(openstack_data) -> dict[str, bool]:
+    out: dict[str, bool] = {}
+    for row in (openstack_data or {}).get("runtime_bmc") or []:
+        if not isinstance(row, dict):
+            continue
+        h = (row.get("hostname") or "").strip().lower()
+        if not h:
+            continue
+        out[h] = _os_is_authoritative_for_host(row)
+    return out
+
+
 def _os_is_authoritative_for_host(osr: dict | None) -> bool:
     """
     Host-level OpenStack authority gate for lifecycle/provisioning columns.
@@ -713,6 +725,7 @@ def _proposed_changes_rows(
         return idx
 
     os_runtime_idx = _runtime_nic_index_by_host_mac(openstack_data)
+    os_host_authority = _os_host_authority_map(openstack_data)
 
     def _new_device_nic_rows():
         out = []
@@ -745,7 +758,12 @@ def _proposed_changes_rows(
                     _ips = [str(x).strip() for x in (osr.get("os_ips") or []) if str(x).strip()]
                     os_ip = ", ".join(_ips) if _ips else "—"
                 os_vlan = str(osr.get("os_runtime_vlan") or "—").strip() or "—"
-                os_has_runtime = bool(osr) and any(x not in {"", "—"} for x in [os_mac, os_ip, os_vlan])
+                host_os_ok = os_host_authority.get((h or "").strip().lower(), False)
+                os_has_runtime = (
+                    bool(osr)
+                    and host_os_ok
+                    and any(x not in {"", "—"} for x in [os_mac, os_ip, os_vlan])
+                )
                 out.append(
                     [
                         h,
@@ -791,7 +809,8 @@ def _proposed_changes_rows(
                 driver=str(osr.get("driver") or ""),
                 power_interface=str(osr.get("power_interface") or ""),
             )
-            has_os_data = bool(osr) and bool(os_bmc_ip or os_mgmt_type)
+            host_os_ok = os_host_authority.get((h or "").strip().lower(), False)
+            has_os_data = bool(osr) and host_os_ok and bool(os_bmc_ip or os_mgmt_type)
             authority_badge = "[OS]" if has_os_data else "[MAAS]"
             mgmt = os_mgmt if bool(osr) else maas_mgmt
             action = (
@@ -942,6 +961,28 @@ def _proposed_changes_rows(
         ])
 
     update_nic = _build_update_nic_rows(interface_audit)
+    # Enforce host-level authority gate across NIC drift rows:
+    # - non-authoritative OS host: never keep OS-only NIC rows
+    # - remaining rows on that host are treated as MAAS fallback authority
+    filtered_update_nic = []
+    for row in update_nic:
+        if len(row) <= 10:
+            filtered_update_nic.append(row)
+            continue
+        host = (row[0] or "").strip().lower()
+        host_os_ok = os_host_authority.get(host, False)
+        if not host_os_ok:
+            maas_mac = str(row[3] or "").strip().lower()
+            maas_if = str(row[1] or "").strip()
+            maas_seen = bool(maas_mac and maas_mac not in {"—", "-", "none"}) or bool(
+                maas_if and maas_if not in {"—", "-", "none"}
+            )
+            if not maas_seen:
+                # OS-only observation for non-authoritative host: skip from drift updates.
+                continue
+            row[10] = "[MAAS]"
+        filtered_update_nic.append(row)
+    update_nic = filtered_update_nic
     review_serial = _build_review_serial_rows(matched_rows)
     lldp_new, lldp_update = build_lldp_drift_rows(openstack_data, netbox_ifaces, maas_data)
 
