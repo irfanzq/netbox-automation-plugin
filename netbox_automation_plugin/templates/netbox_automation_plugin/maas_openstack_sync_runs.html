@@ -5,7 +5,7 @@
 {% block title %}{% trans "MAAS/OpenStack Drift Runs" %}{% endblock %}
 
 {% block content %}
-{% trans "All" as hist_scope_unscoped_label %}
+{% trans "All (No site/location filter in run)" as hist_scope_unscoped_label %}
 {% trans "Site / location — click to choose…" as hist_scope_placeholder %}
 {% trans "Selected:" as hist_scope_selected_prefix %}
 {% trans "site/location(s) selected" as hist_scope_multi_suffix %}
@@ -75,7 +75,7 @@
           <div>
             <label class="form-label mb-1">{% trans "NetBox site / location (saved run scope)" %}</label>
             <p class="small text-muted mb-2">
-              {% trans "Closed by default. Open the list to pick Site / Location pairs. The first option, “All”, limits the list to runs saved with no site or location (those rows show “All (no site/location filter)” in the table). Leave every box unchecked to include all runs." %}
+              {% trans "Closed by default. Open the list to pick Site / Location pairs, or the first option for runs saved with no site/location scope (same meaning as the “All (no site/location filter)” column). Leave every box unchecked to include all runs." %}
             </p>
             <details class="hist-scope-dropdown border rounded bg-body shadow-sm" id="hist-scope-details">
               <summary class="d-flex align-items-center justify-content-between gap-2 form-select form-select-sm py-2 mb-0">

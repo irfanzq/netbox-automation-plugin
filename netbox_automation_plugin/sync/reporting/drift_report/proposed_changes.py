@@ -501,7 +501,8 @@ def _proposed_changes_rows(
 
     def _vrf_from_longest_containing_prefix(ip_obj):
         """
-        Most specific NetBox prefix that contains this IP (e.g. /25 wins over /22); uses that prefix's VRF.
+        Longest-prefix match (LPM): most specific NetBox prefix containing this IP (/25 beats /24 beats /22).
+        Not “shortest” aggregate — always the longest (tightest) matching mask; uses that prefix's VRF.
         """
         from collections import Counter
 
@@ -521,6 +522,71 @@ def _proposed_changes_rows(
         if best_pl < 0:
             return None
         return Counter(at_best).most_common(1)[0][0]
+
+    _exact_aligned_prefix_vrf_memo: dict[str, str | None] = {}
+
+    def _vrf_from_exact_aligned_prefix(align):
+        """
+        VRF from NetBox Prefix(es) whose CIDR exactly matches the floating-aligned /24 (v4)
+        or /64 (v6)—not a parent /22. When NetBox has duplicate prefixes for the same CIDR
+        (e.g. Spruce vs BGP), prefer the design row: tenant / VLAN / role / description set,
+        then non-"BGP" VRF as a last tie-break.
+        """
+        key = str(align)
+        if key in _exact_aligned_prefix_vrf_memo:
+            return _exact_aligned_prefix_vrf_memo[key]
+        try:
+            from ipam.models import Prefix
+        except Exception:
+            _exact_aligned_prefix_vrf_memo[key] = None
+            return None
+
+        def _row_vrf_name(p):
+            try:
+                if getattr(p, "vrf_id", None) and p.vrf:
+                    return (p.vrf.name or "Global").strip() or "Global"
+            except Exception:
+                pass
+            return "Global"
+
+        def _design_score(p):
+            s = 0
+            if getattr(p, "tenant_id", None):
+                s += 8
+            if getattr(p, "vlan_id", None):
+                s += 4
+            if getattr(p, "role_id", None):
+                s += 4
+            if (getattr(p, "description", None) or "").strip():
+                s += 2
+            return s
+
+        try:
+            rows = list(
+                Prefix.objects.filter(prefix=key)
+                .select_related("vrf", "tenant", "role", "vlan")[:64]
+            )
+        except Exception:
+            _exact_aligned_prefix_vrf_memo[key] = None
+            return None
+        if not rows:
+            _exact_aligned_prefix_vrf_memo[key] = None
+            return None
+        try:
+            rows.sort(
+                key=lambda p: (
+                    -_design_score(p),
+                    1 if _row_vrf_name(p).lower() == "bgp" else 0,
+                    _row_vrf_name(p).lower(),
+                )
+            )
+            vn = _row_vrf_name(rows[0])
+            out = vn if vn.lower() != "global" else None
+            _exact_aligned_prefix_vrf_memo[key] = out
+            return out
+        except Exception:
+            _exact_aligned_prefix_vrf_memo[key] = None
+            return None
 
     def _netbox_ipaddress_vrf_for_host(ip_o):
         """VRF on the NetBox IPAddress row for this host, if any (/32 or /128 or host/prefix)."""
@@ -644,9 +710,10 @@ def _proposed_changes_rows(
     def _suggest_vrf_for_floating_address(ip_text: str) -> str:
         """
         Prefer NetBox IPAddress evidence in the floating /24|/64 first (seed .1-.20,
-        then closest neighbors in-block). If the block has no usable host rows, use
-        longest-prefix VRF for the subnet *network address* of that aligned block.
-        Finally merge adjacent /24|/64 bucket plurality from other assignments.
+        then closest neighbors in-block). If the block has no usable host rows, use VRF
+        from Prefix row(s) for that *exact* /24|/64 (duplicate CIDRs: prefer rich design
+        row over bare BGP stub), then longest-prefix match (LPM) on the floating IP
+        (/25 beats /24), then adjacent /24 or /64 bucket plurality.
         """
         try:
             import ipaddress
@@ -666,9 +733,12 @@ def _proposed_changes_rows(
         v = _vrf_from_closest_netbox_ipaddresses(ip_o, max_step=24, boundary_net=align)
         if v:
             return v
-        lpm_net = _vrf_from_longest_containing_prefix(align.network_address)
-        if lpm_net and (lpm_net or "").strip().lower() != "global":
-            return lpm_net
+        v_exact = _vrf_from_exact_aligned_prefix(align)
+        if v_exact and (v_exact or "").strip().lower() != "global":
+            return v_exact
+        lpm_host = _vrf_from_longest_containing_prefix(ip_o)
+        if lpm_host and (lpm_host or "").strip().lower() != "global":
+            return lpm_host
         v = _vrf_from_neighbor_ipaddresses(ip_o)
         if v:
             return v
@@ -676,9 +746,9 @@ def _proposed_changes_rows(
 
     def _suggest_vrf_for_floating_ip_gap(g: dict) -> str:
         """
-        Proposed FIP row VRF: aligned-block IPAddress seeds and neighbors, then prefix VRF
-        for the block network address, then adjacent-subnet bucket vote, then OpenStack
-        network/subnet/project name tokens matched against NetBox VRF names.
+        Proposed FIP row VRF: aligned-block IPAddress seeds and neighbors, then exact /24 or /64
+        Prefix VRF (duplicate tie-break), then LPM on the floating IP (longest match,
+        e.g. /25 over /24), adjacent bucket vote, then OpenStack name tokens vs NetBox VRFs.
         """
         fip = str(g.get("floating_ip") or "").strip()
         fixed = str(g.get("fixed_ip_address") or "").strip()

@@ -14,7 +14,7 @@ from .netbox_scope_choices import list_site_location_choices
 from .tables import MAASOpenStackDriftRunTable
 
 # GET ``filter_location`` sentinel: runs whose NetBox sites / locations column shows
-# "All (no site/location filter)" (unscoped); the history filter UI labels this option "All".
+# "All (no site/location filter)" (unscoped); filter UI: "All (No site/location filter in run)".
 HIST_FILTER_UNSCOPED_SITE_LOCATION = "__unscoped_site_location__"
 
 
