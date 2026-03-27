@@ -13,6 +13,9 @@ from netbox_automation_plugin.sync.reporting.drift_report.device_types import (
     _match_netbox_role_from_hostname,
     _resolve_device_type_display,
 )
+from netbox_automation_plugin.sync.reporting.drift_report.maas_netbox_status import (
+    discovery_tag_with_proposed_nb_device_status,
+)
 from netbox_automation_plugin.sync.reporting.drift_report.new_device_policy import (
     _new_device_candidate_policy,
     _new_device_fabric_display,
@@ -870,12 +873,15 @@ def _proposed_changes_rows(
         # OpenStack authority is state-gated and requires instance_uuid.
         authority_badge = "[OS]" if _os_is_authoritative_for_host(osr) else "[MAAS]"
         if is_candidate:
-            proposed_tag = (
+            base_discovery_tag = (
                 "openstack+maas-discovered" if osr else "maas-discovered"
             )
         else:
-            proposed_tag = "review-only"
+            base_discovery_tag = "review-only"
         nb_prop_state = proposed_netbox_status_for_new_maas_machine(m, osr)
+        proposed_tag = discovery_tag_with_proposed_nb_device_status(
+            base_discovery_tag, nb_prop_state
+        )
         tail = [
             power_type,
             bmc_present,

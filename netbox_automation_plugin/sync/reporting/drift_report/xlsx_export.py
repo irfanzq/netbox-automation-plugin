@@ -236,6 +236,7 @@ def build_drift_report_xlsx(
                 "NetBox location",
                 "NB state",
                 "NB proposed state",
+                "NB Proposed Tag",
                 "Authority",
                 "Alignment issues",
             ],

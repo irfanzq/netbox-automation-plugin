@@ -3,6 +3,7 @@
 import re
 
 from netbox_automation_plugin.sync.reporting.drift_report.maas_netbox_status import (
+    discovery_tag_with_proposed_nb_device_status,
     proposed_netbox_status_for_matched_row,
 )
 from netbox_automation_plugin.sync.reporting.drift_report.misc_utils import _dedupe_note_parts
@@ -106,6 +107,7 @@ def _alignment_review_rows(matched_rows):
         if not align:
             continue
         joined = _dedupe_note_parts("; ".join(align))
+        nb_prop = proposed_netbox_status_for_matched_row(r)
         out.append(
             [
                 r.get("hostname") or "",
@@ -118,7 +120,8 @@ def _alignment_review_rows(matched_rows):
                 r.get("netbox_site") or "—",
                 r.get("netbox_location") or "—",
                 r.get("netbox_status") or "-",
-                proposed_netbox_status_for_matched_row(r),
+                nb_prop,
+                discovery_tag_with_proposed_nb_device_status("alignment-review", nb_prop),
                 "[OS]" if str(r.get("os_authority") or "") == "openstack_runtime" else "[MAAS]",
                 joined or "—",
             ]

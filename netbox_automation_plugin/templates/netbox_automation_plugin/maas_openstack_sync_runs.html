@@ -45,22 +45,23 @@
       <div class="card-body">
         <form method="get" class="vstack gap-3 mb-3">
           <div class="row g-2 align-items-end">
-            <div class="col-6 col-md-6 col-lg-2">
-              <label class="form-label mb-1">{% trans "Preset" %}</label>
-              <select name="preset" class="form-select form-select-sm">
-                <option value="" {% if not preset %}selected{% endif %}>{% trans "All time" %}</option>
-                <option value="last_week" {% if preset == "last_week" %}selected{% endif %}>{% trans "Last week" %}</option>
+            <div class="col-12 col-md-6 col-lg-3">
+              <label class="form-label mb-1" for="hist-filter-preset">{% trans "Time range" %}</label>
+              <select name="preset" id="hist-filter-preset" class="form-select form-select-sm" title="{% trans 'Filter the list by when each drift report run was saved (created).' %}">
+                <option value="" {% if not preset %}selected{% endif %}>{% trans "All time (no shortcut)" %}</option>
+                <option value="last_week" {% if preset == "last_week" %}selected{% endif %}>{% trans "Last 7 days" %}</option>
                 <option value="last_30_days" {% if preset == "last_30_days" %}selected{% endif %}>{% trans "Last 30 days" %}</option>
-                <option value="last_3_months" {% if preset == "last_3_months" %}selected{% endif %}>{% trans "Last 3 months" %}</option>
+                <option value="last_3_months" {% if preset == "last_3_months" %}selected{% endif %}>{% trans "Last 90 days" %}</option>
               </select>
+              <div class="form-text small">{% trans "Runs created in this period. Combine with From / To for a custom range." %}</div>
             </div>
             <div class="col-6 col-md-6 col-lg-2">
-              <label class="form-label mb-1">{% trans "From date" %}</label>
-              <input type="date" name="from_date" value="{{ from_date }}" class="form-control form-control-sm" />
+              <label class="form-label mb-1" for="hist-filter-from">{% trans "From date" %}</label>
+              <input type="date" name="from_date" id="hist-filter-from" value="{{ from_date }}" class="form-control form-control-sm" title="{% trans 'Earliest run creation date to include (optional).' %}" />
             </div>
             <div class="col-6 col-md-6 col-lg-2">
-              <label class="form-label mb-1">{% trans "To date" %}</label>
-              <input type="date" name="to_date" value="{{ to_date }}" class="form-control form-control-sm" />
+              <label class="form-label mb-1" for="hist-filter-to">{% trans "To date" %}</label>
+              <input type="date" name="to_date" id="hist-filter-to" value="{{ to_date }}" class="form-control form-control-sm" title="{% trans 'Latest run creation date to include (optional).' %}" />
             </div>
             <div class="col-12 col-lg-auto ms-lg-auto d-flex flex-wrap align-items-end gap-2 hist-filter-toolbar">
               <button type="submit" class="btn btn-primary btn-sm">{% trans "Apply filters" %}</button>

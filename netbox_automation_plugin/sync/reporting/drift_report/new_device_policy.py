@@ -104,15 +104,15 @@ def _new_device_candidate_policy(
 
 def _proposed_netbox_status_for_new_maas_device(machine: dict) -> str:
     """
-    Suggested NetBox device.status when creating a record for a MAAS-only host.
+    Suggested NetBox device.status for a MAAS-only host (drift / manual review tables).
 
     Uses the same MAAS → NetBox slug map as placement/lifecycle (see
-    maas_netbox_status). For transient/unsafe MAAS states we do not propose a status.
+    maas_netbox_status). Transient states (e.g. RESCUE_MODE) still get an
+    informational slug (typically ``staged``); whether the host is an auto-add
+    candidate is decided separately in ``_new_device_candidate_policy``.
     """
     st = normalize_maas_status(machine.get("status_name") or machine.get("status"))
     if not st:
-        return "—"
-    if st in _MAAS_NEW_DEVICE_UNSAFE_STATUSES:
         return "—"
     return proposed_netbox_status_slug_from_maas(machine.get("status_name") or machine.get("status"))
 
@@ -122,7 +122,8 @@ def proposed_netbox_status_for_new_maas_machine(
 ) -> str:
     """
     NetBox device.status for a MAAS-only (new device) row: OpenStack Ironic first when a
-    BMC/runtime row exists, else MAAS-only policy (including unsafe-state guard).
+    BMC/runtime row exists, else MAAS mapping (same as alignment reference; candidate
+    gating is separate).
     """
     if ironic_bmc_row:
         os_prop = proposed_netbox_status_slug_from_openstack_runtime(

@@ -26,6 +26,8 @@ _NETBOX_DEVICE_STATUS_SLUGS = frozenset({
 
 # MAAS lifecycle → NetBox slug (MAAS side normalized with normalize_maas_status).
 _MAAS_TO_NETBOX: dict[str, str] = {
+    # Placeholder / unset lifecycle in some MAAS views — treat as “in CMDB but not lifecycle-classified”.
+    "DEFAULT": "inventory",
     "DEPLOYED": "active",
     "ACTIVE": "active",
     "READY": "offline",
@@ -64,7 +66,7 @@ def proposed_netbox_status_slug_from_maas(maas_status_display: str) -> str:
     Returns a lowercase slug valid for NetBox, or "—" if unknown / not mappable.
     """
     st = normalize_maas_status(maas_status_display)
-    if not st or st in {"-", "—", "UNKNOWN", "DEFAULT", "NONE", "NULL"}:
+    if not st or st in {"-", "—", "UNKNOWN", "NONE", "NULL"}:
         return "—"
 
     proposed = _MAAS_TO_NETBOX.get(st)
@@ -164,6 +166,24 @@ def proposed_netbox_status_for_matched_row(row: dict) -> str:
     if os_prop != "—":
         return os_prop
     return maas_prop
+
+
+def discovery_tag_with_proposed_nb_device_status(
+    base_discovery_tag: str, nb_status_slug: str
+) -> str:
+    """
+    Combine a workflow discovery tag (``maas-discovered``, ``review-only``, etc.) with the
+    proposed NetBox ``device.status`` slug so **NB Proposed Tag** tracks the same MAAS/OS → NB
+    mapping as **NB proposed state** (e.g. MAAS ``Default`` → ``nb-inventory``).
+    """
+    base = (base_discovery_tag or "").strip()
+    slug = (nb_status_slug or "").strip()
+    if not slug or slug == "—":
+        return base if base else "—"
+    chip = f"nb-{slug}"
+    if not base:
+        return chip
+    return f"{base}+{chip}"
 
 
 def maas_to_netbox_mapping_reference_rows() -> list[list[str]]:
