@@ -155,6 +155,22 @@ def _html_cell_content(s) -> str:
     return html.escape(raw, quote=False).replace("\n", "<br />")
 
 
+def _html_maas_fabric_cell_content(s) -> str:
+    """
+    One visual line per fabric so hyphenated names are never broken mid-token by CSS wrap.
+    Comma-separated lists (e.g. spruce-*) stack with <br />.
+    """
+    raw = _normalize_ascii_cell(s)
+    if not raw.strip():
+        return ""
+    parts = [html.escape(p.strip(), quote=False) for p in raw.split(",") if p.strip()]
+    if not parts:
+        return ""
+    if len(parts) == 1:
+        return parts[0]
+    return "<br />".join(parts)
+
+
 def _html_col_is_mac(header) -> bool:
     """True for column headers that represent a MAC address (not substrings like 'machines')."""
     return re.search(r"(?i)\bMAC\b", str(header or "")) is not None
@@ -162,6 +178,20 @@ def _html_col_is_mac(header) -> bool:
 
 def _html_col_is_risk(header) -> bool:
     return str(header or "").strip().lower() == "risk"
+
+
+def _html_col_is_maas_fabric(header) -> bool:
+    """Cells may list many fabrics; stack on commas, keep each full name intact."""
+    return str(header or "").strip().lower() == "maas fabric"
+
+
+def _html_maas_fabric_col_extra_attrs(header, *, is_header: bool) -> str:
+    if not _html_col_is_maas_fabric(header):
+        return ""
+    if is_header:
+        return ' style="vertical-align:bottom"'
+    # nowrap: each fabric stays one line; multiple lines come from <br /> only.
+    return ' style="white-space:nowrap;vertical-align:top"'
 
 
 def _html_col_is_ip(header) -> bool:
@@ -175,6 +205,8 @@ def _html_col_is_ip(header) -> bool:
 
 def _html_th_class(header) -> str:
     h = str(header or "")
+    if _html_col_is_maas_fabric(h):
+        return "small align-bottom text-nowrap"
     base = "small align-bottom text-nowrap"
     if _html_col_is_mac(h):
         return f"{base} text-nowrap font-monospace"
@@ -193,6 +225,8 @@ def _html_td_class(header, col_idx, notes_col_idx=None) -> str:
     elif _html_col_is_ip(h):
         parts.extend(["align-top", "text-nowrap"])
     elif _html_col_is_risk(h):
+        parts.extend(["align-top", "text-nowrap"])
+    elif _html_col_is_maas_fabric(h):
         parts.extend(["align-top", "text-nowrap"])
     else:
         parts.extend(["align-top", "text-nowrap"])
@@ -221,7 +255,9 @@ def _html_table(
     n = len(headers)
     hdr_strs = [str(h) for h in headers]
     ths = "".join(
-        f'<th scope="col" class="{_html_th_class(h)}">{_html_cell_content(h)}</th>'
+        f'<th scope="col" class="{_html_th_class(h)}"'
+        f'{_html_maas_fabric_col_extra_attrs(h, is_header=True)}>'
+        f"{_html_cell_content(h)}</th>"
         for h in hdr_strs
     )
     if selectable:
@@ -250,7 +286,13 @@ def _html_table(
         for i, cell in enumerate(padded):
             h = hdr_strs[i] if i < len(hdr_strs) else ""
             cls = _html_td_class(h, i, notes_col_idx)
-            tds.append(f'<td class="{cls}">{_html_cell_content(cell)}</td>')
+            fab_attrs = _html_maas_fabric_col_extra_attrs(h, is_header=False)
+            v = (
+                _html_maas_fabric_cell_content(cell)
+                if _html_col_is_maas_fabric(h)
+                else _html_cell_content(cell)
+            )
+            tds.append(f'<td class="{cls}"{fab_attrs}>{v}</td>')
         body_parts.append("<tr>" + "".join(tds) + "</tr>")
     if selectable:
         table_open = (
