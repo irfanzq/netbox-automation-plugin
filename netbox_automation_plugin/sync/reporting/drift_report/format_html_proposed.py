@@ -1,5 +1,9 @@
 """PROPOSED CHANGES and summary tables for the drift HTML/ASCII report."""
 
+from netbox_automation_plugin.sync.reporting.drift_report.maas_netbox_status import (
+    maas_to_netbox_mapping_reference_rows,
+)
+
 
 def emit_proposed_change_tables(e, prop):
     e.spacer()
@@ -24,6 +28,20 @@ def emit_proposed_change_tables(e, prop):
             ["New floating IPs (OpenStack authority)", str(len(prop["add_fips"])), "FIP not in IPAM"],
         ],
     )
+    e.spacer()
+    e.subtitle("Reference — MAAS → NetBox device.status (fallback when no OS runtime)")
+    e.paragraph(
+        "Placement and new-device rows prefer OpenStack Ironic when a BMC row exists; "
+        "this table is the MAAS-only mapping used when OS data is missing or does not map."
+    )
+    e.spacer()
+    e.table(
+        ["MAAS state (normalized)", "NetBox status slug"],
+        maas_to_netbox_mapping_reference_rows(),
+        dynamic_columns=True,
+        wrap_max_width=None,
+        selectable=False,
+    )
     if prop["add_devices"]:
         e.spacer()
         e.subtitle("Detail — new devices")
@@ -42,14 +60,14 @@ def emit_proposed_change_tables(e, prop):
                 "NetBox role",
                 "MAAS fabric",
                 "MAAS status",
-                "NB proposed state",
                 "Serial Number",
                 "Power type",
                 "BMC present",
                 "NIC count",
                 "Primary MAC (MAAS)",
                 "Authority",
-                "Proposed Tag",
+                "NB proposed state",
+                "NB Proposed Tag",
                 "Proposed Action",
             ],
             prop["add_devices"],
@@ -82,7 +100,8 @@ def emit_proposed_change_tables(e, prop):
                 "NIC count",
                 "Primary MAC (MAAS)",
                 "Authority",
-                "Proposed Tag",
+                "NB proposed state",
+                "NB Proposed Tag",
                 "Proposed Action",
             ],
             prop["add_devices_review_only"],

@@ -49,6 +49,7 @@ import logging
 
 from .history_models import MAASOpenStackDriftRun
 from .history_service import create_drift_run_snapshot
+from .netbox_scope_choices import list_site_location_choices as _list_site_location_choices
 
 logger = logging.getLogger("netbox_automation_plugin")
 
@@ -112,35 +113,6 @@ def _trim_maas_only_truly_missing_from_netbox(
     scope_meta["drift_maas_only_excluded_already_in_netbox"] = len(outside)
     drift["in_maas_not_netbox"] = sorted(trimmed, key=lambda x: _hostname_short(x).lower())
     drift["maas_in_netbox_outside_scope"] = sorted(outside, key=lambda x: (x[0] or "").lower())
-
-
-def _list_site_location_choices():
-    """Return (site_choices, location_choices, location_meta_by_key)."""
-    site_choices = []
-    location_choices = []
-    location_meta = {}
-    try:
-        from dcim.models import Site, Location
-        for s in Site.objects.only("slug", "name").order_by("name"):
-            slug = (s.slug or "").strip()
-            if slug:
-                site_choices.append((slug, s.name or slug))
-        for loc in (
-            Location.objects.select_related("site")
-            .only("name", "slug", "site__slug", "site__name")
-            .order_by("site__name", "name")
-        ):
-            site_slug = (getattr(loc.site, "slug", "") or "").strip()
-            loc_name = (loc.name or "").strip()
-            if not site_slug or not loc_name:
-                continue
-            key = f"{site_slug}::{loc_name}"
-            label = f"{getattr(loc.site, 'name', site_slug) or site_slug} / {loc_name}"
-            location_choices.append((key, label))
-            location_meta[key] = {"site_slug": site_slug, "location_name": loc_name}
-    except Exception as e:
-        logger.warning("Could not build site/location filter choices: %s", e)
-    return site_choices, location_choices, location_meta
 
 
 def _norm_tokens(s: str) -> set[str]:
@@ -612,12 +584,12 @@ class MAASOpenStackSyncView(LoginRequiredMixin, View):
     template_name = "netbox_automation_plugin/maas_openstack_sync_form.html"
 
     def get(self, request):
-        site_choices, location_choices, _ = _list_site_location_choices()
+        site_choices, location_choices, _, _ = _list_site_location_choices()
         form = MAASOpenStackSyncForm(site_choices=site_choices, location_choices=location_choices)
         return render(request, self.template_name, {"form": form, "recent_runs": _recent_drift_runs()})
 
     def post(self, request):
-        site_choices, location_choices, location_meta = _list_site_location_choices()
+        site_choices, location_choices, location_meta, site_meta = _list_site_location_choices()
         # Empty <select multiple> is often omitted from POST entirely; normalize so the audit always runs.
         post_data = request.POST.copy()
         if "sites" not in post_data:
@@ -663,9 +635,21 @@ class MAASOpenStackSyncView(LoginRequiredMixin, View):
         openstack_scope_tokens = _openstack_scope_tokens_from_netbox(
             selected_location_names, selected_sites
         )
+        selected_region_names: set[str] = set()
+        for k in selected_location_keys:
+            meta = location_meta.get(k) or {}
+            rn = (meta.get("region_name") or "").strip()
+            if rn:
+                selected_region_names.add(rn)
+        for slug in selected_sites:
+            sm = site_meta.get(slug) or {}
+            rn = (sm.get("region_name") or "").strip()
+            if rn:
+                selected_region_names.add(rn)
         scope_meta = {
             "selected_sites": sorted(selected_sites),
             "selected_locations": sorted(selected_location_names),
+            "selected_regions": sorted(selected_region_names),
             "openstack_scope_tokens": sorted(openstack_scope_tokens),
             "openstack_scope_has_netbox_filter": has_netbox_scope,
         }
@@ -1203,6 +1187,7 @@ class MAASOpenStackSyncView(LoginRequiredMixin, View):
                 report_reference=report_reference,
                 audit_summary=audit_summary,
                 scope_filters={
+                    "regions": sorted(selected_region_names),
                     "sites": sorted(selected_sites),
                     "locations": sorted(selected_location_names),
                     "openstack_tokens": sorted(openstack_scope_tokens),

@@ -2,6 +2,9 @@
 
 import re
 
+from netbox_automation_plugin.sync.reporting.drift_report.maas_netbox_status import (
+    proposed_netbox_status_for_matched_row,
+)
 from netbox_automation_plugin.sync.reporting.drift_report.misc_utils import _dedupe_note_parts
 
 # Substrings of hints from sync/reconciliation/audit_detail.py (placement / lifecycle only).
@@ -115,6 +118,7 @@ def _alignment_review_rows(matched_rows):
                 r.get("netbox_site") or "—",
                 r.get("netbox_location") or "—",
                 r.get("netbox_status") or "-",
+                proposed_netbox_status_for_matched_row(r),
                 "[OS]" if str(r.get("os_authority") or "") == "openstack_runtime" else "[MAAS]",
                 joined or "—",
             ]

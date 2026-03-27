@@ -1,10 +1,18 @@
 """New-device candidate policy, fabric column display, proposed NetBox device.status."""
 
+from __future__ import annotations
+
 import re
+from typing import Optional
 
 from netbox_automation_plugin.sync.reporting.drift_report.fabric_alignment import (
     _is_generic_maas_fabric_name,
     _split_maas_fabrics,
+)
+from netbox_automation_plugin.sync.reporting.drift_report.maas_netbox_status import (
+    normalize_maas_status,
+    proposed_netbox_status_slug_from_maas,
+    proposed_netbox_status_slug_from_openstack_runtime,
 )
 
 def _new_device_fabric_display(maas_fabric_raw, nb_location_raw) -> str:
@@ -46,10 +54,6 @@ _MAAS_NEW_DEVICE_UNSAFE_STATUSES = {
 }
 
 
-def _norm_maas_status(raw: str) -> str:
-    return re.sub(r"[\s\-]+", "_", str(raw or "").strip()).upper()
-
-
 def _has_usable_maas_fabric(machine: dict) -> bool:
     fab = str(machine.get("fabric_name") or "").strip().lower()
     return bool(fab and fab not in {"-", "unknown", "n/a", "none", "null"})
@@ -69,7 +73,7 @@ def _new_device_candidate_policy(
       (is_candidate, note, sort_rank)
     Lower sort_rank comes first.
     """
-    st = _norm_maas_status(machine.get("status_name") or machine.get("status"))
+    st = normalize_maas_status(machine.get("status_name") or machine.get("status"))
     has_fabric = _has_usable_maas_fabric(machine)
     has_identity = bool((vendor or "").strip() and (product or "").strip())
 
@@ -98,42 +102,33 @@ def _new_device_candidate_policy(
     return True, "Candidate", rank
 
 
-# NetBox DCIM Device.status slugs (same set as dcim.choices.DeviceStatusChoices).
-_NETBOX_DEVICE_STATUS_SLUGS = frozenset({
-    "offline",
-    "active",
-    "planned",
-    "staged",
-    "failed",
-    "inventory",
-    "decommissioning",
-})
-
-
 def _proposed_netbox_status_for_new_maas_device(machine: dict) -> str:
     """
     Suggested NetBox device.status when creating a record for a MAAS-only host.
 
-    Maps MAAS lifecycle states we treat as safe for add proposals (see
-    _new_device_candidate_policy / rank keys) to valid NetBox slugs.
-    Deployed and Ready → staged (aligns with “MAAS deployed / NB staged” review pattern).
+    Uses the same MAAS → NetBox slug map as placement/lifecycle (see
+    maas_netbox_status). For transient/unsafe MAAS states we do not propose a status.
     """
-    st = _norm_maas_status(machine.get("status_name") or machine.get("status"))
+    st = normalize_maas_status(machine.get("status_name") or machine.get("status"))
     if not st:
         return "—"
     if st in _MAAS_NEW_DEVICE_UNSAFE_STATUSES:
         return "—"
-    # Explicit MAAS → NetBox mappings for common candidate statuses.
-    proposed = {
-        "DEPLOYED": "staged",
-        "READY": "staged",
-        "ACTIVE": "active",
-        "ALLOCATED": "planned",
-        "DEFAULT": "inventory",
-        "NEW": "inventory",
-    }.get(st)
-    if proposed is None:
-        proposed = "staged"
-    if proposed not in _NETBOX_DEVICE_STATUS_SLUGS:
-        return "—"
-    return proposed
+    return proposed_netbox_status_slug_from_maas(machine.get("status_name") or machine.get("status"))
+
+
+def proposed_netbox_status_for_new_maas_machine(
+    machine: dict, ironic_bmc_row: Optional[dict]
+) -> str:
+    """
+    NetBox device.status for a MAAS-only (new device) row: OpenStack Ironic first when a
+    BMC/runtime row exists, else MAAS-only policy (including unsafe-state guard).
+    """
+    if ironic_bmc_row:
+        os_prop = proposed_netbox_status_slug_from_openstack_runtime(
+            str(ironic_bmc_row.get("provision_state") or ""),
+            ironic_bmc_row.get("maintenance"),
+        )
+        if os_prop != "—":
+            return os_prop
+    return _proposed_netbox_status_for_new_maas_device(machine)

@@ -1,14 +1,45 @@
+from datetime import date, timedelta
+
 from django.contrib.auth.mixins import LoginRequiredMixin
+from django.db.models import Q
 from django.http import HttpResponse
 from django.shortcuts import get_object_or_404, render
 from django.views import View
 from django_tables2 import RequestConfig
-from datetime import date, timedelta
 
 from netbox_automation_plugin.sync.reporting.drift_report import build_drift_report_xlsx
 
 from .history_models import MAASOpenStackDriftRun
+from .netbox_scope_choices import list_site_location_choices
 from .tables import MAASOpenStackDriftRunTable
+
+
+def _filter_runs_by_saved_netbox_scope(qs, site_slugs: list[str], location_keys: list[str], location_meta: dict):
+    """
+    Narrow drift runs whose persisted scope_filters overlap selected NetBox sites / locations.
+    scope_filters uses site slugs and location display names (same as drift audit form).
+    """
+    site_slugs = [s.strip() for s in site_slugs if (s or "").strip()]
+    location_names: set[str] = set()
+    for key in location_keys:
+        k = (key or "").strip()
+        if not k:
+            continue
+        meta = location_meta.get(k) or {}
+        name = (meta.get("location_name") or "").strip()
+        if name:
+            location_names.add(name)
+    if site_slugs:
+        site_q = Q()
+        for slug in site_slugs:
+            site_q |= Q(scope_filters__contains={"sites": [slug]})
+        qs = qs.filter(site_q)
+    if location_names:
+        loc_q = Q()
+        for loc_name in sorted(location_names):
+            loc_q |= Q(scope_filters__contains={"locations": [loc_name]})
+        qs = qs.filter(loc_q)
+    return qs
 
 
 class MAASOpenStackSyncRunsView(LoginRequiredMixin, View):
@@ -19,6 +50,12 @@ class MAASOpenStackSyncRunsView(LoginRequiredMixin, View):
         preset = (request.GET.get("preset") or "").strip().lower()
         from_date_raw = (request.GET.get("from_date") or "").strip()
         to_date_raw = (request.GET.get("to_date") or "").strip()
+        filter_sites = request.GET.getlist("filter_site")
+        filter_locations = request.GET.getlist("filter_location")
+
+        site_choices, location_choices, location_meta, _ = list_site_location_choices()
+        selected_site_set = {s for s in filter_sites if s}
+        selected_location_key_set = {k for k in filter_locations if k}
 
         if preset == "last_week":
             runs = runs.filter(created__date__gte=(date.today() - timedelta(days=7)))
@@ -38,14 +75,29 @@ class MAASOpenStackSyncRunsView(LoginRequiredMixin, View):
             except ValueError:
                 to_date_raw = ""
 
+        runs = _filter_runs_by_saved_netbox_scope(
+            runs,
+            list(selected_site_set),
+            list(selected_location_key_set),
+            location_meta,
+        )
+
         table = MAASOpenStackDriftRunTable(runs, orderable=True)
         RequestConfig(request, paginate={"per_page": 25}).configure(table)
+        run_count = runs.count()
+        any_runs_in_db = MAASOpenStackDriftRun.objects.exists()
         context = {
             "table": table,
-            "run_count": runs.count(),
+            "run_count": run_count,
             "preset": preset,
             "from_date": from_date_raw,
             "to_date": to_date_raw,
+            "site_choices_for_filter": site_choices,
+            "location_choices_for_filter": location_choices,
+            "selected_filter_sites": selected_site_set,
+            "selected_filter_location_keys": selected_location_key_set,
+            "history_filtered_empty": run_count == 0 and any_runs_in_db,
+            "history_never_ran": not any_runs_in_db,
         }
         return render(request, self.template_name, context)
 

@@ -16,7 +16,7 @@ from netbox_automation_plugin.sync.reporting.drift_report.device_types import (
 from netbox_automation_plugin.sync.reporting.drift_report.new_device_policy import (
     _new_device_candidate_policy,
     _new_device_fabric_display,
-    _proposed_netbox_status_for_new_maas_device,
+    proposed_netbox_status_for_new_maas_machine,
 )
 from netbox_automation_plugin.sync.reporting.drift_report.placement import (
     _maas_machine_by_hostname,
@@ -875,12 +875,14 @@ def _proposed_changes_rows(
             )
         else:
             proposed_tag = "review-only"
+        nb_prop_state = proposed_netbox_status_for_new_maas_machine(m, osr)
         tail = [
             power_type,
             bmc_present,
             str(nic_count),
             primary_mac,
             authority_badge,
+            nb_prop_state,
             proposed_tag,
             (
                 "CREATE_NETBOX_DEVICE_AND_PORTS"
@@ -903,16 +905,10 @@ def _proposed_changes_rows(
             str(m.get("status_name", "-")),
         ]
         serial = str(m.get("serial") or "—")
+        row = [*head_common, serial, *tail]
         if is_candidate:
-            row = [
-                *head_common,
-                _proposed_netbox_status_for_new_maas_device(m),
-                serial,
-                *tail,
-            ]
             add_devices.append((status_rank, h.lower(), row))
         else:
-            row = [*head_common, serial, *tail]
             add_devices_review_only.append((status_rank, h.lower(), row))
 
     add_devices = [r for _, _, r in sorted(add_devices, key=lambda x: (x[0], x[1]))]

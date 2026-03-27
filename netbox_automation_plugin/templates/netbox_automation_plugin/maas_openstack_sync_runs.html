@@ -5,51 +5,139 @@
 {% block title %}{% trans "MAAS/OpenStack Drift Runs" %}{% endblock %}
 
 {% block content %}
+<style>
+  .hist-scope-panel {
+    max-height: 220px;
+    overflow-y: auto;
+  }
+  .hist-filter-toolbar .btn {
+    white-space: nowrap;
+  }
+</style>
 <div class="row">
   <div class="col-md-12">
     <div class="card">
-      <div class="card-header d-flex justify-content-between align-items-center">
+      <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">
         <h5 class="card-title mb-0">{% trans "MAAS/OpenStack Drift Run History" %}</h5>
         <a href="{% url 'plugins:netbox_automation_plugin:maas_openstack_sync' %}" class="btn btn-outline-primary btn-sm">
           {% trans "Back to Drift Audit" %}
         </a>
       </div>
       <div class="card-body">
-        <form method="get" class="row g-2 mb-3">
-          <div class="col-md-3">
-            <label class="form-label mb-1">{% trans "Preset" %}</label>
-            <select name="preset" class="form-select form-select-sm">
-              <option value="" {% if not preset %}selected{% endif %}>{% trans "All time" %}</option>
-              <option value="last_week" {% if preset == "last_week" %}selected{% endif %}>{% trans "Last week" %}</option>
-              <option value="last_30_days" {% if preset == "last_30_days" %}selected{% endif %}>{% trans "Last 30 days" %}</option>
-              <option value="last_3_months" {% if preset == "last_3_months" %}selected{% endif %}>{% trans "Last 3 months" %}</option>
-            </select>
+        <form method="get" class="vstack gap-3 mb-3">
+          <div class="row g-2 align-items-end">
+            <div class="col-6 col-md-6 col-lg-2">
+              <label class="form-label mb-1">{% trans "Preset" %}</label>
+              <select name="preset" class="form-select form-select-sm">
+                <option value="" {% if not preset %}selected{% endif %}>{% trans "All time" %}</option>
+                <option value="last_week" {% if preset == "last_week" %}selected{% endif %}>{% trans "Last week" %}</option>
+                <option value="last_30_days" {% if preset == "last_30_days" %}selected{% endif %}>{% trans "Last 30 days" %}</option>
+                <option value="last_3_months" {% if preset == "last_3_months" %}selected{% endif %}>{% trans "Last 3 months" %}</option>
+              </select>
+            </div>
+            <div class="col-6 col-md-6 col-lg-2">
+              <label class="form-label mb-1">{% trans "From date" %}</label>
+              <input type="date" name="from_date" value="{{ from_date }}" class="form-control form-control-sm" />
+            </div>
+            <div class="col-6 col-md-6 col-lg-2">
+              <label class="form-label mb-1">{% trans "To date" %}</label>
+              <input type="date" name="to_date" value="{{ to_date }}" class="form-control form-control-sm" />
+            </div>
+            <div class="col-12 col-lg-auto ms-lg-auto d-flex flex-wrap align-items-end gap-2 hist-filter-toolbar">
+              <button type="submit" class="btn btn-primary btn-sm">{% trans "Apply filters" %}</button>
+              <a href="{% url 'plugins:netbox_automation_plugin:maas_openstack_sync_runs' %}" class="btn btn-outline-secondary btn-sm">
+                {% trans "Reset" %}
+              </a>
+            </div>
           </div>
-          <div class="col-md-3">
-            <label class="form-label mb-1">{% trans "From date" %}</label>
-            <input type="date" name="from_date" value="{{ from_date }}" class="form-control form-control-sm" />
+
+          <div class="row g-3">
+            <div class="col-12 col-xl-6">
+              <fieldset class="border rounded-2 p-2 pb-3 bg-body-secondary bg-opacity-10">
+                <legend class="float-none w-auto px-1 fs-6 mb-2 text-body-secondary">{% trans "NetBox sites (saved run scope)" %}</legend>
+                <p class="small text-muted mb-2 mb-xl-1">
+                  {% trans "Leave all unchecked to include every run. Check one or more sites to show only runs whose saved scope included that site slug." %}
+                </p>
+                <div class="d-flex flex-wrap gap-2 mb-2 hist-filter-toolbar">
+                  <button type="button" class="btn btn-outline-secondary btn-sm py-0 px-2 js-hist-select-all" data-hist-target="hist-filter-sites" aria-label="{% trans 'Select all sites' %}">{% trans "Select all" %}</button>
+                  <button type="button" class="btn btn-outline-secondary btn-sm py-0 px-2 js-hist-clear-checkboxes" data-hist-target="hist-filter-sites" aria-label="{% trans 'Clear site selection' %}">{% trans "Clear" %}</button>
+                </div>
+                <div id="hist-filter-sites" class="hist-scope-panel border rounded bg-body px-2 py-1 small">
+                  {% for slug, label in site_choices_for_filter %}
+                    <div class="form-check mb-0 py-1">
+                      <input class="form-check-input" type="checkbox" name="filter_site" value="{{ slug }}" id="hist-site-{{ forloop.counter }}"
+                        {% if slug in selected_filter_sites %}checked{% endif %} />
+                      <label class="form-check-label" for="hist-site-{{ forloop.counter }}">{{ label }} <span class="text-muted">({{ slug }})</span></label>
+                    </div>
+                  {% empty %}
+                    <p class="text-muted mb-0 small">{% trans "No sites found in NetBox." %}</p>
+                  {% endfor %}
+                </div>
+              </fieldset>
+            </div>
+            <div class="col-12 col-xl-6">
+              <fieldset class="border rounded-2 p-2 pb-3 bg-body-secondary bg-opacity-10">
+                <legend class="float-none w-auto px-1 fs-6 mb-2 text-body-secondary">{% trans "NetBox locations (saved run scope)" %}</legend>
+                <p class="small text-muted mb-2 mb-xl-1">
+                  {% trans "Leave all unchecked to ignore location. Check locations to show runs whose saved scope included that location name." %}
+                </p>
+                <div class="d-flex flex-wrap gap-2 mb-2 hist-filter-toolbar">
+                  <button type="button" class="btn btn-outline-secondary btn-sm py-0 px-2 js-hist-select-all" data-hist-target="hist-filter-locations" aria-label="{% trans 'Select all locations' %}">{% trans "Select all" %}</button>
+                  <button type="button" class="btn btn-outline-secondary btn-sm py-0 px-2 js-hist-clear-checkboxes" data-hist-target="hist-filter-locations" aria-label="{% trans 'Clear location selection' %}">{% trans "Clear" %}</button>
+                </div>
+                <div id="hist-filter-locations" class="hist-scope-panel border rounded bg-body px-2 py-1 small">
+                  {% for key, label in location_choices_for_filter %}
+                    <div class="form-check mb-0 py-1">
+                      <input class="form-check-input" type="checkbox" name="filter_location" value="{{ key }}" id="hist-loc-{{ forloop.counter }}"
+                        {% if key in selected_filter_location_keys %}checked{% endif %} />
+                      <label class="form-check-label" for="hist-loc-{{ forloop.counter }}">{{ label }}</label>
+                    </div>
+                  {% empty %}
+                    <p class="text-muted mb-0 small">{% trans "No locations found in NetBox." %}</p>
+                  {% endfor %}
+                </div>
+              </fieldset>
+            </div>
           </div>
-          <div class="col-md-3">
-            <label class="form-label mb-1">{% trans "To date" %}</label>
-            <input type="date" name="to_date" value="{{ to_date }}" class="form-control form-control-sm" />
-          </div>
-          <div class="col-md-3 d-flex align-items-end gap-2">
-            <button type="submit" class="btn btn-primary btn-sm">{% trans "Apply filters" %}</button>
-            <a href="{% url 'plugins:netbox_automation_plugin:maas_openstack_sync_runs' %}" class="btn btn-outline-secondary btn-sm">
-              {% trans "Reset" %}
-            </a>
-          </div>
+          <p class="small text-muted mb-0">
+            {% trans "After changing site or location checkboxes, use Apply filters in the top row (preset and dates are included in the same request)." %}
+          </p>
         </form>
+
         {% if run_count %}
           <p class="text-muted mb-2">{% trans "Total runs" %}: {{ run_count }}</p>
           {% render_table table %}
-        {% else %}
+        {% elif history_never_ran %}
           <p class="text-muted mb-0">
             {% trans "No drift report runs yet. Run a drift audit to create the first snapshot." %}
+          </p>
+        {% elif history_filtered_empty %}
+          <p class="text-muted mb-0">
+            {% trans "No runs match the current filters. Try clearing site/location checkboxes or widening the date range." %}
           </p>
         {% endif %}
       </div>
     </div>
   </div>
 </div>
+<script>
+(function () {
+  document.querySelectorAll('.js-hist-select-all').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      var id = btn.getAttribute('data-hist-target');
+      var root = id ? document.getElementById(id) : null;
+      if (!root) return;
+      root.querySelectorAll('input[type="checkbox"]').forEach(function (cb) { cb.checked = true; });
+    });
+  });
+  document.querySelectorAll('.js-hist-clear-checkboxes').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      var id = btn.getAttribute('data-hist-target');
+      var root = id ? document.getElementById(id) : null;
+      if (!root) return;
+      root.querySelectorAll('input[type="checkbox"]').forEach(function (cb) { cb.checked = false; });
+    });
+  });
+})();
+</script>
 {% endblock %}

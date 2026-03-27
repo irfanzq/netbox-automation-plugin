@@ -7,7 +7,21 @@ import re
 from collections import defaultdict
 from typing import Dict, Optional
 
+from netbox_automation_plugin.sync.reporting.drift_report.maas_netbox_status import (
+    proposed_netbox_status_slug_from_maas,
+)
+
 logger = logging.getLogger("netbox_automation_plugin.sync")
+
+
+def _maas_nb_alignment_suffix(machine: dict) -> str:
+    """Append MAAS lifecycle → NetBox status slug for drift alignment hints (matches report column)."""
+    slug = proposed_netbox_status_slug_from_maas(
+        str(machine.get("status_name") or machine.get("status") or "")
+    )
+    if slug == "—":
+        return ""
+    return f" | MAAS→NB: {slug}"
 
 
 def _distinct_maas_fabrics_from_machine(m: dict) -> list[str]:
@@ -568,7 +582,10 @@ def build_maas_netbox_matched_rows(
         if maas_st and nb_st:
             # Suppress MAAS lifecycle hints when OS runtime lifecycle data exists.
             if not osr and "deployed" in maas_st and "staged" in nb_st:
-                hints.append("MAAS deployed / NB staged — consider active")
+                hints.append(
+                    "MAAS deployed / NB staged — consider active"
+                    + _maas_nb_alignment_suffix(m)
+                )
             if "ready" in maas_st and "active" in nb_st:
                 pass
         os_prov = (osr.get("provision_state") or "").strip().lower()
@@ -581,9 +598,15 @@ def build_maas_netbox_matched_rows(
             if os_maint and "maintenance" not in nb_st:
                 hints.append("OS maintenance / NB not maintenance — consider maintenance")
             elif os_prov == "active" and os_instance_uuid and "staged" in nb_st:
-                hints.append("OS active+instance / NB staged — consider active")
+                hints.append(
+                    "OS active+instance / NB staged — consider active"
+                    + _maas_nb_alignment_suffix(m)
+                )
             elif os_prov in {"available", "clean failed"} and "active" in nb_st:
-                hints.append(f"OS {os_prov} / NB active — review lifecycle")
+                hints.append(
+                    f"OS {os_prov} / NB active — review lifecycle"
+                    + _maas_nb_alignment_suffix(m)
+                )
         if not nb.get("serial"):
             hints.append("NB serial empty — compare with MAAS inventory")
         maas_bmc = (m.get("bmc_ip") or "").strip()
