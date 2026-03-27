@@ -14,7 +14,11 @@ class MAASOpenStackDriftRunTable(tables.Table):
     status = tables.Column(verbose_name=_("Status"), orderable=True)
     created_by = tables.Column(verbose_name=_("User"), orderable=True)
     created = tables.DateTimeColumn(verbose_name=_("Created"), orderable=True)
-    matched_hosts = tables.Column(verbose_name=_("Matched Hosts"), empty_values=(), orderable=False)
+    matched_hosts = tables.Column(
+        verbose_name=_("Hosts present in both MAAS and NetBox"),
+        empty_values=(),
+        orderable=False,
+    )
     maas_machines = tables.Column(verbose_name=_("MAAS Machines"), empty_values=(), orderable=False)
     netbox_devices = tables.Column(verbose_name=_("NetBox Devices"), empty_values=(), orderable=False)
     actions = tables.Column(verbose_name=_("Actions"), empty_values=(), orderable=False)

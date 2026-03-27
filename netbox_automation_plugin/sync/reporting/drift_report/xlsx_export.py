@@ -194,7 +194,7 @@ def build_drift_report_xlsx(
     ws_sum.append(["NetBox devices (included / fetched)", f"{nb_devices_included} / {nb_devices_fetched}"])
     ws_sum.append(["OpenStack runtime NIC rows (included / fetched)", f"{os_nics_included} / {os_nics_fetched}"])
     ws_sum.append(["OpenStack runtime BMC rows (included / fetched)", f"{os_bmc_included} / {os_bmc_fetched}"])
-    ws_sum.append(["Matched hostnames", str(drift.get("matched_count", 0))])
+    ws_sum.append(["Hosts present in both MAAS and NetBox", str(drift.get("matched_count", 0))])
     ws_sum.append(["In MAAS only", str(pc["maas_only"])])
     ws_sum.append(["NetBox serial missing", str(serial_validation_needed)])
     ws_sum.append(["OpenStack subnet gaps", sub_txt])
@@ -227,15 +227,15 @@ def build_drift_report_xlsx(
             [
                 "Host",
                 "MAAS fabric",
-                "NetBox site",
-                "NetBox location",
+                "MAAS state",
                 "OS region",
-                "Authority",
                 "OS provision",
                 "OS power",
                 "OS maintenance",
-                "MAAS state",
+                "NetBox site",
+                "NetBox location",
                 "NB state",
+                "Authority",
                 "Alignment issues",
             ],
         )

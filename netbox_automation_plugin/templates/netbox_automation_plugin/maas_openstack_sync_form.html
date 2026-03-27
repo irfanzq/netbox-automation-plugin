@@ -394,7 +394,7 @@
               {% if audit_summary.netbox_ok %}
                 <div class="mt-2 text-muted">
                   {% trans "Report sections" %}:
-                  <strong>{% trans "Matched hosts" %}</strong> {{ audit_summary.matched_hostnames }} —
+                  <strong>{% trans "Hosts present in both MAAS and NetBox" %}</strong> {{ audit_summary.matched_hostnames }} —
                   <strong>{% trans "NIC audit" %}</strong> {{ audit_summary.interface_audit_hosts }} {% trans "devices" %}
                 </div>
               {% endif %}

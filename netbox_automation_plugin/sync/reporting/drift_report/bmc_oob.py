@@ -104,6 +104,21 @@ def _os_runtime_bmc_by_hostname(openstack_data: dict | None) -> dict[str, dict]:
     return out
 
 
+def _os_is_authoritative_for_host(os_row: dict | None) -> bool:
+    """
+    Host-level OpenStack authority gate:
+    - require instance_uuid
+    - require provisioning state in trusted set
+    """
+    if not os_row:
+        return False
+    instance_uuid = str(os_row.get("instance_uuid") or "").strip()
+    if not instance_uuid:
+        return False
+    prov = str(os_row.get("provision_state") or "").strip().lower()
+    return prov in {"active", "available"}
+
+
 def _oob_port_hint_column(cov: str, nb_ifn: str, maas_when_no_nb_port: str) -> str:
     """
     Value for the 'NB OOB port (hint)' column: prefer the NetBox port name when the BMC IP
@@ -212,7 +227,7 @@ def _build_proposed_mgmt_interface_rows(
         os_drv = (os_row.get("driver") or "").strip()
         os_pif = (os_row.get("power_interface") or "").strip()
         os_vendor = (os_row.get("vendor") or "").strip()
-        authority = "openstack_runtime" if os_row else "maas_fallback"
+        authority = "openstack_runtime" if _os_is_authoritative_for_host(os_row) else "maas_fallback"
         authority_badge = "[OS]" if authority == "openstack_runtime" else "[MAAS]"
         bmc_effective = os_bmc_ip or bmc
         maas_oob_new = _suggested_netbox_mgmt_interface_name(
