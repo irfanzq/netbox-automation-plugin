@@ -268,6 +268,7 @@ def _html_table(
         table_open = '<div class="table-responsive mb-3">'
     return (
         table_open
+        +
         '<table class="table table-sm table-bordered table-striped align-middle mb-0">'
         f'<thead class="table-light"><tr>{ths}</tr></thead><tbody>'
         + "".join(body_parts)
