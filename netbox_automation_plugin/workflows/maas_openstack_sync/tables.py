@@ -14,11 +14,6 @@ class MAASOpenStackDriftRunTable(tables.Table):
     status = tables.Column(verbose_name=_("Status"), orderable=True)
     created_by = tables.Column(verbose_name=_("User"), orderable=True)
     created = tables.DateTimeColumn(verbose_name=_("Created"), orderable=True)
-    netbox_regions = tables.Column(
-        verbose_name=_("NetBox region(s)"),
-        empty_values=(),
-        orderable=False,
-    )
     netbox_sites_locations = tables.Column(
         verbose_name=_("NetBox sites / locations"),
         empty_values=(),
@@ -40,7 +35,6 @@ class MAASOpenStackDriftRunTable(tables.Table):
             "status",
             "created_by",
             "created",
-            "netbox_regions",
             "netbox_sites_locations",
             "matched_hosts",
             "maas_machines",
@@ -48,17 +42,6 @@ class MAASOpenStackDriftRunTable(tables.Table):
             "actions",
         )
         attrs = {"class": "table table-hover table-headings"}
-
-    def render_netbox_regions(self, record):
-        sf = record.scope_filters if isinstance(record.scope_filters, dict) else {}
-        regions = sf.get("regions") or []
-        if isinstance(regions, list) and regions:
-            return ", ".join(str(x) for x in regions)
-        sites = sf.get("sites") or []
-        locs = sf.get("locations") or []
-        if not sites and not locs:
-            return format_html('<span class="text-muted">{}</span>', _("All (no site/location filter)"))
-        return format_html('<span class="text-muted">{}</span>', _("—"))
 
     def render_netbox_sites_locations(self, record):
         sf = record.scope_filters if isinstance(record.scope_filters, dict) else {}

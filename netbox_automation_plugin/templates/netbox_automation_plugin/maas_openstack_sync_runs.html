@@ -5,9 +5,28 @@
 {% block title %}{% trans "MAAS/OpenStack Drift Runs" %}{% endblock %}
 
 {% block content %}
+{% trans "Site / location — click to choose…" as hist_scope_placeholder %}
+{% trans "Selected:" as hist_scope_selected_prefix %}
+{% trans "site/location(s) selected" as hist_scope_multi_suffix %}
 <style>
+  details.hist-scope-dropdown {
+    max-width: 42rem;
+  }
+  details.hist-scope-dropdown > summary {
+    list-style: none;
+    cursor: pointer;
+  }
+  details.hist-scope-dropdown > summary::-webkit-details-marker {
+    display: none;
+  }
+  details.hist-scope-dropdown .hist-scope-chevron {
+    transition: transform 0.15s ease;
+  }
+  details.hist-scope-dropdown[open] .hist-scope-chevron {
+    transform: rotate(180deg);
+  }
   .hist-scope-panel {
-    max-height: 220px;
+    max-height: 240px;
     overflow-y: auto;
   }
   .hist-filter-toolbar .btn {
@@ -51,44 +70,26 @@
             </div>
           </div>
 
-          <div class="row g-3">
-            <div class="col-12 col-xl-6">
-              <fieldset class="border rounded-2 p-2 pb-3 bg-body-secondary bg-opacity-10">
-                <legend class="float-none w-auto px-1 fs-6 mb-2 text-body-secondary">{% trans "NetBox sites (saved run scope)" %}</legend>
-                <p class="small text-muted mb-2 mb-xl-1">
-                  {% trans "Leave all unchecked to include every run. Check one or more sites to show only runs whose saved scope included that site slug." %}
-                </p>
+          <div>
+            <label class="form-label mb-1">{% trans "NetBox site / location (saved run scope)" %}</label>
+            <p class="small text-muted mb-2">
+              {% trans "Closed by default. Open the list to pick one or more Site / Location pairs. Leave none checked to include all runs." %}
+            </p>
+            <details class="hist-scope-dropdown border rounded bg-body shadow-sm" id="hist-scope-details">
+              <summary class="d-flex align-items-center justify-content-between gap-2 form-select form-select-sm py-2 mb-0">
+                <span class="text-truncate hist-scope-summary-text" id="hist-scope-summary-text"></span>
+                <span class="hist-scope-chevron text-muted small flex-shrink-0" aria-hidden="true">▼</span>
+              </summary>
+              <div class="border-top bg-body-secondary bg-opacity-25 p-2">
                 <div class="d-flex flex-wrap gap-2 mb-2 hist-filter-toolbar">
-                  <button type="button" class="btn btn-outline-secondary btn-sm py-0 px-2 js-hist-select-all" data-hist-target="hist-filter-sites" aria-label="{% trans 'Select all sites' %}">{% trans "Select all" %}</button>
-                  <button type="button" class="btn btn-outline-secondary btn-sm py-0 px-2 js-hist-clear-checkboxes" data-hist-target="hist-filter-sites" aria-label="{% trans 'Clear site selection' %}">{% trans "Clear" %}</button>
-                </div>
-                <div id="hist-filter-sites" class="hist-scope-panel border rounded bg-body px-2 py-1 small">
-                  {% for slug, label in site_choices_for_filter %}
-                    <div class="form-check mb-0 py-1">
-                      <input class="form-check-input" type="checkbox" name="filter_site" value="{{ slug }}" id="hist-site-{{ forloop.counter }}"
-                        {% if slug in selected_filter_sites %}checked{% endif %} />
-                      <label class="form-check-label" for="hist-site-{{ forloop.counter }}">{{ label }} <span class="text-muted">({{ slug }})</span></label>
-                    </div>
-                  {% empty %}
-                    <p class="text-muted mb-0 small">{% trans "No sites found in NetBox." %}</p>
-                  {% endfor %}
-                </div>
-              </fieldset>
-            </div>
-            <div class="col-12 col-xl-6">
-              <fieldset class="border rounded-2 p-2 pb-3 bg-body-secondary bg-opacity-10">
-                <legend class="float-none w-auto px-1 fs-6 mb-2 text-body-secondary">{% trans "NetBox locations (saved run scope)" %}</legend>
-                <p class="small text-muted mb-2 mb-xl-1">
-                  {% trans "Leave all unchecked to ignore location. Check locations to show runs whose saved scope included that location name." %}
-                </p>
-                <div class="d-flex flex-wrap gap-2 mb-2 hist-filter-toolbar">
-                  <button type="button" class="btn btn-outline-secondary btn-sm py-0 px-2 js-hist-select-all" data-hist-target="hist-filter-locations" aria-label="{% trans 'Select all locations' %}">{% trans "Select all" %}</button>
-                  <button type="button" class="btn btn-outline-secondary btn-sm py-0 px-2 js-hist-clear-checkboxes" data-hist-target="hist-filter-locations" aria-label="{% trans 'Clear location selection' %}">{% trans "Clear" %}</button>
+                  <button type="button" class="btn btn-outline-secondary btn-sm py-0 px-2 js-hist-select-all" data-hist-target="hist-filter-locations">{% trans "Select all" %}</button>
+                  <button type="button" class="btn btn-outline-secondary btn-sm py-0 px-2 js-hist-clear-checkboxes" data-hist-target="hist-filter-locations">{% trans "Clear" %}</button>
                 </div>
                 <div id="hist-filter-locations" class="hist-scope-panel border rounded bg-body px-2 py-1 small">
                   {% for key, label in location_choices_for_filter %}
                     <div class="form-check mb-0 py-1">
-                      <input class="form-check-input" type="checkbox" name="filter_location" value="{{ key }}" id="hist-loc-{{ forloop.counter }}"
+                      <input class="form-check-input hist-loc-cb" type="checkbox" name="filter_location" value="{{ key }}" id="hist-loc-{{ forloop.counter }}"
+                        data-label="{{ label|escape }}"
                         {% if key in selected_filter_location_keys %}checked{% endif %} />
                       <label class="form-check-label" for="hist-loc-{{ forloop.counter }}">{{ label }}</label>
                     </div>
@@ -96,12 +97,12 @@
                     <p class="text-muted mb-0 small">{% trans "No locations found in NetBox." %}</p>
                   {% endfor %}
                 </div>
-              </fieldset>
-            </div>
+              </div>
+            </details>
+            <p class="small text-muted mb-0 mt-2">
+              {% trans "Use Apply filters above after changing this list (preset and dates submit together)." %}
+            </p>
           </div>
-          <p class="small text-muted mb-0">
-            {% trans "After changing site or location checkboxes, use Apply filters in the top row (preset and dates are included in the same request)." %}
-          </p>
         </form>
 
         {% if run_count %}
@@ -113,7 +114,7 @@
           </p>
         {% elif history_filtered_empty %}
           <p class="text-muted mb-0">
-            {% trans "No runs match the current filters. Try clearing site/location checkboxes or widening the date range." %}
+            {% trans "No runs match the current filters. Try clearing the site/location list or widening the date range." %}
           </p>
         {% endif %}
       </div>
@@ -122,12 +123,41 @@
 </div>
 <script>
 (function () {
+  var summaryEl = document.getElementById('hist-scope-summary-text');
+  var MSG_CLOSED = "{{ hist_scope_placeholder|escapejs }}";
+  var MSG_ONE_PREFIX = "{{ hist_scope_selected_prefix|escapejs }}";
+  var MSG_MULTI_SUFFIX = "{{ hist_scope_multi_suffix|escapejs }}";
+
+  function selectedLabels() {
+    var out = [];
+    document.querySelectorAll('.hist-loc-cb:checked').forEach(function (cb) {
+      var t = cb.getAttribute('data-label');
+      if (t) out.push(t);
+    });
+    return out;
+  }
+
+  function refreshSummary() {
+    if (!summaryEl) return;
+    var labels = selectedLabels();
+    if (labels.length === 0) {
+      summaryEl.textContent = MSG_CLOSED;
+      return;
+    }
+    if (labels.length === 1) {
+      summaryEl.textContent = MSG_ONE_PREFIX + ' ' + labels[0];
+      return;
+    }
+    summaryEl.textContent = String(labels.length) + ' ' + MSG_MULTI_SUFFIX;
+  }
+
   document.querySelectorAll('.js-hist-select-all').forEach(function (btn) {
     btn.addEventListener('click', function () {
       var id = btn.getAttribute('data-hist-target');
       var root = id ? document.getElementById(id) : null;
       if (!root) return;
       root.querySelectorAll('input[type="checkbox"]').forEach(function (cb) { cb.checked = true; });
+      refreshSummary();
     });
   });
   document.querySelectorAll('.js-hist-clear-checkboxes').forEach(function (btn) {
@@ -136,8 +166,14 @@
       var root = id ? document.getElementById(id) : null;
       if (!root) return;
       root.querySelectorAll('input[type="checkbox"]').forEach(function (cb) { cb.checked = false; });
+      refreshSummary();
     });
   });
+  document.querySelectorAll('.hist-loc-cb').forEach(function (cb) {
+    cb.addEventListener('change', refreshSummary);
+  });
+
+  refreshSummary();
 })();
 </script>
 {% endblock %}
