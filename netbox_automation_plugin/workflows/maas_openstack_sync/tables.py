@@ -97,8 +97,8 @@ class MAASOpenStackDriftRunTable(tables.Table):
                 '<div class="d-flex flex-column gap-2 align-items-start">'
                 '<span class="badge text-bg-light text-dark border" title="{}">{}</span>'
                 '<div class="d-flex flex-wrap gap-1 align-items-center">'
-                '<a href="{}" class="{} text-bg-primary">{}</a>'
-                '<a href="{}?view=modified" class="{} text-bg-info">{}</a>'
+                '<a href="{}" class="{} text-bg-primary js-drift-nav-loading">{}</a>'
+                '<a href="{}?view=modified" class="{} text-bg-info js-drift-nav-loading">{}</a>'
                 '<a href="{}" class="{} text-bg-success js-drift-xlsx-get" data-download-name="drift-report-run-{}.xlsx">{}</a>'
                 '<a href="{}" class="{} text-bg-secondary js-drift-xlsx-get" data-download-name="drift-report-run-{}-modified.xlsx">{}</a>'
                 "</div>"
@@ -122,7 +122,7 @@ class MAASOpenStackDriftRunTable(tables.Table):
             )
         return format_html(
             '<div class="d-flex flex-wrap gap-2 align-items-center">'
-            '<a href="{}" class="btn btn-outline-primary btn-sm py-0 px-2">{}</a>'
+            '<a href="{}" class="btn btn-outline-primary btn-sm py-0 px-2 js-drift-nav-loading">{}</a>'
             '<a href="{}" class="btn btn-outline-success btn-sm py-0 px-2 js-drift-xlsx-get" data-download-name="drift-report-run-{}.xlsx">{}</a>'
             "</div>",
             view_url,

@@ -2,10 +2,17 @@
 {% if drift_nb_picker_catalog is not None %}
 {{ drift_nb_picker_catalog|json_script:"drift-nb-picker-catalog" }}
 <style>
+  .drift-th-pick-row {
+    flex-wrap: nowrap !important;
+  }
+  .drift-th-pick-label {
+    white-space: nowrap;
+  }
   .drift-nb-pick-toggle {
     flex-shrink: 0;
     line-height: 1.1;
     min-width: 1.5rem;
+    align-self: center;
   }
   .drift-nb-pick-menu .drift-nb-pick-options .list-group-item {
     font-size: 0.8125rem;
@@ -229,6 +236,39 @@
     });
     return out;
   };
+
+  function captureDriftReviewBaselines() {
+    document.querySelectorAll(".drift-nb-pick[data-drift-sel-key]").forEach(function(wrap) {
+      var vis = wrap.querySelector(".drift-nb-pick-visible");
+      if (!vis || wrap.__driftBaselineCaptured) return;
+      wrap.__driftOrigInner = vis.innerHTML;
+      wrap.__driftBaselineCaptured = true;
+    });
+  }
+
+  window.DriftReviewResetEdits = function() {
+    document.querySelectorAll(".drift-nb-pick[data-drift-sel-key]").forEach(function(wrap) {
+      var vis = wrap.querySelector(".drift-nb-pick-visible");
+      if (!vis || wrap.__driftOrigInner === undefined) return;
+      vis.innerHTML = wrap.__driftOrigInner;
+    });
+    if (typeof window.DriftReviewMarkClean === "function") {
+      window.DriftReviewMarkClean();
+    }
+  };
+
+  document.addEventListener("click", function(evt) {
+    var clearBtn = evt.target.closest("button.js-drift-clear-review");
+    if (!clearBtn) return;
+    evt.preventDefault();
+    window.DriftReviewResetEdits();
+  });
+
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", captureDriftReviewBaselines);
+  } else {
+    captureDriftReviewBaselines();
+  }
 })();
 </script>
 {% endif %}

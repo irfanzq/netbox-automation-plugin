@@ -1,0 +1,61 @@
+{% load i18n %}
+<style>
+  #drift-nav-loading-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 10001;
+    background: rgba(0, 0, 0, 0.5);
+    display: none;
+    align-items: center;
+    justify-content: center;
+  }
+  #drift-nav-loading-overlay.drift-loading-visible {
+    display: flex;
+  }
+  #drift-nav-loading-overlay .drift-nav-loading-content {
+    text-align: center;
+    color: #fff;
+  }
+  #drift-nav-loading-overlay .drift-nav-loading-spinner {
+    width: 64px;
+    height: 64px;
+    margin: 0 auto 12px;
+    border: 4px solid rgba(255, 255, 255, 0.3);
+    border-top-color: #fff;
+    border-radius: 50%;
+    animation: drift-nav-loading-spin 0.9s linear infinite;
+  }
+  @keyframes drift-nav-loading-spin {
+    to { transform: rotate(360deg); }
+  }
+</style>
+<div id="drift-nav-loading-overlay" aria-hidden="true">
+  <div class="drift-nav-loading-content">
+    <div class="drift-nav-loading-spinner" aria-hidden="true"></div>
+    <div class="drift-nav-loading-message fw-semibold">{% trans "Loading page…" %}</div>
+  </div>
+</div>
+<script>
+(function () {
+  function showNavLoading() {
+    var ov = document.getElementById("drift-nav-loading-overlay");
+    if (!ov) return;
+    ov.classList.add("drift-loading-visible");
+    ov.setAttribute("aria-hidden", "false");
+  }
+  document.addEventListener("click", function (e) {
+    var a = e.target.closest("a.js-drift-nav-loading");
+    if (!a || !a.href) return;
+    if (e.defaultPrevented) return;
+    if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+    if (e.button !== 0) return;
+    if (a.target === "_blank") return;
+    if (a.hasAttribute("download")) return;
+    var href = a.getAttribute("href");
+    if (!href || href.charAt(0) === "#") return;
+    e.preventDefault();
+    showNavLoading();
+    window.location.assign(a.href);
+  }, true);
+})();
+</script>

@@ -121,6 +121,7 @@
     <div class="drift-loading-message">{% trans "Downloading Excel file…" %}</div>
   </div>
 </div>
+{% include "netbox_automation_plugin/_drift_nav_loading_overlay.html" %}
 <div class="row">
   <div class="col">
     <div class="card mb-3">
@@ -133,7 +134,7 @@
             </button>
           </li>
           <li class="nav-item" role="presentation">
-            <a class="nav-link" id="maas-sync-history-tab" href="{% url 'plugins:netbox_automation_plugin:maas_openstack_sync_runs' %}">
+            <a class="nav-link js-drift-nav-loading" id="maas-sync-history-tab" href="{% url 'plugins:netbox_automation_plugin:maas_openstack_sync_runs' %}">
               {% trans "Drift Run History" %}
             </a>
           </li>
@@ -218,7 +219,7 @@
         <p class="small text-muted mt-1 mb-0">{% trans "Download as Excel: runs the audit, shows the report, and triggers the file download." %}</p>
         {% else %}
         <p class="small text-muted mb-2">
-          <a href="{% url 'plugins:netbox_automation_plugin:maas_openstack_sync' %}" class="link-secondary">{% trans "Change scope or run a new audit" %}</a>
+          <a href="{% url 'plugins:netbox_automation_plugin:maas_openstack_sync' %}" class="link-secondary js-drift-nav-loading">{% trans "Change scope or run a new audit" %}</a>
           <span class="text-muted"> — {% trans "Excel and save actions are in the report bar below." %}</span>
         </p>
         {% endif %}
@@ -452,8 +453,6 @@
         {% if audit_done and report_drift %}
           <style>
             .drift-audit-report-scroll {
-              display: flex;
-              flex-direction: column;
               overflow-x: scroll !important;
               overflow-y: scroll;
               max-width: 100%;
@@ -497,6 +496,16 @@
             .drift-audit-report-scroll .drift-report-html .table {
               font-size: inherit;
             }
+            .drift-audit-report-scroll .drift-report-html th.drift-col-role-reason,
+            .drift-audit-report-scroll .drift-report-html td.drift-col-role-reason {
+              max-width: min(28rem, 40vw);
+              white-space: normal;
+              word-break: normal;
+              overflow-wrap: break-word;
+              hyphens: auto;
+              line-height: 1.4;
+              vertical-align: top;
+            }
             .drift-selection-toolbar .btn {
               line-height: 1.15;
             }
@@ -505,27 +514,8 @@
               width: 1%;
               white-space: nowrap;
             }
-            .drift-audit-report-scroll .drift-report-sticky-actions {
-              position: sticky;
-              top: 0;
-              z-index: 500;
-              flex-shrink: 0;
-              align-self: stretch;
-              width: 100%;
-              box-sizing: border-box;
-              margin: -0.5rem -0.5rem 0.75rem -0.5rem;
-              padding: 0.65rem 0.65rem;
-              background-color: var(--bs-body-bg);
-              border-bottom: 1px solid var(--bs-border-color);
-              box-shadow: 0 4px 12px rgba(0, 0, 0, 0.12);
-            }
-            .drift-audit-report-scroll .drift-report-sticky-actions .btn {
-              background-color: var(--bs-body-bg) !important;
-            }
-            .drift-audit-report-scroll .drift-report-sticky-actions .btn-primary {
-              background-color: var(--bs-primary) !important;
-              border-color: var(--bs-primary);
-              color: #fff;
+            .drift-report-actions-toolbar .btn {
+              line-height: 1.2;
             }
           </style>
           <div class="card mb-3">
@@ -538,17 +528,18 @@
               </h5>
             </div>
             <div class="card-body p-2">
-              <div class="drift-audit-report-scroll border rounded bg-body-secondary p-2">
-                <div class="drift-report-sticky-actions d-flex flex-wrap align-items-center justify-content-between gap-2">
-                  <span class="small text-body-secondary fw-semibold text-uppercase">{% trans "Report actions" %}</span>
-                  <div class="d-flex flex-wrap gap-1 justify-content-end">
-                    <a href="{% url 'plugins:netbox_automation_plugin:maas_openstack_sync_download_xlsx' %}" class="btn btn-outline-success btn-sm shadow-sm js-drift-xlsx-get">{% trans "Download as Excel (.xlsx)" %}</a>
-                    <button type="button" class="btn btn-outline-secondary btn-sm shadow-sm js-drift-xlsx-modified-live">{% trans "Download modified Excel (.xlsx)" %}</button>
-                    {% if report_drift_markup == "html" and drift_save_review_url %}
-                      <button type="button" class="btn btn-primary btn-sm shadow-sm js-drift-save-review">{% trans "Save review edits" %}</button>
-                    {% endif %}
-                  </div>
+              <div class="drift-report-actions-toolbar d-flex flex-wrap align-items-center justify-content-between gap-2 mb-2 pb-2 border-bottom">
+                <span class="small text-body-secondary fw-semibold text-uppercase">{% trans "Report actions" %}</span>
+                <div class="d-flex flex-wrap gap-1 justify-content-end">
+                  <a href="{% url 'plugins:netbox_automation_plugin:maas_openstack_sync_download_xlsx' %}" class="btn btn-success btn-sm js-drift-xlsx-get">{% trans "Download as Excel (.xlsx)" %}</a>
+                  <button type="button" class="btn btn-success btn-sm js-drift-xlsx-modified-live">{% trans "Download modified Excel (.xlsx)" %}</button>
+                  {% if report_drift_markup == "html" and drift_save_review_url %}
+                    <button type="button" class="btn btn-outline-secondary btn-sm js-drift-clear-review">{% trans "Clear review edits" %}</button>
+                    <button type="button" class="btn btn-success btn-sm js-drift-save-review">{% trans "Save review edits" %}</button>
+                  {% endif %}
                 </div>
+              </div>
+              <div class="drift-audit-report-scroll border rounded bg-body-secondary p-2">
                 {% if report_drift_markup == "html" %}
                   {{ report_drift|safe }}
                 {% else %}

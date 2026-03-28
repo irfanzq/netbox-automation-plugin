@@ -173,7 +173,7 @@ def _html_nb_picker_wrap(
             f" data-drift-row-idx={html.escape(str(row_idx), quote=True)}"
         )
     return (
-        '<div class="drift-nb-pick position-relative d-inline-flex align-items-start gap-1 flex-wrap text-start" '
+        '<div class="drift-nb-pick position-relative d-inline-flex align-items-center gap-1 flex-nowrap text-start" '
         f'data-nb-pick-kind="{safe_kind}"{extra} role="group">'
         f'<span class="drift-nb-pick-visible align-self-center">{inner_safe_html}</span>'
         '<button type="button" class="btn btn-outline-secondary btn-sm py-0 px-1 drift-nb-pick-toggle" '
@@ -194,7 +194,7 @@ def _html_nb_picker_bulk_column(kind: str, *, col_header: str, data_col_idx: int
     ch = html.escape(str(col_header), quote=True)
     return (
         '<div class="drift-nb-pick drift-nb-pick-bulk position-relative d-inline-flex align-items-center '
-        'gap-1 flex-shrink-0 text-start" '
+        'gap-1 flex-shrink-0 ms-auto text-start" '
         f'data-nb-pick-kind="{safe_kind}" data-drift-bulk="1" '
         f'data-drift-col-header={ch} data-drift-data-col-idx="{int(data_col_idx)}" role="group">'
         '<span class="drift-nb-pick-visible visually-hidden" aria-hidden="true">—</span>'
@@ -236,6 +236,11 @@ def _html_col_is_risk(header) -> bool:
     return str(header or "").strip().lower() == "risk"
 
 
+def _html_col_is_role_reason(header) -> bool:
+    """Long prose in proposed-prefix rows; wrap in HTML (not single-line nowrap)."""
+    return str(header or "").strip().lower() == "role reason"
+
+
 def _html_col_is_maas_fabric(header) -> bool:
     """Cells may list many fabrics; stack on commas, keep each full name intact."""
     return str(header or "").strip().lower() == "maas fabric"
@@ -263,6 +268,8 @@ def _html_th_class(header) -> str:
     h = str(header or "")
     if _html_col_is_maas_fabric(h):
         return "small align-bottom text-nowrap"
+    if _html_col_is_role_reason(h):
+        return "small align-bottom drift-col-role-reason"
     base = "small align-bottom text-nowrap"
     if _html_col_is_mac(h):
         return f"{base} text-nowrap font-monospace"
@@ -276,7 +283,9 @@ def _html_th_class(header) -> str:
 def _html_td_class(header, col_idx, notes_col_idx=None) -> str:
     h = str(header or "")
     parts = []
-    if _html_col_is_mac(h):
+    if _html_col_is_role_reason(h):
+        parts.extend(["align-top", "drift-col-role-reason"])
+    elif _html_col_is_mac(h):
         parts.extend(["align-top", "text-nowrap", "font-monospace"])
     elif _html_col_is_ip(h):
         parts.extend(["align-top", "text-nowrap"])
@@ -321,8 +330,8 @@ def _html_table(
             if pk:
                 bulk = _html_nb_picker_bulk_column(pk, col_header=h, data_col_idx=col_i)
                 inner = (
-                    '<div class="d-flex align-items-center justify-content-between gap-1 flex-wrap w-100">'
-                    f'<span class="me-1 text-wrap text-break">{label_html}</span>{bulk}</div>'
+                    '<div class="d-flex align-items-center justify-content-between gap-2 flex-nowrap w-100 drift-th-pick-row">'
+                    f'<span class="drift-th-pick-label me-1 flex-grow-1">{label_html}</span>{bulk}</div>'
                 )
         header_th_cells.append(
             f'<th scope="col" class="{_html_th_class(h)}"'

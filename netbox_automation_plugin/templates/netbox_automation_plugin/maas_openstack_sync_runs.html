@@ -68,12 +68,13 @@
     <div class="drift-loading-message fw-semibold">{% trans "Downloading Excel file…" %}</div>
   </div>
 </div>
+{% include "netbox_automation_plugin/_drift_nav_loading_overlay.html" %}
 <div class="row">
   <div class="col-md-12">
     <div class="card">
       <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">
         <h5 class="card-title mb-0">{% trans "MAAS/OpenStack Drift Run History" %}</h5>
-        <a href="{% url 'plugins:netbox_automation_plugin:maas_openstack_sync' %}" class="btn btn-outline-primary btn-sm">
+        <a href="{% url 'plugins:netbox_automation_plugin:maas_openstack_sync' %}" class="btn btn-outline-primary btn-sm js-drift-nav-loading">
           {% trans "Back to Drift Audit" %}
         </a>
       </div>
@@ -100,7 +101,7 @@
             </div>
             <div class="col-12 col-lg-auto ms-lg-auto d-flex flex-wrap align-items-end gap-2 hist-filter-toolbar">
               <button type="submit" class="btn btn-primary btn-sm">{% trans "Apply filters" %}</button>
-              <a href="{% url 'plugins:netbox_automation_plugin:maas_openstack_sync_runs' %}" class="btn btn-outline-secondary btn-sm">
+              <a href="{% url 'plugins:netbox_automation_plugin:maas_openstack_sync_runs' %}" class="btn btn-outline-secondary btn-sm js-drift-nav-loading">
                 {% trans "Reset" %}
               </a>
             </div>
