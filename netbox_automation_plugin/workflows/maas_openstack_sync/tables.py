@@ -124,7 +124,7 @@ class MAASOpenStackDriftRunTable(tables.Table):
                 '<a href="{}" class="{} text-bg-secondary js-drift-xlsx-get" data-download-name="drift-report-run-{}-modified.xlsx">{}</a>'
                 "</div>"
                 "</div>",
-                _("Saved NB proposed review edits for this run."),
+                _("Saved NB proposed edits for this run."),
                 _("Edits saved"),
                 view_url,
                 badge_link,

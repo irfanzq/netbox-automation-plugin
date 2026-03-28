@@ -531,11 +531,11 @@
               <div class="drift-report-actions-toolbar d-flex flex-wrap align-items-center justify-content-between gap-2 mb-2 pb-2 border-bottom">
                 <span class="small text-body-secondary fw-semibold text-uppercase">{% trans "Report actions" %}</span>
                 <div class="d-flex flex-wrap gap-1 justify-content-end">
-                  <a href="{% url 'plugins:netbox_automation_plugin:maas_openstack_sync_download_xlsx' %}" class="btn btn-success btn-sm js-drift-xlsx-get">{% trans "Download as Excel (.xlsx)" %}</a>
+                  <a href="{% url 'plugins:netbox_automation_plugin:maas_openstack_sync_download_xlsx' %}{% if audit_run_id %}?run_id={{ audit_run_id }}{% endif %}" class="btn btn-success btn-sm js-drift-xlsx-get">{% trans "Download as Excel (.xlsx)" %}</a>
                   <button type="button" class="btn btn-success btn-sm js-drift-xlsx-modified-live">{% trans "Download modified Excel (.xlsx)" %}</button>
                   {% if report_drift_markup == "html" and drift_save_review_url %}
-                    <button type="button" class="btn btn-success btn-sm js-drift-clear-review">{% trans "Clear review edits" %}</button>
-                    <button type="button" class="btn btn-success btn-sm js-drift-save-review">{% trans "Save review edits" %}</button>
+                    <button type="button" class="btn btn-success btn-sm js-drift-clear-review">{% trans "Clear edits" %}</button>
+                    <button type="button" class="btn btn-success btn-sm js-drift-save-review">{% trans "Save edits" %}</button>
                   {% endif %}
                 </div>
               </div>

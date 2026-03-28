@@ -126,7 +126,7 @@
     e.preventDefault();
     var url = (window._driftXlsxUiConfig && window._driftXlsxUiConfig.saveReviewUrl) || "";
     if (!url) {
-      alert("{% trans 'Save review URL is not configured (no drift run id). Run a new audit or open this report from history.' %}");
+      alert("{% trans 'Save URL is not configured (no drift run id). Run a new audit or open this report from history.' %}");
       return;
     }
     var tok = csrfToken();
@@ -145,7 +145,7 @@
     }
     saveBtn.disabled = true;
     var saveWillNavigate = false;
-    showXlsxOverlay("{% trans 'Saving review edits…' %}");
+    showXlsxOverlay("{% trans 'Saving…' %}");
     fetch(url, {
       method: "POST",
       credentials: "same-origin",
@@ -180,12 +180,12 @@
         if (typeof window.DriftReviewOnSaved === "function") {
           window.DriftReviewOnSaved(pair.j);
         } else {
-          alert("{% trans 'Review edits saved.' %}");
+          alert("{% trans 'Edits saved.' %}");
         }
       })
       .catch(function(err) {
         console.warn("Save review failed:", err);
-        alert("{% trans 'Could not save review edits.' %} " + (err && err.message ? err.message : ""));
+        alert("{% trans 'Could not save edits.' %} " + (err && err.message ? err.message : ""));
       })
       .finally(function() {
         if (!saveWillNavigate) {

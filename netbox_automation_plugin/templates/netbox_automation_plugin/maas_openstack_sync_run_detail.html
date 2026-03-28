@@ -101,7 +101,7 @@
         <div><strong>{% trans "Created" %}:</strong> {{ run.created }}</div>
         <div><strong>{% trans "User" %}:</strong> {{ run.created_by|default:"-" }}</div>
         {% if drift_review_saved_at %}
-          <div><strong>{% trans "Review edits saved" %}:</strong> {{ drift_review_saved_at }}{% if run.drift_review_saved_by %} ({{ run.drift_review_saved_by }}){% endif %}</div>
+          <div><strong>{% trans "Edits saved" %}:</strong> {{ drift_review_saved_at }}{% if run.drift_review_saved_by %} ({{ run.drift_review_saved_by }}){% endif %}</div>
         {% endif %}
       </div>
     </div>

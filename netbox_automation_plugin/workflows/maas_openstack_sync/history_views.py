@@ -295,7 +295,7 @@ class MAASOpenStackSyncRunSaveReviewView(LoginRequiredMixin, View):
                             "ok": False,
                             "error": (
                                 "Could not build modified report HTML from this run's snapshot. "
-                                "Re-run the drift audit, then save review edits again."
+                                "Re-run the drift audit, then save edits again."
                             ),
                         },
                         status=500,
@@ -338,7 +338,7 @@ class MAASOpenStackSyncRunDownloadXlsxView(LoginRequiredMixin, View):
             norm = normalize_drift_review_overrides(run.drift_review_overrides)
             if not norm:
                 return HttpResponse(
-                    "No saved review edits for this run. Save review edits first.",
+                    "No saved edits for this run. Save edits first.",
                     status=404,
                     content_type="text/plain; charset=utf-8",
                 )

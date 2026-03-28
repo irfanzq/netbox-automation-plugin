@@ -26,22 +26,27 @@ Current role:
 
 - Run read-only drift
 - Show detail tables with Include selection and row keys
-- Export Excel
+- NetBox picker columns (▾) for proposed values
+- **`Save edits`** persists user choices to `MAASOpenStackDriftRun` (see **Drift run persistence** below)
+- Export Excel (baseline and modified with merged overrides)
 
 New role (action handoff):
 
-- Convert selected report rows into a staged reconciliation run request
+- Convert **reviewed** proposed rows (after optional selection / preview) into a staged reconciliation run request
+- Handoff must use the **same merged data** as modified HTML/Excel, not the original report only
 
 Buttons on this page:
 
 - `Run drift audit` (existing)
 - `Download as Excel` (existing, cache-backed)
+- `Save edits` (existing — **recommended before branch creation** so NetBox-bound values match what reviewers saw)
 - **`Preview selected changes`** (new, required before branch creation)
 - **`Create NetBox Branch from Selected`** (new primary action after audit)
 
 Redirect after successful click:
 
-- Redirect to **Run Detail page** for the created run (not back to drift report)
+- Redirect to **Sync Run Detail** page for the created **reconciliation** run (not back to drift report).  
+- The drift audit is already tied to **`MAASOpenStackDriftRun`** (`audit_run_id` / history run id); branch creation should reference that id as immutable input.
 
 Why:
 
@@ -251,20 +256,67 @@ Show discoverability and operations:
 
 ---
 
+## Drift run persistence (implemented) — what feeds the branch workflow
+
+Each drift audit creates a **`MAASOpenStackDriftRun`** row (history). After **Save edits**, the following fields matter for any downstream NetBox branch / apply step:
+
+| Field | Role |
+|--------|------|
+| **`snapshot_payload`** | Frozen audit inputs: `maas_data`, `netbox_data`, `openstack_data`, `drift`, `matched_rows`, `interface_audit`, `netbox_ifaces`, gaps, etc. This is the **original** run snapshot; it is **not** rewritten when the user changes pickers. |
+| **`drift_review_overrides`** | Structured JSON: `{ selection_key: { row_index_str: { column_header: value } } }` — the **reviewed** cell values (same shape as the drift Excel/HTML merge). Normalized via **`normalize_drift_review_overrides()`** (includes legacy fixes such as placement `NB` → `NB proposed device status`). |
+| **`report_drift`** | Original drift HTML/text at audit time (**pre-review**). |
+| **`report_drift_modified_html`** | Drift HTML regenerated with overrides merged (human-readable; optional display). |
+| **`drift_review_modified_xlsx`** | Same merge as Excel export (optional attachment). |
+| **`drift_review_saved_at` / `drift_review_saved_by`** | Whether review was saved and by whom. |
+
+### Source of truth for “what we apply to NetBox”
+
+1. **Authoritative inputs for merged proposed rows**  
+   - **`snapshot_payload`** + **`normalize_drift_review_overrides(run.drift_review_overrides)`**  
+   - Then the **same pipeline** as modified HTML/Excel: build proposed rows + alignment rows from the snapshot, then **`merge_drift_review_overrides(prop, align_rows, norm)`**.  
+   - Resulting **`prop`** (add_devices, add_prefixes, update_nic, …) and **alignment rows** are the **structured** values to map to NetBox branch operations (device status, site, prefix, NIC, etc.).
+
+2. **Do not use as sole input for apply**  
+   - **`report_drift`** alone — **pre-review**, can disagree with pickers.  
+   - **Session drift cache** without tying to **`MAASOpenStackDriftRun.id`** — can be stale vs DB.  
+   - Parsing **`report_drift_modified_html`** for apply logic — fragile; prefer structured merge above.
+
+3. **Handoff to “Create NetBox Branch” UI**  
+   - Pass **`drift_run_id`** (`MAASOpenStackDriftRun.pk`, same as live page `audit_run_id` / history run id).  
+   - Server loads the run from DB (`refresh_from_db` on relevant fields), re-runs **snapshot + normalize(overrides) + merge**, then resolves **included** row keys (if selection is still keyed by stable row keys) into frozen operations.  
+   - If the user has **not** saved edits, **`drift_review_overrides`** may be empty — merged output equals **auto-generated** proposed rows only (expected).
+
+4. **Alignment with modified Excel**  
+   - **`build_drift_report_xlsx_from_snapshot_payload(snapshot_payload, drift_overrides=norm)`** uses the same merge — branch preview/apply should match that file when fed the same run.
+
+### Optional shared helper (future code)
+
+Add a single function used by save, history, Excel, and branch preview, e.g.:
+
+- Input: `MAASOpenStackDriftRun` or `(snapshot_payload, drift_review_overrides)`  
+- Output: merged `prop` dict + `align_rows` (and optionally digest for preview token)
+
+So the branch workflow never duplicates merge rules.
+
+---
+
 ## Data contract between report and branch workflow
 
-From drift page submit:
+From drift / run handoff (recommended):
 
-- `audit_snapshot_id` (or equivalent cache key/run token)
-- selected keys grouped by section
+- **`drift_run_id`** — `MAASOpenStackDriftRun` primary key (persisted audit + optional review overrides)
+- **`audit_snapshot_id`** / `source_cache_key` — optional correlation; **do not** rely on cache alone for merge data
+- **selected keys** grouped by section (stable row keys from drift tables, where Include/selection is enforced)
 - metadata: selected/unselected counts
 - preview acknowledgement token (server-generated from frozen operation digest)
 
-Example shape:
+The server **loads** `MAASOpenStackDriftRun`, applies **`normalize_drift_review_overrides` + merge** to `snapshot_payload`, then resolves keys → operations. Frozen operations are stored on the **Sync** run (reconciliation run), not mutated by later drift audits.
+
+Example shape (client → create-run endpoint):
 
 ```json
 {
-  "snapshot_id": "drift:2026-03-27T09:10:12Z:usr42",
+  "drift_run_id": 27,
   "selection_mode": "selected_keys",
   "selected": {
     "detail_new_devices": ["a1b2...", "c3d4..."],
@@ -274,11 +326,22 @@ Example shape:
 }
 ```
 
+Legacy / alternate shape (cache-only — **discouraged** for apply):
+
+```json
+{
+  "snapshot_id": "drift:2026-03-27T09:10:12Z:usr42",
+  "selection_mode": "selected_keys",
+  "selected": { }
+}
+```
+
 Mapping rule:
 
-- backend resolves each key to a deterministic proposed operation
+- backend loads **`MAASOpenStackDriftRun`** by `drift_run_id`, merges **`drift_review_overrides`** into proposed rows from **`snapshot_payload`**
+- backend resolves each **selected** key (and/or policy for “all included rows”) to a deterministic proposed operation
 - operation contains target model, action, field map, and stable operation id
-- operation set is frozen on run and never re-derived from later drift data
+- operation set is frozen on **Sync** run and never re-derived from later drift data
 - apply engine executes frozen operations table-by-table, row-by-row
 - all action attempts are recorded with actor + timestamp + outcome
 
@@ -444,12 +507,13 @@ For run and lifecycle actions, store:
 
 ## Implementation order (practical)
 
-1. Add `Create NetBox Branch from Selected` on drift page
-2. Create `SyncRun` model + run detail page
-3. Implement branch creation and run status transitions
-4. Implement apply engine for selected keys
-5. Add validation step
-6. Add merge/discard actions
-7. Add runs list/history page
+1. Add shared **`merged_proposed_from_drift_run(run)`** (or equivalent) — snapshot + `normalize_drift_review_overrides` + `merge_drift_review_overrides`; use from branch preview/create and keep parity with modified Excel.
+2. Add `Create NetBox Branch from Selected` on drift page — POST **`drift_run_id`** (+ selected keys / preview token).
+3. Create `SyncRun` model + run detail page
+4. Implement branch creation and run status transitions
+5. Implement apply engine: frozen operations derived from merged `prop` / alignment rows + selection, not from `report_drift` alone
+6. Add validation step
+7. Add merge/discard actions
+8. Add sync runs list/history page (distinct from **Drift run** history, unless unified intentionally)
 
-This sequence gives working value early while staying aligned with branch-first safety.
+This sequence gives working value early while staying aligned with branch-first safety and **reviewed** proposed values.

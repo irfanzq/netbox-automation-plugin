@@ -7,8 +7,10 @@ import re
 
 from .forms import MAASOpenStackSyncForm
 
-# Cache key for last drift audit result (so Download Excel uses it without re-running)
-DRIFT_AUDIT_CACHE_TIMEOUT = 600  # seconds
+# Cache key for last drift audit result (so Download Excel uses it without re-running).
+# Baseline download also accepts ?run_id=<MAASOpenStackDriftRun.pk> to rebuild from DB
+# snapshot_payload when this TTL expires (see DriftAuditDownloadXlsxView).
+DRIFT_AUDIT_CACHE_TIMEOUT = 3600  # seconds (1 hour); DB fallback still works after expiry if run_id is present
 
 # Sync package lives under netbox_automation_plugin.sync (not workflows.sync)
 from netbox_automation_plugin.sync.config import get_sync_config, get_openstack_configs
@@ -36,7 +38,6 @@ from netbox_automation_plugin.sync.reporting.drift_report.proposed_lldp_tables i
 )
 from netbox_automation_plugin.sync.reporting.drift_report import (
     _drift_for_user_reports,
-    build_drift_report_xlsx,
     format_drift_report,
 )
 from netbox_automation_plugin.sync.reporting.drift_report.drift_nb_picker_catalog import (
@@ -61,6 +62,13 @@ from .history_service import create_drift_run_snapshot
 from .netbox_scope_choices import list_site_location_choices as _list_site_location_choices
 
 logger = logging.getLogger("netbox_automation_plugin")
+
+
+def _live_baseline_xlsx_download_uri(request, audit_run_id=None) -> str:
+    path = reverse("plugins:netbox_automation_plugin:maas_openstack_sync_download_xlsx")
+    if audit_run_id:
+        path = f"{path}?run_id={int(audit_run_id)}"
+    return request.build_absolute_uri(path)
 
 
 def _drift_review_ui_context(request, audit_run):
@@ -743,9 +751,7 @@ class MAASOpenStackSyncView(LoginRequiredMixin, View):
                             "audit_done": True,
                             "audit_summary": audit_summary,
                             "auto_download_xlsx": True,
-                            "download_xlsx_url": request.build_absolute_uri(
-                                reverse("plugins:netbox_automation_plugin:maas_openstack_sync_download_xlsx")
-                            ),
+                            "download_xlsx_url": _live_baseline_xlsx_download_uri(request, None),
                             "recent_runs": _recent_drift_runs(),
                             "drift_nb_picker_catalog": _drift_nb_picker_catalog_for_markup(
                                 report_drift_markup
@@ -1265,8 +1271,8 @@ class MAASOpenStackSyncView(LoginRequiredMixin, View):
                     "audit_done": True,
                     "audit_summary": audit_summary,
                     "auto_download_xlsx": True,
-                    "download_xlsx_url": request.build_absolute_uri(
-                        reverse("plugins:netbox_automation_plugin:maas_openstack_sync_download_xlsx")
+                    "download_xlsx_url": _live_baseline_xlsx_download_uri(
+                        request, getattr(audit_run, "id", None)
                     ),
                     "recent_runs": _recent_drift_runs(),
                     "audit_run_id": getattr(audit_run, "id", None),
@@ -1298,30 +1304,41 @@ class MAASOpenStackSyncView(LoginRequiredMixin, View):
 
 
 class DriftAuditDownloadXlsxView(LoginRequiredMixin, View):
-    """GET: return drift-report.xlsx from session cache (no re-run). Used after POST format=xlsx to trigger download."""
+    """GET: baseline drift-report.xlsx from cache, or from DB snapshot when ``?run_id=`` is set.
+
+    Session cache expires after DRIFT_AUDIT_CACHE_TIMEOUT; persisted MAASOpenStackDriftRun rows
+    keep ``snapshot_payload`` so downloads still work on the live audit page when the user
+    passes the run id (same as Run # badge).
+    """
 
     def get(self, request):
+        payload = None
         cached = cache.get(_drift_audit_cache_key(request))
-        if not cached:
+        if cached:
+            payload = cached
+        if payload is None:
+            raw_rid = request.GET.get("run_id")
+            if raw_rid is not None and str(raw_rid).strip() != "":
+                try:
+                    rid = int(raw_rid)
+                except (TypeError, ValueError):
+                    rid = None
+                if rid is not None:
+                    run = MAASOpenStackDriftRun.objects.filter(pk=rid).only("snapshot_payload").first()
+                    sp = getattr(run, "snapshot_payload", None) if run else None
+                    if isinstance(sp, dict) and sp:
+                        payload = sp
+        if not payload:
             return HttpResponse(
-                _("Run drift audit first, then use Download as Excel."),
+                _(
+                    "Drift audit cache expired. Re-run the audit, or use Download as Excel "
+                    "when Run # is shown (links include run id), or download from History."
+                ),
                 status=404,
                 content_type="text/plain; charset=utf-8",
             )
         try:
-            xlsx_bytes = build_drift_report_xlsx(
-                cached["maas_data"],
-                cached["netbox_data"],
-                cached["openstack_data"],
-                cached["drift"],
-                matched_rows=cached.get("matched_rows"),
-                os_subnet_hints=cached.get("os_subnet_hints"),
-                os_subnet_gaps=cached.get("os_subnet_gaps"),
-                os_floating_gaps=cached.get("os_floating_gaps"),
-                netbox_prefix_count=cached.get("netbox_prefix_count", 0),
-                interface_audit=cached.get("interface_audit"),
-                netbox_ifaces=cached.get("netbox_ifaces"),
-            )
+            xlsx_bytes = build_drift_report_xlsx_from_snapshot_payload(payload)
         except Exception as e:
             logger.exception("XLSX export failed: %s", e)
             return HttpResponse(
@@ -1334,6 +1351,8 @@ class DriftAuditDownloadXlsxView(LoginRequiredMixin, View):
             content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
         resp["Content-Disposition"] = 'attachment; filename="drift-report.xlsx"'
+        resp["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        resp["Pragma"] = "no-cache"
         return resp
 
 
