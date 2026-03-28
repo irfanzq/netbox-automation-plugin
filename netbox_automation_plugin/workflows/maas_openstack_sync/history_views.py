@@ -1,4 +1,5 @@
 import json
+import logging
 from datetime import date, timedelta
 
 from django.contrib.auth.mixins import LoginRequiredMixin
@@ -26,6 +27,8 @@ from netbox_automation_plugin.sync.reporting.drift_report.drift_nb_picker_catalo
 )
 from .netbox_scope_choices import list_site_location_choices
 from .tables import MAASOpenStackDriftRunTable
+
+logger = logging.getLogger(__name__)
 
 # GET ``filter_location`` sentinel: runs whose NetBox sites / locations column shows
 # "All (no site/location filter)" (unscoped); filter UI: "All (No site/location filter in run)".
@@ -167,10 +170,31 @@ class MAASOpenStackSyncRunDetailView(LoginRequiredMixin, View):
         has_overrides = bool(normalize_drift_review_overrides(run.drift_review_overrides))
         drift_has_saved_review = has_modified_html or has_overrides
         report_body = run.report_drift
-        if want_modified and has_modified_html:
-            report_body = run.report_drift_modified_html
-        elif want_modified and not has_modified_html:
-            want_modified = False
+        drift_view_modified = False
+        if want_modified:
+            payload = run.snapshot_payload if isinstance(run.snapshot_payload, dict) else {}
+            # Prefer live regeneration from snapshot + overrides so HTML always matches saved JSON
+            # (stored report_drift_modified_html may be empty or stale).
+            if has_overrides and payload:
+                try:
+                    report_out = format_drift_report_from_snapshot_payload(
+                        payload,
+                        drift_overrides=run.drift_review_overrides,
+                    )
+                    regen = (report_out.get("drift") or "").strip()
+                    if regen:
+                        report_body = report_out["drift"]
+                        drift_view_modified = True
+                except Exception:
+                    logger.exception(
+                        "Drift run %s: could not regenerate modified HTML from snapshot",
+                        run.id,
+                    )
+            if not drift_view_modified and has_modified_html:
+                report_body = run.report_drift_modified_html
+                drift_view_modified = True
+            if not drift_view_modified:
+                want_modified = False
 
         return render(
             request,
@@ -181,7 +205,7 @@ class MAASOpenStackSyncRunDetailView(LoginRequiredMixin, View):
                 "report_drift_markup": markup,
                 "report_reference": run.report_reference or "",
                 "drift_nb_picker_catalog": picker_catalog,
-                "drift_view_modified": want_modified and has_modified_html,
+                "drift_view_modified": drift_view_modified,
                 "drift_has_saved_review": drift_has_saved_review,
                 "drift_review_saved_at": run.drift_review_saved_at,
                 "drift_save_review_url": reverse(
@@ -254,18 +278,7 @@ class MAASOpenStackSyncRunDownloadXlsxView(LoginRequiredMixin, View):
                     status=404,
                     content_type="text/plain; charset=utf-8",
                 )
-            drift_overrides = run.drift_review_overrides
-            stored = run.drift_review_modified_xlsx
-            if stored:
-                xlsx_bytes = bytes(stored)
-                resp = HttpResponse(
-                    xlsx_bytes,
-                    content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                )
-                resp["Content-Disposition"] = (
-                    f'attachment; filename="drift-report-run-{run_id}-modified.xlsx"'
-                )
-                return resp
+            drift_overrides = norm
         try:
             xlsx_bytes = build_drift_report_xlsx_from_snapshot_payload(
                 payload,
@@ -285,4 +298,6 @@ class MAASOpenStackSyncRunDownloadXlsxView(LoginRequiredMixin, View):
         resp["Content-Disposition"] = (
             f'attachment; filename="drift-report-run-{run_id}{suffix}.xlsx"'
         )
+        resp["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        resp["Pragma"] = "no-cache"
         return resp

@@ -120,7 +120,7 @@
               <a href="{{ drift_download_xlsx_modified_url }}" class="btn btn-success btn-sm js-drift-xlsx-get" data-download-name="drift-report-run-{{ run.id }}-modified.xlsx">{% trans "Download modified Excel (.xlsx)" %}</a>
             {% endif %}
             {% if report_drift_markup == "html" and drift_save_review_url %}
-              <button type="button" class="btn btn-outline-secondary btn-sm js-drift-clear-review">{% trans "Clear review edits" %}</button>
+              <button type="button" class="btn btn-success btn-sm js-drift-clear-review">{% trans "Clear review edits" %}</button>
               <button type="button" class="btn btn-success btn-sm js-drift-save-review">{% trans "Save review edits" %}</button>
             {% endif %}
           </div>

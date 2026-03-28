@@ -11,8 +11,23 @@
     return r.text().then(function(t) { return t || r.statusText || String(r.status); });
   }
   var overlay = document.getElementById("drift-xlsx-loading-overlay");
-  function showXlsxOverlay() {
+  var xlsxOverlayDefaultMsg = null;
+  function xlsxOverlayMessageEl() {
+    return overlay ? overlay.querySelector(".drift-loading-message") : null;
+  }
+  function showXlsxOverlay(message) {
     if (!overlay) return;
+    var msgEl = xlsxOverlayMessageEl();
+    if (msgEl) {
+      if (xlsxOverlayDefaultMsg === null) {
+        xlsxOverlayDefaultMsg = msgEl.textContent;
+      }
+      if (message) {
+        msgEl.textContent = message;
+      } else {
+        msgEl.textContent = xlsxOverlayDefaultMsg;
+      }
+    }
     overlay.classList.add("drift-loading-visible");
     overlay.setAttribute("aria-hidden", "false");
   }
@@ -20,6 +35,10 @@
     if (!overlay) return;
     overlay.classList.remove("drift-loading-visible");
     overlay.setAttribute("aria-hidden", "true");
+    var msgEl = xlsxOverlayMessageEl();
+    if (msgEl && xlsxOverlayDefaultMsg !== null) {
+      msgEl.textContent = xlsxOverlayDefaultMsg;
+    }
   }
   function downloadBlob(blob, filename) {
     var a = document.createElement("a");
@@ -32,7 +51,9 @@
   }
   function fetchGetXlsx(url, filename) {
     showXlsxOverlay();
-    return fetch(url, { credentials: "same-origin" })
+    var sep = url.indexOf("?") >= 0 ? "&" : "?";
+    var bustUrl = url + sep + "_drift_xlsx_cb=" + Date.now();
+    return fetch(bustUrl, { credentials: "same-origin" })
       .then(function(r) {
         if (!r.ok) throw new Error(r.statusText || String(r.status));
         return r.blob();
@@ -121,6 +142,8 @@
       return;
     }
     saveBtn.disabled = true;
+    var saveWillNavigate = false;
+    showXlsxOverlay("{% trans 'Saving review edits…' %}");
     fetch(url, {
       method: "POST",
       credentials: "same-origin",
@@ -146,7 +169,10 @@
           throw new Error((pair.j && pair.j.error) || pair.r.statusText || "Save failed");
         }
         if (pair.j.reload && window.DriftReviewReloadAfterSave === true) {
-          window.location.reload();
+          saveWillNavigate = true;
+          var nextUrl = new URL(window.location.href);
+          nextUrl.searchParams.set("view", "modified");
+          window.location.href = nextUrl.toString();
           return;
         }
         if (typeof window.DriftReviewOnSaved === "function") {
@@ -159,7 +185,12 @@
         console.warn("Save review failed:", err);
         alert("{% trans 'Could not save review edits.' %} " + (err && err.message ? err.message : ""));
       })
-      .finally(function() { saveBtn.disabled = false; });
+      .finally(function() {
+        if (!saveWillNavigate) {
+          hideXlsxOverlay();
+        }
+        saveBtn.disabled = false;
+      });
   });
 })();
 </script>
