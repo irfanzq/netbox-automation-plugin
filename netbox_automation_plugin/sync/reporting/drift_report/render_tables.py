@@ -167,10 +167,15 @@ def _html_nb_picker_wrap(
     safe_kind = html.escape(kind, quote=True)
     extra = ""
     if col_header and selection_key and row_idx != "":
+        # Attributes must be quoted: unquoted values end at whitespace, so
+        # "NB proposed device status" was parsed as "NB" and Excel merge skipped columns.
+        ch_attr = html.escape(str(col_header), quote=True)
+        sk_attr = html.escape(str(selection_key), quote=True)
+        ri_attr = html.escape(str(row_idx), quote=True)
         extra = (
-            f" data-drift-col-header={html.escape(str(col_header), quote=True)}"
-            f" data-drift-sel-key={html.escape(str(selection_key), quote=True)}"
-            f" data-drift-row-idx={html.escape(str(row_idx), quote=True)}"
+            f' data-drift-col-header="{ch_attr}"'
+            f' data-drift-sel-key="{sk_attr}"'
+            f' data-drift-row-idx="{ri_attr}"'
         )
     return (
         '<div class="drift-nb-pick position-relative d-inline-flex align-items-center gap-1 flex-nowrap text-start" '
@@ -196,7 +201,7 @@ def _html_nb_picker_bulk_column(kind: str, *, col_header: str, data_col_idx: int
         '<div class="drift-nb-pick drift-nb-pick-bulk position-relative d-inline-flex align-items-center '
         'gap-1 flex-shrink-0 ms-auto text-start" '
         f'data-nb-pick-kind="{safe_kind}" data-drift-bulk="1" '
-        f'data-drift-col-header={ch} data-drift-data-col-idx="{int(data_col_idx)}" role="group">'
+        f'data-drift-col-header="{ch}" data-drift-data-col-idx="{int(data_col_idx)}" role="group">'
         '<span class="drift-nb-pick-visible visually-hidden" aria-hidden="true">—</span>'
         '<button type="button" class="btn btn-outline-secondary btn-sm py-0 px-1 drift-nb-pick-toggle" '
         'aria-expanded="false" title="Apply NetBox choice to selected rows" '

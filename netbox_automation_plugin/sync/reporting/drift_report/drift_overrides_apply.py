@@ -217,7 +217,29 @@ def normalize_drift_review_overrides(raw: Any) -> dict[str, dict[str, dict[str, 
                 inner[rk] = colmap
         if inner:
             out[sk] = inner
+    _remap_legacy_truncated_nb_placement_headers(out)
     return out
+
+
+def _remap_legacy_truncated_nb_placement_headers(
+    out: dict[str, dict[str, dict[str, str]]],
+) -> None:
+    """
+    Older drift HTML used unquoted data-drift-col-header attributes; browsers then
+    truncated values at the first space (e.g. \"NB proposed device status\" -> \"NB\").
+    Remap a sole \"NB\" key in the placement table to the real header so merge,
+    saved modified HTML, history \"view modified\", and Excel stay consistent.
+    """
+    sec = out.get("detail_placement_lifecycle_alignment")
+    if not isinstance(sec, dict):
+        return
+    target = "NB proposed device status"
+    for cmap in sec.values():
+        if not isinstance(cmap, dict) or len(cmap) != 1:
+            continue
+        if "NB" not in cmap or target in cmap:
+            continue
+        cmap[target] = cmap.pop("NB")
 
 
 def _update_nic_row_is_os_authority(row) -> bool:

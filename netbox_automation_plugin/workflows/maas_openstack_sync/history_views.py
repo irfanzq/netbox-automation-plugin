@@ -191,6 +191,7 @@ class MAASOpenStackSyncRunDetailView(LoginRequiredMixin, View):
                 "drift_review_modified_xlsx",
                 "drift_review_saved_at",
                 "drift_review_saved_by",
+                "snapshot_payload",
             ]
         )
         markup = run.report_drift_markup or "html"
@@ -208,14 +209,12 @@ class MAASOpenStackSyncRunDetailView(LoginRequiredMixin, View):
         drift_view_modified = False
         if want_modified:
             payload = run.snapshot_payload if isinstance(run.snapshot_payload, dict) else {}
-            # Prefer HTML saved at review-save time: it was rendered from the in-memory snapshot
-            # before JSON round-trip, so it reliably reflects overrides. Regenerating from
-            # snapshot_payload first can no-op merges (row/shape drift) and look like the
-            # original report even when drift_review_overrides is non-empty.
-            if has_modified_html:
-                report_body = run.report_drift_modified_html
-                drift_view_modified = True
-            elif has_overrides and payload:
+            # When overrides exist, regenerate from snapshot + normalized overrides first so
+            # merge fixes (e.g. legacy truncated \"NB\" column keys) always apply in history
+            # even if report_drift_modified_html was saved before those fixes or matched the
+            # original HTML by mistake. Fall back to stored modified HTML if regen fails or
+            # is empty.
+            if has_overrides and payload:
                 try:
                     report_out = format_drift_report_from_snapshot_payload(
                         payload,
@@ -223,13 +222,16 @@ class MAASOpenStackSyncRunDetailView(LoginRequiredMixin, View):
                     )
                     regen = (report_out.get("drift") or "").strip()
                     if regen:
-                        report_body = report_out["drift"]
+                        report_body = regen
                         drift_view_modified = True
                 except Exception:
                     logger.exception(
                         "Drift run %s: could not regenerate modified HTML from snapshot",
                         run.id,
                     )
+            if not drift_view_modified and has_modified_html:
+                report_body = run.report_drift_modified_html
+                drift_view_modified = True
             if not drift_view_modified:
                 want_modified = False
 
@@ -276,11 +278,28 @@ class MAASOpenStackSyncRunSaveReviewView(LoginRequiredMixin, View):
             if not overrides:
                 mod_html = ""
             else:
+                # Latest snapshot from DB (avoids stale in-memory row after parallel edits).
+                run.refresh_from_db(fields=["snapshot_payload"])
                 report_out = format_drift_report_from_snapshot_payload(
                     run.snapshot_payload,
                     drift_overrides=overrides,
                 )
-                mod_html = report_out.get("drift") or ""
+                mod_html = (report_out.get("drift") or "").strip()
+                if not mod_html:
+                    logger.error(
+                        "Save review: overrides present but empty drift HTML for run %s",
+                        run_id,
+                    )
+                    return JsonResponse(
+                        {
+                            "ok": False,
+                            "error": (
+                                "Could not build modified report HTML from this run's snapshot. "
+                                "Re-run the drift audit, then save review edits again."
+                            ),
+                        },
+                        status=500,
+                    )
                 mod_xlsx = build_drift_report_xlsx_from_snapshot_payload(
                     run.snapshot_payload,
                     drift_overrides=overrides,
