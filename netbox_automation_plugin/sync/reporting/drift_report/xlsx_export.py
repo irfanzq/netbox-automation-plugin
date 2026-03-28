@@ -234,10 +234,9 @@ def build_drift_report_xlsx(
         openstack_data=openstack_data,
         netbox_ifaces=netbox_ifaces,
     )
-    if drift_overrides:
-        norm = normalize_drift_review_overrides(drift_overrides)
-        if norm:
-            prop, align_rows_x = merge_drift_review_overrides(prop, align_rows_x, norm)
+    norm = normalize_drift_review_overrides(drift_overrides)
+    if norm:
+        prop, align_rows_x = merge_drift_review_overrides(prop, align_rows_x, norm)
     if align_rows_x:
         r_al = ws_sum.max_row + 1
         ws_sum.append(["Detail — placement & lifecycle alignment", ""])

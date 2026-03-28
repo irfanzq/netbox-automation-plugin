@@ -4,9 +4,6 @@
 {% block title %}{% trans "Drift Run Detail" %} #{{ run.id }}{% endblock %}
 
 {% block content %}
-{# NetBox: CSRF cookie is HttpOnly; AJAX must use hidden input value. #}
-<form id="drift-review-csrf-anchor" class="d-none" aria-hidden="true">{% csrf_token %}</form>
-<script>window.DriftReviewReloadAfterSave = true;</script>
 <style>
   .drift-audit-report-scroll {
     overflow-x: scroll !important;
@@ -64,6 +61,14 @@
   @keyframes drift-run-detail-xlsx-spin {
     to { transform: rotate(360deg); }
   }
+  /* Read-only saved run: hide NetBox pickers, bulk ▾, and row Include UI */
+  .drift-run-detail-readonly .drift-nb-pick-toggle,
+  .drift-run-detail-readonly .drift-nb-pick-menu,
+  .drift-run-detail-readonly .drift-selection-toolbar,
+  .drift-run-detail-readonly .drift-select-col-header,
+  .drift-run-detail-readonly .drift-select-col {
+    display: none !important;
+  }
 </style>
 <div id="drift-xlsx-loading-overlay" aria-hidden="true">
   <div class="drift-loading-content">
@@ -115,17 +120,14 @@
         <div class="drift-report-actions-toolbar d-flex flex-wrap align-items-center justify-content-between gap-2 mb-2 pb-2 border-bottom">
           <span class="small text-body-secondary fw-semibold text-uppercase">{% trans "Report actions" %}</span>
           <div class="d-flex flex-wrap gap-1 justify-content-end">
-            <a href="{% url 'plugins:netbox_automation_plugin:maas_openstack_sync_run_download_xlsx' run.id %}" class="btn btn-success btn-sm js-drift-xlsx-get" data-download-name="drift-report-run-{{ run.id }}.xlsx">{% trans "Download as Excel (.xlsx)" %}</a>
-            {% if drift_has_saved_review %}
+            {% if drift_view_modified and drift_has_saved_review %}
               <a href="{{ drift_download_xlsx_modified_url }}" class="btn btn-success btn-sm js-drift-xlsx-get" data-download-name="drift-report-run-{{ run.id }}-modified.xlsx">{% trans "Download modified Excel (.xlsx)" %}</a>
-            {% endif %}
-            {% if report_drift_markup == "html" and drift_save_review_url %}
-              <button type="button" class="btn btn-success btn-sm js-drift-clear-review">{% trans "Clear review edits" %}</button>
-              <button type="button" class="btn btn-success btn-sm js-drift-save-review">{% trans "Save review edits" %}</button>
+            {% else %}
+              <a href="{% url 'plugins:netbox_automation_plugin:maas_openstack_sync_run_download_xlsx' run.id %}" class="btn btn-success btn-sm js-drift-xlsx-get" data-download-name="drift-report-run-{{ run.id }}.xlsx">{% trans "Download as Excel (.xlsx)" %}</a>
             {% endif %}
           </div>
         </div>
-        <div class="drift-audit-report-scroll border rounded bg-body-secondary p-2">
+        <div class="drift-audit-report-scroll drift-run-detail-readonly border rounded bg-body-secondary p-2">
           {% if report_drift_markup == "html" %}
             {{ report_drift|safe }}
           {% else %}
@@ -140,7 +142,9 @@
             </div>
           </details>
         {% endif %}
-        {% include "netbox_automation_plugin/_drift_nb_picker_script.html" %}
+        {% if not drift_run_detail_readonly %}
+          {% include "netbox_automation_plugin/_drift_nb_picker_script.html" %}
+        {% endif %}
         {% if report_drift_markup == "html" %}
           <script>
             window._driftXlsxUiConfig = {

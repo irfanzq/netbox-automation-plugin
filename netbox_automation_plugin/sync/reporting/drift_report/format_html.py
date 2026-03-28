@@ -68,7 +68,7 @@ def format_drift_report(
         openstack_data=openstack_data,
         netbox_ifaces=netbox_ifaces,
     )
-    norm = normalize_drift_review_overrides(drift_overrides) if drift_overrides else {}
+    norm = normalize_drift_review_overrides(drift_overrides)
     if norm:
         prop, align_rows = merge_drift_review_overrides(prop, align_rows, norm)
     emit_drift_counts_and_alignment(

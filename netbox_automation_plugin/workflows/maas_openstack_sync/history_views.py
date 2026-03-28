@@ -22,9 +22,6 @@ from .drift_snapshot_export import (
     format_drift_report_from_snapshot_payload,
 )
 from .history_models import MAASOpenStackDriftRun
-from netbox_automation_plugin.sync.reporting.drift_report.drift_nb_picker_catalog import (
-    build_drift_nb_picker_catalog,
-)
 from .netbox_scope_choices import list_site_location_choices
 from .tables import MAASOpenStackDriftRunTable
 
@@ -155,12 +152,8 @@ class MAASOpenStackSyncRunDetailView(LoginRequiredMixin, View):
     def get(self, request, run_id: int):
         run = get_object_or_404(MAASOpenStackDriftRun, pk=run_id)
         markup = run.report_drift_markup or "html"
+        # Persisted run pages are read-only: no NetBox picker catalog or save-review UI.
         picker_catalog = None
-        if str(markup).lower() == "html":
-            try:
-                picker_catalog = build_drift_nb_picker_catalog()
-            except Exception:
-                picker_catalog = {}
         want_modified = (request.GET.get("view") or "").strip().lower() in (
             "modified",
             "1",
@@ -173,9 +166,14 @@ class MAASOpenStackSyncRunDetailView(LoginRequiredMixin, View):
         drift_view_modified = False
         if want_modified:
             payload = run.snapshot_payload if isinstance(run.snapshot_payload, dict) else {}
-            # Prefer live regeneration from snapshot + overrides so HTML always matches saved JSON
-            # (stored report_drift_modified_html may be empty or stale).
-            if has_overrides and payload:
+            # Prefer HTML saved at review-save time: it was rendered from the in-memory snapshot
+            # before JSON round-trip, so it reliably reflects overrides. Regenerating from
+            # snapshot_payload first can no-op merges (row/shape drift) and look like the
+            # original report even when drift_review_overrides is non-empty.
+            if has_modified_html:
+                report_body = run.report_drift_modified_html
+                drift_view_modified = True
+            elif has_overrides and payload:
                 try:
                     report_out = format_drift_report_from_snapshot_payload(
                         payload,
@@ -190,9 +188,6 @@ class MAASOpenStackSyncRunDetailView(LoginRequiredMixin, View):
                         "Drift run %s: could not regenerate modified HTML from snapshot",
                         run.id,
                     )
-            if not drift_view_modified and has_modified_html:
-                report_body = run.report_drift_modified_html
-                drift_view_modified = True
             if not drift_view_modified:
                 want_modified = False
 
@@ -205,13 +200,11 @@ class MAASOpenStackSyncRunDetailView(LoginRequiredMixin, View):
                 "report_drift_markup": markup,
                 "report_reference": run.report_reference or "",
                 "drift_nb_picker_catalog": picker_catalog,
+                "drift_run_detail_readonly": True,
                 "drift_view_modified": drift_view_modified,
                 "drift_has_saved_review": drift_has_saved_review,
                 "drift_review_saved_at": run.drift_review_saved_at,
-                "drift_save_review_url": reverse(
-                    "plugins:netbox_automation_plugin:maas_openstack_sync_run_save_review",
-                    args=[run.id],
-                ),
+                "drift_save_review_url": None,
                 "drift_download_xlsx_modified_url": reverse(
                     "plugins:netbox_automation_plugin:maas_openstack_sync_run_download_xlsx",
                     args=[run.id],
@@ -279,6 +272,23 @@ class MAASOpenStackSyncRunDownloadXlsxView(LoginRequiredMixin, View):
                     content_type="text/plain; charset=utf-8",
                 )
             drift_overrides = norm
+            stored = run.drift_review_modified_xlsx
+            if stored:
+                try:
+                    blob = bytes(stored)
+                except TypeError:
+                    blob = b""
+                if len(blob) > 0:
+                    resp = HttpResponse(
+                        blob,
+                        content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    )
+                    resp["Content-Disposition"] = (
+                        f'attachment; filename="drift-report-run-{run_id}-modified.xlsx"'
+                    )
+                    resp["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+                    resp["Pragma"] = "no-cache"
+                    return resp
         try:
             xlsx_bytes = build_drift_report_xlsx_from_snapshot_payload(
                 payload,
