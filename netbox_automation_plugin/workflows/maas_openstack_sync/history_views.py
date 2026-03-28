@@ -9,6 +9,7 @@ from django.shortcuts import get_object_or_404, render
 from django.urls import reverse
 from django.utils import timezone
 from django.views import View
+from django.views.decorators.cache import never_cache
 from django.views.decorators.csrf import ensure_csrf_cookie
 from django.utils.decorators import method_decorator
 from django_tables2 import RequestConfig
@@ -30,6 +31,35 @@ logger = logging.getLogger(__name__)
 # GET ``filter_location`` sentinel: runs whose NetBox sites / locations column shows
 # "All (no site/location filter)" (unscoped); filter UI: "All (No site/location filter in run)".
 HIST_FILTER_UNSCOPED_SITE_LOCATION = "__unscoped_site_location__"
+
+
+def _drift_review_saved_query_string(run: MAASOpenStackDriftRun) -> str:
+    """
+    Query string for ?view=modified (and matching Excel links) so the URL changes
+    whenever review edits are re-saved — avoids stale cached HTML/XLSX when another
+    tab saved newer data for the same run.
+    """
+    ts = getattr(run, "drift_review_saved_at", None)
+    base = "view=modified"
+    if ts is None:
+        return base
+    try:
+        v = int(ts.timestamp())
+    except (OSError, OverflowError, TypeError, ValueError):
+        return base
+    return f"{base}&review_saved={v}"
+
+
+def _drift_modified_xlsx_query_string(run: MAASOpenStackDriftRun) -> str:
+    ts = getattr(run, "drift_review_saved_at", None)
+    base = "modified=1"
+    if ts is None:
+        return base
+    try:
+        v = int(ts.timestamp())
+    except (OSError, OverflowError, TypeError, ValueError):
+        return base
+    return f"{base}&review_saved={v}"
 
 
 def _unscoped_site_location_q() -> Q:
@@ -89,6 +119,7 @@ def _apply_history_location_filters(qs, selected_keys: set[str], location_meta: 
     return qs.filter(combined)
 
 
+@method_decorator(never_cache, name="dispatch")
 class MAASOpenStackSyncRunsView(LoginRequiredMixin, View):
     template_name = "netbox_automation_plugin/maas_openstack_sync_runs.html"
 
@@ -145,12 +176,23 @@ class MAASOpenStackSyncRunsView(LoginRequiredMixin, View):
         return render(request, self.template_name, context)
 
 
+@method_decorator(never_cache, name="dispatch")
 @method_decorator(ensure_csrf_cookie, name="dispatch")
 class MAASOpenStackSyncRunDetailView(LoginRequiredMixin, View):
     template_name = "netbox_automation_plugin/maas_openstack_sync_run_detail.html"
 
     def get(self, request, run_id: int):
         run = get_object_or_404(MAASOpenStackDriftRun, pk=run_id)
+        run.refresh_from_db(
+            fields=[
+                "report_drift",
+                "report_drift_modified_html",
+                "drift_review_overrides",
+                "drift_review_modified_xlsx",
+                "drift_review_saved_at",
+                "drift_review_saved_by",
+            ]
+        )
         markup = run.report_drift_markup or "html"
         # Persisted run pages are read-only: no NetBox picker catalog or save-review UI.
         picker_catalog = None
@@ -209,7 +251,8 @@ class MAASOpenStackSyncRunDetailView(LoginRequiredMixin, View):
                     "plugins:netbox_automation_plugin:maas_openstack_sync_run_download_xlsx",
                     args=[run.id],
                 )
-                + "?modified=1",
+                + f"?{_drift_modified_xlsx_query_string(run)}",
+                "drift_view_modified_query_string": _drift_review_saved_query_string(run),
                 "drift_download_xlsx_modified_post_url": "",
             },
         )
@@ -253,9 +296,18 @@ class MAASOpenStackSyncRunSaveReviewView(LoginRequiredMixin, View):
         return JsonResponse({"ok": True, "run_id": run.id, "reload": True})
 
 
+@method_decorator(never_cache, name="dispatch")
 class MAASOpenStackSyncRunDownloadXlsxView(LoginRequiredMixin, View):
     def get(self, request, run_id: int):
         run = get_object_or_404(MAASOpenStackDriftRun, pk=run_id)
+        run.refresh_from_db(
+            fields=[
+                "snapshot_payload",
+                "drift_review_overrides",
+                "drift_review_modified_xlsx",
+                "drift_review_saved_at",
+            ]
+        )
         payload = run.snapshot_payload or {}
         want_modified = (request.GET.get("modified") or "").strip().lower() in (
             "1",

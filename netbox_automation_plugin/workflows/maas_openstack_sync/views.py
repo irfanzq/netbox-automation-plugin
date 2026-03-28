@@ -1338,18 +1338,16 @@ class DriftAuditDownloadXlsxView(LoginRequiredMixin, View):
 
 
 class DriftAuditDownloadXlsxModifiedView(LoginRequiredMixin, View):
-    """POST JSON { \"overrides\": {...} } — session cache + merged proposed cells → .xlsx."""
+    """POST JSON { \"overrides\": {...}, \"run_id\": optional } — merged cells → .xlsx.
+
+    When ``run_id`` is the persisted drift run for this audit, the snapshot is taken from
+    the database (same as Save review). Otherwise falls back to session cache so exports
+    stay aligned with row indices after save or if cache and DB diverged.
+    """
 
     http_method_names = ["post"]
 
     def post(self, request):
-        cached = cache.get(_drift_audit_cache_key(request))
-        if not cached:
-            return HttpResponse(
-                _("Run drift audit first, then download modified Excel."),
-                status=404,
-                content_type="text/plain; charset=utf-8",
-            )
         try:
             body = json.loads(request.body.decode() or "{}")
         except json.JSONDecodeError:
@@ -1358,13 +1356,34 @@ class DriftAuditDownloadXlsxModifiedView(LoginRequiredMixin, View):
                 status=400,
                 content_type="text/plain; charset=utf-8",
             )
+        payload = None
+        raw_rid = body.get("run_id")
+        if raw_rid is not None and raw_rid != "":
+            try:
+                rid = int(raw_rid)
+            except (TypeError, ValueError):
+                rid = None
+            if rid is not None:
+                run = MAASOpenStackDriftRun.objects.filter(pk=rid).only("snapshot_payload").first()
+                sp = getattr(run, "snapshot_payload", None) if run else None
+                if isinstance(sp, dict) and sp:
+                    payload = sp
+        if payload is None:
+            cached = cache.get(_drift_audit_cache_key(request))
+            if not cached:
+                return HttpResponse(
+                    _("Run drift audit first, then download modified Excel."),
+                    status=404,
+                    content_type="text/plain; charset=utf-8",
+                )
+            payload = cached
         raw_ov = body.get("overrides")
         if not isinstance(raw_ov, dict):
             raw_ov = {}
         norm = normalize_drift_review_overrides(raw_ov)
         try:
             xlsx_bytes = build_drift_report_xlsx_from_snapshot_payload(
-                cached,
+                payload,
                 drift_overrides=norm if norm else None,
             )
         except Exception as e:

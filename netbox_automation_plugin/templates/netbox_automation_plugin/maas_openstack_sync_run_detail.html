@@ -91,7 +91,7 @@
             {% if drift_view_modified %}
               <a href="?" class="btn btn-outline-secondary btn-sm">{% trans "View original report" %}</a>
             {% else %}
-              <a href="?view=modified" class="btn btn-outline-info btn-sm">{% trans "View modified report" %}</a>
+              <a href="?{{ drift_view_modified_query_string }}" class="btn btn-outline-info btn-sm">{% trans "View modified report" %}</a>
             {% endif %}
           {% endif %}
         </div>

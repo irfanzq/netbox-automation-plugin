@@ -682,7 +682,8 @@
           <script>
             window._driftXlsxUiConfig = {
               postModifiedUrl: "{{ drift_download_xlsx_modified_post_url|default:''|escapejs }}",
-              saveReviewUrl: "{{ drift_save_review_url|default:''|escapejs }}"
+              saveReviewUrl: "{{ drift_save_review_url|default:''|escapejs }}",
+              auditRunId: {% if audit_run_id %}{{ audit_run_id }}{% else %}null{% endif %}
             };
           </script>
           {% include "netbox_automation_plugin/_drift_xlsx_overlay_and_script.html" %}

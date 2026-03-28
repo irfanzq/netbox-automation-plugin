@@ -10,6 +10,26 @@ from netbox_automation_plugin.sync.reporting.drift_report.drift_overrides_apply 
 from .history_models import MAASOpenStackDriftRun
 
 
+def _history_modified_view_query(record) -> str:
+    ts = getattr(record, "drift_review_saved_at", None)
+    if ts is None:
+        return "view=modified"
+    try:
+        return f"view=modified&review_saved={int(ts.timestamp())}"
+    except (OSError, OverflowError, TypeError, ValueError):
+        return "view=modified"
+
+
+def _history_modified_xlsx_query(record) -> str:
+    ts = getattr(record, "drift_review_saved_at", None)
+    if ts is None:
+        return "modified=1"
+    try:
+        return f"modified=1&review_saved={int(ts.timestamp())}"
+    except (OSError, OverflowError, TypeError, ValueError):
+        return "modified=1"
+
+
 class MAASOpenStackDriftRunTable(tables.Table):
     id = tables.Column(
         verbose_name=_("Run ID"),
@@ -87,10 +107,11 @@ class MAASOpenStackDriftRunTable(tables.Table):
             "plugins:netbox_automation_plugin:maas_openstack_sync_run_download_xlsx",
             args=[record.id],
         )
-        download_mod_url = download_url + "?modified=1"
+        download_mod_url = download_url + "?" + _history_modified_xlsx_query(record)
         has_review = bool((record.report_drift_modified_html or "").strip()) or bool(
             normalize_drift_review_overrides(record.drift_review_overrides)
         )
+        modified_view_url = f"{view_url}?{_history_modified_view_query(record)}"
         badge_link = "badge text-decoration-none fw-normal py-2 px-2"
         if has_review:
             return format_html(
@@ -98,7 +119,7 @@ class MAASOpenStackDriftRunTable(tables.Table):
                 '<span class="badge text-bg-light text-dark border" title="{}">{}</span>'
                 '<div class="d-flex flex-wrap gap-1 align-items-center">'
                 '<a href="{}" class="{} text-bg-primary js-drift-nav-loading">{}</a>'
-                '<a href="{}?view=modified" class="{} text-bg-info js-drift-nav-loading">{}</a>'
+                '<a href="{}" class="{} text-bg-info js-drift-nav-loading">{}</a>'
                 '<a href="{}" class="{} text-bg-success js-drift-xlsx-get" data-download-name="drift-report-run-{}.xlsx">{}</a>'
                 '<a href="{}" class="{} text-bg-secondary js-drift-xlsx-get" data-download-name="drift-report-run-{}-modified.xlsx">{}</a>'
                 "</div>"
@@ -108,7 +129,7 @@ class MAASOpenStackDriftRunTable(tables.Table):
                 view_url,
                 badge_link,
                 _("View report"),
-                view_url,
+                modified_view_url,
                 badge_link,
                 _("View modified"),
                 download_url,

@@ -94,6 +94,8 @@
       return;
     }
     showXlsxOverlay();
+    var cfg = window._driftXlsxUiConfig || {};
+    var runId = cfg.auditRunId != null && cfg.auditRunId !== "" ? cfg.auditRunId : null;
     fetch(postUrl, {
       method: "POST",
       credentials: "same-origin",
@@ -101,7 +103,7 @@
         "Content-Type": "application/json",
         "X-CSRFToken": tok
       },
-      body: JSON.stringify({ overrides: overrides })
+      body: JSON.stringify({ overrides: overrides, run_id: runId })
     })
       .then(function(r) {
         if (!r.ok) {
