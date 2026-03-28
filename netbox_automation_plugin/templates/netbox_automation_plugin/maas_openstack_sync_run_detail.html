@@ -4,9 +4,13 @@
 {% block title %}{% trans "Drift Run Detail" %} #{{ run.id }}{% endblock %}
 
 {% block content %}
+{# NetBox: CSRF cookie is HttpOnly; AJAX must use hidden input value. #}
+<form id="drift-review-csrf-anchor" class="d-none" aria-hidden="true">{% csrf_token %}</form>
 <script>window.DriftReviewReloadAfterSave = true;</script>
 <style>
   .drift-audit-report-scroll {
+    display: flex;
+    flex-direction: column;
     overflow-x: scroll !important;
     overflow-y: scroll;
     max-width: 100%;
@@ -24,12 +28,24 @@
   .drift-audit-report-scroll .drift-report-sticky-actions {
     position: sticky;
     top: 0;
-    z-index: 100;
+    z-index: 500;
+    flex-shrink: 0;
+    align-self: stretch;
+    width: 100%;
+    box-sizing: border-box;
     margin: -0.5rem -0.5rem 0.75rem -0.5rem;
-    padding: 0.5rem 0.5rem;
-    background-color: var(--bs-secondary-bg);
+    padding: 0.65rem 0.65rem;
+    background-color: var(--bs-body-bg);
     border-bottom: 1px solid var(--bs-border-color);
-    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.06);
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.12);
+  }
+  .drift-audit-report-scroll .drift-report-sticky-actions .btn {
+    background-color: var(--bs-body-bg) !important;
+  }
+  .drift-audit-report-scroll .drift-report-sticky-actions .btn-primary {
+    background-color: var(--bs-primary) !important;
+    border-color: var(--bs-primary);
+    color: #fff;
   }
   #drift-xlsx-loading-overlay {
     position: fixed;
@@ -110,12 +126,12 @@
           <div class="drift-report-sticky-actions d-flex flex-wrap align-items-center justify-content-between gap-2">
             <span class="small text-body-secondary fw-semibold text-uppercase">{% trans "Report actions" %}</span>
             <div class="d-flex flex-wrap gap-1 justify-content-end">
-              <a href="{% url 'plugins:netbox_automation_plugin:maas_openstack_sync_run_download_xlsx' run.id %}" class="btn btn-outline-success btn-sm js-drift-xlsx-get" data-download-name="drift-report-run-{{ run.id }}.xlsx">{% trans "Download as Excel (.xlsx)" %}</a>
+              <a href="{% url 'plugins:netbox_automation_plugin:maas_openstack_sync_run_download_xlsx' run.id %}" class="btn btn-outline-success btn-sm shadow-sm js-drift-xlsx-get" data-download-name="drift-report-run-{{ run.id }}.xlsx">{% trans "Download as Excel (.xlsx)" %}</a>
               {% if drift_has_saved_review %}
-                <a href="{{ drift_download_xlsx_modified_url }}" class="btn btn-outline-secondary btn-sm js-drift-xlsx-get" data-download-name="drift-report-run-{{ run.id }}-modified.xlsx">{% trans "Download modified Excel (.xlsx)" %}</a>
+                <a href="{{ drift_download_xlsx_modified_url }}" class="btn btn-outline-secondary btn-sm shadow-sm js-drift-xlsx-get" data-download-name="drift-report-run-{{ run.id }}-modified.xlsx">{% trans "Download modified Excel (.xlsx)" %}</a>
               {% endif %}
               {% if report_drift_markup == "html" and drift_save_review_url %}
-                <button type="button" class="btn btn-primary btn-sm js-drift-save-review">{% trans "Save review edits" %}</button>
+                <button type="button" class="btn btn-primary btn-sm shadow-sm js-drift-save-review">{% trans "Save review edits" %}</button>
               {% endif %}
             </div>
           </div>

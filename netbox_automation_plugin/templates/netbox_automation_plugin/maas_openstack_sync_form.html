@@ -148,7 +148,8 @@
         {% if form.non_field_errors %}
           <div class="alert alert-danger">{{ form.non_field_errors }}</div>
         {% endif %}
-        <details id="maas-drift-scope" class="border rounded p-2 mb-2 bg-body-secondary bg-opacity-25" {% if not audit_done %}open{% endif %}>
+        {% if not audit_done %}
+        <details id="maas-drift-scope" class="border rounded p-2 mb-2 bg-body-secondary bg-opacity-25" open>
           <summary class="fw-semibold text-body">
             {% trans "Scope filters (optional)" %} —
             <span class="fw-normal text-muted">{% trans "Leave empty for a full report (all sites and locations). Expand to narrow scope." %}</span>
@@ -208,18 +209,19 @@
                 </div>
                 <div class="col-12 d-flex flex-wrap gap-2">
                   <button type="submit" class="btn btn-primary">{% trans "Run drift audit" %}</button>
-                  {% if audit_done %}
-                    <a href="{% url 'plugins:netbox_automation_plugin:maas_openstack_sync_download_xlsx' %}" class="btn btn-outline-success js-drift-xlsx-get">{% trans "Download as Excel (.xlsx)" %}</a>
-                    <button type="button" class="btn btn-outline-secondary js-drift-xlsx-modified-live">{% trans "Download modified Excel (.xlsx)" %}</button>
-                  {% else %}
-                    <button type="submit" name="format" value="xlsx" class="btn btn-outline-success">{% trans "Run drift audit + download Excel (.xlsx)" %}</button>
-                  {% endif %}
+                  <button type="submit" name="format" value="xlsx" class="btn btn-outline-success">{% trans "Run drift audit + download Excel (.xlsx)" %}</button>
                 </div>
               </div>
             </form>
           </div>
         </details>
         <p class="small text-muted mt-1 mb-0">{% trans "Download as Excel: runs the audit, shows the report, and triggers the file download." %}</p>
+        {% else %}
+        <p class="small text-muted mb-2">
+          <a href="{% url 'plugins:netbox_automation_plugin:maas_openstack_sync' %}" class="link-secondary">{% trans "Change scope or run a new audit" %}</a>
+          <span class="text-muted"> — {% trans "Excel and save actions are in the report bar below." %}</span>
+        </p>
+        {% endif %}
         <script>
           (function() {
             var overlay = document.getElementById("drift-audit-loading-overlay");
@@ -450,6 +452,8 @@
         {% if audit_done and report_drift %}
           <style>
             .drift-audit-report-scroll {
+              display: flex;
+              flex-direction: column;
               overflow-x: scroll !important;
               overflow-y: scroll;
               max-width: 100%;
@@ -504,12 +508,24 @@
             .drift-audit-report-scroll .drift-report-sticky-actions {
               position: sticky;
               top: 0;
-              z-index: 100;
+              z-index: 500;
+              flex-shrink: 0;
+              align-self: stretch;
+              width: 100%;
+              box-sizing: border-box;
               margin: -0.5rem -0.5rem 0.75rem -0.5rem;
-              padding: 0.5rem 0.5rem;
-              background-color: var(--bs-secondary-bg);
+              padding: 0.65rem 0.65rem;
+              background-color: var(--bs-body-bg);
               border-bottom: 1px solid var(--bs-border-color);
-              box-shadow: 0 2px 4px rgba(0, 0, 0, 0.06);
+              box-shadow: 0 4px 12px rgba(0, 0, 0, 0.12);
+            }
+            .drift-audit-report-scroll .drift-report-sticky-actions .btn {
+              background-color: var(--bs-body-bg) !important;
+            }
+            .drift-audit-report-scroll .drift-report-sticky-actions .btn-primary {
+              background-color: var(--bs-primary) !important;
+              border-color: var(--bs-primary);
+              color: #fff;
             }
           </style>
           <div class="card mb-3">
@@ -526,10 +542,10 @@
                 <div class="drift-report-sticky-actions d-flex flex-wrap align-items-center justify-content-between gap-2">
                   <span class="small text-body-secondary fw-semibold text-uppercase">{% trans "Report actions" %}</span>
                   <div class="d-flex flex-wrap gap-1 justify-content-end">
-                    <a href="{% url 'plugins:netbox_automation_plugin:maas_openstack_sync_download_xlsx' %}" class="btn btn-outline-success btn-sm js-drift-xlsx-get">{% trans "Download as Excel (.xlsx)" %}</a>
-                    <button type="button" class="btn btn-outline-secondary btn-sm js-drift-xlsx-modified-live">{% trans "Download modified Excel (.xlsx)" %}</button>
-                    {% if drift_save_review_url %}
-                      <button type="button" class="btn btn-primary btn-sm js-drift-save-review">{% trans "Save review edits" %}</button>
+                    <a href="{% url 'plugins:netbox_automation_plugin:maas_openstack_sync_download_xlsx' %}" class="btn btn-outline-success btn-sm shadow-sm js-drift-xlsx-get">{% trans "Download as Excel (.xlsx)" %}</a>
+                    <button type="button" class="btn btn-outline-secondary btn-sm shadow-sm js-drift-xlsx-modified-live">{% trans "Download modified Excel (.xlsx)" %}</button>
+                    {% if report_drift_markup == "html" and drift_save_review_url %}
+                      <button type="button" class="btn btn-primary btn-sm shadow-sm js-drift-save-review">{% trans "Save review edits" %}</button>
                     {% endif %}
                   </div>
                 </div>
@@ -670,6 +686,8 @@
           </script>
         {% endif %}
         {% if audit_done %}
+          {# NetBox sets CSRF_COOKIE_HTTPONLY; JS must read csrftoken from this input, not document.cookie. #}
+          <form id="drift-review-csrf-anchor" class="d-none" aria-hidden="true">{% csrf_token %}</form>
           <script>
             window._driftXlsxUiConfig = {
               postModifiedUrl: "{{ drift_download_xlsx_modified_post_url|default:''|escapejs }}",

@@ -65,7 +65,8 @@ logger = logging.getLogger("netbox_automation_plugin")
 
 def _drift_review_ui_context(request, audit_run):
     """URLs for saving review edits and POST download of modified Excel (live audit page)."""
-    del request  # reserved for future absolute URLs
+    if audit_run is None:
+        audit_run = _drift_run_for_session(request)
     rid = getattr(audit_run, "id", None) if audit_run is not None else None
     ctx = {
         "audit_run_id": rid,
@@ -564,6 +565,18 @@ def _filter_openstack_configs_for_drift_scope(
 def _drift_audit_cache_key(request):
     """Per-session key for cached drift audit (so Download Excel does not re-run)."""
     return f"drift_audit:{request.session.session_key or request.user.pk}"
+
+
+def _drift_run_for_session(request):
+    """Latest saved drift run for this session's cache key (e.g. after Excel-from-cache path skipped passing run)."""
+    key = (_drift_audit_cache_key(request) or "").strip()
+    if not key:
+        return None
+    return (
+        MAASOpenStackDriftRun.objects.filter(source_cache_key=key)
+        .order_by("-id")
+        .first()
+    )
 
 
 def _cache_drift_audit(request, payload):
@@ -1346,11 +1359,13 @@ class DriftAuditDownloadXlsxModifiedView(LoginRequiredMixin, View):
                 content_type="text/plain; charset=utf-8",
             )
         raw_ov = body.get("overrides")
-        norm = normalize_drift_review_overrides(raw_ov) if raw_ov else {}
+        if not isinstance(raw_ov, dict):
+            raw_ov = {}
+        norm = normalize_drift_review_overrides(raw_ov)
         try:
             xlsx_bytes = build_drift_report_xlsx_from_snapshot_payload(
                 cached,
-                drift_overrides=raw_ov if norm else None,
+                drift_overrides=norm if norm else None,
             )
         except Exception as e:
             logger.exception("Modified XLSX export failed: %s", e)

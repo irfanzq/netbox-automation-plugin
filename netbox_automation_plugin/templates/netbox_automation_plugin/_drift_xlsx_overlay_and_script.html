@@ -2,8 +2,13 @@
 <script>
 (function() {
   function csrfToken() {
+    var inp = document.querySelector("input[name=csrfmiddlewaretoken]");
+    if (inp && inp.value) return inp.value;
     var m = document.cookie.match(/csrftoken=([^;]+)/);
     return m ? decodeURIComponent(m[1]) : "";
+  }
+  function readErrorText(r) {
+    return r.text().then(function(t) { return t || r.statusText || String(r.status); });
   }
   var overlay = document.getElementById("drift-xlsx-loading-overlay");
   function showXlsxOverlay() {
@@ -49,25 +54,47 @@
     if (!btn) return;
     e.preventDefault();
     var postUrl = (window._driftXlsxUiConfig && window._driftXlsxUiConfig.postModifiedUrl) || "";
-    if (!postUrl) return;
-    var collect = window.DriftReviewCollectOverrides;
-    var overrides = typeof collect === "function" ? collect() : {};
+    if (!postUrl) {
+      alert("{% trans 'Modified Excel URL is not configured on this page.' %}");
+      return;
+    }
+    var tok = csrfToken();
+    if (!tok) {
+      alert("{% trans 'Missing CSRF token. Reload the page and try again.' %}");
+      return;
+    }
+    var overrides = {};
+    try {
+      var collect = window.DriftReviewCollectOverrides;
+      overrides = typeof collect === "function" ? collect() : {};
+    } catch (err) {
+      console.warn("DriftReviewCollectOverrides failed:", err);
+      alert("{% trans 'Could not read cell edits from the report.' %}");
+      return;
+    }
     showXlsxOverlay();
     fetch(postUrl, {
       method: "POST",
       credentials: "same-origin",
       headers: {
         "Content-Type": "application/json",
-        "X-CSRFToken": csrfToken()
+        "X-CSRFToken": tok
       },
       body: JSON.stringify({ overrides: overrides })
     })
       .then(function(r) {
-        if (!r.ok) throw new Error(r.statusText || String(r.status));
+        if (!r.ok) {
+          return readErrorText(r).then(function(msg) {
+            throw new Error(msg);
+          });
+        }
         return r.blob();
       })
       .then(function(blob) { downloadBlob(blob, "drift-report-modified.xlsx"); })
-      .catch(function(err) { console.warn("Modified Excel download failed:", err); })
+      .catch(function(err) {
+        console.warn("Modified Excel download failed:", err);
+        alert("{% trans 'Modified Excel download failed.' %} " + (err && err.message ? err.message : ""));
+      })
       .finally(hideXlsxOverlay);
   });
   document.addEventListener("click", function(e) {
@@ -75,20 +102,45 @@
     if (!saveBtn) return;
     e.preventDefault();
     var url = (window._driftXlsxUiConfig && window._driftXlsxUiConfig.saveReviewUrl) || "";
-    if (!url) return;
-    var collect = window.DriftReviewCollectOverrides;
-    var overrides = typeof collect === "function" ? collect() : {};
+    if (!url) {
+      alert("{% trans 'Save review URL is not configured (no drift run id). Run a new audit or open this report from history.' %}");
+      return;
+    }
+    var tok = csrfToken();
+    if (!tok) {
+      alert("{% trans 'Missing CSRF token. Reload the page and try again.' %}");
+      return;
+    }
+    var overrides = {};
+    try {
+      var collect = window.DriftReviewCollectOverrides;
+      overrides = typeof collect === "function" ? collect() : {};
+    } catch (err) {
+      console.warn("DriftReviewCollectOverrides failed:", err);
+      alert("{% trans 'Could not read cell edits from the report.' %}");
+      return;
+    }
     saveBtn.disabled = true;
     fetch(url, {
       method: "POST",
       credentials: "same-origin",
       headers: {
         "Content-Type": "application/json",
-        "X-CSRFToken": csrfToken()
+        "X-CSRFToken": tok
       },
       body: JSON.stringify({ overrides: overrides })
     })
-      .then(function(r) { return r.json().then(function(j) { return { r: r, j: j }; }); })
+      .then(function(r) {
+        return r.text().then(function(t) {
+          var j = {};
+          try {
+            j = t ? JSON.parse(t) : {};
+          } catch (ignore) {
+            j = { ok: false, error: t || r.statusText || "Save failed" };
+          }
+          return { r: r, j: j };
+        });
+      })
       .then(function(pair) {
         if (!pair.r.ok || !pair.j.ok) {
           throw new Error((pair.j && pair.j.error) || pair.r.statusText || "Save failed");

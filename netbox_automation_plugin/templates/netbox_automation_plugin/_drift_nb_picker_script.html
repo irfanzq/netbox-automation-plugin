@@ -86,6 +86,34 @@
     });
   }
 
+  function applyBulkNbPick(bulkWrap, name) {
+    var table = bulkWrap.closest("table");
+    if (!table) return;
+    var dci = bulkWrap.getAttribute("data-drift-data-col-idx");
+    if (dci === null || dci === "") return;
+    var colIdx = parseInt(dci, 10);
+    if (isNaN(colIdx) || colIdx < 0) return;
+    var tdIndex = colIdx + 1;
+    var rows = table.querySelectorAll("tbody tr");
+    var changed = 0;
+    rows.forEach(function(tr) {
+      var inc = tr.querySelector("input.drift-include-row");
+      if (!inc || !inc.checked) return;
+      var cells = tr.querySelectorAll("td");
+      if (tdIndex >= cells.length) return;
+      var td = cells[tdIndex];
+      var cellPick = td.querySelector(".drift-nb-pick:not(.drift-nb-pick-bulk)");
+      if (!cellPick) return;
+      var vis = cellPick.querySelector(".drift-nb-pick-visible");
+      if (!vis) return;
+      vis.textContent = name;
+      changed += 1;
+    });
+    if (changed && typeof window.DriftReviewMarkDirty === "function") {
+      window.DriftReviewMarkDirty();
+    }
+  }
+
   function repopulate(wrap) {
     var kind = wrap.getAttribute("data-nb-pick-kind") || "";
     var base = (window.DriftNbPickerChoices && window.DriftNbPickerChoices[kind]) || [];
@@ -109,10 +137,14 @@
       b.addEventListener("click", function(ev) {
         ev.preventDefault();
         ev.stopPropagation();
-        var vis = wrap.querySelector(".drift-nb-pick-visible");
-        vis.textContent = name;
-        if (typeof window.DriftReviewMarkDirty === "function") {
-          window.DriftReviewMarkDirty();
+        if (wrap.getAttribute("data-drift-bulk") === "1") {
+          applyBulkNbPick(wrap, name);
+        } else {
+          var vis = wrap.querySelector(".drift-nb-pick-visible");
+          if (vis) vis.textContent = name;
+          if (typeof window.DriftReviewMarkDirty === "function") {
+            window.DriftReviewMarkDirty();
+          }
         }
         closeAllMenus();
       });

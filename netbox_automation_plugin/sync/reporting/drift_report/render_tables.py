@@ -188,6 +188,29 @@ def _html_nb_picker_wrap(
     )
 
 
+def _html_nb_picker_bulk_column(kind: str, *, col_header: str, data_col_idx: int) -> str:
+    """Header control: same ▾ menu as cells; JS applies choice to every row with Include checked."""
+    safe_kind = html.escape(kind, quote=True)
+    ch = html.escape(str(col_header), quote=True)
+    return (
+        '<div class="drift-nb-pick drift-nb-pick-bulk position-relative d-inline-flex align-items-center '
+        'gap-1 flex-shrink-0 text-start" '
+        f'data-nb-pick-kind="{safe_kind}" data-drift-bulk="1" '
+        f'data-drift-col-header={ch} data-drift-data-col-idx="{int(data_col_idx)}" role="group">'
+        '<span class="drift-nb-pick-visible visually-hidden" aria-hidden="true">—</span>'
+        '<button type="button" class="btn btn-outline-secondary btn-sm py-0 px-1 drift-nb-pick-toggle" '
+        'aria-expanded="false" title="Apply NetBox choice to selected rows" '
+        'aria-label="Apply NetBox choice to selected rows">▾</button>'
+        '<div class="drift-nb-pick-menu d-none border rounded shadow-sm bg-body p-0 text-start" '
+        'style="min-width:11rem;">'
+        '<input type="search" class="form-control form-control-sm border-0 border-bottom rounded-0 drift-nb-pick-q" '
+        'placeholder="Search…" autocomplete="off">'
+        '<div class="drift-nb-pick-options list-group list-group-flush overflow-auto" '
+        'style="max-height:7.5rem"></div>'
+        "</div></div>"
+    )
+
+
 def _html_maas_fabric_cell_content(s) -> str:
     """
     One visual line per fabric so hyphenated names are never broken mid-token by CSS wrap.
@@ -288,12 +311,24 @@ def _html_table(
         return ""
     n = len(headers)
     hdr_strs = [str(h) for h in headers]
-    ths = "".join(
-        f'<th scope="col" class="{_html_th_class(h)}"'
-        f'{_html_maas_fabric_col_extra_attrs(h, is_header=True)}>'
-        f"{_html_cell_content(h)}</th>"
-        for h in hdr_strs
-    )
+    pick_map = proposed_pick_columns if isinstance(proposed_pick_columns, dict) else None
+    header_th_cells = []
+    for col_i, h in enumerate(hdr_strs):
+        label_html = _html_cell_content(h)
+        inner = label_html
+        if selectable and pick_map:
+            pk = pick_map.get(h)
+            if pk:
+                bulk = _html_nb_picker_bulk_column(pk, col_header=h, data_col_idx=col_i)
+                inner = (
+                    '<div class="d-flex align-items-center justify-content-between gap-1 flex-wrap w-100">'
+                    f'<span class="me-1 text-wrap text-break">{label_html}</span>{bulk}</div>'
+                )
+        header_th_cells.append(
+            f'<th scope="col" class="{_html_th_class(h)}"'
+            f'{_html_maas_fabric_col_extra_attrs(h, is_header=True)}>{inner}</th>'
+        )
+    ths = "".join(header_th_cells)
     if selectable:
         ths = (
             '<th scope="col" class="small align-bottom text-nowrap drift-select-col-header">'
@@ -317,7 +352,6 @@ def _html_table(
                 f'value="{html.escape(row_key)}" data-row-key="{html.escape(row_key)}" checked />'
                 "</td>"
             )
-        pick_map = proposed_pick_columns if isinstance(proposed_pick_columns, dict) else None
         for i, cell in enumerate(padded):
             h = hdr_strs[i] if i < len(hdr_strs) else ""
             cls = _html_td_class(h, i, notes_col_idx)
