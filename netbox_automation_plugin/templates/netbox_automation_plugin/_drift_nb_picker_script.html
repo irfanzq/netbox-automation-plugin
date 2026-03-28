@@ -1,0 +1,202 @@
+{% load i18n %}
+{% if drift_nb_picker_catalog is not None %}
+{{ drift_nb_picker_catalog|json_script:"drift-nb-picker-catalog" }}
+<style>
+  .drift-nb-pick-toggle {
+    flex-shrink: 0;
+    line-height: 1.1;
+    min-width: 1.5rem;
+  }
+  .drift-nb-pick-menu .drift-nb-pick-options .list-group-item {
+    font-size: 0.8125rem;
+    border-left: none;
+    border-right: none;
+  }
+  .drift-nb-pick-menu .drift-nb-pick-q {
+    font-size: 0.8125rem;
+  }
+</style>
+<script>
+(function() {
+  var el = document.getElementById("drift-nb-picker-catalog");
+  try {
+    window.DriftNbPickerChoices = el ? JSON.parse(el.textContent) : {};
+  } catch (e) {
+    window.DriftNbPickerChoices = {};
+  }
+
+  function esc(s) {
+    return String(s)
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;");
+  }
+
+  function visiblePlain(el) {
+    return el ? el.textContent.replace(/\s+/g, " ").trim() : "";
+  }
+
+  function highlight(name, q) {
+    var e = esc(name);
+    var t = (q || "").trim();
+    if (!t) return e;
+    var low = name.toLowerCase();
+    var lt = t.toLowerCase();
+    var i = low.indexOf(lt);
+    if (i < 0) return e;
+    return (
+      esc(name.slice(0, i)) +
+      '<mark class="bg-warning bg-opacity-50 text-dark">' +
+      esc(name.slice(i, i + lt.length)) +
+      "</mark>" +
+      esc(name.slice(i + lt.length))
+    );
+  }
+
+  function filterList(items, q) {
+    var parts = (q || "").toLowerCase().split(/\s+/).filter(Boolean);
+    if (!parts.length) return items.slice();
+    return items.filter(function(name) {
+      var n = String(name).toLowerCase();
+      return parts.every(function(p) { return n.indexOf(p) >= 0; });
+    });
+  }
+
+  function getMenu(wrap) {
+    if (!wrap.__driftMenuEl) {
+      wrap.__driftMenuEl = wrap.querySelector(".drift-nb-pick-menu");
+    }
+    return wrap.__driftMenuEl;
+  }
+
+  function closeAllMenus() {
+    document.querySelectorAll(".drift-nb-pick-menu").forEach(function(menu) {
+      if (menu.classList.contains("d-none")) return;
+      var w = menu.__driftOwner || menu.closest(".drift-nb-pick");
+      menu.classList.add("d-none");
+      if (menu.parentNode === document.body && w) {
+        w.appendChild(menu);
+      }
+      delete menu.__driftOwner;
+      if (w) {
+        var tb = w.querySelector(".drift-nb-pick-toggle");
+        if (tb) tb.setAttribute("aria-expanded", "false");
+      }
+    });
+  }
+
+  function repopulate(wrap) {
+    var kind = wrap.getAttribute("data-nb-pick-kind") || "";
+    var base = (window.DriftNbPickerChoices && window.DriftNbPickerChoices[kind]) || [];
+    var list = base.slice();
+    var cur = visiblePlain(wrap.querySelector(".drift-nb-pick-visible"));
+    if (cur && cur !== "—" && list.indexOf(cur) < 0) {
+      list.unshift(cur);
+    }
+    var menu = getMenu(wrap);
+    var qel = menu.querySelector(".drift-nb-pick-q");
+    var q = qel ? qel.value : "";
+    var filtered = filterList(list, q);
+    var opts = menu.querySelector(".drift-nb-pick-options");
+    opts.innerHTML = "";
+    filtered.forEach(function(name) {
+      var b = document.createElement("button");
+      b.type = "button";
+      b.className =
+        "list-group-item list-group-item-action py-1 px-2 text-start border-start-0 border-end-0";
+      b.innerHTML = highlight(name, q);
+      b.addEventListener("click", function(ev) {
+        ev.preventDefault();
+        ev.stopPropagation();
+        var vis = wrap.querySelector(".drift-nb-pick-visible");
+        vis.textContent = name;
+        if (typeof window.DriftReviewMarkDirty === "function") {
+          window.DriftReviewMarkDirty();
+        }
+        closeAllMenus();
+      });
+      opts.appendChild(b);
+    });
+  }
+
+  function openWrap(wrap) {
+    closeAllMenus();
+    var menu = getMenu(wrap);
+    var btn = wrap.querySelector(".drift-nb-pick-toggle");
+    if (!menu || !btn) return;
+    document.body.appendChild(menu);
+    menu.__driftOwner = wrap;
+    var r = btn.getBoundingClientRect();
+    var vw = window.innerWidth || 800;
+    var left = Math.min(Math.max(8, r.left), vw - 200);
+    menu.style.position = "fixed";
+    menu.style.left = left + "px";
+    menu.style.top = (r.bottom + 4) + "px";
+    menu.style.zIndex = "10050";
+    menu.classList.remove("d-none");
+    btn.setAttribute("aria-expanded", "true");
+    var qel = menu.querySelector(".drift-nb-pick-q");
+    if (qel) qel.value = "";
+    repopulate(wrap);
+    if (qel) qel.focus();
+    if (!wrap.__driftNbFilterBound) {
+      wrap.__driftNbFilterBound = true;
+      if (qel) {
+        qel.addEventListener("input", function() {
+          repopulate(wrap);
+        });
+        qel.addEventListener("click", function(e) {
+          e.stopPropagation();
+        });
+      }
+    }
+  }
+
+  document.addEventListener("click", function(evt) {
+    var t = evt.target;
+    if (!(t instanceof Element)) return;
+    if (t.closest(".drift-nb-pick-menu")) {
+      return;
+    }
+    var toggle = t.closest(".drift-nb-pick-toggle");
+    if (toggle) {
+      evt.preventDefault();
+      evt.stopPropagation();
+      var wrap = toggle.closest(".drift-nb-pick");
+      if (!wrap) return;
+      var menu = getMenu(wrap);
+      var open = menu && !menu.classList.contains("d-none") && menu.parentNode === document.body;
+      if (open) {
+        closeAllMenus();
+      } else {
+        openWrap(wrap);
+      }
+      return;
+    }
+    closeAllMenus();
+  });
+
+  document.addEventListener("keydown", function(evt) {
+    if (evt.key === "Escape") closeAllMenus();
+  });
+
+  window.DriftReviewCollectOverrides = function() {
+    var out = {};
+    document.querySelectorAll(".drift-nb-pick[data-drift-sel-key]").forEach(function(wrap) {
+      var sk = wrap.getAttribute("data-drift-sel-key");
+      var ri = wrap.getAttribute("data-drift-row-idx");
+      var ch = wrap.getAttribute("data-drift-col-header");
+      if (!sk || ri === null || !ch) return;
+      var vis = wrap.querySelector(".drift-nb-pick-visible");
+      var t = vis ? vis.textContent.replace(/\s+/g, " ").trim() : "";
+      if (t === "—") t = "";
+      if (!out[sk]) out[sk] = {};
+      if (!out[sk][ri]) out[sk][ri] = {};
+      out[sk][ri][ch] = t;
+    });
+    return out;
+  };
+})();
+</script>
+{% endif %}

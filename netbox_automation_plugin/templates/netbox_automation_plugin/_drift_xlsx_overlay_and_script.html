@@ -1,0 +1,113 @@
+{% load i18n %}
+<script>
+(function() {
+  function csrfToken() {
+    var m = document.cookie.match(/csrftoken=([^;]+)/);
+    return m ? decodeURIComponent(m[1]) : "";
+  }
+  var overlay = document.getElementById("drift-xlsx-loading-overlay");
+  function showXlsxOverlay() {
+    if (!overlay) return;
+    overlay.classList.add("drift-loading-visible");
+    overlay.setAttribute("aria-hidden", "false");
+  }
+  function hideXlsxOverlay() {
+    if (!overlay) return;
+    overlay.classList.remove("drift-loading-visible");
+    overlay.setAttribute("aria-hidden", "true");
+  }
+  function downloadBlob(blob, filename) {
+    var a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = filename || "report.xlsx";
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(a.href);
+  }
+  function fetchGetXlsx(url, filename) {
+    showXlsxOverlay();
+    return fetch(url, { credentials: "same-origin" })
+      .then(function(r) {
+        if (!r.ok) throw new Error(r.statusText || String(r.status));
+        return r.blob();
+      })
+      .then(function(blob) { downloadBlob(blob, filename); })
+      .catch(function(e) { console.warn("Excel download failed:", e); })
+      .finally(hideXlsxOverlay);
+  }
+  document.addEventListener("click", function(e) {
+    var a = e.target.closest("a.js-drift-xlsx-get");
+    if (!a || !a.getAttribute("href")) return;
+    e.preventDefault();
+    var href = a.getAttribute("href");
+    var name = a.getAttribute("data-download-name") || "drift-report.xlsx";
+    fetchGetXlsx(href, name);
+  });
+  document.addEventListener("click", function(e) {
+    var btn = e.target.closest("button.js-drift-xlsx-modified-live");
+    if (!btn) return;
+    e.preventDefault();
+    var postUrl = (window._driftXlsxUiConfig && window._driftXlsxUiConfig.postModifiedUrl) || "";
+    if (!postUrl) return;
+    var collect = window.DriftReviewCollectOverrides;
+    var overrides = typeof collect === "function" ? collect() : {};
+    showXlsxOverlay();
+    fetch(postUrl, {
+      method: "POST",
+      credentials: "same-origin",
+      headers: {
+        "Content-Type": "application/json",
+        "X-CSRFToken": csrfToken()
+      },
+      body: JSON.stringify({ overrides: overrides })
+    })
+      .then(function(r) {
+        if (!r.ok) throw new Error(r.statusText || String(r.status));
+        return r.blob();
+      })
+      .then(function(blob) { downloadBlob(blob, "drift-report-modified.xlsx"); })
+      .catch(function(err) { console.warn("Modified Excel download failed:", err); })
+      .finally(hideXlsxOverlay);
+  });
+  document.addEventListener("click", function(e) {
+    var saveBtn = e.target.closest("button.js-drift-save-review");
+    if (!saveBtn) return;
+    e.preventDefault();
+    var url = (window._driftXlsxUiConfig && window._driftXlsxUiConfig.saveReviewUrl) || "";
+    if (!url) return;
+    var collect = window.DriftReviewCollectOverrides;
+    var overrides = typeof collect === "function" ? collect() : {};
+    saveBtn.disabled = true;
+    fetch(url, {
+      method: "POST",
+      credentials: "same-origin",
+      headers: {
+        "Content-Type": "application/json",
+        "X-CSRFToken": csrfToken()
+      },
+      body: JSON.stringify({ overrides: overrides })
+    })
+      .then(function(r) { return r.json().then(function(j) { return { r: r, j: j }; }); })
+      .then(function(pair) {
+        if (!pair.r.ok || !pair.j.ok) {
+          throw new Error((pair.j && pair.j.error) || pair.r.statusText || "Save failed");
+        }
+        if (pair.j.reload && window.DriftReviewReloadAfterSave === true) {
+          window.location.reload();
+          return;
+        }
+        if (typeof window.DriftReviewOnSaved === "function") {
+          window.DriftReviewOnSaved(pair.j);
+        } else {
+          alert("{% trans 'Review edits saved.' %}");
+        }
+      })
+      .catch(function(err) {
+        console.warn("Save review failed:", err);
+        alert("{% trans 'Could not save review edits.' %} " + (err && err.message ? err.message : ""));
+      })
+      .finally(function() { saveBtn.disabled = false; });
+  });
+})();
+</script>

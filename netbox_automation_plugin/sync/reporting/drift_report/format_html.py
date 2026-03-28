@@ -9,6 +9,13 @@ from netbox_automation_plugin.sync.reporting.drift_report.format_html_inventory 
 from netbox_automation_plugin.sync.reporting.drift_report.format_html_proposed import (
     emit_proposed_change_tables,
 )
+from netbox_automation_plugin.sync.reporting.drift_report.fabric_alignment import (
+    _alignment_review_rows,
+)
+from netbox_automation_plugin.sync.reporting.drift_report.drift_overrides_apply import (
+    merge_drift_review_overrides,
+    normalize_drift_review_overrides,
+)
 from netbox_automation_plugin.sync.reporting.drift_report.placement import _drift_for_user_reports
 from netbox_automation_plugin.sync.reporting.drift_report.proposed_changes import (
     _proposed_changes_rows,
@@ -30,6 +37,7 @@ def format_drift_report(
     interface_audit=None,
     netbox_ifaces=None,
     use_html=True,
+    drift_overrides=None,
 ):
     """
     Return {"drift": str, "reference": str, "drift_markup": "html"|"text"}.
@@ -48,6 +56,21 @@ def format_drift_report(
     emit_inventory_scope(
         e, maas_data, netbox_data, openstack_data, drift, netbox_prefix_count
     )
+    align_rows = _alignment_review_rows(matched_rows)
+    prop = _proposed_changes_rows(
+        maas_data,
+        netbox_data,
+        drift,
+        interface_audit,
+        matched_rows,
+        os_subnet_gaps or [],
+        os_floating_gaps or [],
+        openstack_data=openstack_data,
+        netbox_ifaces=netbox_ifaces,
+    )
+    norm = normalize_drift_review_overrides(drift_overrides) if drift_overrides else {}
+    if norm:
+        prop, align_rows = merge_drift_review_overrides(prop, align_rows, norm)
     emit_drift_counts_and_alignment(
         e,
         drift,
@@ -59,18 +82,7 @@ def format_drift_report(
         os_subnet_gaps,
         os_floating_gaps,
         orphaned_nb_count,
-    )
-
-    prop = _proposed_changes_rows(
-        maas_data,
-        netbox_data,
-        drift,
-        interface_audit,
-        matched_rows,
-        os_subnet_gaps or [],
-        os_floating_gaps or [],
-        openstack_data=openstack_data,
-        netbox_ifaces=netbox_ifaces,
+        alignment_rows_override=align_rows,
     )
     emit_proposed_change_tables(e, prop)
 

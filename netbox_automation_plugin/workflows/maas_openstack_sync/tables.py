@@ -3,6 +3,10 @@ from django.urls import reverse
 from django.utils.html import format_html
 from django.utils.translation import gettext_lazy as _
 
+from netbox_automation_plugin.sync.reporting.drift_report.drift_overrides_apply import (
+    normalize_drift_review_overrides,
+)
+
 from .history_models import MAASOpenStackDriftRun
 
 
@@ -83,11 +87,47 @@ class MAASOpenStackDriftRunTable(tables.Table):
             "plugins:netbox_automation_plugin:maas_openstack_sync_run_download_xlsx",
             args=[record.id],
         )
+        download_mod_url = download_url + "?modified=1"
+        has_review = bool((record.report_drift_modified_html or "").strip()) or bool(
+            normalize_drift_review_overrides(record.drift_review_overrides)
+        )
+        badge_link = "badge text-decoration-none fw-normal py-2 px-2"
+        if has_review:
+            return format_html(
+                '<div class="d-flex flex-column gap-2 align-items-start">'
+                '<span class="badge text-bg-light text-dark border" title="{}">{}</span>'
+                '<div class="d-flex flex-wrap gap-1 align-items-center">'
+                '<a href="{}" class="{} text-bg-primary">{}</a>'
+                '<a href="{}?view=modified" class="{} text-bg-info">{}</a>'
+                '<a href="{}" class="{} text-bg-success js-drift-xlsx-get" data-download-name="drift-report-run-{}.xlsx">{}</a>'
+                '<a href="{}" class="{} text-bg-secondary js-drift-xlsx-get" data-download-name="drift-report-run-{}-modified.xlsx">{}</a>'
+                "</div>"
+                "</div>",
+                _("Saved NB proposed review edits for this run."),
+                _("Edits saved"),
+                view_url,
+                badge_link,
+                _("View report"),
+                view_url,
+                badge_link,
+                _("View modified"),
+                download_url,
+                badge_link,
+                record.id,
+                _("Download Excel"),
+                download_mod_url,
+                badge_link,
+                record.id,
+                _("Download modified Excel"),
+            )
         return format_html(
-            '<div class="d-flex gap-2 flex-wrap">'
-            '<a href="{}" class="btn btn-outline-primary btn-sm py-0 px-2">View report</a>'
-            '<a href="{}" class="btn btn-outline-success btn-sm py-0 px-2">Download Excel</a>'
+            '<div class="d-flex flex-wrap gap-2 align-items-center">'
+            '<a href="{}" class="btn btn-outline-primary btn-sm py-0 px-2">{}</a>'
+            '<a href="{}" class="btn btn-outline-success btn-sm py-0 px-2 js-drift-xlsx-get" data-download-name="drift-report-run-{}.xlsx">{}</a>'
             "</div>",
             view_url,
+            _("View report"),
             download_url,
+            record.id,
+            _("Download Excel"),
         )

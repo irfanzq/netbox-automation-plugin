@@ -21,6 +21,8 @@ def emit_drift_counts_and_alignment(
     os_subnet_gaps,
     os_floating_gaps,
     orphaned_nb_count,
+    *,
+    alignment_rows_override=None,
 ):
     e.spacer()
     e.banner("DRIFT COUNTS")
@@ -123,7 +125,11 @@ def emit_drift_counts_and_alignment(
         ],
     )
 
-    align_rows = _alignment_review_rows(matched_rows)
+    align_rows = (
+        alignment_rows_override
+        if alignment_rows_override is not None
+        else _alignment_review_rows(matched_rows)
+    )
     if align_rows:
         e.spacer()
         e.subtitle("Detail — placement & lifecycle alignment")
@@ -139,8 +145,8 @@ def emit_drift_counts_and_alignment(
                 "OS maintenance",
                 "NetBox site",
                 "NetBox location",
-                "NB state",
-                "NB proposed state",
+                "NB state (current)",
+                "NB proposed device status",
                 "Authority",
                 "Alignment issues",
             ],
@@ -150,4 +156,5 @@ def emit_drift_counts_and_alignment(
             wrap_max_width=None,
             selectable=True,
             selection_key="detail_placement_lifecycle_alignment",
+            proposed_pick_columns={"NB proposed device status": "device_status"},
         )

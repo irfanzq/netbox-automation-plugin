@@ -33,7 +33,41 @@
   .hist-filter-toolbar .btn {
     white-space: nowrap;
   }
+  #drift-xlsx-loading-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 10000;
+    background: rgba(0, 0, 0, 0.5);
+    display: none;
+    align-items: center;
+    justify-content: center;
+  }
+  #drift-xlsx-loading-overlay.drift-loading-visible {
+    display: flex;
+  }
+  #drift-xlsx-loading-overlay .drift-loading-content {
+    text-align: center;
+    color: #fff;
+  }
+  #drift-xlsx-loading-overlay .drift-loading-spinner {
+    width: 64px;
+    height: 64px;
+    margin: 0 auto 12px;
+    border: 4px solid rgba(255, 255, 255, 0.3);
+    border-top-color: #fff;
+    border-radius: 50%;
+    animation: drift-hist-xlsx-spin 0.9s linear infinite;
+  }
+  @keyframes drift-hist-xlsx-spin {
+    to { transform: rotate(360deg); }
+  }
 </style>
+<div id="drift-xlsx-loading-overlay" aria-hidden="true">
+  <div class="drift-loading-content">
+    <div class="drift-loading-spinner" aria-hidden="true"></div>
+    <div class="drift-loading-message fw-semibold">{% trans "Downloading Excel file…" %}</div>
+  </div>
+</div>
 <div class="row">
   <div class="col-md-12">
     <div class="card">
@@ -184,4 +218,8 @@
   refreshSummary();
 })();
 </script>
+<script>
+  window._driftXlsxUiConfig = { postModifiedUrl: "", saveReviewUrl: "" };
+</script>
+{% include "netbox_automation_plugin/_drift_xlsx_overlay_and_script.html" %}
 {% endblock %}

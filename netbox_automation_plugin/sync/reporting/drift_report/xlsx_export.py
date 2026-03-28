@@ -17,6 +17,10 @@ from netbox_automation_plugin.sync.reporting.drift_report.metrics import (
     _severity_triage_rows,
 )
 from netbox_automation_plugin.sync.reporting.drift_report.placement import _drift_for_user_reports
+from netbox_automation_plugin.sync.reporting.drift_report.drift_overrides_apply import (
+    merge_drift_review_overrides,
+    normalize_drift_review_overrides,
+)
 from netbox_automation_plugin.sync.reporting.drift_report.proposed_changes import (
     _proposed_changes_rows,
 )
@@ -34,6 +38,7 @@ def build_drift_report_xlsx(
     netbox_prefix_count=0,
     interface_audit=None,
     netbox_ifaces=None,
+    drift_overrides=None,
 ):
     """
     Build an Excel (.xlsx) workbook from the same inputs as format_drift_report.
@@ -218,6 +223,21 @@ def build_drift_report_xlsx(
             ws_sum.append(list(row))
         ws_sum.append([])
     align_rows_x = _alignment_review_rows(matched_rows)
+    prop = _proposed_changes_rows(
+        maas_data,
+        netbox_data,
+        drift,
+        interface_audit,
+        matched_rows,
+        os_subnet_gaps or [],
+        os_floating_gaps or [],
+        openstack_data=openstack_data,
+        netbox_ifaces=netbox_ifaces,
+    )
+    if drift_overrides:
+        norm = normalize_drift_review_overrides(drift_overrides)
+        if norm:
+            prop, align_rows_x = merge_drift_review_overrides(prop, align_rows_x, norm)
     if align_rows_x:
         r_al = ws_sum.max_row + 1
         ws_sum.append(["Detail — placement & lifecycle alignment", ""])
@@ -234,8 +254,8 @@ def build_drift_report_xlsx(
                 "OS maintenance",
                 "NetBox site",
                 "NetBox location",
-                "NB state",
-                "NB proposed state",
+                "NB state (current)",
+                "NB proposed device status",
                 "Authority",
                 "Alignment issues",
             ],
@@ -244,17 +264,6 @@ def build_drift_report_xlsx(
             ws_sum.append(row)
         ws_sum.append([])
 
-    prop = _proposed_changes_rows(
-        maas_data,
-        netbox_data,
-        drift,
-        interface_audit,
-        matched_rows,
-        os_subnet_gaps or [],
-        os_floating_gaps or [],
-        openstack_data=openstack_data,
-        netbox_ifaces=netbox_ifaces,
-    )
     ws_sum.append([])
     ws_sum.append(["PROPOSED CHANGES (read-only)", "", ""])
     _append_header(ws_sum, ["Bucket", "Count"])
@@ -312,15 +321,15 @@ def build_drift_report_xlsx(
         "A) New devices",
         [
             "Hostname",
-            "NB region",
-            "NB site",
-            "NB location",
+            "NB proposed region",
+            "NB proposed site",
+            "NB proposed location",
             "OS region",
             "OS provision",
             "OS power",
             "OS maintenance",
-            "NetBox device type",
-            "NetBox role",
+            "NB proposed device type",
+            "NB proposed role",
             "MAAS fabric",
             "MAAS status",
             "Serial Number",
@@ -329,8 +338,8 @@ def build_drift_report_xlsx(
             "NIC count",
             "Primary MAC (MAAS)",
             "Authority",
-            "NB proposed state",
-            "NB Proposed Tag",
+            "NB proposed device status",
+            "NB proposed tag",
             "Proposed Action",
         ],
         prop["add_devices"],
@@ -339,15 +348,15 @@ def build_drift_report_xlsx(
         "A) MAAS-only hosts (manual review required)",
         [
             "Hostname",
-            "NB region",
-            "NB site",
-            "NB location",
+            "NB proposed region",
+            "NB proposed site",
+            "NB proposed location",
             "OS region",
             "OS provision",
             "OS power",
             "OS maintenance",
-            "NetBox device type",
-            "NetBox role",
+            "NB proposed device type",
+            "NB proposed role",
             "MAAS fabric",
             "MAAS status",
             "Serial Number",
@@ -356,8 +365,8 @@ def build_drift_report_xlsx(
             "NIC count",
             "Primary MAC (MAAS)",
             "Authority",
-            "NB proposed state",
-            "NB Proposed Tag",
+            "NB proposed device status",
+            "NB proposed tag",
             "Proposed Action",
         ],
         prop.get("add_devices_review_only", []),
@@ -370,18 +379,18 @@ def build_drift_report_xlsx(
             "Start address",
             "End address",
             "Project",
-            "Suggested NB role",
-            "NB status",
-            "Suggested NB VRF",
+            "NB proposed role",
+            "NB proposed status",
+            "NB proposed VRF",
             "Role reason",
             "Authority",
             "Proposed Action",
         ],
         prop["add_prefixes"],
         note=(
-            "NB status: reserved when no Neutron ports were counted on that subnet in this scan; "
+            "NB proposed status: reserved when no Neutron ports were counted on that subnet in this scan; "
             "active when at least one port was seen (role certainty is only in Role reason). "
-            "Suggested NB VRF is inferred from OpenStack naming signals (network/project/region text)."
+            "NB proposed VRF is inferred from OpenStack naming signals (network/project/region text)."
         ),
     )
     _append_block(
@@ -392,9 +401,9 @@ def build_drift_report_xlsx(
             "Name",
             "NAT inside IP (from OpenStack fixed IP)",
             "Project",
-            "NB status",
-            "NB role",
-            "NB VRF",
+            "NB proposed status",
+            "NB proposed role",
+            "NB proposed VRF",
             "Proposed Action",
         ],
         prop["add_fips"],

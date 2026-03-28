@@ -4,6 +4,26 @@ from netbox_automation_plugin.sync.reporting.drift_report.maas_netbox_status imp
     maas_to_netbox_mapping_reference_rows,
 )
 
+# Header label → catalog key for drift_nb_picker_catalog (NB proposed tag excluded).
+_PROPOSED_NB_PICK_DEVICE = {
+    "NB proposed region": "region",
+    "NB proposed site": "site",
+    "NB proposed location": "location",
+    "NB proposed device type": "device_type",
+    "NB proposed role": "device_role",
+    "NB proposed device status": "device_status",
+}
+_PROPOSED_NB_PICK_PREFIX = {
+    "NB proposed role": "prefix_role",
+    "NB proposed status": "prefix_status",
+    "NB proposed VRF": "vrf",
+}
+_PROPOSED_NB_PICK_FIP = {
+    "NB proposed status": "ip_status",
+    "NB proposed role": "ip_role",
+    "NB proposed VRF": "vrf",
+}
+
 
 def emit_proposed_change_tables(e, prop):
     e.spacer()
@@ -49,15 +69,15 @@ def emit_proposed_change_tables(e, prop):
         e.table(
             [
                 "Hostname",
-                "NB region",
-                "NB site",
-                "NB location",
+                "NB proposed region",
+                "NB proposed site",
+                "NB proposed location",
                 "OS region",
                 "OS provision",
                 "OS power",
                 "OS maintenance",
-                "NetBox device type",
-                "NetBox role",
+                "NB proposed device type",
+                "NB proposed role",
                 "MAAS fabric",
                 "MAAS status",
                 "Serial Number",
@@ -66,8 +86,8 @@ def emit_proposed_change_tables(e, prop):
                 "NIC count",
                 "Primary MAC (MAAS)",
                 "Authority",
-                "NB proposed state",
-                "NB Proposed Tag",
+                "NB proposed device status",
+                "NB proposed tag",
                 "Proposed Action",
             ],
             prop["add_devices"],
@@ -75,6 +95,7 @@ def emit_proposed_change_tables(e, prop):
             wrap_max_width=None,
             selectable=True,
             selection_key="detail_new_devices",
+            proposed_pick_columns=_PROPOSED_NB_PICK_DEVICE,
         )
     if prop.get("add_devices_review_only"):
         e.spacer()
@@ -83,15 +104,15 @@ def emit_proposed_change_tables(e, prop):
         e.table(
             [
                 "Hostname",
-                "NB region",
-                "NB site",
-                "NB location",
+                "NB proposed region",
+                "NB proposed site",
+                "NB proposed location",
                 "OS region",
                 "OS provision",
                 "OS power",
                 "OS maintenance",
-                "NetBox device type",
-                "NetBox role",
+                "NB proposed device type",
+                "NB proposed role",
                 "MAAS fabric",
                 "MAAS status",
                 "Serial Number",
@@ -100,8 +121,8 @@ def emit_proposed_change_tables(e, prop):
                 "NIC count",
                 "Primary MAC (MAAS)",
                 "Authority",
-                "NB proposed state",
-                "NB Proposed Tag",
+                "NB proposed device status",
+                "NB proposed tag",
                 "Proposed Action",
             ],
             prop["add_devices_review_only"],
@@ -109,15 +130,16 @@ def emit_proposed_change_tables(e, prop):
             wrap_max_width=None,
             selectable=True,
             selection_key="detail_review_only_devices",
+            proposed_pick_columns=_PROPOSED_NB_PICK_DEVICE,
         )
     if prop["add_prefixes"]:
         e.spacer()
         e.subtitle("Detail — new prefixes")
         e.paragraph(
             "Use each row as NetBox Prefix create input (CIDR + OpenStack network/project context). "
-            "NB status: reserved when no Neutron ports were counted on that subnet in this scan; "
+            "NB proposed status: reserved when no Neutron ports were counted on that subnet in this scan; "
             "active when at least one port was seen (role certainty is only in Role reason). "
-            "Suggested NB VRF is inferred from OpenStack naming signals (network/project/region text)."
+            "NB proposed VRF is inferred from OpenStack naming signals (network/project/region text)."
         )
         e.spacer()
         e.table(
@@ -127,9 +149,9 @@ def emit_proposed_change_tables(e, prop):
                 "Start address",
                 "End address",
                 "Project",
-                "Suggested NB role",
-                "NB status",
-                "Suggested NB VRF",
+                "NB proposed role",
+                "NB proposed status",
+                "NB proposed VRF",
                 "Role reason",
                 "Authority",
                 "Proposed Action",
@@ -139,6 +161,7 @@ def emit_proposed_change_tables(e, prop):
             wrap_max_width=None,
             selectable=True,
             selection_key="detail_new_prefixes",
+            proposed_pick_columns=_PROPOSED_NB_PICK_PREFIX,
         )
     if prop["add_fips"]:
         e.spacer()
@@ -151,9 +174,9 @@ def emit_proposed_change_tables(e, prop):
                 "Name",
                 "NAT inside IP (from OpenStack fixed IP)",
                 "Project",
-                "NB status",
-                "NB role",
-                "NB VRF",
+                "NB proposed status",
+                "NB proposed role",
+                "NB proposed VRF",
                 "Proposed Action",
             ],
             prop["add_fips"],
@@ -161,6 +184,7 @@ def emit_proposed_change_tables(e, prop):
             wrap_max_width=None,
             selectable=True,
             selection_key="detail_new_fips",
+            proposed_pick_columns=_PROPOSED_NB_PICK_FIP,
         )
 
     e.spacer()

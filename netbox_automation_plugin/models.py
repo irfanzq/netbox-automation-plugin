@@ -245,6 +245,28 @@ class MAASOpenStackDriftRun(NetBoxModel):
     snapshot_payload = models.JSONField(default=dict, blank=True)
     source_cache_key = models.CharField(max_length=200, blank=True, default="")
     error_message = models.TextField(blank=True, default="")
+    drift_review_overrides = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text="User edits to NB proposed columns (by selection_key / row / header).",
+    )
+    report_drift_modified_html = models.TextField(
+        blank=True,
+        help_text="HTML drift report regenerated with drift_review_overrides applied.",
+    )
+    drift_review_modified_xlsx = models.BinaryField(
+        null=True,
+        blank=True,
+        help_text="Excel export built when review edits were saved (same overrides as modified HTML).",
+    )
+    drift_review_saved_at = models.DateTimeField(null=True, blank=True)
+    drift_review_saved_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="maas_openstack_drift_runs_review_saved",
+    )
 
     class Meta:
         app_label = "netbox_automation_plugin"

@@ -1,15 +1,29 @@
+import json
 from datetime import date, timedelta
 
 from django.contrib.auth.mixins import LoginRequiredMixin
 from django.db.models import Q
-from django.http import HttpResponse
+from django.http import HttpResponse, JsonResponse
 from django.shortcuts import get_object_or_404, render
+from django.urls import reverse
+from django.utils import timezone
 from django.views import View
+from django.views.decorators.csrf import ensure_csrf_cookie
+from django.utils.decorators import method_decorator
 from django_tables2 import RequestConfig
 
-from netbox_automation_plugin.sync.reporting.drift_report import build_drift_report_xlsx
+from netbox_automation_plugin.sync.reporting.drift_report.drift_overrides_apply import (
+    normalize_drift_review_overrides,
+)
 
+from .drift_snapshot_export import (
+    build_drift_report_xlsx_from_snapshot_payload,
+    format_drift_report_from_snapshot_payload,
+)
 from .history_models import MAASOpenStackDriftRun
+from netbox_automation_plugin.sync.reporting.drift_report.drift_nb_picker_catalog import (
+    build_drift_nb_picker_catalog,
+)
 from .netbox_scope_choices import list_site_location_choices
 from .tables import MAASOpenStackDriftRunTable
 
@@ -131,40 +145,131 @@ class MAASOpenStackSyncRunsView(LoginRequiredMixin, View):
         return render(request, self.template_name, context)
 
 
+@method_decorator(ensure_csrf_cookie, name="dispatch")
 class MAASOpenStackSyncRunDetailView(LoginRequiredMixin, View):
     template_name = "netbox_automation_plugin/maas_openstack_sync_run_detail.html"
 
     def get(self, request, run_id: int):
         run = get_object_or_404(MAASOpenStackDriftRun, pk=run_id)
+        markup = run.report_drift_markup or "html"
+        picker_catalog = None
+        if str(markup).lower() == "html":
+            try:
+                picker_catalog = build_drift_nb_picker_catalog()
+            except Exception:
+                picker_catalog = {}
+        want_modified = (request.GET.get("view") or "").strip().lower() in (
+            "modified",
+            "1",
+            "true",
+        )
+        has_modified_html = bool((run.report_drift_modified_html or "").strip())
+        has_overrides = bool(normalize_drift_review_overrides(run.drift_review_overrides))
+        drift_has_saved_review = has_modified_html or has_overrides
+        report_body = run.report_drift
+        if want_modified and has_modified_html:
+            report_body = run.report_drift_modified_html
+        elif want_modified and not has_modified_html:
+            want_modified = False
+
         return render(
             request,
             self.template_name,
             {
                 "run": run,
-                "report_drift": run.report_drift,
-                "report_drift_markup": run.report_drift_markup or "html",
+                "report_drift": report_body,
+                "report_drift_markup": markup,
                 "report_reference": run.report_reference or "",
+                "drift_nb_picker_catalog": picker_catalog,
+                "drift_view_modified": want_modified and has_modified_html,
+                "drift_has_saved_review": drift_has_saved_review,
+                "drift_review_saved_at": run.drift_review_saved_at,
+                "drift_save_review_url": reverse(
+                    "plugins:netbox_automation_plugin:maas_openstack_sync_run_save_review",
+                    args=[run.id],
+                ),
+                "drift_download_xlsx_modified_url": reverse(
+                    "plugins:netbox_automation_plugin:maas_openstack_sync_run_download_xlsx",
+                    args=[run.id],
+                )
+                + "?modified=1",
+                "drift_download_xlsx_modified_post_url": "",
             },
         )
+
+
+class MAASOpenStackSyncRunSaveReviewView(LoginRequiredMixin, View):
+    """POST JSON { "overrides": { selection_key: { row_idx: { header: value } } } }."""
+
+    http_method_names = ["post"]
+
+    def post(self, request, run_id: int):
+        run = get_object_or_404(MAASOpenStackDriftRun, pk=run_id)
+        try:
+            body = json.loads(request.body.decode() or "{}")
+        except json.JSONDecodeError:
+            return JsonResponse({"ok": False, "error": "Invalid JSON"}, status=400)
+        raw_ov = body.get("overrides")
+        overrides = normalize_drift_review_overrides(raw_ov)
+        mod_xlsx = None
+        try:
+            if not overrides:
+                mod_html = ""
+            else:
+                report_out = format_drift_report_from_snapshot_payload(
+                    run.snapshot_payload,
+                    drift_overrides=overrides,
+                )
+                mod_html = report_out.get("drift") or ""
+                mod_xlsx = build_drift_report_xlsx_from_snapshot_payload(
+                    run.snapshot_payload,
+                    drift_overrides=overrides,
+                )
+        except Exception as e:
+            return JsonResponse({"ok": False, "error": str(e)}, status=500)
+        run.drift_review_overrides = overrides
+        run.report_drift_modified_html = mod_html
+        run.drift_review_modified_xlsx = mod_xlsx if overrides else None
+        run.drift_review_saved_at = timezone.now()
+        run.drift_review_saved_by = request.user if getattr(request, "user", None) and request.user.is_authenticated else None
+        run.save()
+        return JsonResponse({"ok": True, "run_id": run.id, "reload": True})
 
 
 class MAASOpenStackSyncRunDownloadXlsxView(LoginRequiredMixin, View):
     def get(self, request, run_id: int):
         run = get_object_or_404(MAASOpenStackDriftRun, pk=run_id)
         payload = run.snapshot_payload or {}
+        want_modified = (request.GET.get("modified") or "").strip().lower() in (
+            "1",
+            "true",
+            "yes",
+        )
+        drift_overrides = None
+        if want_modified:
+            norm = normalize_drift_review_overrides(run.drift_review_overrides)
+            if not norm:
+                return HttpResponse(
+                    "No saved review edits for this run. Save review edits first.",
+                    status=404,
+                    content_type="text/plain; charset=utf-8",
+                )
+            drift_overrides = run.drift_review_overrides
+            stored = run.drift_review_modified_xlsx
+            if stored:
+                xlsx_bytes = bytes(stored)
+                resp = HttpResponse(
+                    xlsx_bytes,
+                    content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                )
+                resp["Content-Disposition"] = (
+                    f'attachment; filename="drift-report-run-{run_id}-modified.xlsx"'
+                )
+                return resp
         try:
-            xlsx_bytes = build_drift_report_xlsx(
-                payload.get("maas_data") or {},
-                payload.get("netbox_data") or {},
-                payload.get("openstack_data"),
-                payload.get("drift") or {},
-                matched_rows=payload.get("matched_rows"),
-                os_subnet_hints=payload.get("os_subnet_hints"),
-                os_subnet_gaps=payload.get("os_subnet_gaps"),
-                os_floating_gaps=payload.get("os_floating_gaps"),
-                netbox_prefix_count=payload.get("netbox_prefix_count", 0),
-                interface_audit=payload.get("interface_audit"),
-                netbox_ifaces=payload.get("netbox_ifaces"),
+            xlsx_bytes = build_drift_report_xlsx_from_snapshot_payload(
+                payload,
+                drift_overrides=drift_overrides,
             )
         except Exception as e:
             return HttpResponse(
@@ -176,5 +281,8 @@ class MAASOpenStackSyncRunDownloadXlsxView(LoginRequiredMixin, View):
             xlsx_bytes,
             content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
-        resp["Content-Disposition"] = f'attachment; filename="drift-report-run-{run_id}.xlsx"'
+        suffix = "-modified" if want_modified else ""
+        resp["Content-Disposition"] = (
+            f'attachment; filename="drift-report-run-{run_id}{suffix}.xlsx"'
+        )
         return resp

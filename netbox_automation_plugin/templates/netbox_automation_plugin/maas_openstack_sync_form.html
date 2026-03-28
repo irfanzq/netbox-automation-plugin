@@ -17,6 +17,18 @@
   #drift-audit-loading-overlay.drift-loading-visible {
     display: flex;
   }
+  #drift-xlsx-loading-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 10000;
+    background: rgba(0, 0, 0, 0.5);
+    display: none;
+    align-items: center;
+    justify-content: center;
+  }
+  #drift-xlsx-loading-overlay.drift-loading-visible {
+    display: flex;
+  }
   .drift-loading-content {
     text-align: center;
     color: #fff;
@@ -99,6 +111,14 @@
       <span class="drift-loading-text">loading</span>
     </div>
     <div class="drift-loading-message">{% trans "Running report…" %}</div>
+  </div>
+</div>
+<div id="drift-xlsx-loading-overlay" aria-hidden="true">
+  <div class="drift-loading-content">
+    <div class="drift-loading-spinner">
+      <span class="drift-loading-text">loading</span>
+    </div>
+    <div class="drift-loading-message">{% trans "Downloading Excel file…" %}</div>
   </div>
 </div>
 <div class="row">
@@ -189,7 +209,8 @@
                 <div class="col-12 d-flex flex-wrap gap-2">
                   <button type="submit" class="btn btn-primary">{% trans "Run drift audit" %}</button>
                   {% if audit_done %}
-                    <a href="{% url 'plugins:netbox_automation_plugin:maas_openstack_sync_download_xlsx' %}" class="btn btn-outline-success">{% trans "Download as Excel (.xlsx)" %}</a>
+                    <a href="{% url 'plugins:netbox_automation_plugin:maas_openstack_sync_download_xlsx' %}" class="btn btn-outline-success js-drift-xlsx-get">{% trans "Download as Excel (.xlsx)" %}</a>
+                    <button type="button" class="btn btn-outline-secondary js-drift-xlsx-modified-live">{% trans "Download modified Excel (.xlsx)" %}</button>
                   {% else %}
                     <button type="submit" name="format" value="xlsx" class="btn btn-outline-success">{% trans "Run drift audit + download Excel (.xlsx)" %}</button>
                   {% endif %}
@@ -480,19 +501,38 @@
               width: 1%;
               white-space: nowrap;
             }
+            .drift-audit-report-scroll .drift-report-sticky-actions {
+              position: sticky;
+              top: 0;
+              z-index: 100;
+              margin: -0.5rem -0.5rem 0.75rem -0.5rem;
+              padding: 0.5rem 0.5rem;
+              background-color: var(--bs-secondary-bg);
+              border-bottom: 1px solid var(--bs-border-color);
+              box-shadow: 0 2px 4px rgba(0, 0, 0, 0.06);
+            }
           </style>
           <div class="card mb-3">
-            <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">
+            <div class="card-header">
               <h5 class="mb-0">
                 {% trans "Drift Audit Report" %}
                 {% if audit_run_id %}
                   <span class="badge text-bg-secondary ms-1">Run #{{ audit_run_id }}</span>
                 {% endif %}
               </h5>
-              <a href="{% url 'plugins:netbox_automation_plugin:maas_openstack_sync_download_xlsx' %}" class="btn btn-outline-success btn-sm">{% trans "Download as Excel (.xlsx)" %}</a>
             </div>
             <div class="card-body p-2">
               <div class="drift-audit-report-scroll border rounded bg-body-secondary p-2">
+                <div class="drift-report-sticky-actions d-flex flex-wrap align-items-center justify-content-between gap-2">
+                  <span class="small text-body-secondary fw-semibold text-uppercase">{% trans "Report actions" %}</span>
+                  <div class="d-flex flex-wrap gap-1 justify-content-end">
+                    <a href="{% url 'plugins:netbox_automation_plugin:maas_openstack_sync_download_xlsx' %}" class="btn btn-outline-success btn-sm js-drift-xlsx-get">{% trans "Download as Excel (.xlsx)" %}</a>
+                    <button type="button" class="btn btn-outline-secondary btn-sm js-drift-xlsx-modified-live">{% trans "Download modified Excel (.xlsx)" %}</button>
+                    {% if drift_save_review_url %}
+                      <button type="button" class="btn btn-primary btn-sm js-drift-save-review">{% trans "Save review edits" %}</button>
+                    {% endif %}
+                  </div>
+                </div>
                 {% if report_drift_markup == "html" %}
                   {{ report_drift|safe }}
                 {% else %}
@@ -588,11 +628,26 @@
               initAll();
             })();
           </script>
+          {% include "netbox_automation_plugin/_drift_nb_picker_script.html" %}
         {% endif %}
         {% if auto_download_xlsx and download_xlsx_url %}
           <script>
             (function() {
               var url = "{{ download_xlsx_url|escapejs }}";
+              var xov = document.getElementById("drift-xlsx-loading-overlay");
+              function xShow() {
+                if (xov) {
+                  xov.classList.add("drift-loading-visible");
+                  xov.setAttribute("aria-hidden", "false");
+                }
+              }
+              function xHide() {
+                if (xov) {
+                  xov.classList.remove("drift-loading-visible");
+                  xov.setAttribute("aria-hidden", "true");
+                }
+              }
+              xShow();
               fetch(url, { credentials: "same-origin" })
                 .then(function(r) {
                   if (!r.ok) throw new Error(r.statusText);
@@ -609,9 +664,19 @@
                 })
                 .catch(function(e) {
                   console.warn("Drift report Excel download failed:", e);
-                });
+                })
+                .finally(xHide);
             })();
           </script>
+        {% endif %}
+        {% if audit_done %}
+          <script>
+            window._driftXlsxUiConfig = {
+              postModifiedUrl: "{{ drift_download_xlsx_modified_post_url|default:''|escapejs }}",
+              saveReviewUrl: "{{ drift_save_review_url|default:''|escapejs }}"
+            };
+          </script>
+          {% include "netbox_automation_plugin/_drift_xlsx_overlay_and_script.html" %}
         {% endif %}
   </div>
 </div>

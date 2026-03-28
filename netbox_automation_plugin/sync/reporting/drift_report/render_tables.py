@@ -155,6 +155,39 @@ def _html_cell_content(s) -> str:
     return html.escape(raw, quote=False).replace("\n", "<br />")
 
 
+def _html_nb_picker_wrap(
+    inner_safe_html: str,
+    kind: str,
+    *,
+    col_header: str = "",
+    selection_key: str = "",
+    row_idx: str = "",
+) -> str:
+    """Wrap already-escaped cell HTML in a NetBox choice picker (search + scroll)."""
+    safe_kind = html.escape(kind, quote=True)
+    extra = ""
+    if col_header and selection_key and row_idx != "":
+        extra = (
+            f" data-drift-col-header={html.escape(str(col_header), quote=True)}"
+            f" data-drift-sel-key={html.escape(str(selection_key), quote=True)}"
+            f" data-drift-row-idx={html.escape(str(row_idx), quote=True)}"
+        )
+    return (
+        '<div class="drift-nb-pick position-relative d-inline-flex align-items-start gap-1 flex-wrap text-start" '
+        f'data-nb-pick-kind="{safe_kind}"{extra} role="group">'
+        f'<span class="drift-nb-pick-visible align-self-center">{inner_safe_html}</span>'
+        '<button type="button" class="btn btn-outline-secondary btn-sm py-0 px-1 drift-nb-pick-toggle" '
+        'aria-expanded="false" title="Choose from NetBox" aria-label="Choose from NetBox">▾</button>'
+        '<div class="drift-nb-pick-menu d-none border rounded shadow-sm bg-body p-0 text-start" '
+        'style="min-width:11rem;">'
+        '<input type="search" class="form-control form-control-sm border-0 border-bottom rounded-0 drift-nb-pick-q" '
+        'placeholder="Search…" autocomplete="off">'
+        '<div class="drift-nb-pick-options list-group list-group-flush overflow-auto" '
+        'style="max-height:7.5rem"></div>'
+        "</div></div>"
+    )
+
+
 def _html_maas_fabric_cell_content(s) -> str:
     """
     One visual line per fabric so hyphenated names are never broken mid-token by CSS wrap.
@@ -249,6 +282,7 @@ def _html_table(
     notes_col_idx=None,
     selectable=False,
     selection_key=None,
+    proposed_pick_columns=None,
 ):
     if not headers:
         return ""
@@ -283,17 +317,38 @@ def _html_table(
                 f'value="{html.escape(row_key)}" data-row-key="{html.escape(row_key)}" checked />'
                 "</td>"
             )
+        pick_map = proposed_pick_columns if isinstance(proposed_pick_columns, dict) else None
         for i, cell in enumerate(padded):
             h = hdr_strs[i] if i < len(hdr_strs) else ""
             cls = _html_td_class(h, i, notes_col_idx)
             fab_attrs = _html_maas_fabric_col_extra_attrs(h, is_header=False)
-            v = (
-                _html_maas_fabric_cell_content(cell)
-                if _html_col_is_maas_fabric(h)
-                else _html_cell_content(cell)
-            )
+            kind = pick_map.get(h) if pick_map else None
+            if kind:
+                inner = (
+                    _html_maas_fabric_cell_content(cell)
+                    if _html_col_is_maas_fabric(h)
+                    else _html_cell_content(cell)
+                )
+                if not (inner or "").strip():
+                    inner = '<span class="text-muted">—</span>'
+                v = _html_nb_picker_wrap(
+                    inner,
+                    kind,
+                    col_header=h,
+                    selection_key=safe_selection_key if selectable else "",
+                    row_idx=str(row_idx) if selectable else "",
+                )
+            else:
+                v = (
+                    _html_maas_fabric_cell_content(cell)
+                    if _html_col_is_maas_fabric(h)
+                    else _html_cell_content(cell)
+                )
             tds.append(f'<td class="{cls}"{fab_attrs}>{v}</td>')
-        body_parts.append("<tr>" + "".join(tds) + "</tr>")
+        tr_attrs = ""
+        if selectable:
+            tr_attrs = f' data-drift-sel-key="{html.escape(safe_selection_key)}" data-drift-row-idx="{row_idx}"'
+        body_parts.append(f"<tr{tr_attrs}>" + "".join(tds) + "</tr>")
     if selectable:
         table_open = (
             '<div class="drift-selectable-table mb-3" '
@@ -390,6 +445,7 @@ class _DriftReportEmitter:
                     notes_col_idx=kw.get("notes_col_idx"),
                     selectable=kw.get("selectable", False),
                     selection_key=kw.get("selection_key"),
+                    proposed_pick_columns=kw.get("proposed_pick_columns"),
                 )
             )
         else:

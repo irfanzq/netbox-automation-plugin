@@ -4,6 +4,7 @@
 {% block title %}{% trans "Drift Run Detail" %} #{{ run.id }}{% endblock %}
 
 {% block content %}
+<script>window.DriftReviewReloadAfterSave = true;</script>
 <style>
   .drift-audit-report-scroll {
     overflow-x: scroll !important;
@@ -20,35 +21,104 @@
     margin: 0;
     vertical-align: top;
   }
+  .drift-audit-report-scroll .drift-report-sticky-actions {
+    position: sticky;
+    top: 0;
+    z-index: 100;
+    margin: -0.5rem -0.5rem 0.75rem -0.5rem;
+    padding: 0.5rem 0.5rem;
+    background-color: var(--bs-secondary-bg);
+    border-bottom: 1px solid var(--bs-border-color);
+    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.06);
+  }
+  #drift-xlsx-loading-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 10000;
+    background: rgba(0, 0, 0, 0.5);
+    display: none;
+    align-items: center;
+    justify-content: center;
+  }
+  #drift-xlsx-loading-overlay.drift-loading-visible {
+    display: flex;
+  }
+  #drift-xlsx-loading-overlay .drift-loading-content {
+    text-align: center;
+    color: #fff;
+  }
+  #drift-xlsx-loading-overlay .drift-loading-spinner {
+    width: 64px;
+    height: 64px;
+    margin: 0 auto 12px;
+    border: 4px solid rgba(255, 255, 255, 0.3);
+    border-top-color: #fff;
+    border-radius: 50%;
+    animation: drift-run-detail-xlsx-spin 0.9s linear infinite;
+  }
+  @keyframes drift-run-detail-xlsx-spin {
+    to { transform: rotate(360deg); }
+  }
 </style>
+<div id="drift-xlsx-loading-overlay" aria-hidden="true">
+  <div class="drift-loading-content">
+    <div class="drift-loading-spinner" aria-hidden="true"></div>
+    <div class="drift-loading-message fw-semibold">{% trans "Downloading Excel file…" %}</div>
+  </div>
+</div>
 
 <div class="row">
   <div class="col">
     <div class="card mb-3">
       <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">
         <h5 class="mb-0">{% trans "Drift Report Run" %} #{{ run.id }}</h5>
-        <div class="d-flex gap-2">
+        <div class="d-flex flex-wrap gap-1 align-items-center">
           <a href="{% url 'plugins:netbox_automation_plugin:maas_openstack_sync_runs' %}" class="btn btn-outline-secondary btn-sm">
             {% trans "History" %}
           </a>
-          <a href="{% url 'plugins:netbox_automation_plugin:maas_openstack_sync_run_download_xlsx' run.id %}" class="btn btn-outline-success btn-sm">
-            {% trans "Download as Excel (.xlsx)" %}
-          </a>
+          {% if drift_has_saved_review %}
+            {% if drift_view_modified %}
+              <a href="?" class="btn btn-outline-secondary btn-sm">{% trans "View original report" %}</a>
+            {% else %}
+              <a href="?view=modified" class="btn btn-outline-info btn-sm">{% trans "View modified report" %}</a>
+            {% endif %}
+          {% endif %}
         </div>
       </div>
       <div class="card-body py-2 small">
         <div><strong>{% trans "Status" %}:</strong> {{ run.get_status_display }}</div>
         <div><strong>{% trans "Created" %}:</strong> {{ run.created }}</div>
         <div><strong>{% trans "User" %}:</strong> {{ run.created_by|default:"-" }}</div>
+        {% if drift_review_saved_at %}
+          <div><strong>{% trans "Review edits saved" %}:</strong> {{ drift_review_saved_at }}{% if run.drift_review_saved_by %} ({{ run.drift_review_saved_by }}){% endif %}</div>
+        {% endif %}
       </div>
     </div>
 
     <div class="card mb-3">
       <div class="card-header">
-        <h5 class="mb-0">{% trans "Saved Drift Report" %}</h5>
+        <h5 class="mb-0">
+          {% if drift_view_modified %}
+            {% trans "Saved Drift Report (modified)" %}
+          {% else %}
+            {% trans "Saved Drift Report" %}
+          {% endif %}
+        </h5>
       </div>
       <div class="card-body p-2">
         <div class="drift-audit-report-scroll border rounded bg-body-secondary p-2">
+          <div class="drift-report-sticky-actions d-flex flex-wrap align-items-center justify-content-between gap-2">
+            <span class="small text-body-secondary fw-semibold text-uppercase">{% trans "Report actions" %}</span>
+            <div class="d-flex flex-wrap gap-1 justify-content-end">
+              <a href="{% url 'plugins:netbox_automation_plugin:maas_openstack_sync_run_download_xlsx' run.id %}" class="btn btn-outline-success btn-sm js-drift-xlsx-get" data-download-name="drift-report-run-{{ run.id }}.xlsx">{% trans "Download as Excel (.xlsx)" %}</a>
+              {% if drift_has_saved_review %}
+                <a href="{{ drift_download_xlsx_modified_url }}" class="btn btn-outline-secondary btn-sm js-drift-xlsx-get" data-download-name="drift-report-run-{{ run.id }}-modified.xlsx">{% trans "Download modified Excel (.xlsx)" %}</a>
+              {% endif %}
+              {% if report_drift_markup == "html" and drift_save_review_url %}
+                <button type="button" class="btn btn-primary btn-sm js-drift-save-review">{% trans "Save review edits" %}</button>
+              {% endif %}
+            </div>
+          </div>
           {% if report_drift_markup == "html" %}
             {{ report_drift|safe }}
           {% else %}
@@ -62,6 +132,16 @@
               <pre class="drift-report-pre mb-0 font-monospace" style="font-size: 0.8rem; line-height: 1.35;">{{ report_reference }}</pre>
             </div>
           </details>
+        {% endif %}
+        {% include "netbox_automation_plugin/_drift_nb_picker_script.html" %}
+        {% if report_drift_markup == "html" %}
+          <script>
+            window._driftXlsxUiConfig = {
+              postModifiedUrl: "{{ drift_download_xlsx_modified_post_url|default:''|escapejs }}",
+              saveReviewUrl: "{{ drift_save_review_url|default:''|escapejs }}"
+            };
+          </script>
+          {% include "netbox_automation_plugin/_drift_xlsx_overlay_and_script.html" %}
         {% endif %}
       </div>
     </div>

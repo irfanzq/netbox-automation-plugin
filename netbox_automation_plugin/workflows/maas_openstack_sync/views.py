@@ -39,19 +39,57 @@ from netbox_automation_plugin.sync.reporting.drift_report import (
     build_drift_report_xlsx,
     format_drift_report,
 )
+from netbox_automation_plugin.sync.reporting.drift_report.drift_nb_picker_catalog import (
+    build_drift_nb_picker_catalog,
+)
 from netbox_automation_plugin.sync.reporting.drift_report.placement import (
     _netbox_placement_from_maas_machine,
 )
+import json
+import logging
+
 from django.http import HttpResponse
 from django.urls import reverse
 
-import logging
+from netbox_automation_plugin.sync.reporting.drift_report.drift_overrides_apply import (
+    normalize_drift_review_overrides,
+)
 
+from .drift_snapshot_export import build_drift_report_xlsx_from_snapshot_payload
 from .history_models import MAASOpenStackDriftRun
 from .history_service import create_drift_run_snapshot
 from .netbox_scope_choices import list_site_location_choices as _list_site_location_choices
 
 logger = logging.getLogger("netbox_automation_plugin")
+
+
+def _drift_review_ui_context(request, audit_run):
+    """URLs for saving review edits and POST download of modified Excel (live audit page)."""
+    del request  # reserved for future absolute URLs
+    rid = getattr(audit_run, "id", None) if audit_run is not None else None
+    ctx = {
+        "audit_run_id": rid,
+        "drift_save_review_url": None,
+        "drift_download_xlsx_modified_post_url": reverse(
+            "plugins:netbox_automation_plugin:maas_openstack_sync_download_xlsx_modified",
+        ),
+    }
+    if rid:
+        ctx["drift_save_review_url"] = reverse(
+            "plugins:netbox_automation_plugin:maas_openstack_sync_run_save_review",
+            args=[rid],
+        )
+    return ctx
+
+
+def _drift_nb_picker_catalog_for_markup(markup: str):
+    if str(markup or "").lower() != "html":
+        return None
+    try:
+        return build_drift_nb_picker_catalog()
+    except Exception as e:
+        logger.warning("Drift NB picker catalog failed: %s", e)
+        return {}
 
 
 def _netbox_placement_by_hostname_from_devices(netbox_data: dict) -> dict:
@@ -696,6 +734,10 @@ class MAASOpenStackSyncView(LoginRequiredMixin, View):
                                 reverse("plugins:netbox_automation_plugin:maas_openstack_sync_download_xlsx")
                             ),
                             "recent_runs": _recent_drift_runs(),
+                            "drift_nb_picker_catalog": _drift_nb_picker_catalog_for_markup(
+                                report_drift_markup
+                            ),
+                            **_drift_review_ui_context(request, None),
                         },
                     )
                 except Exception as e:
@@ -992,7 +1034,7 @@ class MAASOpenStackSyncView(LoginRequiredMixin, View):
             # devices) is outside the selected set — e.g. fabric "spruce-staging" matches
             # location "Spruce", while placement resolves to "Birch Staging" via shared
             # tokens like "staging". Drop MAAS-only rows (not in scoped NetBox inventory)
-            # when proposed nb location does not match selected locations.
+            # when NB proposed location does not match selected locations.
             if selected_location_names:
                 _sync = get_sync_config() or {}
                 _fab_map = _sync.get("site_mapping_fabric") or {}
@@ -1215,6 +1257,10 @@ class MAASOpenStackSyncView(LoginRequiredMixin, View):
                     ),
                     "recent_runs": _recent_drift_runs(),
                     "audit_run_id": getattr(audit_run, "id", None),
+                    "drift_nb_picker_catalog": _drift_nb_picker_catalog_for_markup(
+                        report_drift_markup
+                    ),
+                    **_drift_review_ui_context(request, audit_run),
                 },
             )
 
@@ -1230,6 +1276,10 @@ class MAASOpenStackSyncView(LoginRequiredMixin, View):
                 "audit_summary": audit_summary,
                 "recent_runs": _recent_drift_runs(),
                 "audit_run_id": getattr(audit_run, "id", None),
+                "drift_nb_picker_catalog": _drift_nb_picker_catalog_for_markup(
+                    report_drift_markup
+                ),
+                **_drift_review_ui_context(request, audit_run),
             },
         )
 
@@ -1271,4 +1321,47 @@ class DriftAuditDownloadXlsxView(LoginRequiredMixin, View):
             content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
         resp["Content-Disposition"] = 'attachment; filename="drift-report.xlsx"'
+        return resp
+
+
+class DriftAuditDownloadXlsxModifiedView(LoginRequiredMixin, View):
+    """POST JSON { \"overrides\": {...} } — session cache + merged proposed cells → .xlsx."""
+
+    http_method_names = ["post"]
+
+    def post(self, request):
+        cached = cache.get(_drift_audit_cache_key(request))
+        if not cached:
+            return HttpResponse(
+                _("Run drift audit first, then download modified Excel."),
+                status=404,
+                content_type="text/plain; charset=utf-8",
+            )
+        try:
+            body = json.loads(request.body.decode() or "{}")
+        except json.JSONDecodeError:
+            return HttpResponse(
+                _("Invalid JSON body."),
+                status=400,
+                content_type="text/plain; charset=utf-8",
+            )
+        raw_ov = body.get("overrides")
+        norm = normalize_drift_review_overrides(raw_ov) if raw_ov else {}
+        try:
+            xlsx_bytes = build_drift_report_xlsx_from_snapshot_payload(
+                cached,
+                drift_overrides=raw_ov if norm else None,
+            )
+        except Exception as e:
+            logger.exception("Modified XLSX export failed: %s", e)
+            return HttpResponse(
+                _("Excel export failed: ") + str(e),
+                status=500,
+                content_type="text/plain; charset=utf-8",
+            )
+        resp = HttpResponse(
+            xlsx_bytes,
+            content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+        resp["Content-Disposition"] = 'attachment; filename="drift-report-modified.xlsx"'
         return resp
