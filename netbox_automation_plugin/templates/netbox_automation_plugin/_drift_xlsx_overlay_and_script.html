@@ -177,6 +177,9 @@
           window.location.href = nextUrl.toString();
           return;
         }
+        if (typeof window.DriftReviewMarkClean === "function") {
+          window.DriftReviewMarkClean();
+        }
         if (typeof window.DriftReviewOnSaved === "function") {
           window.DriftReviewOnSaved(pair.j);
         } else {

@@ -29,11 +29,57 @@ from netbox_automation_plugin.sync.reporting.drift_report.render_tables import (
 from .history_models import MAASOpenStackDriftRun
 
 
-def merged_proposed_from_drift_run(run: MAASOpenStackDriftRun) -> tuple[dict[str, Any], list]:
-    """Snapshot + normalized overrides + merge — parity with modified drift HTML/XLSX."""
+def merge_review_override_layers(
+    base: dict[str, dict[str, dict[str, str]]],
+    overlay: dict[str, dict[str, dict[str, str]]],
+) -> dict[str, dict[str, dict[str, str]]]:
+    """Deep-merge overlay onto base (overlay wins). Values are normalized header maps."""
+    out: dict[str, dict[str, dict[str, str]]] = {
+        sk: {rk: dict(cols) for rk, cols in rows.items()} for sk, rows in base.items()
+    }
+    for sk, rows in overlay.items():
+        if sk not in out:
+            out[sk] = {}
+        for ri, cols in rows.items():
+            if ri not in out[sk]:
+                out[sk][ri] = {}
+            out[sk][ri].update(cols)
+    return out
+
+
+def effective_review_norm_for_run(
+    run: MAASOpenStackDriftRun,
+    posted_review_overrides: Any | None,
+) -> dict[str, dict[str, dict[str, str]]]:
+    """
+    DB-saved review plus optional POST body from the audit page (unsaved picker state).
+    posted_review_overrides=None: DB only. Otherwise normalize(posted) merged over DB.
+    """
+    db_norm = normalize_drift_review_overrides(run.drift_review_overrides)
+    if posted_review_overrides is None:
+        return db_norm
+    post_norm = normalize_drift_review_overrides(posted_review_overrides)
+    return merge_review_override_layers(db_norm, post_norm)
+
+
+def merged_proposed_from_drift_run(
+    run: MAASOpenStackDriftRun,
+    *,
+    review_norm: dict[str, dict[str, dict[str, str]]] | None = None,
+) -> tuple[dict[str, Any], list]:
+    """
+    Snapshot + review merge — parity with modified drift HTML/XLSX.
+
+    review_norm=None: use drift_run.drift_review_overrides from DB.
+    review_norm=dict (possibly empty): use that normalized map only ({}
+      = auto proposal before any review edits).
+    """
     payload = run.snapshot_payload if isinstance(run.snapshot_payload, dict) else {}
     drift = _drift_for_user_reports(payload.get("drift") or {})
-    norm = normalize_drift_review_overrides(run.drift_review_overrides)
+    if review_norm is None:
+        norm = normalize_drift_review_overrides(run.drift_review_overrides)
+    else:
+        norm = dict(review_norm)
     align_rows = _alignment_review_rows(payload.get("matched_rows"))
     prop = _proposed_changes_rows(
         payload.get("maas_data") or {},
@@ -55,13 +101,17 @@ def _safe_selection_key(selection_key: str) -> str:
     return re.sub(r"[^a-zA-Z0-9_-]+", "_", str(selection_key or "drift_rows"))
 
 
-def build_row_key_index(prop: dict, align_rows: list) -> dict[str, dict[str, Any]]:
+def build_row_key_index(
+    prop: dict, align_rows: list
+) -> tuple[dict[str, dict[str, Any]], dict[tuple[str, int], dict[str, Any]]]:
     """
-    Map HTML checkbox row_key (sha1 prefix) to row metadata.
+    Map HTML checkbox row_key (sha1 prefix) to row metadata, plus stable (safe_sk, row_idx).
 
+    Checkbox values can become stale when cell text changes without a re-render; use stable map.
     Must stay aligned with render_tables._html_table selectable rows.
     """
     index: dict[str, dict[str, Any]] = {}
+    stable: dict[tuple[str, int], dict[str, Any]] = {}
 
     sk = "detail_placement_lifecycle_alignment"
     headers = SELECTION_KEY_TO_HEADERS.get(sk, [])
@@ -71,13 +121,15 @@ def build_row_key_index(prop: dict, align_rows: list) -> dict[str, dict[str, Any
         n = len(headers)
         padded = row_list[:n] + [""] * (n - min(len(row_list), n))
         rk = _selection_row_key(safe, idx, padded)
-        index[rk] = {
+        meta = {
             "selection_key": sk,
             "prop_list_key": None,
             "row_index": idx,
             "headers": headers,
             "row": padded,
         }
+        index[rk] = meta
+        stable[(safe, idx)] = meta
 
     update_nic = prop.get("update_nic")
     if isinstance(update_nic, list):
@@ -94,7 +146,7 @@ def build_row_key_index(prop: dict, align_rows: list) -> dict[str, dict[str, Any
                 n = len(headers)
                 padded = row_list[:n] + [""] * (n - min(len(row_list), n))
                 rk = _selection_row_key(safe, sub_idx, padded)
-                index[rk] = {
+                meta = {
                     "selection_key": sk,
                     "prop_list_key": "update_nic",
                     "row_index": sub_idx,
@@ -102,6 +154,8 @@ def build_row_key_index(prop: dict, align_rows: list) -> dict[str, dict[str, Any
                     "headers": headers,
                     "row": padded,
                 }
+                index[rk] = meta
+                stable[(safe, sub_idx)] = meta
 
     for sk, pk in SELECTION_KEY_TO_PROP_LIST.items():
         if sk in ("detail_nic_drift_os", "detail_nic_drift_maas"):
@@ -120,15 +174,17 @@ def build_row_key_index(prop: dict, align_rows: list) -> dict[str, dict[str, Any
             n = len(headers)
             padded = row_list[:n] + [""] * (n - min(len(row_list), n))
             rk = _selection_row_key(safe, idx, padded)
-            index[rk] = {
+            meta = {
                 "selection_key": sk,
                 "prop_list_key": pk,
                 "row_index": idx,
                 "headers": headers,
                 "row": padded,
             }
+            index[rk] = meta
+            stable[(safe, idx)] = meta
 
-    return index
+    return index, stable
 
 
 def all_registered_selection_keys() -> frozenset[str]:

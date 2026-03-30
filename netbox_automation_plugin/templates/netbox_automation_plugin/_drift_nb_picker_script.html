@@ -32,6 +32,14 @@
     window.DriftNbPickerChoices = {};
   }
 
+  window.__driftReviewDirty = false;
+  window.DriftReviewMarkDirty = function() {
+    window.__driftReviewDirty = true;
+  };
+  window.DriftReviewMarkClean = function() {
+    window.__driftReviewDirty = false;
+  };
+
   function esc(s) {
     return String(s)
       .replace(/&/g, "&amp;")

@@ -56,6 +56,8 @@ from netbox_automation_plugin.sync.reporting.drift_report.drift_overrides_apply 
     normalize_drift_review_overrides,
 )
 
+from .drift_snapshot_export import format_drift_report_from_snapshot_payload
+
 from .drift_snapshot_export import build_drift_report_xlsx_from_snapshot_payload
 from .history_models import MAASOpenStackDriftRun
 from .history_service import create_drift_run_snapshot
@@ -103,7 +105,35 @@ def _reconciliation_ui_context(request):
         "maas_reconciliation_runs_url": reverse(
             "plugins:netbox_automation_plugin:maas_openstack_reconciliation_runs",
         ),
+        "maas_reconciliation_stage_url": reverse(
+            "plugins:netbox_automation_plugin:maas_openstack_reconciliation_stage",
+        ),
     }
+
+
+def _report_body_for_resumed_drift_run(audit_run: MAASOpenStackDriftRun) -> tuple[str, str]:
+    """Rebuild merged HTML from snapshot + overrides (same idea as drift run history)."""
+    markup = audit_run.report_drift_markup or "html"
+    has_modified_html = bool((audit_run.report_drift_modified_html or "").strip())
+    has_overrides = bool(normalize_drift_review_overrides(audit_run.drift_review_overrides))
+    report_body = audit_run.report_drift or ""
+    drift_view_modified = False
+    payload = audit_run.snapshot_payload if isinstance(audit_run.snapshot_payload, dict) else {}
+    if has_overrides and payload:
+        try:
+            report_out = format_drift_report_from_snapshot_payload(
+                payload,
+                drift_overrides=audit_run.drift_review_overrides,
+            )
+            regen = (report_out.get("drift") or "").strip()
+            if regen:
+                report_body = regen
+                drift_view_modified = True
+        except Exception:
+            logger.exception("Resumed drift run %s: could not regenerate HTML from snapshot", audit_run.pk)
+    if not drift_view_modified and has_modified_html:
+        report_body = audit_run.report_drift_modified_html or report_body
+    return report_body, markup
 
 
 def _drift_nb_picker_catalog_for_markup(markup: str):
@@ -660,6 +690,38 @@ class MAASOpenStackSyncView(LoginRequiredMixin, View):
     def get(self, request):
         site_choices, location_choices, _, _ = _list_site_location_choices()
         form = MAASOpenStackSyncForm(site_choices=site_choices, location_choices=location_choices)
+        raw_resume = request.GET.get("drift_run_id")
+        if raw_resume is not None and str(raw_resume).strip() != "":
+            try:
+                rid = int(raw_resume)
+            except (TypeError, ValueError):
+                rid = None
+            if rid is not None:
+                audit_run = MAASOpenStackDriftRun.objects.filter(pk=rid).first()
+                if audit_run is not None:
+                    report_drift, report_drift_markup = _report_body_for_resumed_drift_run(audit_run)
+                    audit_summary = (
+                        audit_run.audit_summary if isinstance(audit_run.audit_summary, dict) else {}
+                    )
+                    return render(
+                        request,
+                        self.template_name,
+                        {
+                            "form": form,
+                            "report_drift": report_drift,
+                            "report_drift_markup": report_drift_markup,
+                            "report_reference": audit_run.report_reference or "",
+                            "audit_done": True,
+                            "audit_summary": audit_summary,
+                            "recent_runs": _recent_drift_runs(),
+                            "audit_run_id": audit_run.pk,
+                            "drift_nb_picker_catalog": _drift_nb_picker_catalog_for_markup(
+                                report_drift_markup
+                            ),
+                            **_drift_review_ui_context(request, audit_run),
+                            **_reconciliation_ui_context(request),
+                        },
+                    )
         return render(request, self.template_name, {"form": form, "recent_runs": _recent_drift_runs()})
 
     def post(self, request):

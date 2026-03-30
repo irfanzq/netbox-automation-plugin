@@ -1,0 +1,205 @@
+{% extends 'base/layout.html' %}
+{% load i18n %}
+
+{% block title %}{% trans "Reconciliation preview" %} — {% trans "Drift run" %} #{{ drift_run.pk }}{% endblock %}
+
+{% block content %}
+<div class="row">
+  <div class="col-lg-10">
+    <div class="card mb-3">
+      <h5 class="card-header d-flex flex-wrap align-items-center justify-content-between gap-2">
+        <span>{% trans "Branch reconciliation — preview" %} <span class="badge text-bg-secondary">{% trans "Drift" %} #{{ drift_run.pk }}</span></span>
+        <div class="d-flex flex-wrap gap-1">
+          <a href="{{ audit_back_url }}" class="btn btn-outline-primary btn-sm">{% trans "Back to drift audit" %}</a>
+          <a href="{{ reconciliation_runs_url }}" class="btn btn-outline-secondary btn-sm">{% trans "All reconciliation runs" %}</a>
+        </div>
+      </h5>
+      <div class="card-body">
+        <p class="text-body-secondary small mb-3">
+          {% blocktrans trimmed %}Preview and branch creation use the <strong>saved</strong> drift review in the database (same merge as modified Excel). If you changed NetBox pickers on the audit page, those edits were saved automatically when you continued here. The diff below is auto-proposed vs that saved review for the rows you included.{% endblocktrans %}
+          {% if drift_run.drift_review_saved_at %}
+            <span class="d-block mt-1">{% trans "Last saved review" %}: {{ drift_run.drift_review_saved_at }}{% if drift_run.drift_review_saved_by %} ({{ drift_run.drift_review_saved_by }}){% endif %}</span>
+          {% endif %}
+        </p>
+        <h6 class="text-body-secondary text-uppercase small">{% trans "Next steps" %}</h6>
+        <ol class="small mb-4">
+          <li>{% trans "Confirm the operation list and digest below match what you intend to apply to a new NetBox branch." %}</li>
+          <li>{% trans "Create the branch (frozen operations are locked for this run)." %}</li>
+          <li>{% trans "On the run detail page, apply changes to the branch, then discard or merge (merge when you implement it) as appropriate." %}</li>
+        </ol>
+        <dl class="row mb-3 small">
+          <dt class="col-sm-3">{% trans "Digest" %}</dt>
+          <dd class="col-sm-9 text-monospace">{{ operations_digest|default:"—" }}</dd>
+          <dt class="col-sm-3">{% trans "Operations" %}</dt>
+          <dd class="col-sm-9">{{ operation_count }}</dd>
+        </dl>
+        {% if warnings %}
+          <div class="alert alert-warning small">
+            <strong>{% trans "Warnings" %}</strong>
+            <ul class="mb-0 mt-1">
+              {% for w in warnings %}
+                <li>{{ w }}</li>
+              {% endfor %}
+            </ul>
+          </div>
+        {% endif %}
+        {% if counts_by_action %}
+          <p class="small mb-1"><strong>{% trans "By action" %}</strong></p>
+          <ul class="small mb-3">
+            {% for k, v in counts_by_action.items %}
+              <li><code>{{ k }}</code>: {{ v }}</li>
+            {% endfor %}
+          </ul>
+        {% endif %}
+        {% if row_diffs %}
+          <h6 class="text-body-secondary text-uppercase small mt-3">{% trans "Audit diff (auto-proposed vs your review)" %}</h6>
+          <p class="small text-body-secondary mb-2">
+            {% blocktrans trimmed %}Cells that differ between the automatic proposal and the merged review (saved edits plus any unsent picker values from the audit page) for the rows you included.{% endblocktrans %}
+          </p>
+          <div class="table-responsive border rounded mb-3">
+            <table class="table table-sm mb-0">
+              <thead>
+                <tr>
+                  <th>{% trans "Summary" %}</th>
+                  <th>{% trans "Section" %}</th>
+                  <th>{% trans "Column" %}</th>
+                  <th>{% trans "Before → after" %}</th>
+                </tr>
+              </thead>
+              <tbody>
+                {% for d in row_diffs %}
+                  {% for ch in d.changes %}
+                  <tr>
+                    {% if forloop.first %}
+                    <td class="small" rowspan="{{ d.changes|length }}">{{ d.summary|default:"—" }}</td>
+                    <td class="small text-monospace" rowspan="{{ d.changes|length }}">{{ d.section|default:"—" }}</td>
+                    {% endif %}
+                    <td class="small"><code>{{ ch.header|default:"—" }}</code></td>
+                    <td class="small font-monospace">
+                      <span class="text-danger">{{ ch.before|default:"—" }}</span>
+                      →
+                      <span class="text-success">{{ ch.after|default:"—" }}</span>
+                    </td>
+                  </tr>
+                  {% endfor %}
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+        {% endif %}
+        <div class="d-flex flex-wrap gap-2 align-items-center mb-3">
+          <button type="button" class="btn btn-primary btn-sm" id="maas-recon-create-branch">{% trans "Create NetBox branch from this preview" %}</button>
+          <span class="small text-body-secondary" id="maas-recon-create-msg"></span>
+        </div>
+      </div>
+    </div>
+    {% if operations %}
+      <div class="card">
+        <h5 class="card-header">{% trans "Operations" %}</h5>
+        <div class="card-body p-0">
+          <div class="table-responsive">
+            <table class="table table-sm table-striped mb-0">
+              <thead>
+                <tr>
+                  <th>#</th>
+                  <th>{% trans "Section" %}</th>
+                  <th>{% trans "Action" %}</th>
+                  <th>{% trans "Summary" %}</th>
+                </tr>
+              </thead>
+              <tbody>
+                {% for op in operations %}
+                  <tr>
+                    <td class="text-muted">{{ forloop.counter }}</td>
+                    <td class="small text-monospace">{{ op.section|default:"—" }}</td>
+                    <td class="small">{{ op.action|default:"—" }}</td>
+                    <td class="small">{{ op.summary|default:"—" }}</td>
+                  </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    {% endif %}
+  </div>
+</div>
+
+{{ selected|json_script:"maas-recon-selected-data" }}
+{{ posted_review_overrides|json_script:"maas-recon-posted-overrides-data" }}
+<form id="recon-action-csrf" class="d-none">{% csrf_token %}</form>
+<input type="hidden" id="maas-recon-preview-token" value="{{ preview_ack_token }}" autocomplete="off" />
+<script>
+  (function() {
+    var btn = document.getElementById("maas-recon-create-branch");
+    var msg = document.getElementById("maas-recon-create-msg");
+    var selEl = document.getElementById("maas-recon-selected-data");
+    var postedEl = document.getElementById("maas-recon-posted-overrides-data");
+    var tokEl = document.getElementById("maas-recon-preview-token");
+    var createUrl = "{{ create_url|escapejs }}";
+    var driftRunId = {{ drift_run.pk }};
+    function csrf() {
+      var el = document.querySelector("#recon-action-csrf input[name=csrfmiddlewaretoken]");
+      return el ? el.value : "";
+    }
+    if (!btn || !selEl || !tokEl || !createUrl) return;
+    btn.addEventListener("click", function() {
+      var tok = (tokEl.value || "").trim();
+      if (!tok) {
+        if (msg) msg.textContent = "{% filter escapejs %}{% trans "No preview token. Return to the audit and continue again." %}{% endfilter %}";
+        return;
+      }
+      var selected;
+      var posted = {};
+      try {
+        selected = JSON.parse(selEl.textContent);
+      } catch (e) {
+        if (msg) msg.textContent = String(e);
+        return;
+      }
+      if (postedEl) {
+        try {
+          posted = JSON.parse(postedEl.textContent);
+        } catch (e2) {
+          posted = {};
+        }
+      }
+      btn.disabled = true;
+      if (msg) msg.textContent = "";
+      var payload = {
+        drift_run_id: driftRunId,
+        selected: selected,
+        preview_ack_token: tok
+      };
+      if (posted && typeof posted === "object" && Object.keys(posted).length) {
+        payload.drift_review_overrides = posted;
+      }
+      fetch(createUrl, {
+        method: "POST",
+        credentials: "same-origin",
+        headers: {
+          "Content-Type": "application/json",
+          "X-CSRFToken": csrf()
+        },
+        body: JSON.stringify(payload)
+      })
+        .then(function(r) {
+          return r.json().then(function(j) { return { ok: r.ok, status: r.status, body: j }; });
+        })
+        .then(function(res) {
+          if (res.body && res.body.redirect_url) {
+            window.location.href = res.body.redirect_url;
+            return;
+          }
+          btn.disabled = false;
+          var err = (res.body && res.body.error) ? res.body.error : ("HTTP " + res.status);
+          if (msg) msg.textContent = err;
+        })
+        .catch(function(e) {
+          btn.disabled = false;
+          if (msg) msg.textContent = String(e);
+        });
+    });
+  })();
+</script>
+{% endblock %}

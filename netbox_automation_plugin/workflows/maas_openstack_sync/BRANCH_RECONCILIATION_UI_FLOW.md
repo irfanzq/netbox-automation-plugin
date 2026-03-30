@@ -125,6 +125,8 @@ Purpose:
 - Show per-table and per-row results
 - Enforce explicit partial-failure semantics
 
+**Branch write contract (`netbox_branching`):** In Apply mode, the workflow activates the selected branch using `netbox_branching.utilities.activate_branch(branch)` and runs ORM writes inside the branch-aware transaction/connection context used by the installed plugin — specifically the same pairing the plugin uses internally (`activate_branch` plus `transaction.atomic(using=branch.connection_name)`, matching `Branch.sync` in `models/branches.py`). If branch activation or branch-scoped transaction setup fails, the run must fail clearly and must not write branch-affected models to main.
+
 Buttons on Run Detail:
 
 - **`Apply selected changes to branch`** (primary when `branch_created`)

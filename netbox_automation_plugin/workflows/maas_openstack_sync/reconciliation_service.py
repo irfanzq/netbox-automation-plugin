@@ -15,6 +15,9 @@ from django.db import transaction
 from django.utils import timezone
 
 from netbox_automation_plugin.models import MAASOpenStackReconciliationRun
+from netbox_automation_plugin.sync.reporting.drift_report.render_tables import (
+    _selection_row_key,
+)
 
 from .history_models import MAASOpenStackDriftRun
 from .reconciliation_branch import (
@@ -25,8 +28,10 @@ from .reconciliation_branch import (
     netbox_branch_exists,
 )
 from .reconciliation_merge import (
+    _safe_selection_key,
     all_registered_selection_keys,
     build_row_key_index,
+    effective_review_norm_for_run,
     merged_proposed_from_drift_run,
 )
 
@@ -87,57 +92,96 @@ def _operation_summary(meta: dict[str, Any]) -> str:
     return f"{sk}: {host or '—'}"
 
 
-def _normalize_selected(raw: Any) -> dict[str, list[str]]:
+def _normalize_selected(raw: Any) -> dict[str, list[dict[str, Any]]]:
+    """Section -> list of {row_key, row_index} (from drift HTML); row_key may be stale after edits."""
     if not isinstance(raw, dict):
         return {}
-    out: dict[str, list[str]] = {}
+    out: dict[str, list[dict[str, Any]]] = {}
     for k, v in raw.items():
         sk = str(k).strip()
         if not sk:
             continue
-        if isinstance(v, str):
-            v = [v]
-        if not isinstance(v, list):
-            continue
-        keys = [str(x).strip() for x in v if str(x).strip()]
-        if keys:
-            out[sk] = keys
+        items = v if isinstance(v, list) else [v]
+        norm_items: list[dict[str, Any]] = []
+        for x in items:
+            if isinstance(x, dict):
+                rk = str(x.get("row_key") or "").strip()
+                ri_raw = x.get("row_index")
+                ri_int: int | None
+                try:
+                    ri_int = int(ri_raw) if ri_raw is not None and ri_raw != "" else None
+                except (TypeError, ValueError):
+                    ri_int = None
+                if rk or ri_int is not None:
+                    norm_items.append({"row_key": rk, "row_index": ri_int})
+            else:
+                s = str(x).strip()
+                if s:
+                    norm_items.append({"row_key": s, "row_index": None})
+        if norm_items:
+            out[sk] = norm_items
     return out
 
 
 def build_frozen_operations(
-    selected: dict[str, list[str]],
+    selected: dict[str, list[dict[str, Any]]],
     row_index: dict[str, dict[str, Any]],
+    stable_index: dict[tuple[str, int], dict[str, Any]],
 ) -> list[dict[str, Any]]:
     allowed = all_registered_selection_keys()
     ops: list[dict[str, Any]] = []
     seen: set[str] = set()
 
     for sk in selected:
-        if sk not in allowed:
+        if sk not in allowed and _safe_selection_key(sk) not in {
+            _safe_selection_key(x) for x in allowed
+        }:
             raise ValueError(f"Unknown selection section: {sk}")
 
     for sk in sorted(selected.keys()):
-        for rk in selected[sk]:
-            meta = row_index.get(rk)
+        canon_sk = sk if sk in allowed else None
+        if canon_sk is None:
+            for cand in allowed:
+                if _safe_selection_key(cand) == sk:
+                    canon_sk = cand
+                    break
+        if canon_sk is None:
+            raise ValueError(f"Unknown selection section: {sk}")
+        safe = _safe_selection_key(canon_sk)
+        for item in selected[sk]:
+            rk = str(item.get("row_key") or "").strip()
+            ri = item.get("row_index")
+            try:
+                ri_int = int(ri) if ri is not None and ri != "" else None
+            except (TypeError, ValueError):
+                ri_int = None
+            meta = None
+            if rk and rk in row_index:
+                meta = row_index[rk]
+            if meta is None and ri_int is not None:
+                meta = stable_index.get((safe, ri_int))
             if not meta:
-                raise ValueError(f"Unknown row key under {sk}: {rk}")
-            if meta["selection_key"] != sk:
+                detail = rk or f"row_index={ri_int}"
+                raise ValueError(f"Unknown row under {sk}: {detail}")
+            if _safe_selection_key(str(meta["selection_key"])) != safe:
                 raise ValueError(
-                    f"Row key {rk} belongs to section {meta['selection_key']}, not {sk}"
+                    f"Row {detail} belongs to section {meta['selection_key']}, not {sk}"
                 )
-            if rk in seen:
+            msk = str(meta["selection_key"])
+            safe_meta = _safe_selection_key(msk)
+            row_key_final = _selection_row_key(safe_meta, meta["row_index"], list(meta["row"]))
+            if row_key_final in seen:
                 continue
-            seen.add(rk)
+            seen.add(row_key_final)
             cells = _cells_dict(meta["headers"], meta["row"])
             op: dict[str, Any] = {
-                "row_key": rk,
-                "selection_key": sk,
+                "row_key": row_key_final,
+                "selection_key": msk,
                 "prop_list_key": meta.get("prop_list_key"),
                 "row_index": meta["row_index"],
                 "cells": cells,
                 "summary": _operation_summary(meta),
-                "action": SK_TO_ACTION.get(sk, "unknown"),
+                "action": SK_TO_ACTION.get(msk, "unknown"),
             }
             if "global_row_index" in meta:
                 op["global_row_index"] = meta["global_row_index"]
@@ -145,6 +189,55 @@ def build_frozen_operations(
 
     ops.sort(key=lambda o: (o["selection_key"], o["row_index"], o["row_key"]))
     return ops
+
+
+def _row_diffs_vs_baseline(
+    frozen: list[dict[str, Any]],
+    stable_baseline: dict[tuple[str, int], dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Per selected row: cells after review vs auto-proposed snapshot (no overrides)."""
+    out: list[dict[str, Any]] = []
+    for op in frozen:
+        msk = str(op.get("selection_key") or "")
+        safe_m = _safe_selection_key(msk)
+        ri = int(op["row_index"]) if op.get("row_index") is not None else 0
+        bmeta = stable_baseline.get((safe_m, ri))
+        cells_a = dict(op.get("cells") or {})
+        if not bmeta:
+            headers = list(cells_a.keys())
+            if headers:
+                out.append(
+                    {
+                        "summary": op.get("summary"),
+                        "section": msk,
+                        "action": op.get("action"),
+                        "changes": [
+                            {"header": h, "before": "", "after": cells_a.get(h, "")}
+                            for h in headers
+                        ],
+                    }
+                )
+            continue
+        cells_b = _cells_dict(bmeta["headers"], bmeta["row"])
+        keys = sorted(set(bmeta["headers"]) | set(cells_a.keys()))
+        changed = [h for h in keys if cells_b.get(h, "") != cells_a.get(h, "")]
+        if changed:
+            out.append(
+                {
+                    "summary": op.get("summary"),
+                    "section": msk,
+                    "action": op.get("action"),
+                    "changes": [
+                        {
+                            "header": h,
+                            "before": cells_b.get(h, ""),
+                            "after": cells_a.get(h, ""),
+                        }
+                        for h in changed
+                    ],
+                }
+            )
+    return out
 
 
 def operations_digest(frozen_ops: list[dict[str, Any]]) -> str:
@@ -196,6 +289,7 @@ def preview_reconciliation(
     *,
     drift_run: MAASOpenStackDriftRun,
     selected_raw: Any,
+    posted_review_overrides_raw: Any | None = None,
 ) -> dict[str, Any]:
     drift_run.refresh_from_db(
         fields=["snapshot_payload", "drift_review_overrides", "drift_review_saved_at"]
@@ -204,11 +298,15 @@ def preview_reconciliation(
     if not selected:
         raise ValueError("No rows selected. Check at least one Include box in the report.")
 
-    prop, align = merged_proposed_from_drift_run(drift_run)
-    row_index = build_row_key_index(prop, align)
-    frozen = build_frozen_operations(selected, row_index)
+    final_norm = effective_review_norm_for_run(drift_run, posted_review_overrides_raw)
+    prop_auto, align_auto = merged_proposed_from_drift_run(drift_run, review_norm={})
+    prop_f, align_f = merged_proposed_from_drift_run(drift_run, review_norm=final_norm)
+    _, stable_auto = build_row_key_index(prop_auto, align_auto)
+    row_index_f, stable_f = build_row_key_index(prop_f, align_f)
+    frozen = build_frozen_operations(selected, row_index_f, stable_f)
     digest = operations_digest(frozen)
     token = make_preview_token(drift_run_id=int(drift_run.pk), digest=digest)
+    row_diffs = _row_diffs_vs_baseline(frozen, stable_auto)
 
     counts: dict[str, int] = {}
     for op in frozen:
@@ -237,6 +335,7 @@ def preview_reconciliation(
         "counts_by_action": counts,
         "counts_by_section": by_section,
         "warnings": warnings,
+        "row_diffs": row_diffs,
     }
 
 
@@ -246,6 +345,7 @@ def create_reconciliation_run(
     selected_raw: Any,
     preview_ack_token: str,
     user,
+    posted_review_overrides_raw: Any | None = None,
 ) -> MAASOpenStackReconciliationRun:
     drift_run.refresh_from_db(
         fields=["snapshot_payload", "drift_review_overrides", "drift_review_saved_at"]
@@ -254,9 +354,10 @@ def create_reconciliation_run(
     if not selected:
         raise ValueError("No rows selected.")
 
-    prop, align = merged_proposed_from_drift_run(drift_run)
-    row_index = build_row_key_index(prop, align)
-    frozen = build_frozen_operations(selected, row_index)
+    final_norm = effective_review_norm_for_run(drift_run, posted_review_overrides_raw)
+    prop_f, align_f = merged_proposed_from_drift_run(drift_run, review_norm=final_norm)
+    row_index_f, stable_f = build_row_key_index(prop_f, align_f)
+    frozen = build_frozen_operations(selected, row_index_f, stable_f)
     digest = operations_digest(frozen)
 
     ok, err = verify_preview_token(

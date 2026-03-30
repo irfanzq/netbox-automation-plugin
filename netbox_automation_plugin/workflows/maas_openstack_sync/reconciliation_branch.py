@@ -6,6 +6,8 @@ from contextlib import contextmanager
 import logging
 from typing import Any, Iterator
 
+from django.db import transaction
+
 logger = logging.getLogger(__name__)
 
 
@@ -96,9 +98,11 @@ def get_netbox_branch(*, branch_id: Any = None, branch_name: str = "") -> tuple[
 @contextmanager
 def branch_write_context(*, branch: Any) -> Iterator[None]:
     """
-    Best-effort branch activation context.
+    Activate NetBox Branching context for ORM writes.
 
-    If no known context API exists, raise to avoid writes landing in main dataset.
+    For netboxlabs/netbox-branching, matches Branch.sync: activate_branch plus
+    transaction.atomic(using=branch.connection_name). If no API fits, raises so
+    callers do not write branch-aware models to main by accident.
     """
     # 1) Branch instance may provide a context manager method.
     for method_name in ("as_context", "activate", "as_active", "scope"):
@@ -117,14 +121,20 @@ def branch_write_context(*, branch: Any) -> Iterator[None]:
         except Exception:
             continue
 
-    # 2) NetBox Labs netbox-branching: contextvar-based router (see utilities.activate_branch).
+    # 2) NetBox Labs netbox-branching: same stack as models.Branch.sync — activate_branch plus
+    # transaction.atomic(using=branch.connection_name) so ORM hits the branch schema reliably.
     try:
         from netbox_branching.utilities import activate_branch as _nb_activate_branch
     except ImportError:
         _nb_activate_branch = None
     if callable(_nb_activate_branch):
-        with _nb_activate_branch(branch):
-            yield
+        using = getattr(branch, "connection_name", None)
+        if using:
+            with _nb_activate_branch(branch), transaction.atomic(using=using):
+                yield
+        else:
+            with _nb_activate_branch(branch):
+                yield
         return
 
     # 3) Legacy / alternate module paths.

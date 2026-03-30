@@ -23,6 +23,7 @@ from .workflows.maas_openstack_sync.reconciliation_views import (
     ReconciliationRetryFailedView,
     ReconciliationRunDetailView,
     ReconciliationRunsListView,
+    ReconciliationStagingView,
 )
 
 app_name = "netbox_automation_plugin"
@@ -112,6 +113,11 @@ urlpatterns = [
         "maas-openstack-sync/reconciliation/runs/<int:run_id>/",
         ReconciliationRunDetailView.as_view(),
         name="maas_openstack_reconciliation_detail",
+    ),
+    path(
+        "maas-openstack-sync/reconciliation/stage/",
+        ReconciliationStagingView.as_view(),
+        name="maas_openstack_reconciliation_stage",
     ),
     path(
         "maas-openstack-sync/reconciliation/preview/",
