@@ -1,0 +1,190 @@
+{% extends 'base/layout.html' %}
+{% load i18n %}
+
+{% block title %}{% trans "Reconciliation run" %} #{{ run.pk }}{% endblock %}
+
+{% block content %}
+<div class="row">
+  <div class="col">
+    <div class="card mb-3">
+      <h5 class="card-header d-flex flex-wrap align-items-center justify-content-between gap-2">
+        <span>{% trans "Branch reconciliation" %} <span class="badge text-bg-secondary">#{{ run.pk }}</span></span>
+        <div class="d-flex flex-wrap gap-1">
+          <a href="{% url 'plugins:netbox_automation_plugin:maas_openstack_reconciliation_runs' %}" class="btn btn-outline-secondary btn-sm">{% trans "All runs" %}</a>
+          {% if run.drift_run_id %}
+            <a href="{% url 'plugins:netbox_automation_plugin:maas_openstack_sync_run_detail' run.drift_run_id %}" class="btn btn-outline-secondary btn-sm">{% trans "Drift run" %} #{{ run.drift_run_id }}</a>
+          {% endif %}
+        </div>
+      </h5>
+      <div class="card-body">
+        <dl class="row mb-0">
+          <dt class="col-sm-3">{% trans "Status" %}</dt>
+          <dd class="col-sm-9"><span class="badge text-bg-primary">{{ run.get_status_display }}</span></dd>
+          <dt class="col-sm-3">{% trans "Branch" %}</dt>
+          <dd class="col-sm-9 text-monospace">{{ run.branch_name|default:"—" }}{% if run.branch_id %} <span class="text-muted">(pk {{ run.branch_id }})</span>{% endif %}</dd>
+          <dt class="col-sm-3">{% trans "Digest" %}</dt>
+          <dd class="col-sm-9 text-monospace small">{{ run.operations_digest|default:"—" }}</dd>
+          <dt class="col-sm-3">{% trans "Operations" %}</dt>
+          <dd class="col-sm-9">{{ frozen_ops|length }}</dd>
+          {% if run.error_message %}
+            <dt class="col-sm-3">{% trans "Error" %}</dt>
+            <dd class="col-sm-9 text-danger text-break">{{ run.error_message }}</dd>
+          {% endif %}
+        </dl>
+      </div>
+    </div>
+
+    <div class="card mb-3">
+      <h5 class="card-header">{% trans "Lifecycle" %}</h5>
+      <div class="card-body">
+        <p class="text-body-secondary small mb-2">
+          {% blocktrans trimmed %}Apply writes frozen operations into the branch schema only. Discard abandons the run and deletes the NetBox branch when possible; it does not undo individual rows inside an existing branch. Merge to main uses NetBox Branching (not wired here yet).{% endblocktrans %}
+        </p>
+        <div class="d-flex flex-wrap gap-1">
+          <button type="button" class="btn btn-primary btn-sm js-recon-apply" {% if not can_apply %}disabled{% endif %}>{% trans "Apply selected changes to branch" %}</button>
+          <button type="button" class="btn btn-outline-primary btn-sm js-recon-retry" {% if not can_retry_failed %}disabled{% endif %}>{% trans "Re-apply failed items" %}</button>
+          <button type="button" class="btn btn-outline-secondary btn-sm" disabled title="{% trans 'Not implemented yet' %}">{% trans "Run validation" %}</button>
+          <button type="button" class="btn btn-outline-secondary btn-sm" disabled title="{% trans 'Not implemented yet' %}">{% trans "Merge to main" %}</button>
+          <button type="button" class="btn btn-outline-danger btn-sm js-recon-discard" {% if not can_discard %}disabled{% endif %} title="{% trans 'Deletes the branch record in NetBox when possible' %}">{% trans "Discard run" %}</button>
+        </div>
+        <div id="reconApplyMsg" class="small mt-2 text-body-secondary"></div>
+      </div>
+    </div>
+
+    {% if apply_results.summary %}
+      <div class="card mb-3">
+        <h5 class="card-header">{% trans "Latest apply summary" %}</h5>
+        <div class="card-body py-2">
+          <div class="row g-2 small">
+            <div class="col-md-2"><strong>{% trans "Attempted" %}:</strong> {{ apply_results.summary.attempted|default:0 }}</div>
+            <div class="col-md-2"><strong>{% trans "Created" %}:</strong> {{ apply_results.summary.created|default:0 }}</div>
+            <div class="col-md-2"><strong>{% trans "Updated" %}:</strong> {{ apply_results.summary.updated|default:0 }}</div>
+            <div class="col-md-2"><strong>{% trans "Skipped" %}:</strong> {{ apply_results.summary.skipped|default:0 }}</div>
+            <div class="col-md-2"><strong>{% trans "Failed" %}:</strong> {{ apply_results.summary.failed|default:0 }}</div>
+            <div class="col-md-2"><strong>{% trans "Retry only" %}:</strong> {{ apply_results.retry_failed_only|yesno:"yes,no" }}</div>
+          </div>
+        </div>
+      </div>
+    {% endif %}
+
+    {% if frozen_ops %}
+      <div class="card">
+        <h5 class="card-header">{% trans "Frozen operations" %}</h5>
+        <div class="card-body p-0">
+          <div class="table-responsive">
+            <table class="table table-sm table-striped mb-0">
+              <thead>
+                <tr>
+                  <th>{# #}</th>
+                  <th>{% trans "Section" %}</th>
+                  <th>{% trans "Action" %}</th>
+                  <th>{% trans "Summary" %}</th>
+                </tr>
+              </thead>
+              <tbody>
+                {% for op in frozen_ops %}
+                  <tr>
+                    <td class="text-muted">{{ forloop.counter }}</td>
+                    <td class="small text-monospace">{{ op.selection_key|default:"—" }}</td>
+                    <td class="small">{{ op.action|default:"—" }}</td>
+                    <td class="small">{{ op.summary|default:"—" }}</td>
+                  </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    {% endif %}
+
+    {% if apply_results.rows %}
+      <div class="card mt-3">
+        <h5 class="card-header">{% trans "Apply row results" %}</h5>
+        <div class="card-body p-0">
+          <div class="table-responsive">
+            <table class="table table-sm table-striped mb-0">
+              <thead>
+                <tr>
+                  <th>{% trans "Status" %}</th>
+                  <th>{% trans "Reason" %}</th>
+                  <th>{% trans "Section" %}</th>
+                  <th>{% trans "Action" %}</th>
+                  <th>{% trans "Summary" %}</th>
+                </tr>
+              </thead>
+              <tbody>
+                {% for row in apply_results.rows %}
+                  <tr>
+                    <td class="small"><span class="badge text-bg-secondary">{{ row.status|default:"—" }}</span></td>
+                    <td class="small text-monospace">{{ row.reason|default:"—" }}</td>
+                    <td class="small text-monospace">{{ row.selection_key|default:"—" }}</td>
+                    <td class="small">{{ row.action|default:"—" }}</td>
+                    <td class="small">{{ row.summary|default:"—" }}</td>
+                  </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    {% endif %}
+  </div>
+</div>
+<form id="recon-csrf-anchor" class="d-none">{% csrf_token %}</form>
+<script>
+  (function() {
+    function csrfToken() {
+      var el = document.querySelector("#recon-csrf-anchor input[name=csrfmiddlewaretoken]");
+      return el ? el.value : "";
+    }
+    function postAction(url, btn) {
+      if (!url || !btn) return;
+      btn.disabled = true;
+      var msg = document.getElementById("reconApplyMsg");
+      fetch(url, {
+        method: "POST",
+        credentials: "same-origin",
+        headers: {
+          "Content-Type": "application/json",
+          "X-CSRFToken": csrfToken()
+        },
+        body: "{}"
+      }).then(function(r) {
+        return r.json().then(function(j) { return { ok: r.ok, body: j }; });
+      }).then(function(res) {
+        if (res.ok && res.body && res.body.ok) {
+          if (msg) msg.textContent = "Action complete. Refreshing results...";
+          window.location.reload();
+          return;
+        }
+        if (msg) msg.textContent = (res.body && res.body.error) ? res.body.error : "Request failed.";
+      }).catch(function(err) {
+        if (msg) msg.textContent = String(err);
+      }).finally(function() {
+        btn.disabled = false;
+      });
+    }
+    var applyBtn = document.querySelector(".js-recon-apply");
+    var retryBtn = document.querySelector(".js-recon-retry");
+    if (applyBtn) {
+      applyBtn.addEventListener("click", function() {
+        postAction("{{ apply_url|escapejs }}", applyBtn);
+      });
+    }
+    if (retryBtn) {
+      retryBtn.addEventListener("click", function() {
+        postAction("{{ retry_failed_url|escapejs }}", retryBtn);
+      });
+    }
+    var discardBtn = document.querySelector(".js-recon-discard");
+    if (discardBtn) {
+      discardBtn.addEventListener("click", function() {
+        if (!confirm("{% trans 'Discard this run and delete its NetBox branch when possible? This cannot be undone.' %}")) {
+          return;
+        }
+        postAction("{{ discard_url|escapejs }}", discardBtn);
+      });
+    }
+  })();
+</script>
+{% endblock %}

@@ -138,6 +138,11 @@
               {% trans "Drift Run History" %}
             </a>
           </li>
+          <li class="nav-item" role="presentation">
+            <a class="nav-link js-drift-nav-loading" id="maas-sync-recon-tab" href="{% url 'plugins:netbox_automation_plugin:maas_openstack_reconciliation_runs' %}">
+              {% trans "Branch reconciliation" %}
+            </a>
+          </li>
         </ul>
         <div class="tab-content" id="maas-sync-tabs-content">
           <div class="tab-pane fade show active" id="maas-sync-audit-pane" role="tabpanel" aria-labelledby="maas-sync-audit-tab" tabindex="0">
@@ -537,6 +542,10 @@
                     <button type="button" class="btn btn-success btn-sm js-drift-clear-review">{% trans "Clear edits" %}</button>
                     <button type="button" class="btn btn-success btn-sm js-drift-save-review">{% trans "Save edits" %}</button>
                   {% endif %}
+                  {% if audit_run_id and report_drift_markup == "html" %}
+                    <button type="button" class="btn btn-primary btn-sm js-maas-recon-preview">{% trans "Preview selected changes" %}</button>
+                    <button type="button" class="btn btn-primary btn-sm js-maas-recon-create" disabled>{% trans "Create NetBox branch from selected" %}</button>
+                  {% endif %}
                 </div>
               </div>
               <div class="drift-audit-report-scroll border rounded bg-body-secondary p-2">
@@ -557,6 +566,25 @@
               <p class="small text-muted mt-2 mb-0">{% trans "Excel can be opened in Microsoft Excel or Google Sheets." %}</p>
             </div>
           </div>
+          {% if audit_run_id and report_drift_markup == "html" %}
+          <div class="modal fade" id="maasReconPreviewModal" tabindex="-1" aria-hidden="true">
+            <div class="modal-dialog modal-lg modal-dialog-scrollable">
+              <div class="modal-content">
+                <div class="modal-header">
+                  <h5 class="modal-title">{% trans "Reconciliation preview" %}</h5>
+                  <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="{% trans 'Close' %}"></button>
+                </div>
+                <div class="modal-body">
+                  <p class="small text-body-secondary mb-2" id="maasReconPreviewMeta"></p>
+                  <pre class="small bg-body-secondary border rounded p-2 mb-0" style="max-height: 50vh; overflow: auto;" id="maasReconPreviewBody"></pre>
+                </div>
+                <div class="modal-footer">
+                  <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">{% trans "Close" %}</button>
+                </div>
+              </div>
+            </div>
+          </div>
+          {% endif %}
           <script>
             (function() {
               function updateState(container) {
@@ -685,8 +713,128 @@
               saveReviewUrl: "{{ drift_save_review_url|default:''|escapejs }}",
               auditRunId: {% if audit_run_id %}{{ audit_run_id }}{% else %}null{% endif %}
             };
+            window._maasReconConfig = {
+              previewUrl: "{% url 'plugins:netbox_automation_plugin:maas_openstack_reconciliation_preview' %}",
+              createUrl: "{% url 'plugins:netbox_automation_plugin:maas_openstack_reconciliation_create' %}",
+              driftRunId: {% if audit_run_id %}{{ audit_run_id }}{% else %}null{% endif %}
+            };
           </script>
           {% include "netbox_automation_plugin/_drift_xlsx_overlay_and_script.html" %}
+          {% if audit_run_id and report_drift_markup == "html" %}
+          <script>
+            (function() {
+              function getCsrf() {
+                var el = document.querySelector("#drift-review-csrf-anchor input[name=csrfmiddlewaretoken]");
+                return el ? el.value : "";
+              }
+              function collectSelected() {
+                var selected = {};
+                document.querySelectorAll(".drift-selectable-table tbody .drift-include-row:checked").forEach(function(cb) {
+                  var tr = cb.closest("tr");
+                  var sk = tr && tr.getAttribute("data-drift-sel-key");
+                  var rk = cb.value;
+                  if (!sk || !rk) return;
+                  if (!selected[sk]) selected[sk] = [];
+                  selected[sk].push(rk);
+                });
+                return selected;
+              }
+              var previewTok = null;
+              var btnPrev = document.querySelector(".js-maas-recon-preview");
+              var btnCreate = document.querySelector(".js-maas-recon-create");
+              var cfg = window._maasReconConfig || {};
+              if (!btnPrev || !btnCreate || !cfg.previewUrl || !cfg.createUrl || !cfg.driftRunId) return;
+
+              btnPrev.addEventListener("click", function() {
+                var sel = collectSelected();
+                var keys = Object.keys(sel);
+                if (!keys.length) {
+                  alert("{% filter escapejs %}{% trans "Select at least one row (Include) in the report." %}{% endfilter %}");
+                  return;
+                }
+                btnPrev.disabled = true;
+                fetch(cfg.previewUrl, {
+                  method: "POST",
+                  credentials: "same-origin",
+                  headers: {
+                    "Content-Type": "application/json",
+                    "X-CSRFToken": getCsrf()
+                  },
+                  body: JSON.stringify({ drift_run_id: cfg.driftRunId, selected: sel })
+                })
+                  .then(function(r) { return r.json().then(function(j) { return { ok: r.ok, status: r.status, body: j }; }); })
+                  .then(function(res) {
+                    btnPrev.disabled = false;
+                    if (!res.body || !res.body.ok) {
+                      alert((res.body && res.body.error) ? res.body.error : ("HTTP " + res.status));
+                      previewTok = null;
+                      btnCreate.disabled = true;
+                      return;
+                    }
+                    previewTok = res.body.preview_ack_token;
+                    btnCreate.disabled = !previewTok;
+                    var lines = (res.body.operations || []).map(function(o) {
+                      return "[" + (o.section || "") + "] " + (o.summary || "");
+                    });
+                    var meta = "digest: " + (res.body.operations_digest || "") + " — " +
+                      (res.body.operation_count || 0) + " {% filter escapejs %}{% trans "operations" %}{% endfilter %}";
+                    var pre = document.getElementById("maasReconPreviewBody");
+                    var metaEl = document.getElementById("maasReconPreviewMeta");
+                    if (pre) pre.textContent = lines.join("\n");
+                    if (metaEl) metaEl.textContent = meta;
+                    var modalEl = document.getElementById("maasReconPreviewModal");
+                    if (modalEl && window.bootstrap && window.bootstrap.Modal) {
+                      window.bootstrap.Modal.getOrCreateInstance(modalEl).show();
+                    } else if (modalEl) {
+                      alert(meta + "\n\n" + lines.join("\n"));
+                    }
+                  })
+                  .catch(function(e) {
+                    btnPrev.disabled = false;
+                    previewTok = null;
+                    btnCreate.disabled = true;
+                    console.warn(e);
+                    alert(String(e));
+                  });
+              });
+
+              btnCreate.addEventListener("click", function() {
+                if (!previewTok) {
+                  alert("{% filter escapejs %}{% trans "Run Preview selected changes first." %}{% endfilter %}");
+                  return;
+                }
+                var sel = collectSelected();
+                btnCreate.disabled = true;
+                fetch(cfg.createUrl, {
+                  method: "POST",
+                  credentials: "same-origin",
+                  headers: {
+                    "Content-Type": "application/json",
+                    "X-CSRFToken": getCsrf()
+                  },
+                  body: JSON.stringify({
+                    drift_run_id: cfg.driftRunId,
+                    selected: sel,
+                    preview_ack_token: previewTok
+                  })
+                })
+                  .then(function(r) { return r.json().then(function(j) { return { ok: r.ok, status: r.status, body: j }; }); })
+                  .then(function(res) {
+                    if (res.body && res.body.redirect_url) {
+                      window.location.href = res.body.redirect_url;
+                      return;
+                    }
+                    btnCreate.disabled = false;
+                    alert((res.body && res.body.error) ? res.body.error : ("HTTP " + res.status));
+                  })
+                  .catch(function(e) {
+                    btnCreate.disabled = false;
+                    alert(String(e));
+                  });
+              });
+            })();
+          </script>
+          {% endif %}
         {% endif %}
   </div>
 </div>

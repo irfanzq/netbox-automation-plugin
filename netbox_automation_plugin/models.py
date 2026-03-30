@@ -283,3 +283,90 @@ class MAASOpenStackDriftRun(NetBoxModel):
         return f"Drift run {self.pk} ({self.status})"
 
 
+class MAASOpenStackReconciliationRun(NetBoxModel):
+    """
+    Branch reconciliation run: frozen drift rows → NetBox Branch → (future) apply/merge.
+    """
+
+    STATUS_DRAFT = "draft"
+    STATUS_BRANCH_CREATING = "branch_creating"
+    STATUS_BRANCH_CREATED = "branch_created"
+    STATUS_BRANCH_CREATE_FAILED = "branch_create_failed"
+    STATUS_APPLY_IN_PROGRESS = "apply_in_progress"
+    STATUS_APPLIED = "applied"
+    STATUS_APPLY_FAILED_PARTIAL = "apply_failed_partial"
+    STATUS_APPLY_FAILED = "apply_failed"
+    STATUS_VALIDATION_IN_PROGRESS = "validation_in_progress"
+    STATUS_VALIDATED = "validated"
+    STATUS_VALIDATION_FAILED = "validation_failed"
+    STATUS_MERGE_IN_PROGRESS = "merge_in_progress"
+    STATUS_MERGED = "merged"
+    STATUS_MERGE_FAILED = "merge_failed"
+    STATUS_DISCARDED = "discarded"
+
+    STATUS_CHOICES = [
+        (STATUS_DRAFT, "Draft"),
+        (STATUS_BRANCH_CREATING, "Branch creating"),
+        (STATUS_BRANCH_CREATED, "Branch created"),
+        (STATUS_BRANCH_CREATE_FAILED, "Branch create failed"),
+        (STATUS_APPLY_IN_PROGRESS, "Apply in progress"),
+        (STATUS_APPLIED, "Applied"),
+        (STATUS_APPLY_FAILED_PARTIAL, "Apply failed (partial)"),
+        (STATUS_APPLY_FAILED, "Apply failed"),
+        (STATUS_VALIDATION_IN_PROGRESS, "Validation in progress"),
+        (STATUS_VALIDATED, "Validated"),
+        (STATUS_VALIDATION_FAILED, "Validation failed"),
+        (STATUS_MERGE_IN_PROGRESS, "Merge in progress"),
+        (STATUS_MERGED, "Merged"),
+        (STATUS_MERGE_FAILED, "Merge failed"),
+        (STATUS_DISCARDED, "Discarded"),
+    ]
+
+    drift_run = models.ForeignKey(
+        MAASOpenStackDriftRun,
+        on_delete=models.CASCADE,
+        related_name="reconciliation_runs",
+    )
+    status = models.CharField(max_length=32, choices=STATUS_CHOICES, default=STATUS_DRAFT)
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="maas_openstack_reconciliation_runs",
+    )
+    branch_id = models.PositiveBigIntegerField(
+        null=True,
+        blank=True,
+        help_text="NetBox Branch primary key when branching is available.",
+    )
+    branch_name = models.CharField(max_length=240, blank=True, default="")
+    frozen_operations = models.JSONField(
+        default=list,
+        blank=True,
+        help_text="Immutable operation set resolved at create time.",
+    )
+    operations_digest = models.CharField(max_length=64, blank=True, default="")
+    selection = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text="Selected row keys by drift section (selection_key → row_key list).",
+    )
+    error_message = models.TextField(blank=True, default="")
+    apply_results = models.JSONField(default=dict, blank=True)
+
+    class Meta:
+        app_label = "netbox_automation_plugin"
+        ordering = ["-created"]
+        verbose_name = "MAAS/OpenStack branch reconciliation run"
+        verbose_name_plural = "MAAS/OpenStack branch reconciliation runs"
+        indexes = [
+            models.Index(fields=["-created"]),
+            models.Index(fields=["status", "-created"]),
+            models.Index(fields=["drift_run", "-created"]),
+        ]
+
+    def __str__(self):
+        return f"Reconciliation {self.pk} ({self.status})"
+
+

@@ -91,6 +91,21 @@ def _drift_review_ui_context(request, audit_run):
     return ctx
 
 
+def _reconciliation_ui_context(request):
+    """URLs for branch reconciliation (preview/create/list)."""
+    return {
+        "maas_reconciliation_preview_url": reverse(
+            "plugins:netbox_automation_plugin:maas_openstack_reconciliation_preview",
+        ),
+        "maas_reconciliation_create_url": reverse(
+            "plugins:netbox_automation_plugin:maas_openstack_reconciliation_create",
+        ),
+        "maas_reconciliation_runs_url": reverse(
+            "plugins:netbox_automation_plugin:maas_openstack_reconciliation_runs",
+        ),
+    }
+
+
 def _drift_nb_picker_catalog_for_markup(markup: str):
     if str(markup or "").lower() != "html":
         return None
@@ -757,6 +772,7 @@ class MAASOpenStackSyncView(LoginRequiredMixin, View):
                                 report_drift_markup
                             ),
                             **_drift_review_ui_context(request, None),
+                            **_reconciliation_ui_context(request),
                         },
                     )
                 except Exception as e:
@@ -1280,6 +1296,7 @@ class MAASOpenStackSyncView(LoginRequiredMixin, View):
                         report_drift_markup
                     ),
                     **_drift_review_ui_context(request, audit_run),
+                    **_reconciliation_ui_context(request),
                 },
             )
 
@@ -1299,6 +1316,7 @@ class MAASOpenStackSyncView(LoginRequiredMixin, View):
                     report_drift_markup
                 ),
                 **_drift_review_ui_context(request, audit_run),
+                **_reconciliation_ui_context(request),
             },
         )
 

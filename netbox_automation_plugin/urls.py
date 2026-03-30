@@ -14,6 +14,16 @@ from .workflows.maas_openstack_sync.history_views import (
     MAASOpenStackSyncRunDownloadXlsxView,
     MAASOpenStackSyncRunSaveReviewView,
 )
+from .workflows.maas_openstack_sync.reconciliation_views import (
+    ReconciliationApplyView,
+    ReconciliationCreateView,
+    ReconciliationDiscardView,
+    ReconciliationNotImplementedPostView,
+    ReconciliationPreviewView,
+    ReconciliationRetryFailedView,
+    ReconciliationRunDetailView,
+    ReconciliationRunsListView,
+)
 
 app_name = "netbox_automation_plugin"
 
@@ -92,6 +102,51 @@ urlpatterns = [
         "maas-openstack-sync/runs/<int:run_id>/save-review/",
         MAASOpenStackSyncRunSaveReviewView.as_view(),
         name="maas_openstack_sync_run_save_review",
+    ),
+    path(
+        "maas-openstack-sync/reconciliation/runs/",
+        ReconciliationRunsListView.as_view(),
+        name="maas_openstack_reconciliation_runs",
+    ),
+    path(
+        "maas-openstack-sync/reconciliation/runs/<int:run_id>/",
+        ReconciliationRunDetailView.as_view(),
+        name="maas_openstack_reconciliation_detail",
+    ),
+    path(
+        "maas-openstack-sync/reconciliation/preview/",
+        ReconciliationPreviewView.as_view(),
+        name="maas_openstack_reconciliation_preview",
+    ),
+    path(
+        "maas-openstack-sync/reconciliation/create/",
+        ReconciliationCreateView.as_view(),
+        name="maas_openstack_reconciliation_create",
+    ),
+    path(
+        "maas-openstack-sync/reconciliation/runs/<int:run_id>/apply/",
+        ReconciliationApplyView.as_view(),
+        name="maas_openstack_reconciliation_apply",
+    ),
+    path(
+        "maas-openstack-sync/reconciliation/runs/<int:run_id>/retry-failed/",
+        ReconciliationRetryFailedView.as_view(),
+        name="maas_openstack_reconciliation_retry_failed",
+    ),
+    path(
+        "maas-openstack-sync/reconciliation/runs/<int:run_id>/validate/",
+        ReconciliationNotImplementedPostView.as_view(),
+        name="maas_openstack_reconciliation_validate",
+    ),
+    path(
+        "maas-openstack-sync/reconciliation/runs/<int:run_id>/merge/",
+        ReconciliationNotImplementedPostView.as_view(),
+        name="maas_openstack_reconciliation_merge",
+    ),
+    path(
+        "maas-openstack-sync/reconciliation/runs/<int:run_id>/discard/",
+        ReconciliationDiscardView.as_view(),
+        name="maas_openstack_reconciliation_discard",
     ),
 ]
 

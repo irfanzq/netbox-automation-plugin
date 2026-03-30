@@ -1,0 +1,59 @@
+{% extends 'base/layout.html' %}
+{% load i18n %}
+
+{% block title %}{% trans "Branch reconciliation runs" %}{% endblock %}
+
+{% block content %}
+<div class="row">
+  <div class="col">
+    <div class="card">
+      <h5 class="card-header d-flex flex-wrap align-items-center justify-content-between gap-2">
+        <span>{% trans "MAAS / OpenStack — branch reconciliation runs" %}</span>
+        <a href="{% url 'plugins:netbox_automation_plugin:maas_openstack_sync' %}" class="btn btn-outline-secondary btn-sm">
+          {% trans "Drift audit" %}
+        </a>
+      </h5>
+      <div class="card-body p-0">
+        {% if runs %}
+          <div class="table-responsive">
+            <table class="table table-hover mb-0">
+              <thead>
+                <tr>
+                  <th>{% trans "ID" %}</th>
+                  <th>{% trans "Status" %}</th>
+                  <th>{% trans "Drift run" %}</th>
+                  <th>{% trans "Branch" %}</th>
+                  <th>{% trans "Ops" %}</th>
+                  <th>{% trans "Created" %}</th>
+                  <th>{% trans "User" %}</th>
+                </tr>
+              </thead>
+              <tbody>
+                {% for r in runs %}
+                  <tr>
+                    <td>
+                      <a href="{% url 'plugins:netbox_automation_plugin:maas_openstack_reconciliation_detail' r.pk %}">{{ r.pk }}</a>
+                    </td>
+                    <td><span class="badge text-bg-secondary">{{ r.get_status_display }}</span></td>
+                    <td>
+                      {% if r.drift_run_id %}
+                        <a href="{% url 'plugins:netbox_automation_plugin:maas_openstack_sync_run_detail' r.drift_run_id %}">{{ r.drift_run_id }}</a>
+                      {% else %}—{% endif %}
+                    </td>
+                    <td class="text-monospace small">{{ r.branch_name|default:"—" }}</td>
+                    <td>{{ r.frozen_operations|length }}</td>
+                    <td class="text-nowrap small">{{ r.created }}</td>
+                    <td class="small">{{ r.created_by|default:"—" }}</td>
+                  </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+        {% else %}
+          <p class="text-body-secondary mb-0 p-3">{% trans "No reconciliation runs yet. From the drift audit report, use Preview and Create branch." %}</p>
+        {% endif %}
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}
