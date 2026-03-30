@@ -727,6 +727,7 @@
                 });
                 return selected;
               }
+              var stagingWaitMsg = "{% filter escapejs %}{% trans "Building reconciliation preview…" %}{% endfilter %}";
               form.addEventListener("submit", function(ev) {
                 ev.preventDefault();
                 var sel = collectSelected();
@@ -734,12 +735,16 @@
                   alert("{% filter escapejs %}{% trans "Select at least one row (Include) in the report." %}{% endfilter %}");
                   return;
                 }
+                var stageBtn = document.getElementById("maas-recon-stage-submit");
+                if (stageBtn) stageBtn.disabled = true;
+                if (typeof window.driftNavLoadingShow === "function") {
+                  window.driftNavLoadingShow(stagingWaitMsg);
+                }
                 var hidden = document.getElementById("maas-recon-selected-json");
                 if (hidden) hidden.value = JSON.stringify(sel);
                 var ovEl = document.getElementById("maas-recon-overrides-json");
                 var saveUrl = (window._driftXlsxUiConfig && window._driftXlsxUiConfig.saveReviewUrl) || "";
                 var dirty = window.__driftReviewDirty === true;
-                var stageBtn = document.getElementById("maas-recon-stage-submit");
 
                 function collectOverridesSafe() {
                   try {
@@ -768,10 +773,11 @@
                 if (dirty && saveUrl) {
                   var tok = stagingCsrf();
                   if (!tok) {
+                    if (typeof window.driftNavLoadingHide === "function") window.driftNavLoadingHide();
+                    if (stageBtn) stageBtn.disabled = false;
                     alert("{% filter escapejs %}{% trans "Missing CSRF token. Reload the page and try again." %}{% endfilter %}");
                     return;
                   }
-                  if (stageBtn) stageBtn.disabled = true;
                   fetch(saveUrl, {
                     method: "POST",
                     credentials: "same-origin",
@@ -802,6 +808,7 @@
                       proceedDbOnly();
                     })
                     .catch(function(err) {
+                      if (typeof window.driftNavLoadingHide === "function") window.driftNavLoadingHide();
                       alert(
                         "{% filter escapejs %}{% trans "Could not save your table edits before reconciliation." %}{% endfilter %} "
                         + (err && err.message ? err.message : "")

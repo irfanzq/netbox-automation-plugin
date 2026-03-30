@@ -32,17 +32,32 @@
 <div id="drift-nav-loading-overlay" aria-hidden="true">
   <div class="drift-nav-loading-content">
     <div class="drift-nav-loading-spinner" aria-hidden="true"></div>
-    <div class="drift-nav-loading-message fw-semibold">{% trans "Loading page…" %}</div>
+    <div class="drift-nav-loading-message fw-semibold" id="drift-nav-loading-message">{% trans "Loading page…" %}</div>
   </div>
 </div>
 <script>
 (function () {
-  function showNavLoading() {
+  var msgEl = document.getElementById("drift-nav-loading-message");
+  var defaultMsg = msgEl && msgEl.textContent ? msgEl.textContent.trim() : "";
+  function showNavLoading(customMsg) {
     var ov = document.getElementById("drift-nav-loading-overlay");
     if (!ov) return;
+    if (msgEl) {
+      var m = customMsg != null ? String(customMsg).trim() : "";
+      msgEl.textContent = m || defaultMsg;
+    }
     ov.classList.add("drift-loading-visible");
     ov.setAttribute("aria-hidden", "false");
   }
+  function hideNavLoading() {
+    var ov = document.getElementById("drift-nav-loading-overlay");
+    if (!ov) return;
+    ov.classList.remove("drift-loading-visible");
+    ov.setAttribute("aria-hidden", "true");
+    if (msgEl && defaultMsg) msgEl.textContent = defaultMsg;
+  }
+  window.driftNavLoadingShow = showNavLoading;
+  window.driftNavLoadingHide = hideNavLoading;
   document.addEventListener("click", function (e) {
     var a = e.target.closest("a.js-drift-nav-loading");
     if (!a || !a.href) return;

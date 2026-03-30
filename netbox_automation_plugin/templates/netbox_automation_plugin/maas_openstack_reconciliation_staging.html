@@ -4,14 +4,15 @@
 {% block title %}{% trans "Reconciliation preview" %} — {% trans "Drift run" %} #{{ drift_run.pk }}{% endblock %}
 
 {% block content %}
+{% include "netbox_automation_plugin/_drift_nav_loading_overlay.html" %}
 <div class="row">
   <div class="col-lg-10">
     <div class="card mb-3">
       <h5 class="card-header d-flex flex-wrap align-items-center justify-content-between gap-2">
         <span>{% trans "Branch reconciliation — preview" %} <span class="badge text-bg-secondary">{% trans "Drift" %} #{{ drift_run.pk }}</span></span>
         <div class="d-flex flex-wrap gap-1">
-          <a href="{{ audit_back_url }}" class="btn btn-outline-primary btn-sm">{% trans "Back to drift audit" %}</a>
-          <a href="{{ reconciliation_runs_url }}" class="btn btn-outline-secondary btn-sm">{% trans "All reconciliation runs" %}</a>
+          <a href="{{ audit_back_url }}" class="btn btn-outline-primary btn-sm js-drift-nav-loading">{% trans "Back to drift audit" %}</a>
+          <a href="{{ reconciliation_runs_url }}" class="btn btn-outline-secondary btn-sm js-drift-nav-loading">{% trans "All reconciliation runs" %}</a>
         </div>
       </h5>
       <div class="card-body">
@@ -21,7 +22,10 @@
             <span class="d-block mt-1">{% trans "Last saved review" %}: {{ drift_run.drift_review_saved_at }}{% if drift_run.drift_review_saved_by %} ({{ drift_run.drift_review_saved_by }}){% endif %}</span>
           {% endif %}
         </p>
-        <h6 class="text-body-secondary text-uppercase small">{% trans "Next steps" %}</h6>
+        <p class="small text-body-secondary mb-0">
+          {% blocktrans trimmed %}Each operation’s expandable <strong>Audit columns</strong> are the same cell values stored for apply (MAC, VLAN, MAAS properties, etc.).{% endblocktrans %}
+        </p>
+        <h6 class="text-body-secondary text-uppercase small mt-3">{% trans "Next steps" %}</h6>
         <ol class="small mb-4">
           <li>{% trans "Confirm the operation list and digest below match what you intend to apply to a new NetBox branch." %}</li>
           <li>{% trans "Create the branch (frozen operations are locked for this run)." %}</li>
@@ -105,6 +109,7 @@
                   <th>{% trans "Section" %}</th>
                   <th>{% trans "Action" %}</th>
                   <th>{% trans "Summary" %}</th>
+                  <th>{% trans "Audit columns" %}</th>
                 </tr>
               </thead>
               <tbody>
@@ -114,6 +119,21 @@
                     <td class="small text-monospace">{{ op.section|default:"—" }}</td>
                     <td class="small">{{ op.action|default:"—" }}</td>
                     <td class="small">{{ op.summary|default:"—" }}</td>
+                    <td class="small align-top" style="min-width: 12rem;">
+                      {% if op.cells %}
+                        <details class="drift-recon-op-cells">
+                          <summary class="text-primary" style="cursor: pointer;">{% trans "Show all columns" %}</summary>
+                          <dl class="row small mb-0 mt-2 border-top pt-2">
+                            {% for col, val in op.cells.items %}
+                              <dt class="col-5 text-body-secondary text-wrap">{{ col }}</dt>
+                              <dd class="col-7 mb-1 text-wrap">{% if val %}{{ val }}{% else %}—{% endif %}</dd>
+                            {% endfor %}
+                          </dl>
+                        </details>
+                      {% else %}
+                        —
+                      {% endif %}
+                    </td>
                   </tr>
                 {% endfor %}
               </tbody>

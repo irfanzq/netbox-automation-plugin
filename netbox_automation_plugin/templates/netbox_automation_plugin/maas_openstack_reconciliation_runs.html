@@ -4,12 +4,13 @@
 {% block title %}{% trans "Branch reconciliation runs" %}{% endblock %}
 
 {% block content %}
+{% include "netbox_automation_plugin/_drift_nav_loading_overlay.html" %}
 <div class="row">
   <div class="col">
     <div class="card">
       <h5 class="card-header d-flex flex-wrap align-items-center justify-content-between gap-2">
         <span>{% trans "MAAS / OpenStack — branch reconciliation runs" %}</span>
-        <a href="{% url 'plugins:netbox_automation_plugin:maas_openstack_sync' %}" class="btn btn-outline-secondary btn-sm">
+        <a href="{% url 'plugins:netbox_automation_plugin:maas_openstack_sync' %}" class="btn btn-outline-secondary btn-sm js-drift-nav-loading">
           {% trans "Drift audit" %}
         </a>
       </h5>
