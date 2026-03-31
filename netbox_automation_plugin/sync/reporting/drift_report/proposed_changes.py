@@ -968,7 +968,7 @@ def _proposed_changes_rows(
                     if maas_if != "—"
                     else f"maas-nic-{mac.replace(':', '')[-6:]}"
                 )
-                props = f"MAC {mac}; untagged VLAN {vlan} (from MAAS); IPs: {ips}"
+                props = f"MAC {mac}; untagged VLAN {vlan}; IPs: {ips}"
                 osr = os_runtime_idx.get(((h or "").strip().lower(), _norm_mac_local(mac))) or {}
                 os_reg = str(
                     osr.get("os_region") or (openstack_data or {}).get("openstack_region_name") or "—"
@@ -987,9 +987,7 @@ def _proposed_changes_rows(
                 )
                 if os_has_runtime:
                     # OS authority: Proposed properties reflect runtime only (MAAS columns still show MAAS).
-                    props = (
-                        f"MAC {os_mac}; untagged VLAN {os_vlan} (from OS runtime); IPs: {os_ip}"
-                    )
+                    props = f"MAC {os_mac}; untagged VLAN {os_vlan}; IPs: {os_ip}"
                 out.append(
                     [
                         h,
@@ -1039,6 +1037,10 @@ def _proposed_changes_rows(
             )
             host_os_ok = os_host_authority.get((h or "").strip().lower(), False)
             has_os_data = bool(osr) and host_os_ok and bool(os_bmc_ip or os_mgmt_type)
+            os_vendor = str(osr.get("vendor") or "").strip() or "—"
+            os_model = str(osr.get("model") or osr.get("product") or osr.get("hardware_model") or "").strip() or "—"
+            maas_vendor = str(m.get("hardware_vendor") or "").strip() or "—"
+            maas_product = str(m.get("hardware_product") or "").strip() or "—"
             authority_badge = "[OS]" if has_os_data else "[MAAS]"
             mgmt = os_mgmt if bool(osr) else maas_mgmt
             target_ip = os_bmc_ip if has_os_data and os_bmc_ip else bmc_ip
@@ -1055,8 +1057,12 @@ def _proposed_changes_rows(
                     h,
                     os_bmc_ip or "—",
                     os_mgmt_type or "—",
+                    os_vendor,
+                    os_model,
                     bmc_ip or "—",
                     power_type or "—",
+                    maas_vendor,
+                    maas_product,
                     str(m.get("bmc_mac") or "—"),
                     mgmt,
                     bmc_ip or "—",

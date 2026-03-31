@@ -29,10 +29,7 @@ def _build_add_nb_interface_rows(interface_audit):
             authority = str(row.get("authority") or "maas_fallback").strip()
             authority_badge = "[OS]" if authority == "openstack_runtime" else "[MAAS]"
             os_region = str(row.get("os_region") or "—").strip() or "—"
-            props = (
-                f"MAC {mac}; untagged VLAN {vlan} (from MAAS); "
-                f"IPs: {ips}"
-            )
+            props = f"MAC {mac}; untagged VLAN {vlan}; IPs: {ips}"
             out.append([
                 hn,
                 nb_site,
