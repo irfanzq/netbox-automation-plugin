@@ -151,6 +151,17 @@ def _collect_neutron(conn, project_label: str) -> tuple[list, list, list]:
     networks = []
     subnets = []
     floating_ips = []
+    project_name_by_id: dict[str, str] = {}
+
+    # Resolve owning project display names from Keystone when available.
+    try:
+        for p in conn.identity.projects():
+            pid = str(getattr(p, "id", "") or "").strip()
+            pname = str(getattr(p, "name", "") or "").strip()
+            if pid and pname:
+                project_name_by_id[pid] = pname
+    except Exception:
+        project_name_by_id = {}
 
     for net in conn.network.networks():
         networks.append({
@@ -164,6 +175,10 @@ def _collect_neutron(conn, project_label: str) -> tuple[list, list, list]:
 
     for sn in conn.network.subnets():
         tid = getattr(sn, "tenant_id", None) or getattr(sn, "project_id", None) or ""
+        tid_s = str(tid)[:36] if tid else ""
+        # Owner project must come from resource tenant/project id mapping.
+        # Do not fall back to current scan scope label (can be unrelated project).
+        proj_name = project_name_by_id.get(tid_s, "")
         raw_pools = getattr(sn, "allocation_pools", None) or []
         pools = []
         for p in raw_pools:
@@ -187,19 +202,23 @@ def _collect_neutron(conn, project_label: str) -> tuple[list, list, list]:
             "gateway_ip": getattr(sn, "gateway_ip", "") or "",
             "ip_version": str(getattr(sn, "ip_version", "") or ""),
             "enable_dhcp": bool(getattr(sn, "is_dhcp_enabled", False)),
-            "project_id": str(tid)[:36] if tid else "",
-            "project_name": project_label or "",
+            "project_id": tid_s,
+            "project_name": proj_name,
             "allocation_pools": pools,
         })
 
     for fip in conn.network.ips(floating=True):
         tid = getattr(fip, "tenant_id", None) or getattr(fip, "project_id", None) or ""
+        tid_s = str(tid)[:36] if tid else ""
+        # Owner project must come from resource tenant/project id mapping.
+        # Do not fall back to current scan scope label (can be unrelated project).
+        proj_name = project_name_by_id.get(tid_s, "")
         floating_ips.append({
             "floating_ip_address": getattr(fip, "floating_ip_address", ""),
             "fixed_ip_address": getattr(fip, "fixed_ip_address", "") or "-",
             "id": getattr(fip, "id", ""),
-            "project_id": str(tid)[:36] if tid else "",
-            "project_name": project_label,
+            "project_id": tid_s,
+            "project_name": proj_name,
             "floating_network_id": getattr(fip, "floating_network_id", "") or "",
         })
 

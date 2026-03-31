@@ -248,7 +248,7 @@ def _html_col_is_role_reason(header) -> bool:
 
 def _html_col_is_prefix_description(header) -> bool:
     h = str(header or "").strip().lower()
-    return h in {"os description", "nb prefix description"}
+    return h in {"os description", "nb prefix description", "nb proposed prefix description"}
 
 
 def _html_col_is_maas_fabric(header) -> bool:
@@ -277,7 +277,7 @@ def _html_col_is_ip(header) -> bool:
 def _html_th_class(header) -> str:
     h = str(header or "")
     if _html_col_is_prefix_description(h):
-        return "small align-bottom"
+        return "small align-bottom drift-col-prefix-description"
     if _html_col_is_maas_fabric(h):
         return "small align-bottom text-nowrap"
     if _html_col_is_role_reason(h):
@@ -296,7 +296,7 @@ def _html_td_class(header, col_idx, notes_col_idx=None) -> str:
     h = str(header or "")
     parts = []
     if _html_col_is_prefix_description(h):
-        parts.extend(["align-top"])
+        parts.extend(["align-top", "drift-col-prefix-description"])
     elif _html_col_is_role_reason(h):
         parts.extend(["align-top", "drift-col-role-reason"])
     elif _html_col_is_mac(h):
