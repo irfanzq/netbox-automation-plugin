@@ -985,6 +985,11 @@ def _proposed_changes_rows(
                     and host_os_ok
                     and any(x not in {"", "—"} for x in [os_mac, os_ip, os_vlan])
                 )
+                if os_has_runtime:
+                    props = (
+                        f"MAC {os_mac}; untagged VLAN {os_vlan} (from OS runtime); IPs: {os_ip}. "
+                        f"MAAS note: untagged VLAN {vlan}; IPs: {ips}"
+                    )
                 out.append(
                     [
                         h,
@@ -1008,6 +1013,8 @@ def _proposed_changes_rows(
         return sorted(out, key=lambda x: (x[0] or "").lower())
 
     def _new_device_bmc_rows():
+        from netbox_automation_plugin.sync.reconciliation.audit_detail import _normalize_mac
+
         out = []
         for h in sorted(drift.get("in_maas_not_netbox") or []):
             m = by_h.get(h, {})
@@ -1034,10 +1041,16 @@ def _proposed_changes_rows(
             has_os_data = bool(osr) and host_os_ok and bool(os_bmc_ip or os_mgmt_type)
             authority_badge = "[OS]" if has_os_data else "[MAAS]"
             mgmt = os_mgmt if bool(osr) else maas_mgmt
-            action = (
-                "CREATE_NETBOX_OOB_IFACE"
-                + ("; SET_NETBOX_OOB_IP" if bmc_ip else "")
-            )
+            target_ip = os_bmc_ip if has_os_data and os_bmc_ip else bmc_ip
+            source = "OS runtime" if has_os_data and os_bmc_ip else "MAAS"
+            action_parts = [f"CREATE_NETBOX_OOB_IFACE={mgmt or 'mgmt0'}"]
+            if target_ip:
+                action_parts.append(f"SET_NETBOX_OOB_IP={target_ip} (from {source})")
+            action = "; ".join(action_parts)
+            bmc_mac_hint = str(m.get("bmc_mac") or "").strip()
+            mac_norm = _normalize_mac(bmc_mac_hint) if bmc_mac_hint else ""
+            if mac_norm and "SET_NETBOX_OOB_MAC=" not in action:
+                action += f"; SET_NETBOX_OOB_MAC={mac_norm} (from MAAS BMC)"
             out.append(
                 [
                     h,
@@ -1168,7 +1181,12 @@ def _proposed_changes_rows(
         role_name, role_reason = _suggest_prefix_role(g)
         vrf_name = _suggest_vrf_for_prefix_gap(g, selected_locations)
         os_desc = str(g.get("network_name") or "-")
-        tenant_name = str(g.get("project_name") or g.get("project_id") or "-")
+        tenant_name = str(
+            g.get("project_owner_name")
+            or g.get("project_name")
+            or g.get("project_id")
+            or "-"
+        )
         nb_scope = _suggest_scope_location_from_os_region(g.get("os_region") or "")
         nb_vlan = _suggest_vlan_from_os_segmentation_id(g.get("provider_segmentation_id"))
         add_prefixes.append([
@@ -1196,6 +1214,7 @@ def _proposed_changes_rows(
             g.get("floating_network_name"),
         )
         tenant_name = _first_meaningful_text(
+            g.get("project_owner_name"),
             g.get("project_name"),
             g.get("project_id"),
         )

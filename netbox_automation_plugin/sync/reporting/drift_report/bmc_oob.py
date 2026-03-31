@@ -309,6 +309,16 @@ def _build_proposed_mgmt_interface_rows(
             str(nb_detail.get("untagged_vlan_vid") or "—") if nb_detail else "—"
         )
 
+        target_ip = str(cov_ip_used or bmc_effective or bmc or "—").strip() or "—"
+        source_label = "OS runtime" if authority == "openstack_runtime" else "MAAS"
+
+        risk_rank = {"None": 0, "Low": 1, "Medium": 2, "High": 3}
+
+        def _bump_risk(cur: str, want: str) -> str:
+            c = cur if cur in risk_rank else "Low"
+            w = want if want in risk_rank else "Low"
+            return w if risk_rank[w] > risk_rank[c] else c
+
         if oob_match and cov == "MGMT_IFACE":
             status = "OK"
             action = "NO_CHANGE"
@@ -328,7 +338,7 @@ def _build_proposed_mgmt_interface_rows(
         elif not oob_match and cov == "OOB_IFACE_IP_MISMATCH":
             status = "SET_OOB"
             action = "SET_NETBOX_OOB_IP; REVIEW_OOB_IFACE_IP"
-            risk = "Low"
+            risk = "Medium"
         elif cov == "NO_IFACE_IP":
             status = "ADD_OOB_AND_MGMT"
             action = "SET_NETBOX_OOB_IP; ADD_NETBOX_OOB_IFACE"
@@ -338,19 +348,44 @@ def _build_proposed_mgmt_interface_rows(
             action = "REVIEW_BMC_ALIGNMENT"
             risk = "Medium"
 
+        if action != "NO_CHANGE":
+            if "SET_NETBOX_OOB_IP" in action:
+                action = action.replace(
+                    "SET_NETBOX_OOB_IP",
+                    f"SET_NETBOX_OOB_IP={target_ip} (from {source_label})",
+                )
+            if "ADD_NETBOX_OOB_IFACE" in action:
+                action = action.replace(
+                    "ADD_NETBOX_OOB_IFACE",
+                    f"ADD_NETBOX_OOB_IFACE={mgmt_suggested or 'mgmt0'}",
+                )
+
         status_before_mac = status
+        maas_mac_norm = _normalize_mac(maas_mac) if maas_mac else ""
+        nb_mgmt_mac_norm = _normalize_mac(nb_mgmt_mac) if nb_mgmt_mac and nb_mgmt_mac != "—" else ""
         if maas_mac and nb_mgmt_mac and nb_mgmt_mac != "—":
-            mm = _normalize_mac(maas_mac)
-            nm = _normalize_mac(nb_mgmt_mac)
-            if mm and nm and mm != nm:
+            if maas_mac_norm and nb_mgmt_mac_norm and maas_mac_norm != nb_mgmt_mac_norm:
                 if status == "OK":
                     status = "REVIEW"
                     risk = "Medium"
-                # Do not keep “everything aligns” copy when MACs disagree.
+                # Emit concrete target/current MAC values for mismatch.
                 if status_before_mac == "OK":
-                    action = "REVIEW_BMC_MAC_MISMATCH"
+                    action = (
+                        f"SET_NETBOX_OOB_MAC={maas_mac_norm} "
+                        f"(from MAAS BMC; current NB MAC {nb_mgmt_mac})"
+                    )
                 else:
-                    action += "; REVIEW_BMC_MAC_MISMATCH"
+                    action += (
+                        f"; SET_NETBOX_OOB_MAC={maas_mac_norm} "
+                        f"(from MAAS BMC; current NB MAC {nb_mgmt_mac})"
+                    )
+                risk = _bump_risk(risk, "High")
+        elif maas_mac_norm and (
+            (not nb_mgmt_mac) or str(nb_mgmt_mac).strip() in {"", "—", "-", "None", "none"}
+        ):
+            # Missing NetBox OOB MAC: populate from MAAS hardware MAC.
+            action += f"; SET_NETBOX_OOB_MAC={maas_mac_norm} (from MAAS BMC; current NB MAC —)"
+            risk = _bump_risk(risk, "Medium")
         if maas_vlan and nb_mgmt_vid not in ("", "—", "None"):
             if maas_vlan.strip() != str(nb_mgmt_vid).strip():
                 action += (
@@ -358,7 +393,7 @@ def _build_proposed_mgmt_interface_rows(
                 )
                 if status == "OK":
                     status = "REVIEW"
-                    risk = "Low"
+                risk = _bump_risk(risk, "Medium")
 
         if authority == "openstack_runtime":
             # OS generally does not expose BMC MAC reliably; suppress MAAS MAC-only drift here.
@@ -368,12 +403,48 @@ def _build_proposed_mgmt_interface_rows(
                     "",
                 )
             if "BMC MAC mismatch:" in action:
-                action = "SET_NETBOX_OOB_IP_FROM_OS; SKIP_BMC_MAC_VALIDATION_OS"
+                action = f"SET_NETBOX_OOB_IP={target_ip} (from OS runtime); SKIP_BMC_MAC_VALIDATION_OS"
                 if status == "REVIEW":
                     status = "SET_OOB_OS"
 
         if authority == "openstack_runtime" and _ip_address_host(cov_ip_used) != _ip_address_host(bmc_effective):
             action += "; REPLACE_MAAS_BMC_IP_WITH_OS_BMC_IP"
+
+        if action != "NO_CHANGE":
+            if "REVIEW_OOB_IFACE_IP" in action:
+                action = action.replace(
+                    "REVIEW_OOB_IFACE_IP",
+                    f"REVIEW_OOB_IFACE_IP=target {target_ip} not on NetBox OOB iface {nb_ifn or '—'}",
+                )
+            if "REVIEW_BMC_VLAN_HINT" in action:
+                action = action.replace(
+                    "REVIEW_BMC_VLAN_HINT",
+                    f"REVIEW_BMC_VLAN_HINT=MAAS VLAN {maas_vlan or '—'} vs NetBox VLAN {nb_mgmt_vid or '—'}",
+                )
+            if "REPLACE_MAAS_BMC_IP_WITH_OS_BMC_IP" in action:
+                action = action.replace(
+                    "REPLACE_MAAS_BMC_IP_WITH_OS_BMC_IP",
+                    f"REPLACE_MAAS_BMC_IP_WITH_OS_BMC_IP={bmc or '—'} -> {bmc_effective or target_ip}",
+                )
+
+        # When NetBox OOB port has no MAC but MAAS (or MAAS hardware on OS-authority rows) has one, spell it out in Proposed action.
+        mac_src = _normalize_mac(maas_mac) if maas_mac else ""
+        mac_src_label = (
+            "MAAS BMC (hardware; OS audit has no BMC MAC)"
+            if authority == "openstack_runtime" and mac_src
+            else "MAAS BMC"
+            if mac_src
+            else ""
+        )
+        nb_mac_empty = (not nb_mgmt_mac) or str(nb_mgmt_mac).strip() in ("", "—", "-", "None", "none")
+        if (
+            mac_src
+            and nb_mac_empty
+            and str(status).strip().upper() != "OK"
+            and "SET_NETBOX_OOB_MAC=" not in action
+            and "SKIP_BMC_MAC_VALIDATION_OS" not in action
+        ):
+            action += f"; SET_NETBOX_OOB_MAC={mac_src} (from {mac_src_label})"
 
         if str(status).strip().upper() == "OK":
             continue

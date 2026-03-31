@@ -30,28 +30,33 @@ def _build_update_nic_rows(interface_audit):
             statuses = []
             actions = []
             risk = "Medium"
+            maas_mac = str(row.get("maas_mac") or "").strip() or "—"
+            maas_ips = str(row.get("maas_ips") or "").strip() or "—"
+
+            def _preferred_value(os_val: str, maas_val: str) -> tuple[str, str]:
+                os_v = str(os_val or "").strip()
+                maas_v = str(maas_val or "").strip()
+                if authority == "openstack_runtime" and os_v not in {"", "—", "-", "None", "none"}:
+                    return os_v, "OS runtime"
+                if maas_v not in {"", "—", "-", "None", "none"}:
+                    return maas_v, "MAAS"
+                if os_v:
+                    return os_v, "OS runtime"
+                return "—", "MAAS"
 
             if "VLAN_DRIFT" in st:
                 if nb_vlan in {"", "—", "None", "none"}:
                     statuses.append("MISSING_NB_VLAN")
-                    if authority == "openstack_runtime":
-                        actions.append("SET_NETBOX_UNTAGGED_VLAN")
-                    else:
-                        actions.append("SET_NETBOX_UNTAGGED_VLAN")
                 else:
                     statuses.append("VLAN_MISMATCH")
-                    if authority == "openstack_runtime":
-                        actions.append("SET_NETBOX_UNTAGGED_VLAN")
-                    else:
-                        actions.append("SET_NETBOX_UNTAGGED_VLAN")
+                vlan_target, vlan_src = _preferred_value(os_vlan, maas_vlan)
+                actions.append(f"SET_NETBOX_UNTAGGED_VLAN={vlan_target} (from {vlan_src})")
                 risk = "High"
 
             if "IP_GAP" in st:
                 statuses.append("MISSING_NB_IP")
-                if authority == "openstack_runtime":
-                    actions.append("SET_NETBOX_IP")
-                else:
-                    actions.append("SET_NETBOX_IP")
+                ip_target, ip_src = _preferred_value(os_ip, maas_ips)
+                actions.append(f"SET_NETBOX_IP={ip_target} (from {ip_src})")
 
             note_l = notes.lower()
             if ("netbox mac empty" in note_l) or ("mac mismatch" in note_l) or ("mac-drift" in note_l):
@@ -59,10 +64,8 @@ def _build_update_nic_rows(interface_audit):
                     statuses.append("MAC_MISMATCH")
                 else:
                     statuses.append("MISSING_NB_MAC")
-                if authority == "openstack_runtime":
-                    actions.append("SET_NETBOX_MAC")
-                else:
-                    actions.append("SET_NETBOX_MAC")
+                mac_target, mac_src = _preferred_value(os_mac, maas_mac)
+                actions.append(f"SET_NETBOX_MAC={mac_target} (from {mac_src})")
 
             if not statuses:
                 statuses.append(st)

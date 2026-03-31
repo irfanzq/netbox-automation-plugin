@@ -87,7 +87,11 @@ def _operation_summary(meta: dict[str, Any]) -> str:
         mac = (cells.get("MAAS MAC") or cells.get("OS MAC") or "").strip()
         vlan = (cells.get("MAAS VLAN") or cells.get("OS runtime VLAN") or "").strip()
         ips = (cells.get("MAAS IPs") or cells.get("OS runtime IP") or "").strip()
-        props = (cells.get("Proposed properties (from MAAS)") or "").strip()
+        props = (
+            cells.get("Proposed properties")
+            or cells.get("Proposed properties (from MAAS)")
+            or ""
+        ).strip()
         bits = []
         if mac:
             bits.append(f"MAC {mac}")

@@ -249,31 +249,53 @@ def emit_proposed_change_tables(e, prop):
         e.spacer()
         e.subtitle("Detail — new NICs")
         e.spacer()
-        e.table(
-            [
-                "Host",
-                "NB site",
-                "NB location",
-                "MAAS intf",
-                "MAAS fabric",
-                "MAAS MAC",
-                "MAAS IPs",
-                "MAAS VLAN",
-                "OS region",
-                "OS MAC",
-                "OS runtime IP",
-                "OS runtime VLAN",
-                "Authority",
-                "Suggested NB name",
-                "Proposed properties (from MAAS)",
-                "Risk",
-            ],
-            prop["add_nb_interfaces"],
-            dynamic_columns=True,
-            wrap_max_width=None,
-            selectable=True,
-            selection_key="detail_new_nics",
+        headers = [
+            "Host",
+            "NB site",
+            "NB location",
+            "MAAS intf",
+            "MAAS fabric",
+            "MAAS MAC",
+            "MAAS IPs",
+            "MAAS VLAN",
+            "OS region",
+            "OS MAC",
+            "OS runtime IP",
+            "OS runtime VLAN",
+            "Authority",
+            "Suggested NB name",
+            "Proposed properties",
+            "Risk",
+        ]
+        os_rows = [r for r in prop["add_nb_interfaces"] if len(r) > 12 and str(r[12]).strip() == "[OS]"]
+        maas_rows = [r for r in prop["add_nb_interfaces"] if len(r) <= 12 or str(r[12]).strip() != "[OS]"]
+        e.paragraph(
+            f"Authority split: OS runtime={len(os_rows)} row(s), MAAS fallback={len(maas_rows)} row(s)."
         )
+        if os_rows:
+            e.spacer()
+            e.subtitle("Detail — new NICs (OS authority)")
+            e.spacer()
+            e.table(
+                headers,
+                os_rows,
+                dynamic_columns=True,
+                wrap_max_width=None,
+                selectable=True,
+                selection_key="detail_new_nics_os",
+            )
+        if maas_rows:
+            e.spacer()
+            e.subtitle("Detail — new NICs (MAAS authority)")
+            e.spacer()
+            e.table(
+                headers,
+                maas_rows,
+                dynamic_columns=True,
+                wrap_max_width=None,
+                selectable=True,
+                selection_key="detail_new_nics_maas",
+            )
     if prop["update_nic"]:
         e.spacer()
         e.subtitle("Detail — NIC drift")
@@ -371,6 +393,7 @@ def emit_proposed_change_tables(e, prop):
                 "Actual NB Port Carrying BMC IP",
                 "NB OOB MAC",
                 "Authority",
+                "Status",
                 "Proposed action",
                 "Risk",
             ],

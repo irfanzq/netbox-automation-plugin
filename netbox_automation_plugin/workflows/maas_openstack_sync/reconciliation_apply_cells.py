@@ -224,7 +224,7 @@ def _interface_audit_description(cells: dict[str, str], consumed_lower: set[str]
     """Single description: headline NB/MAAS/proposed columns + full residual (no audit column omitted)."""
     # Each tuple: display label first, then synonym header names to match in cells.
     headline_specs: tuple[tuple[str, ...], ...] = (
-        ("Proposed properties (from MAAS)",),
+        ("Proposed properties", "Proposed properties (from MAAS)"),
         ("Suggested NB name", "MAAS intf"),
         ("Risk",),
         ("Authority",),

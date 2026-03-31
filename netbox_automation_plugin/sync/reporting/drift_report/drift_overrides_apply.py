@@ -14,6 +14,8 @@ SELECTION_KEY_TO_PROP_LIST: dict[str, str] = {
     "detail_new_ip_ranges": "add_ip_ranges",
     "detail_new_fips": "add_fips",
     "detail_new_nics": "add_nb_interfaces",
+    "detail_new_nics_os": "add_nb_interfaces",
+    "detail_new_nics_maas": "add_nb_interfaces",
     "detail_bmc_new_devices": "add_mgmt_iface_new_devices",
     "detail_bmc_existing": "add_mgmt_iface",
     "detail_serial_review": "review_serial",
@@ -120,7 +122,7 @@ HEADERS_DETAIL_NEW_NICS: list[str] = [
     "OS runtime VLAN",
     "Authority",
     "Suggested NB name",
-    "Proposed properties (from MAAS)",
+    "Proposed properties",
     "Risk",
 ]
 
@@ -172,6 +174,7 @@ HEADERS_BMC_EXISTING: list[str] = [
     "Actual NB Port Carrying BMC IP",
     "NB OOB MAC",
     "Authority",
+    "Status",
     "Proposed action",
     "Risk",
 ]
@@ -191,6 +194,8 @@ SELECTION_KEY_TO_HEADERS: dict[str, list[str]] = {
     "detail_new_ip_ranges": HEADERS_DETAIL_NEW_IP_RANGES,
     "detail_new_fips": HEADERS_DETAIL_NEW_FIPS,
     "detail_new_nics": HEADERS_DETAIL_NEW_NICS,
+    "detail_new_nics_os": HEADERS_DETAIL_NEW_NICS,
+    "detail_new_nics_maas": HEADERS_DETAIL_NEW_NICS,
     "detail_nic_drift_os": HEADERS_DETAIL_NIC_DRIFT,
     "detail_nic_drift_maas": HEADERS_DETAIL_NIC_DRIFT,
     "detail_bmc_new_devices": HEADERS_BMC_NEW_DEVICES,
@@ -267,6 +272,47 @@ def _remap_legacy_truncated_nb_placement_headers(
 def _update_nic_row_is_os_authority(row) -> bool:
     """Matches format_html_proposed split for NIC drift (OS vs MAAS) tables."""
     return len(row) > 10 and str(row[10]).strip() == "[OS]"
+
+
+def _new_nic_row_is_os_authority(row) -> bool:
+    """Matches format_html_proposed split for new NICs (OS vs MAAS) tables."""
+    return len(row) > 12 and str(row[12]).strip() == "[OS]"
+
+
+def _apply_new_nics_subset(
+    rows: list,
+    headers: list[str],
+    section: dict[str, dict[str, str]],
+    *,
+    os_authority: bool,
+) -> None:
+    """
+    HTML uses two tables with row indices 0..n-1 per subset; underlying prop is one add_nb_interfaces list.
+    Map subset index -> global index before applying cell overrides.
+    """
+    h2i = {h: i for i, h in enumerate(headers)}
+    global_indices = [
+        i
+        for i, r in enumerate(rows)
+        if isinstance(r, (list, tuple)) and (_new_nic_row_is_os_authority(r) == os_authority)
+    ]
+    for ridx_str, cmap in section.items():
+        try:
+            sub_idx = int(ridx_str)
+        except (TypeError, ValueError):
+            continue
+        if sub_idx < 0 or sub_idx >= len(global_indices):
+            continue
+        gi = global_indices[sub_idx]
+        row = list(rows[gi])
+        for col_header, val in cmap.items():
+            j = h2i.get(col_header)
+            if j is None:
+                continue
+            while len(row) <= j:
+                row.append("")
+            row[j] = "" if val is None else str(val).strip()
+        rows[gi] = row
 
 
 def _apply_update_nic_subset(
@@ -353,6 +399,20 @@ def merge_drift_review_overrides(
             if isinstance(un, list):
                 _apply_update_nic_subset(
                     un, HEADERS_DETAIL_NIC_DRIFT, section, os_authority=False
+                )
+            continue
+        if sel_key == "detail_new_nics_os":
+            rows = p.get("add_nb_interfaces")
+            if isinstance(rows, list):
+                _apply_new_nics_subset(
+                    rows, HEADERS_DETAIL_NEW_NICS, section, os_authority=True
+                )
+            continue
+        if sel_key == "detail_new_nics_maas":
+            rows = p.get("add_nb_interfaces")
+            if isinstance(rows, list):
+                _apply_new_nics_subset(
+                    rows, HEADERS_DETAIL_NEW_NICS, section, os_authority=False
                 )
             continue
         pk = SELECTION_KEY_TO_PROP_LIST.get(sel_key)

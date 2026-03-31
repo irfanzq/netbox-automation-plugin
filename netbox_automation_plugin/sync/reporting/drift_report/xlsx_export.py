@@ -436,8 +436,10 @@ def build_drift_report_xlsx(
         ],
         prop["add_fips"],
     )
+    new_nics_os = [r for r in prop["add_nb_interfaces"] if len(r) > 12 and str(r[12]).strip() == "[OS]"]
+    new_nics_maas = [r for r in prop["add_nb_interfaces"] if len(r) <= 12 or str(r[12]).strip() != "[OS]"]
     _append_block(
-        "B) New NICs",
+        "B) New NICs (OS authority)",
         [
             "Host",
             "NB site",
@@ -453,10 +455,32 @@ def build_drift_report_xlsx(
             "OS runtime VLAN",
             "Authority",
             "Suggested NB name",
-            "Proposed properties (from MAAS)",
+            "Proposed properties",
             "Risk",
         ],
-        prop["add_nb_interfaces"],
+        new_nics_os,
+    )
+    _append_block(
+        "B) New NICs (MAAS authority)",
+        [
+            "Host",
+            "NB site",
+            "NB location",
+            "MAAS intf",
+            "MAAS fabric",
+            "MAAS MAC",
+            "MAAS IPs",
+            "MAAS VLAN",
+            "OS region",
+            "OS MAC",
+            "OS runtime IP",
+            "OS runtime VLAN",
+            "Authority",
+            "Suggested NB name",
+            "Proposed properties",
+            "Risk",
+        ],
+        new_nics_maas,
     )
     _append_block(
         "B) NIC drift (OS runtime authority)",
@@ -521,6 +545,7 @@ def build_drift_report_xlsx(
             "Actual NB Port Carrying BMC IP",
             "NB OOB MAC",
             "Authority",
+            "Status",
             "Proposed action",
             "Risk",
         ],

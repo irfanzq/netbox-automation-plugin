@@ -153,6 +153,7 @@ def _collect_neutron(
     *,
     project_filter_ids: set[str] | None = None,
     project_filter_names: set[str] | None = None,
+    force_project_label_display: bool = False,
 ) -> tuple[list, list, list]:
     networks = []
     subnets = []
@@ -227,7 +228,11 @@ def _collect_neutron(
                     pools.append({"start": start, "end": end})
             except Exception:
                 continue
-        display_project = proj_name or (project_label if (want_ids or want_names) else "")
+        display_project = (
+            project_label
+            if force_project_label_display
+            else (proj_name or (project_label if (want_ids or want_names) else ""))
+        )
         subnets.append({
             "id": sn.id,
             "cidr": getattr(sn, "cidr", ""),
@@ -239,6 +244,7 @@ def _collect_neutron(
             "enable_dhcp": bool(getattr(sn, "is_dhcp_enabled", False)),
             "project_id": tid_s,
             "project_name": display_project,
+            "project_owner_name": proj_name,
             "allocation_pools": pools,
         })
 
@@ -261,13 +267,18 @@ def _collect_neutron(
                 owner_ok = True
             if not owner_ok:
                 continue
-        display_project = proj_name or (project_label if (want_ids or want_names) else "")
+        display_project = (
+            project_label
+            if force_project_label_display
+            else (proj_name or (project_label if (want_ids or want_names) else ""))
+        )
         floating_ips.append({
             "floating_ip_address": getattr(fip, "floating_ip_address", ""),
             "fixed_ip_address": getattr(fip, "fixed_ip_address", "") or "-",
             "id": getattr(fip, "id", ""),
             "project_id": tid_s,
             "project_name": display_project,
+            "project_owner_name": proj_name,
             "floating_network_id": getattr(fip, "floating_network_id", "") or "",
         })
 
@@ -754,7 +765,7 @@ def _fetch_single_project(openstack, config: dict) -> dict:
     )
     # Single-project mode uses configured credentials/context, but should still
     # collect all resources visible within that context (admin often sees many projects).
-    n, s, f = _collect_neutron(conn, project_label)
+    n, s, f = _collect_neutron(conn, project_label, force_project_label_display=False)
     rn = _collect_runtime_nics(conn, n)
     rb = _collect_runtime_bmc(conn)
     sc = _collect_subnet_consumers(conn, s, n)
