@@ -9,16 +9,20 @@ from __future__ import annotations
 import ipaddress
 import logging
 import re
+from functools import lru_cache
 from typing import Any
 
 from django.utils.text import slugify
 
 logger = logging.getLogger(__name__)
 
+_VID_FROM_PARENS_RE = re.compile(r"\((\d+)\)\s*$")
+
 # Actions with real NetBox writers (extend as handlers are filled in).
 SUPPORTED_APPLY_ACTIONS: frozenset[str] = frozenset(
     {
         "create_prefix",
+        "create_ip_range",
         "create_floating_ip",
         "create_device",
         "review_device",
@@ -266,6 +270,94 @@ def _merge_device_tags(device, tag_cell: str) -> bool:
     return changed
 
 
+# Detail — new devices: MAAS / OS / audit columns -> NetBox Device custom field `key` (first existing wins).
+# Add Custom Fields on Device with any of these keys (type text is enough) to populate from drift apply.
+_NEW_DEVICE_DRIFT_TO_CF_KEYS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("OS region", ("os_region", "drift_os_region")),
+    ("OS provision", ("os_provision", "drift_os_provision")),
+    ("OS power", ("os_power", "drift_os_power")),
+    ("OS maintenance", ("os_maintenance", "drift_os_maintenance")),
+    ("MAAS fabric", ("maas_fabric", "drift_maas_fabric")),
+    ("MAAS status", ("maas_status", "drift_maas_status")),
+    ("Power type", ("power_type", "maas_power_type", "drift_power_type")),
+    ("BMC present", ("bmc_present", "drift_bmc_present")),
+    ("NIC count", ("nic_count", "drift_nic_count")),
+    ("Authority", ("drift_authority", "authority")),
+    ("Proposed Action", ("drift_proposed_action", "proposed_action")),
+)
+
+
+def _custom_field_targets_model(cf: Any, model_cls: type) -> bool:
+    from django.contrib.contenttypes.models import ContentType
+
+    try:
+        ct = ContentType.objects.get_for_model(model_cls, for_concrete_model=False)
+    except Exception:
+        return False
+    try:
+        rel = getattr(cf, "content_types", None)
+        if rel is not None and hasattr(rel, "filter"):
+            if rel.filter(pk=ct.pk).exists():
+                return True
+    except Exception:
+        pass
+    try:
+        rel = getattr(cf, "object_types", None)
+        if rel is not None and hasattr(rel, "filter"):
+            app, name = model_cls._meta.app_label, model_cls._meta.model_name
+            if rel.filter(app_label=app, model=name).exists():
+                return True
+    except Exception:
+        pass
+    return False
+
+
+@lru_cache(maxsize=1)
+def _device_custom_field_keys_cached() -> frozenset[str]:
+    try:
+        from dcim.models import Device
+        from extras.models import CustomField
+    except Exception:
+        return frozenset()
+    keys: set[str] = set()
+    for cf in CustomField.objects.iterator():
+        if not _custom_field_targets_model(cf, Device):
+            continue
+        k = getattr(cf, "key", None)
+        if k:
+            keys.add(str(k))
+    return frozenset(keys)
+
+
+def _merge_new_device_row_into_custom_fields(device: Any, cells: dict[str, str]) -> tuple[bool, set[str]]:
+    """
+    Write drift source columns into Device.custom_field_data when matching Custom Field keys exist.
+
+    Returns (device_custom_field_data_changed, drift_headers_applied).
+    """
+    valid = _device_custom_field_keys_cached()
+    if not valid or not hasattr(device, "custom_field_data"):
+        return False, set()
+    data = dict(device.custom_field_data or {})
+    changed = False
+    applied_headers: set[str] = set()
+    for header, slug_opts in _NEW_DEVICE_DRIFT_TO_CF_KEYS:
+        val = _cell(cells, header)
+        if not val or val in ("—", "-"):
+            continue
+        for slug in slug_opts:
+            if slug not in valid:
+                continue
+            if data.get(slug) != val:
+                data[slug] = val
+                changed = True
+            applied_headers.add(header)
+            break
+    if changed:
+        device.custom_field_data = data
+    return changed, applied_headers
+
+
 def apply_create_prefix(op: dict[str, Any]) -> tuple[str, str]:
     from ipam.models import Prefix, Role, VRF
 
@@ -276,12 +368,28 @@ def apply_create_prefix(op: dict[str, Any]) -> tuple[str, str]:
     vrf_name = _cell(cells, "NB proposed VRF")
     status_name = _cell(cells, "NB proposed status")
     role_name = _cell(cells, "NB proposed role")
-    descr = _cell(cells, "Role reason", "Authority")
+    tenant_name = _cell(cells, "NB Proposed Tenant")
+    scope_name = _cell(cells, "NB Proposed Scope")
+    vlan_name = _cell(cells, "NB Proposed VLAN")
+    descr = _cell(
+        cells,
+        "NB Proposed Prefix description",
+        "NB Prefix description",
+        "OS Description",
+        "Role reason",
+        "Authority",
+    )
     consumed = {
         _norm_header("CIDR"),
+        _norm_header("OS Description"),
+        _norm_header("NB Proposed Prefix description"),
+        _norm_header("NB Prefix description"),
         _norm_header("NB proposed VRF"),
         _norm_header("NB proposed status"),
         _norm_header("NB proposed role"),
+        _norm_header("NB Proposed Tenant"),
+        _norm_header("NB Proposed Scope"),
+        _norm_header("NB Proposed VLAN"),
         _norm_header("Role reason"),
         _norm_header("Authority"),
     }
@@ -293,7 +401,128 @@ def apply_create_prefix(op: dict[str, Any]) -> tuple[str, str]:
     role = _resolve_by_name(Role, role_name) if role_name else None
     if role_name and role is None:
         return "skipped", "skipped_prerequisite_missing"
+    tenant = None
+    if tenant_name:
+        try:
+            from tenancy.models import Tenant
+
+            tenant = _resolve_by_name(Tenant, tenant_name)
+        except Exception:
+            tenant = None
+        if tenant is None:
+            return "skipped", "skipped_prerequisite_missing"
+    scope_obj = None
+    if scope_name and scope_name not in {"—", "-"}:
+        try:
+            from dcim.models import Location
+
+            scope_obj = _resolve_by_name(Location, scope_name)
+        except Exception:
+            scope_obj = None
+        if scope_obj is None:
+            return "skipped", "skipped_prerequisite_missing"
+    vlan_obj = None
+    if vlan_name and vlan_name not in {"—", "-"}:
+        try:
+            vlan_obj = _resolve_vlan_for_prefix_scope(vlan_name, scope_obj)
+        except Exception:
+            vlan_obj = None
+        if vlan_obj is None:
+            return "skipped", "skipped_prerequisite_missing"
     existing = Prefix.objects.filter(prefix=cidr, vrf=vrf).first()
+    if existing is not None:
+        changed = False
+        if status_name:
+            val = _pick_choice_value(existing._meta.get_field("status"), status_name)
+            if val is not None and existing.status != val:
+                existing.status = val
+                changed = True
+        if role is not None and getattr(existing, "role_id", None) != role.pk:
+            existing.role = role
+            changed = True
+        if tenant is not None and hasattr(existing, "tenant_id") and existing.tenant_id != tenant.pk:
+            existing.tenant = tenant
+            changed = True
+        if scope_obj is not None and hasattr(existing, "scope"):
+            cur = getattr(existing, "scope", None)
+            if cur is None or getattr(cur, "pk", None) != scope_obj.pk:
+                existing.scope = scope_obj
+                changed = True
+        if vlan_obj is not None and hasattr(existing, "vlan_id") and existing.vlan_id != vlan_obj.pk:
+            existing.vlan = vlan_obj
+            changed = True
+        if descr and hasattr(existing, "description"):
+            if (existing.description or "") != descr[:2000]:
+                existing.description = descr[:2000]
+                changed = True
+        merge_ch = _merge_audit_residual_onto_object(
+            existing, cells, consumed, attr_names=("description",), max_len=4000
+        )
+        if changed or merge_ch:
+            existing.save()
+            return "updated", "ok_updated"
+        return "skipped", "skipped_already_desired"
+    obj = Prefix(prefix=cidr, vrf=vrf)
+    if status_name:
+        val = _pick_choice_value(obj._meta.get_field("status"), status_name)
+        if val is not None:
+            obj.status = val
+    if role is not None:
+        obj.role = role
+    if tenant is not None and hasattr(obj, "tenant"):
+        obj.tenant = tenant
+    if scope_obj is not None and hasattr(obj, "scope"):
+        obj.scope = scope_obj
+    if vlan_obj is not None and hasattr(obj, "vlan"):
+        obj.vlan = vlan_obj
+    if descr and hasattr(obj, "description"):
+        obj.description = descr[:2000]
+    obj.save()
+    if _merge_audit_residual_onto_object(obj, cells, consumed, attr_names=("description",), max_len=4000):
+        obj.save()
+    return "created", "ok_created"
+
+
+def apply_create_ip_range(op: dict[str, Any]) -> tuple[str, str]:
+    from ipam.models import IPRange, Role, VRF
+
+    cells = op.get("cells") or {}
+    if (reason := skip_reason_from_row_guides(cells)) is not None:
+        return "skipped", reason
+    start_addr = _cell(cells, "Start address")
+    end_addr = _cell(cells, "End address")
+    status_name = _cell(cells, "NB proposed status")
+    role_name = _cell(cells, "NB proposed role")
+    vrf_name = _cell(cells, "NB proposed VRF")
+    descr = _cell(cells, "NB Proposed Description", "OS Pool Description")
+    if status_name in {"—", "-"}:
+        status_name = ""
+    if role_name in {"—", "-"}:
+        role_name = ""
+    if vrf_name in {"—", "-"}:
+        vrf_name = ""
+    consumed = {
+        _norm_header("Start address"),
+        _norm_header("End address"),
+        _norm_header("OS Pool Description"),
+        _norm_header("NB Proposed Description"),
+        _norm_header("NB proposed status"),
+        _norm_header("NB proposed role"),
+        _norm_header("NB proposed VRF"),
+    }
+    if not start_addr or not end_addr:
+        return "skipped", "skipped_prerequisite_missing"
+    vrf = _resolve_by_name(VRF, vrf_name) if vrf_name else None
+    if vrf_name and vrf is None:
+        return "skipped", "skipped_prerequisite_missing"
+    role = _resolve_by_name(Role, role_name) if role_name else None
+    if role_name and role is None:
+        return "skipped", "skipped_prerequisite_missing"
+    existing = IPRange.objects.filter(
+        start_address=start_addr,
+        end_address=end_addr,
+        vrf=vrf,
+    ).first()
     if existing is not None:
         changed = False
         if status_name:
@@ -315,12 +544,12 @@ def apply_create_prefix(op: dict[str, Any]) -> tuple[str, str]:
             existing.save()
             return "updated", "ok_updated"
         return "skipped", "skipped_already_desired"
-    obj = Prefix(prefix=cidr, vrf=vrf)
+    obj = IPRange(start_address=start_addr, end_address=end_addr, vrf=vrf)
     if status_name:
         val = _pick_choice_value(obj._meta.get_field("status"), status_name)
         if val is not None:
             obj.status = val
-    if role is not None:
+    if role is not None and hasattr(obj, "role"):
         obj.role = role
     if descr and hasattr(obj, "description"):
         obj.description = descr[:2000]
@@ -340,8 +569,10 @@ def apply_create_floating_ip(op: dict[str, Any]) -> tuple[str, str]:
     status_name = _cell(cells, "NB proposed status")
     vrf_name = _cell(cells, "NB proposed VRF")
     role_name = _cell(cells, "NB proposed role")
+    tenant_name = _cell(cells, "NB Proposed Tenant")
     consumed = {
         _norm_header("Floating IP"),
+        _norm_header("NB Proposed Tenant"),
         _norm_header("NB proposed status"),
         _norm_header("NB proposed VRF"),
         _norm_header("NB proposed role"),
@@ -365,6 +596,16 @@ def apply_create_floating_ip(op: dict[str, Any]) -> tuple[str, str]:
             role_obj = None
         if role_obj is None:
             return "skipped", "skipped_prerequisite_missing"
+    tenant_obj = None
+    if tenant_name and tenant_name not in {"—", "-"}:
+        try:
+            from tenancy.models import Tenant
+
+            tenant_obj = _resolve_by_name(Tenant, tenant_name)
+        except Exception:
+            tenant_obj = None
+        if tenant_obj is None:
+            return "skipped", "skipped_prerequisite_missing"
     existing = IPAddress.objects.filter(address=address, vrf=vrf).first()
     if existing is not None:
         changed = False
@@ -375,6 +616,9 @@ def apply_create_floating_ip(op: dict[str, Any]) -> tuple[str, str]:
                 changed = True
         if role_obj is not None and hasattr(existing, "role_id") and existing.role_id != role_obj.pk:
             existing.role = role_obj
+            changed = True
+        if tenant_obj is not None and hasattr(existing, "tenant_id") and existing.tenant_id != tenant_obj.pk:
+            existing.tenant = tenant_obj
             changed = True
         merge_ch = _merge_audit_residual_onto_object(
             existing, cells, consumed, attr_names=("description",), max_len=4000
@@ -390,6 +634,8 @@ def apply_create_floating_ip(op: dict[str, Any]) -> tuple[str, str]:
             ip_obj.status = val
     if role_obj is not None and hasattr(ip_obj, "role"):
         ip_obj.role = role_obj
+    if tenant_obj is not None and hasattr(ip_obj, "tenant"):
+        ip_obj.tenant = tenant_obj
     ip_obj.save()
     if _merge_audit_residual_onto_object(ip_obj, cells, consumed, attr_names=("description",), max_len=4000):
         ip_obj.save()
@@ -397,7 +643,7 @@ def apply_create_floating_ip(op: dict[str, Any]) -> tuple[str, str]:
 
 
 def _apply_device_core(cells: dict[str, str], *, create_if_missing: bool) -> tuple[str, str]:
-    from dcim.models import Device, DeviceRole, DeviceType, Location, Site
+    from dcim.models import Device, DeviceRole, DeviceType, Location, Platform, Site
 
     hostname = _cell(cells, "Hostname", "Host")
     site_name = _cell(cells, "NB proposed site", "NetBox site")
@@ -406,10 +652,15 @@ def _apply_device_core(cells: dict[str, str], *, create_if_missing: bool) -> tup
     dtype_name = _cell(cells, "NB proposed device type")
     status_name = _cell(cells, "NB proposed device status", "NB state (current)")
     serial = _cell(cells, "Serial Number", "MAAS Serial")
-    tag_cell = _cell(cells, "NB proposed tag")
+    tag_cell = _cell(cells, "NB proposed tag", "Suggested NetBox tags", "NetBox tags")
+    region_name = _cell(cells, "NB proposed region")
+    platform_name = _cell(cells, "NB proposed platform")
+    asset_raw = _cell(cells, "NB proposed asset tag", "Asset tag")
+    platform_obj = _resolve_by_name(Platform, platform_name) if platform_name else None
     consumed_d = {
         _norm_header("Hostname"),
         _norm_header("Host"),
+        _norm_header("NB proposed region"),
         _norm_header("NB proposed site"),
         _norm_header("NetBox site"),
         _norm_header("NB proposed location"),
@@ -421,6 +672,14 @@ def _apply_device_core(cells: dict[str, str], *, create_if_missing: bool) -> tup
         _norm_header("Serial Number"),
         _norm_header("MAAS Serial"),
         _norm_header("NB proposed tag"),
+        _norm_header("Suggested NetBox tags"),
+        _norm_header("NetBox tags"),
+        # Shown on drift device rows only; interface MACs are applied from NIC drift rows.
+        _norm_header("Primary MAC (MAAS)"),
+        _norm_header("Primary MAC (OS)"),
+        _norm_header("NB proposed platform"),
+        _norm_header("NB proposed asset tag"),
+        _norm_header("Asset tag"),
     }
     if not hostname:
         return "skipped", "skipped_prerequisite_missing"
@@ -447,12 +706,40 @@ def _apply_device_core(cells: dict[str, str], *, create_if_missing: bool) -> tup
                 dev.status = val
         if serial and hasattr(dev, "serial"):
             dev.serial = serial[:50]
+        if platform_obj is not None and hasattr(dev, "platform"):
+            dev.platform = platform_obj
+        if asset_raw and hasattr(dev, "asset_tag"):
+            alen = Device._meta.get_field("asset_tag").max_length
+            tag_s = str(asset_raw).strip()[: int(alen)]
+            if tag_s:
+                dev.asset_tag = tag_s
         dev.save()
+        consumed_merge = set(consumed_d)
+        if platform_name and platform_obj is None:
+            consumed_merge.discard(_norm_header("NB proposed platform"))
+        ar0 = str(asset_raw or "").strip()
+        if ar0 and hasattr(dev, "asset_tag"):
+            alen0 = int(Device._meta.get_field("asset_tag").max_length)
+            want0 = ar0[:alen0]
+            if not want0 or (getattr(dev, "asset_tag", None) or "") != want0:
+                consumed_merge.discard(_norm_header("NB proposed asset tag"))
+                consumed_merge.discard(_norm_header("Asset tag"))
+        elif ar0:
+            consumed_merge.discard(_norm_header("NB proposed asset tag"))
+            consumed_merge.discard(_norm_header("Asset tag"))
+        reg_ok, _ = _sync_site_region(dev.site, region_name)
+        if not reg_ok:
+            consumed_merge.discard(_norm_header("NB proposed region"))
+        tags_applied = False
         if tag_cell:
-            _merge_device_tags(dev, tag_cell)
-        if _merge_audit_residual_onto_object(
-            dev, cells, consumed_d, attr_names=("comments", "description"), max_len=8000
-        ):
+            tags_applied = _merge_device_tags(dev, tag_cell)
+        cf_changed, cf_hdrs = _merge_new_device_row_into_custom_fields(dev, cells)
+        for h in cf_hdrs:
+            consumed_merge.add(_norm_header(h))
+        merge_ch = _merge_audit_residual_onto_object(
+            dev, cells, consumed_merge, attr_names=("comments", "description"), max_len=8000
+        )
+        if merge_ch or tags_applied or cf_changed:
             dev.save()
         return "created", "ok_created"
     changed = False
@@ -476,14 +763,45 @@ def _apply_device_core(cells: dict[str, str], *, create_if_missing: bool) -> tup
     if serial and hasattr(existing, "serial") and (existing.serial or "") != serial[:50]:
         existing.serial = serial[:50]
         changed = True
+    if platform_obj is not None and hasattr(existing, "platform_id"):
+        if existing.platform_id != platform_obj.pk:
+            existing.platform = platform_obj
+            changed = True
+    if asset_raw and hasattr(existing, "asset_tag"):
+        alen = existing._meta.get_field("asset_tag").max_length
+        tag_s = str(asset_raw).strip()[: int(alen)]
+        if tag_s and (existing.asset_tag or "") != tag_s:
+            existing.asset_tag = tag_s
+            changed = True
     if tag_cell:
         if _merge_device_tags(existing, tag_cell):
             changed = True
+    target_site = site if site is not None else existing.site
+    consumed_merge = set(consumed_d)
+    if platform_name and platform_obj is None:
+        consumed_merge.discard(_norm_header("NB proposed platform"))
+    ar_u = str(asset_raw or "").strip()
+    if ar_u and hasattr(existing, "asset_tag"):
+        alen_u = int(existing._meta.get_field("asset_tag").max_length)
+        want_u = ar_u[:alen_u]
+        if not want_u or (existing.asset_tag or "") != want_u:
+            consumed_merge.discard(_norm_header("NB proposed asset tag"))
+            consumed_merge.discard(_norm_header("Asset tag"))
+    elif ar_u:
+        consumed_merge.discard(_norm_header("NB proposed asset tag"))
+        consumed_merge.discard(_norm_header("Asset tag"))
+    reg_ok, site_saved = _sync_site_region(target_site, region_name)
+    if not reg_ok:
+        consumed_merge.discard(_norm_header("NB proposed region"))
+    cf_changed, cf_hdrs = _merge_new_device_row_into_custom_fields(existing, cells)
+    for h in cf_hdrs:
+        consumed_merge.add(_norm_header(h))
     merge_ch = _merge_audit_residual_onto_object(
-        existing, cells, consumed_d, attr_names=("comments", "description"), max_len=8000
+        existing, cells, consumed_merge, attr_names=("comments", "description"), max_len=8000
     )
-    if changed or merge_ch:
+    if changed or merge_ch or cf_changed:
         existing.save()
+    if changed or merge_ch or cf_changed or site_saved:
         return "updated", "ok_updated"
     return "skipped", "skipped_already_desired"
 
@@ -564,12 +882,97 @@ def _iface_type_default():
         return "other"
 
 
+def _sync_site_region(site_obj, region_name: str) -> tuple[bool, bool]:
+    """
+    Apply NB proposed region onto the device's Site.
+
+    Returns (omit_from_residual, site_row_was_saved).
+    """
+    rn = str(region_name or "").strip()
+    if not rn or rn in ("—", "-"):
+        return True, False
+    if site_obj is None or not getattr(site_obj, "pk", None):
+        return False, False
+    try:
+        from dcim.models import Region, Site
+    except Exception:
+        return False, False
+    reg = _resolve_by_name(Region, rn)
+    if reg is None:
+        return False, False
+    site_db = Site.objects.filter(pk=site_obj.pk).first()
+    if site_db is None or not hasattr(site_db, "region_id"):
+        return False, False
+    if site_db.region_id == reg.pk:
+        return True, False
+    site_db.region = reg
+    site_db.save()
+    return True, True
+
+
 def _resolve_vlan_for_device(device, vid: int):
     from ipam.models import VLAN
 
     if not device.site_id:
         return None
     return VLAN.objects.filter(site_id=device.site_id, vid=vid).first()
+
+
+def _resolve_vlan_for_prefix_scope(vlan_name: str, scope_obj) -> Any | None:
+    from ipam.models import VLAN
+
+    raw = str(vlan_name or "").strip()
+    if not raw or raw in {"—", "-"}:
+        return None
+
+    candidate_vid = None
+    m = _VID_FROM_PARENS_RE.search(raw)
+    if m:
+        try:
+            candidate_vid = int(m.group(1))
+        except Exception:
+            candidate_vid = None
+    elif raw.isdigit():
+        try:
+            candidate_vid = int(raw)
+        except Exception:
+            candidate_vid = None
+
+    q = VLAN.objects.all()
+    if scope_obj is not None:
+        try:
+            from django.contrib.contenttypes.models import ContentType
+
+            ct_loc = ContentType.objects.get_by_natural_key("dcim", "location")
+            anc_ids = list(
+                scope_obj.get_ancestors(include_self=True).values_list("id", flat=True)
+            )
+            q_loc = VLAN.objects.filter(
+                group__scope_type=ct_loc,
+                group__scope_id__in=anc_ids,
+            )
+            q_site = VLAN.objects.none()
+            if getattr(scope_obj, "site_id", None):
+                try:
+                    q_site = VLAN.objects.get_for_site(scope_obj.site)
+                except Exception:
+                    q_site = VLAN.objects.none()
+            q = (q_loc | q_site).distinct()
+        except Exception:
+            q = VLAN.objects.all()
+
+    if candidate_vid is not None:
+        by_vid = q.filter(vid=candidate_vid).first()
+        if by_vid is not None:
+            return by_vid
+        by_vid_any = VLAN.objects.filter(vid=candidate_vid).first()
+        if by_vid_any is not None:
+            return by_vid_any
+
+    by_name = _resolve_by_name(VLAN, raw)
+    if by_name is not None:
+        return by_name
+    return q.filter(name=raw).first()
 
 
 def _assign_ips_to_interface(iface, ip_blob: str, vrf) -> bool:
@@ -837,6 +1240,7 @@ def apply_bmc_alignment(op: dict[str, Any]) -> tuple[str, str]:
 
 _APPLY_FUNCS: dict[str, Any] = {
     "create_prefix": apply_create_prefix,
+    "create_ip_range": apply_create_ip_range,
     "create_floating_ip": apply_create_floating_ip,
     "create_device": apply_create_device,
     "review_device": apply_review_device,

@@ -132,6 +132,16 @@
   function repopulate(wrap) {
     var kind = wrap.getAttribute("data-nb-pick-kind") || "";
     var base = (window.DriftNbPickerChoices && window.DriftNbPickerChoices[kind]) || [];
+    if (kind === "vlan") {
+      var byScope = (window.DriftNbPickerChoices && window.DriftNbPickerChoices._vlan_by_scope_location) || {};
+      var tr = wrap.closest("tr");
+      var scopeWrap = tr ? tr.querySelector('.drift-nb-pick[data-drift-col-header="NB Proposed Scope"]') : null;
+      var scopeEditable = tr ? tr.querySelector('.drift-editable-text[data-drift-col-header="NB Proposed Scope"]') : null;
+      var scopeName = visiblePlain(scopeWrap ? scopeWrap.querySelector(".drift-nb-pick-visible") : scopeEditable);
+      if (scopeName && byScope[scopeName] && byScope[scopeName].length) {
+        base = byScope[scopeName];
+      }
+    }
     var list = base.slice();
     var cur = visiblePlain(wrap.querySelector(".drift-nb-pick-visible"));
     if (cur && cur !== "—" && list.indexOf(cur) < 0) {
@@ -242,6 +252,16 @@
       if (!out[sk][ri]) out[sk][ri] = {};
       out[sk][ri][ch] = t;
     });
+    document.querySelectorAll(".drift-editable-text[data-drift-sel-key]").forEach(function(el) {
+      var sk = el.getAttribute("data-drift-sel-key");
+      var ri = el.getAttribute("data-drift-row-idx");
+      var ch = el.getAttribute("data-drift-col-header");
+      if (!sk || ri === null || !ch) return;
+      var t = el.textContent.replace(/\s+/g, " ").trim();
+      if (!out[sk]) out[sk] = {};
+      if (!out[sk][ri]) out[sk][ri] = {};
+      out[sk][ri][ch] = t;
+    });
     return out;
   };
 
@@ -252,6 +272,33 @@
       wrap.__driftOrigInner = vis.innerHTML;
       wrap.__driftBaselineCaptured = true;
     });
+    document.querySelectorAll(".drift-editable-text[data-drift-sel-key]").forEach(function(el) {
+      if (el.__driftBaselineCaptured) return;
+      el.__driftOrigText = el.textContent;
+      el.__driftBaselineCaptured = true;
+      el.addEventListener("input", function() {
+        if (typeof window.DriftReviewMarkDirty === "function") {
+          window.DriftReviewMarkDirty();
+        }
+      });
+    });
+    document.querySelectorAll('.drift-nb-pick[data-drift-col-header="NB Proposed VLAN"]').forEach(function(wrap) {
+      var vis = wrap.querySelector(".drift-nb-pick-visible");
+      if (!vis) return;
+      vis.setAttribute("contenteditable", "true");
+      vis.classList.add("drift-editable-text");
+      var sk = wrap.getAttribute("data-drift-sel-key");
+      var ri = wrap.getAttribute("data-drift-row-idx");
+      var ch = wrap.getAttribute("data-drift-col-header");
+      if (sk) vis.setAttribute("data-drift-sel-key", sk);
+      if (ri !== null) vis.setAttribute("data-drift-row-idx", ri);
+      if (ch) vis.setAttribute("data-drift-col-header", ch);
+      vis.addEventListener("input", function() {
+        if (typeof window.DriftReviewMarkDirty === "function") {
+          window.DriftReviewMarkDirty();
+        }
+      });
+    });
   }
 
   window.DriftReviewResetEdits = function() {
@@ -259,6 +306,10 @@
       var vis = wrap.querySelector(".drift-nb-pick-visible");
       if (!vis || wrap.__driftOrigInner === undefined) return;
       vis.innerHTML = wrap.__driftOrigInner;
+    });
+    document.querySelectorAll(".drift-editable-text[data-drift-sel-key]").forEach(function(el) {
+      if (el.__driftOrigText === undefined) return;
+      el.textContent = el.__driftOrigText;
     });
     if (typeof window.DriftReviewMarkClean === "function") {
       window.DriftReviewMarkClean();

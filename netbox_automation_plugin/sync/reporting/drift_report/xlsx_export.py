@@ -34,6 +34,7 @@ def build_drift_report_xlsx(
     matched_rows=None,
     os_subnet_hints=None,
     os_subnet_gaps=None,
+    os_ip_range_gaps=None,
     os_floating_gaps=None,
     netbox_prefix_count=0,
     interface_audit=None,
@@ -230,6 +231,7 @@ def build_drift_report_xlsx(
         interface_audit,
         matched_rows,
         os_subnet_gaps or [],
+        os_ip_range_gaps or [],
         os_floating_gaps or [],
         openstack_data=openstack_data,
         netbox_ifaces=netbox_ifaces,
@@ -269,6 +271,7 @@ def build_drift_report_xlsx(
     total_props_x = (
         len(prop["add_devices"])
         + len(prop["add_prefixes"])
+        + len(prop.get("add_ip_ranges", []))
         + len(prop["add_fips"])
         + len(prop["update_nic"])
         + len(prop["add_nb_interfaces"])
@@ -279,6 +282,7 @@ def build_drift_report_xlsx(
     ws_sum.append(["New devices", str(len(prop["add_devices"]))])
     ws_sum.append(["Review-only MAAS-only hosts", str(len(prop.get("add_devices_review_only", [])))])
     ws_sum.append(["New prefixes", str(len(prop["add_prefixes"]))])
+    ws_sum.append(["New IP ranges (allocation pools)", str(len(prop.get("add_ip_ranges", [])))])
     ws_sum.append(["New floating IPs", str(len(prop["add_fips"]))])
     ws_sum.append(["New NICs", str(len(prop["add_nb_interfaces"]))])
     ws_sum.append(["NIC drift", str(len(prop["update_nic"]))])
@@ -299,6 +303,7 @@ def build_drift_report_xlsx(
     ws_prop.append(["New devices (MAAS fallback)", len(prop["add_devices"])])
     ws_prop.append(["Review-only MAAS-only hosts", len(prop.get("add_devices_review_only", []))])
     ws_prop.append(["New prefixes (OpenStack authority)", len(prop["add_prefixes"])])
+    ws_prop.append(["New IP ranges (OpenStack authority)", len(prop.get("add_ip_ranges", []))])
     ws_prop.append(["New floating IPs (OpenStack authority)", len(prop["add_fips"])])
     ws_prop.append(["New NICs", len(prop["add_nb_interfaces"])])
     ws_prop.append(["NIC drift (OS runtime authority)", len(nic_drift_os)])
@@ -336,6 +341,7 @@ def build_drift_report_xlsx(
             "BMC present",
             "NIC count",
             "Primary MAC (MAAS)",
+            "Primary MAC (OS)",
             "Authority",
             "NB proposed device status",
             "NB proposed tag",
@@ -363,6 +369,7 @@ def build_drift_report_xlsx(
             "BMC present",
             "NIC count",
             "Primary MAC (MAAS)",
+            "Primary MAC (OS)",
             "Authority",
             "NB proposed device status",
             "NB proposed tag",
@@ -375,9 +382,12 @@ def build_drift_report_xlsx(
         [
             "OS region",
             "CIDR",
-            "Start address",
-            "End address",
+            "OS Description",
             "Project",
+            "NB Proposed Prefix description",
+            "NB Proposed Tenant",
+            "NB Proposed Scope",
+            "NB Proposed VLAN",
             "NB proposed role",
             "NB proposed status",
             "NB proposed VRF",
@@ -393,6 +403,24 @@ def build_drift_report_xlsx(
         ),
     )
     _append_block(
+        "A) New IP ranges (allocation pools)",
+        [
+            "OS region",
+            "CIDR",
+            "Start address",
+            "End address",
+            "OS Pool Description",
+            "NB Proposed Description",
+            "Project",
+            "NB proposed status",
+            "NB proposed role",
+            "NB proposed VRF",
+            "Authority",
+            "Proposed Action",
+        ],
+        prop.get("add_ip_ranges", []),
+    )
+    _append_block(
         "A) New floating IPs",
         [
             "OS region",
@@ -400,6 +428,7 @@ def build_drift_report_xlsx(
             "Name",
             "NAT inside IP (from OpenStack fixed IP)",
             "Project",
+            "NB Proposed Tenant",
             "NB proposed status",
             "NB proposed role",
             "NB proposed VRF",

@@ -14,11 +14,15 @@ _PROPOSED_NB_PICK_DEVICE = {
     "NB proposed device status": "device_status",
 }
 _PROPOSED_NB_PICK_PREFIX = {
+    "NB Proposed Tenant": "tenant",
+    "NB Proposed Scope": "scope_location",
+    "NB Proposed VLAN": "vlan",
     "NB proposed role": "prefix_role",
     "NB proposed status": "prefix_status",
     "NB proposed VRF": "vrf",
 }
 _PROPOSED_NB_PICK_FIP = {
+    "NB Proposed Tenant": "tenant",
     "NB proposed status": "ip_status",
     "NB proposed role": "ip_role",
     "NB proposed VRF": "vrf",
@@ -85,6 +89,7 @@ def emit_proposed_change_tables(e, prop):
                 "BMC present",
                 "NIC count",
                 "Primary MAC (MAAS)",
+                "Primary MAC (OS)",
                 "Authority",
                 "NB proposed device status",
                 "NB proposed tag",
@@ -120,6 +125,7 @@ def emit_proposed_change_tables(e, prop):
                 "BMC present",
                 "NIC count",
                 "Primary MAC (MAAS)",
+                "Primary MAC (OS)",
                 "Authority",
                 "NB proposed device status",
                 "NB proposed tag",
@@ -146,9 +152,12 @@ def emit_proposed_change_tables(e, prop):
             [
                 "OS region",
                 "CIDR",
-                "Start address",
-                "End address",
+                "OS Description",
                 "Project",
+                "NB Proposed Prefix description",
+                "NB Proposed Tenant",
+                "NB Proposed Scope",
+                "NB Proposed VLAN",
                 "NB proposed role",
                 "NB proposed status",
                 "NB proposed VRF",
@@ -162,6 +171,38 @@ def emit_proposed_change_tables(e, prop):
             selectable=True,
             selection_key="detail_new_prefixes",
             proposed_pick_columns=_PROPOSED_NB_PICK_PREFIX,
+            editable_columns=["NB Proposed Prefix description"],
+        )
+    if prop.get("add_ip_ranges"):
+        e.spacer()
+        e.subtitle("Detail — new IP ranges (allocation pools)")
+        e.paragraph(
+            "OpenStack subnet allocation pools proposed as NetBox IPRanges. "
+            "These rows represent assignable host windows inside the subnet CIDR."
+        )
+        e.spacer()
+        e.table(
+            [
+                "OS region",
+                "CIDR",
+                "Start address",
+                "End address",
+                "OS Pool Description",
+                "NB Proposed Description",
+                "Project",
+                "NB proposed status",
+                "NB proposed role",
+                "NB proposed VRF",
+                "Authority",
+                "Proposed Action",
+            ],
+            prop["add_ip_ranges"],
+            dynamic_columns=True,
+            wrap_max_width=None,
+            selectable=True,
+            selection_key="detail_new_ip_ranges",
+            proposed_pick_columns=_PROPOSED_NB_PICK_PREFIX,
+            editable_columns=["NB Proposed Description"],
         )
     if prop["add_fips"]:
         e.spacer()
@@ -174,6 +215,7 @@ def emit_proposed_change_tables(e, prop):
                 "Name",
                 "NAT inside IP (from OpenStack fixed IP)",
                 "Project",
+                "NB Proposed Tenant",
                 "NB proposed status",
                 "NB proposed role",
                 "NB proposed VRF",

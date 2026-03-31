@@ -21,6 +21,9 @@ def build_drift_nb_picker_catalog() -> dict[str, list[str]]:
         "region": [],
         "site": [],
         "location": [],
+        "scope_location": [],
+        "tenant": [],
+        "vlan": [],
         "device_type": [],
         "device_role": [],
         "device_status": [],
@@ -29,6 +32,7 @@ def build_drift_nb_picker_catalog() -> dict[str, list[str]]:
         "ip_status": [],
         "ip_role": [],
     }
+    out["_vlan_by_scope_location"] = {}
     try:
         from ipam.models import VRF
 
@@ -63,6 +67,75 @@ def build_drift_nb_picker_catalog() -> dict[str, list[str]]:
         out["location"] = sorted(set(out["location"]))
     except Exception as e:
         logger.debug("drift picker location: %s", e)
+
+    try:
+        from dcim.models import Location
+
+        out["scope_location"] = sorted(
+            {(x.name or "").strip() for x in Location.objects.only("name").iterator()} - {""}
+        )
+    except Exception as e:
+        logger.debug("drift picker scope_location: %s", e)
+
+    try:
+        from tenancy.models import Tenant
+
+        out["tenant"] = sorted({(x.name or "").strip() for x in Tenant.objects.only("name").iterator()} - {""})
+    except Exception as e:
+        logger.debug("drift picker tenant: %s", e)
+
+    try:
+        from ipam.models import VLAN
+
+        vals = []
+        for v in VLAN.objects.only("name", "vid").iterator():
+            vid = getattr(v, "vid", None)
+            if vid is None:
+                continue
+            nm = (getattr(v, "name", None) or "").strip()
+            vals.append(f"{nm} ({vid})" if nm else str(vid))
+        out["vlan"] = sorted(set(vals))
+    except Exception as e:
+        logger.debug("drift picker vlan: %s", e)
+
+    # Per-location VLAN choices for Prefix scope "DCIM > Location" behavior.
+    try:
+        from django.contrib.contenttypes.models import ContentType
+        from dcim.models import Location
+        from ipam.models import VLAN
+
+        ct_loc = ContentType.objects.get_by_natural_key("dcim", "location")
+        by_loc: dict[str, list[str]] = {}
+        for loc in Location.objects.select_related("site").iterator():
+            lname = (loc.name or "").strip()
+            if not lname:
+                continue
+            labels = []
+            # VLAN groups scoped to this location or any ancestor location.
+            anc_ids = list(
+                loc.get_ancestors(include_self=True).values_list("id", flat=True)
+            )
+            q_loc = VLAN.objects.filter(
+                group__scope_type=ct_loc,
+                group__scope_id__in=anc_ids,
+            ).distinct()
+            # NetBox site fallback behavior.
+            q_site = VLAN.objects.none()
+            if getattr(loc, "site_id", None):
+                try:
+                    q_site = VLAN.objects.get_for_site(loc.site)
+                except Exception:
+                    q_site = VLAN.objects.none()
+            for v in (q_loc | q_site).distinct():
+                vid = getattr(v, "vid", None)
+                if vid is None:
+                    continue
+                nm = (getattr(v, "name", None) or "").strip()
+                labels.append(f"{nm} ({vid})" if nm else str(vid))
+            by_loc[lname] = sorted(set(labels))
+        out["_vlan_by_scope_location"] = by_loc
+    except Exception as e:
+        logger.debug("drift picker vlan_by_scope_location: %s", e)
 
     try:
         from dcim.models import DeviceType

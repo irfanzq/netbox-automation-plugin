@@ -1,5 +1,4 @@
 """Proposed change buckets (NIC drift, new devices, prefixes, etc.)."""
-
 from typing import Any
 
 from netbox_automation_plugin.sync.reporting.drift_report.bmc_oob import (
@@ -62,6 +61,14 @@ def _friendly_neutron_owners_line(owners: str) -> str:
     if not pieces:
         return ""
     return "Port mix: " + ", ".join(pieces) + "."
+
+
+def _first_meaningful_text(*vals: Any) -> str:
+    for v in vals:
+        s = str(v or "").strip()
+        if s and s not in {"-", "—"}:
+            return s
+    return "-"
 
 
 def _friendly_prefix_role_summary(bucket: str, confidence: str, ports_total: int, owners: str) -> str:
@@ -189,10 +196,50 @@ def _proposed_changes_rows(
     interface_audit,
     matched_rows,
     os_subnet_gaps,
+    os_ip_range_gaps,
     os_floating_gaps,
     openstack_data=None,
     netbox_ifaces=None,
 ):
+    def _suggest_scope_location_from_os_region(os_region: str) -> str:
+        reg = str(os_region or "").strip().lower()
+        if not reg or reg in {"-", "—"}:
+            return "—"
+        locs = netbox_data.get("locations") or []
+        exact = []
+        fuzzy = []
+        for row in locs:
+            if not isinstance(row, dict):
+                continue
+            nm = str(row.get("name") or "").strip()
+            ss = str(row.get("site_slug") or "").strip()
+            if not nm:
+                continue
+            nl = nm.lower()
+            sl = ss.lower()
+            if nl == reg or sl == reg:
+                exact.append(nm)
+            elif reg in nl or nl in reg or reg in sl or sl in reg:
+                fuzzy.append(nm)
+        cand = exact or fuzzy
+        return sorted(set(cand))[0] if cand else "—"
+
+    def _suggest_vlan_from_os_segmentation_id(seg_id: Any) -> str:
+        s = str(seg_id or "").strip()
+        if not s or s in {"-", "—"}:
+            return "—"
+        try:
+            vid = int(s)
+        except Exception:
+            return s
+        for v in (netbox_data.get("vlans") or []):
+            try:
+                if int(v.get("vid")) == vid:
+                    return str(v.get("display") or f"{v.get('name') or ''} ({vid})").strip()
+            except Exception:
+                continue
+        return str(vid)
+
     def _suggest_prefix_role(g: dict) -> tuple[str, str]:
         """
         Suggest best NetBox Prefix role from runtime consumer analysis.
@@ -245,15 +292,6 @@ def _proposed_changes_rows(
             "admin": "OpenStack Admin",
         }.get(bucket, "OpenStack VM")
         return fallback_name, summary
-
-    def _cidr_start_end(cidr: str) -> tuple[str, str]:
-        try:
-            import ipaddress
-
-            n = ipaddress.ip_network((cidr or "").strip(), strict=False)
-            return str(n.network_address), str(n.broadcast_address)
-        except Exception:
-            return "-", "-"
 
     def _suggest_prefix_status(g: dict) -> str:
         """
@@ -1033,6 +1071,29 @@ def _proposed_changes_rows(
         ifaces = m.get("interfaces") or []
         nic_count = sum(1 for r in ifaces if str(r.get("mac") or "").strip())
         primary_mac = _primary_mac_from_maas(ifaces)
+        hn = (h or "").strip().lower()
+        primary_mac_os = "—"
+        pmn = (
+            _norm_mac_local(primary_mac)
+            if str(primary_mac).strip() not in {"", "—", "-"}
+            else ""
+        )
+        if pmn and hn:
+            hit = os_runtime_idx.get((hn, pmn))
+            if hit:
+                primary_mac_os = (
+                    str(hit.get("os_mac") or hit.get("mac") or "—").strip() or "—"
+                )
+        if str(primary_mac_os).strip() in {"", "—", "-"} and hn and openstack_data and not (
+            openstack_data.get("error")
+        ):
+            for nic in openstack_data.get("runtime_nics") or []:
+                if (nic.get("hostname") or "").strip().lower() != hn:
+                    continue
+                om = str(nic.get("os_mac") or nic.get("mac") or "").strip()
+                if om and om not in {"—", "-"}:
+                    primary_mac_os = om
+                    break
         bmc_ip = str(m.get("bmc_ip") or "—")
         power_type = str(m.get("power_type") or "—")
         bmc_present = "Yes" if (bmc_ip not in {"", "—"} or power_type not in {"", "—"}) else "No"
@@ -1064,6 +1125,7 @@ def _proposed_changes_rows(
             bmc_present,
             str(nic_count),
             primary_mac,
+            primary_mac_os,
             authority_badge,
             nb_prop_state,
             proposed_tag,
@@ -1105,13 +1167,19 @@ def _proposed_changes_rows(
     for g in (os_subnet_gaps or []):
         role_name, role_reason = _suggest_prefix_role(g)
         vrf_name = _suggest_vrf_for_prefix_gap(g, selected_locations)
-        start_addr, end_addr = _cidr_start_end(g.get("cidr", ""))
+        os_desc = str(g.get("network_name") or "-")
+        tenant_name = str(g.get("project_name") or g.get("project_id") or "-")
+        nb_scope = _suggest_scope_location_from_os_region(g.get("os_region") or "")
+        nb_vlan = _suggest_vlan_from_os_segmentation_id(g.get("provider_segmentation_id"))
         add_prefixes.append([
             g.get("os_region") or "—",
             g.get("cidr", ""),
-            start_addr,
-            end_addr,
+            os_desc,
             g.get("project_name", "-"),
+            os_desc,
+            tenant_name,
+            nb_scope,
+            nb_vlan,
             role_name,
             _suggest_prefix_status(g),
             vrf_name,
@@ -1123,7 +1191,14 @@ def _proposed_changes_rows(
     add_fips = []
     for g in (os_floating_gaps or []):
         fip = g.get("floating_ip", "")
-        fip_name = g.get("floating_subnet_name") or g.get("floating_network_name") or "-"
+        fip_name = _first_meaningful_text(
+            g.get("floating_subnet_name"),
+            g.get("floating_network_name"),
+        )
+        tenant_name = _first_meaningful_text(
+            g.get("project_name"),
+            g.get("project_id"),
+        )
         nb_vrf = _suggest_vrf_for_floating_ip_gap(g)
         nb_status = "active" if str(g.get("port_id") or "").strip() else "reserved"
         add_fips.append([
@@ -1132,11 +1207,15 @@ def _proposed_changes_rows(
             fip_name,
             g.get("fixed_ip_address", "-"),
             g.get("project_name") or g.get("project_id") or "-",
+            tenant_name,
             nb_status,
             "VIP",
             nb_vrf,
             "CREATE_NETBOX_IPADDRESS_FROM_OS_FIP",
         ])
+
+    # Temporarily disabled per operator request: do not emit allocation-pool IPRange proposals.
+    add_ip_ranges = []
 
     update_nic = _build_update_nic_rows(interface_audit)
     # Enforce host-level authority gate across NIC drift rows:
@@ -1168,6 +1247,7 @@ def _proposed_changes_rows(
         "add_devices": add_devices,
         "add_devices_review_only": add_devices_review_only,
         "add_prefixes": add_prefixes,
+        "add_ip_ranges": add_ip_ranges,
         "add_fips": add_fips,
         "lldp_new": lldp_new,
         "lldp_update": lldp_update,
