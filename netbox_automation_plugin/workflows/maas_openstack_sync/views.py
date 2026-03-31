@@ -791,9 +791,11 @@ class MAASOpenStackSyncView(LoginRequiredMixin, View):
             "openstack_scope_has_netbox_filter": has_netbox_scope,
         }
 
-        # If Download Excel: show report and trigger download (via GET endpoint). Cache hit = use cache; miss = run audit below.
+        # If Download Excel: by default run a fresh audit first, then trigger download.
+        # Optional escape hatch: POST reuse_cached_audit=1 to use cache when available.
         export_xlsx = request.POST.get("format") == "xlsx"
-        if export_xlsx:
+        reuse_cached_audit = request.POST.get("reuse_cached_audit") == "1"
+        if export_xlsx and reuse_cached_audit:
             cached = cache.get(_drift_audit_cache_key(request))
             if cached:
                 try:

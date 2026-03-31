@@ -384,7 +384,7 @@ def build_drift_report_xlsx(
             "CIDR",
             "OS Description",
             "Project",
-            "NB Proposed Prefix description",
+            "NB Proposed Prefix description (editable)",
             "NB Proposed Tenant",
             "NB Proposed Scope",
             "NB Proposed VLAN",

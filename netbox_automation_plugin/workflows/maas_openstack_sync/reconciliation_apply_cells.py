@@ -373,6 +373,7 @@ def apply_create_prefix(op: dict[str, Any]) -> tuple[str, str]:
     vlan_name = _cell(cells, "NB Proposed VLAN")
     descr = _cell(
         cells,
+        "NB Proposed Prefix description (editable)",
         "NB Proposed Prefix description",
         "NB Prefix description",
         "OS Description",
@@ -382,6 +383,7 @@ def apply_create_prefix(op: dict[str, Any]) -> tuple[str, str]:
     consumed = {
         _norm_header("CIDR"),
         _norm_header("OS Description"),
+        _norm_header("NB Proposed Prefix description (editable)"),
         _norm_header("NB Proposed Prefix description"),
         _norm_header("NB Prefix description"),
         _norm_header("NB proposed VRF"),

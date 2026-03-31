@@ -145,7 +145,8 @@ def emit_proposed_change_tables(e, prop):
             "Use each row as NetBox Prefix create input (CIDR + OpenStack network/project context). "
             "NB proposed status: reserved when no Neutron ports were counted on that subnet in this scan; "
             "active when at least one port was seen (role certainty is only in Role reason). "
-            "NB proposed VRF is inferred from OpenStack naming signals (network/project/region text)."
+            "NB proposed VRF is inferred from OpenStack naming signals (network/project/region text). "
+            "Columns marked '(editable)' can be clicked and edited directly."
         )
         e.spacer()
         e.table(
@@ -154,7 +155,7 @@ def emit_proposed_change_tables(e, prop):
                 "CIDR",
                 "OS Description",
                 "Project",
-                "NB Proposed Prefix description",
+                "NB Proposed Prefix description (editable)",
                 "NB Proposed Tenant",
                 "NB Proposed Scope",
                 "NB Proposed VLAN",
@@ -171,7 +172,7 @@ def emit_proposed_change_tables(e, prop):
             selectable=True,
             selection_key="detail_new_prefixes",
             proposed_pick_columns=_PROPOSED_NB_PICK_PREFIX,
-            editable_columns=["NB Proposed Prefix description"],
+            editable_columns=["NB Proposed Prefix description (editable)"],
         )
     if prop.get("add_ip_ranges"):
         e.spacer()

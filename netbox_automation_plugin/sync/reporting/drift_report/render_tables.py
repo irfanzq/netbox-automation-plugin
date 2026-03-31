@@ -248,7 +248,12 @@ def _html_col_is_role_reason(header) -> bool:
 
 def _html_col_is_prefix_description(header) -> bool:
     h = str(header or "").strip().lower()
-    return h in {"os description", "nb prefix description", "nb proposed prefix description"}
+    return h in {
+        "os description",
+        "nb prefix description",
+        "nb proposed prefix description",
+        "nb proposed prefix description (editable)",
+    }
 
 
 def _html_col_is_maas_fabric(header) -> bool:

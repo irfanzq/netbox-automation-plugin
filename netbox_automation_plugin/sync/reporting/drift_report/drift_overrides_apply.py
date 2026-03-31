@@ -49,7 +49,7 @@ HEADERS_DETAIL_NEW_PREFIXES: list[str] = [
     "CIDR",
     "OS Description",
     "Project",
-    "NB Proposed Prefix description",
+    "NB Proposed Prefix description (editable)",
     "NB Proposed Tenant",
     "NB Proposed Scope",
     "NB Proposed VLAN",
