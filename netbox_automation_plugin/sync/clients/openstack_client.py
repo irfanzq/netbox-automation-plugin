@@ -177,19 +177,28 @@ def _collect_neutron(
     }
 
     for net in conn.network.networks():
+        nproj = getattr(net, "tenant_id", None) or getattr(net, "project_id", None) or ""
+        nproj_s = str(nproj)[:36] if nproj else ""
         networks.append({
             "id": net.id,
             "name": net.name or net.id,
+            "project_id": nproj_s,
             "is_router_external": bool(getattr(net, "is_router_external", False)),
+            "is_shared": bool(getattr(net, "shared", False) or getattr(net, "is_shared", False)),
             "provider_network_type": getattr(net, "provider_network_type", "") or "",
             "provider_segmentation_id": str(getattr(net, "provider_segmentation_id", "") or ""),
             "provider_physical_network": getattr(net, "provider_physical_network", "") or "",
         })
 
+    net_proj_by_id = {(n.get("id") or ""): (n.get("project_id") or "") for n in networks if n.get("id")}
+
     for sn in conn.network.subnets():
         tid = getattr(sn, "tenant_id", None) or getattr(sn, "project_id", None) or ""
         tid_s = str(tid)[:36] if tid else ""
-        # Owner project must come from resource tenant/project id mapping.
+        nid = str(getattr(sn, "network_id", "") or "").strip()
+        if not tid_s and nid:
+            tid_s = str(net_proj_by_id.get(nid) or "")[:36]
+        # Owner project must come from resource/network tenant id + Keystone mapping.
         # Do not fall back to current scan scope label (can be unrelated project).
         proj_name = project_name_by_id.get(tid_s, "")
         if want_ids or want_names:
@@ -197,6 +206,10 @@ def _collect_neutron(
             if tid_s and tid_s in want_ids:
                 owner_ok = True
             if (not owner_ok) and proj_name and proj_name.strip().lower() in want_names:
+                owner_ok = True
+            # Neutron often omits tenant_id on subnets/FIPs even though the parent network has it,
+            # or leaves both empty on provider/shared nets. Dropping these removed whole regions from audit.
+            if not owner_ok and not tid_s:
                 owner_ok = True
             if not owner_ok:
                 continue
@@ -214,6 +227,7 @@ def _collect_neutron(
                     pools.append({"start": start, "end": end})
             except Exception:
                 continue
+        display_project = proj_name or (project_label if (want_ids or want_names) else "")
         subnets.append({
             "id": sn.id,
             "cidr": getattr(sn, "cidr", ""),
@@ -224,14 +238,17 @@ def _collect_neutron(
             "ip_version": str(getattr(sn, "ip_version", "") or ""),
             "enable_dhcp": bool(getattr(sn, "is_dhcp_enabled", False)),
             "project_id": tid_s,
-            "project_name": proj_name,
+            "project_name": display_project,
             "allocation_pools": pools,
         })
 
     for fip in conn.network.ips(floating=True):
         tid = getattr(fip, "tenant_id", None) or getattr(fip, "project_id", None) or ""
         tid_s = str(tid)[:36] if tid else ""
-        # Owner project must come from resource tenant/project id mapping.
+        fnid = str(getattr(fip, "floating_network_id", "") or "").strip()
+        if not tid_s and fnid:
+            tid_s = str(net_proj_by_id.get(fnid) or "")[:36]
+        # Owner project must come from resource/network tenant id + Keystone mapping.
         # Do not fall back to current scan scope label (can be unrelated project).
         proj_name = project_name_by_id.get(tid_s, "")
         if want_ids or want_names:
@@ -240,14 +257,17 @@ def _collect_neutron(
                 owner_ok = True
             if (not owner_ok) and proj_name and proj_name.strip().lower() in want_names:
                 owner_ok = True
+            if not owner_ok and not tid_s:
+                owner_ok = True
             if not owner_ok:
                 continue
+        display_project = proj_name or (project_label if (want_ids or want_names) else "")
         floating_ips.append({
             "floating_ip_address": getattr(fip, "floating_ip_address", ""),
             "fixed_ip_address": getattr(fip, "fixed_ip_address", "") or "-",
             "id": getattr(fip, "id", ""),
             "project_id": tid_s,
-            "project_name": proj_name,
+            "project_name": display_project,
             "floating_network_id": getattr(fip, "floating_network_id", "") or "",
         })
 
@@ -732,26 +752,9 @@ def _fetch_single_project(openstack, config: dict) -> dict:
         or (config.get("openstack_project_id") or "").strip()[:12]
         or "-"
     )
-    target_ids: set[str] = set()
-    target_names: set[str] = set()
-    try:
-        pid = str(kwargs.get("project_id") or "").strip()
-        pname = str(kwargs.get("project_name") or "").strip()
-        if pid:
-            target_ids.add(pid)
-        if pname:
-            target_names.add(pname.lower())
-        cp = str(getattr(conn, "current_project_id", "") or "").strip()
-        if cp:
-            target_ids.add(cp)
-    except Exception:
-        pass
-    n, s, f = _collect_neutron(
-        conn,
-        project_label,
-        project_filter_ids=target_ids,
-        project_filter_names=target_names,
-    )
+    # Single-project mode uses configured credentials/context, but should still
+    # collect all resources visible within that context (admin often sees many projects).
+    n, s, f = _collect_neutron(conn, project_label)
     rn = _collect_runtime_nics(conn, n)
     rb = _collect_runtime_bmc(conn)
     sc = _collect_subnet_consumers(conn, s, n)
