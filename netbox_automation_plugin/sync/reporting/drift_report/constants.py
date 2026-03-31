@@ -18,14 +18,15 @@ _DT_MATCH_NARROW_MIN = 20
 _PHASE0_FIELD_OWNERSHIP_TITLE = "Field ownership — Phase 0 drift audit"
 _PHASE0_FIELD_OWNERSHIP_LEAD = (
     "NetBox is the canonical inventory model in this workflow. "
-    "MAAS and OpenStack supply runtime signals for comparison and gap detection; "
-    "proposed actions are review-gated suggestions to align NetBox and do not run automatically."
+    "Where OpenStack runtime exists for a host, it is the primary source for live NIC signals (MAC, IP, VLAN) and supported lifecycle context; "
+    "MAAS covers commissioning, OOB/power, host/NIC correlation, and fallback when OpenStack is absent or not authoritative. "
+    "Proposed actions are review-gated and do not run automatically."
 )
 _PHASE0_FIELD_OWNERSHIP_BULLETS = (
     "Discovery scope in Phase 0: detect new device candidates and drift; do not auto-apply changes.",
-    "MAAS data is used for host/NIC matching and drift visibility (MAC, IP, VLAN observations).",
-    "OOB/BMC values from MAAS power data inform NetBox management documentation alignment.",
-    "OpenStack subnet and floating IP state is used to detect NetBox/IPAM gaps.",
+    "OpenStack is not only subnet/Floating IP inventory: enrolled runtime is primary for per-host NIC drift (MAC, IP, VLAN) and supported device lifecycle signals in this audit when available.",
+    "MAAS is used for commissioning inventory, BMC/OOB power documentation, matching, drift visibility, and MAAS-fallback authority when OpenStack runtime is absent or non-authoritative for a host.",
+    "OpenStack subnet and floating IP state additionally supports NetBox/IPAM gap detection beyond per-host runtime.",
     "Explicit non-goals for this phase: no blind hostname renames and no deletes from this screen.",
     "Conflict handling: operational evidence is compared to model intent; NetBox remains authoritative after approved updates.",
 )
