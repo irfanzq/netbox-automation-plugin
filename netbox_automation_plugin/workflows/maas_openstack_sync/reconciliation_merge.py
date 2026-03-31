@@ -88,6 +88,7 @@ def merged_proposed_from_drift_run(
         payload.get("interface_audit"),
         payload.get("matched_rows"),
         payload.get("os_subnet_gaps") or [],
+        payload.get("os_ip_range_gaps") or [],
         payload.get("os_floating_gaps") or [],
         openstack_data=payload.get("openstack_data"),
         netbox_ifaces=payload.get("netbox_ifaces"),

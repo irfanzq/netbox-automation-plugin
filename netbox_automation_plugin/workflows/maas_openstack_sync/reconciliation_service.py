@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-import ipaddress
 import json
 import re
 import secrets
@@ -27,6 +26,7 @@ from .reconciliation_branch import (
     get_netbox_branch,
     netbox_branch_exists,
 )
+from .reconciliation_apply_cells import SUPPORTED_APPLY_ACTIONS, apply_row_operation
 from .reconciliation_merge import (
     _safe_selection_key,
     all_registered_selection_keys,
@@ -41,6 +41,7 @@ SK_TO_ACTION = {
     "detail_new_devices": "create_device",
     "detail_review_only_devices": "review_device",
     "detail_new_prefixes": "create_prefix",
+    "detail_new_ip_ranges": "create_ip_range",
     "detail_new_fips": "create_floating_ip",
     "detail_new_nics": "create_interface",
     "detail_nic_drift_os": "update_interface",
@@ -50,8 +51,6 @@ SK_TO_ACTION = {
     "detail_serial_review": "serial_review",
     "detail_placement_lifecycle_alignment": "placement_alignment",
 }
-
-SUPPORTED_APPLY_ACTIONS = {"create_prefix", "create_floating_ip", "create_device"}
 
 
 def _cells_dict(headers: list, row: list) -> dict[str, str]:
@@ -75,11 +74,33 @@ def _operation_summary(meta: dict[str, Any]) -> str:
         cidr = cells.get("CIDR") or "—"
         vrf = cells.get("NB proposed VRF") or "—"
         return f"Prefix: {cidr} (VRF {vrf})"
+    if sk == "detail_new_ip_ranges":
+        s = cells.get("Start address") or "—"
+        e = cells.get("End address") or "—"
+        vrf = cells.get("NB proposed VRF") or "—"
+        return f"IP range: {s} - {e} (VRF {vrf})"
     if sk == "detail_new_fips":
         fip = cells.get("Floating IP") or "—"
         return f"Floating IP: {fip}"
     if sk == "detail_new_nics":
-        return f"New interface: {host or '—'}"
+        base = f"New interface: {host or '—'}"
+        mac = (cells.get("MAAS MAC") or cells.get("OS MAC") or "").strip()
+        vlan = (cells.get("MAAS VLAN") or cells.get("OS runtime VLAN") or "").strip()
+        ips = (cells.get("MAAS IPs") or cells.get("OS runtime IP") or "").strip()
+        props = (cells.get("Proposed properties (from MAAS)") or "").strip()
+        bits = []
+        if mac:
+            bits.append(f"MAC {mac}")
+        if vlan:
+            bits.append(f"VLAN {vlan}")
+        if ips:
+            bits.append(f"IPs {ips}")
+        if bits:
+            base += " — " + "; ".join(bits)
+        if props:
+            p = props if len(props) <= 160 else props[:157].rstrip() + "…"
+            base += " — " + p
+        return base
     if sk in ("detail_nic_drift_os", "detail_nic_drift_maas"):
         intf = cells.get("NB intf") or cells.get("MAAS intf") or "—"
         return f"NIC drift: {host or '—'} / {intf}"
@@ -329,7 +350,12 @@ def preview_reconciliation(
         "operations_digest": digest,
         "preview_ack_token": token,
         "operations": [
-            {"summary": o["summary"], "action": o["action"], "section": o["selection_key"]}
+            {
+                "summary": o["summary"],
+                "action": o["action"],
+                "section": o["selection_key"],
+                "cells": dict(o.get("cells") or {}),
+            }
             for o in frozen
         ],
         "counts_by_action": counts,
@@ -407,192 +433,6 @@ def create_reconciliation_run(
     return run
 
 
-def _pick_choice_value(field, raw: str) -> Any:
-    s = str(raw or "").strip()
-    if not s:
-        return None
-    try:
-        choices = list(getattr(field, "choices", []) or [])
-    except Exception:
-        return None
-    sl = s.lower()
-    for val, label in choices:
-        if str(val).lower() == sl or str(label).strip().lower() == sl:
-            return val
-    return None
-
-
-def _resolve_by_name(model, name: str):
-    s = str(name or "").strip()
-    if not s:
-        return None
-    for lookup in ("name", "slug", "model"):
-        try:
-            obj = model.objects.filter(**{lookup: s}).first()
-        except Exception:
-            obj = None
-        if obj is not None:
-            return obj
-    for lookup in ("name__iexact", "slug__iexact", "model__iexact"):
-        try:
-            obj = model.objects.filter(**{lookup: s}).first()
-        except Exception:
-            obj = None
-        if obj is not None:
-            return obj
-    return None
-
-
-def _normalize_ip_for_netbox(raw_ip: str) -> str:
-    s = str(raw_ip or "").strip()
-    if not s:
-        raise ValueError("empty address")
-    if "/" in s:
-        ipaddress.ip_interface(s)
-        return s
-    ip_obj = ipaddress.ip_address(s)
-    return f"{s}/32" if ip_obj.version == 4 else f"{s}/128"
-
-
-def _apply_create_prefix(op: dict[str, Any]) -> tuple[str, str]:
-    from ipam.models import Prefix, VRF
-
-    cells = op.get("cells") or {}
-    cidr = str(cells.get("CIDR") or "").strip()
-    vrf_name = str(cells.get("NB proposed VRF") or "").strip()
-    status_name = str(cells.get("NB proposed status") or "").strip()
-    if not cidr:
-        return "skipped", "skipped_prerequisite_missing"
-    vrf = _resolve_by_name(VRF, vrf_name) if vrf_name else None
-    if vrf_name and vrf is None:
-        return "skipped", "skipped_prerequisite_missing"
-    existing = Prefix.objects.filter(prefix=cidr, vrf=vrf).first()
-    if existing is not None:
-        changed = False
-        if status_name:
-            val = _pick_choice_value(existing._meta.get_field("status"), status_name)
-            if val is not None and existing.status != val:
-                existing.status = val
-                changed = True
-        if changed:
-            existing.save()
-            return "updated", "ok_updated"
-        return "skipped", "skipped_already_desired"
-    obj = Prefix(prefix=cidr, vrf=vrf)
-    if status_name:
-        val = _pick_choice_value(obj._meta.get_field("status"), status_name)
-        if val is not None:
-            obj.status = val
-    obj.save()
-    return "created", "ok_created"
-
-
-def _apply_create_floating_ip(op: dict[str, Any]) -> tuple[str, str]:
-    from ipam.models import IPAddress, VRF
-
-    cells = op.get("cells") or {}
-    raw_ip = str(cells.get("Floating IP") or "").strip()
-    status_name = str(cells.get("NB proposed status") or "").strip()
-    vrf_name = str(cells.get("NB proposed VRF") or "").strip()
-    if not raw_ip:
-        return "skipped", "skipped_prerequisite_missing"
-    try:
-        address = _normalize_ip_for_netbox(raw_ip)
-    except ValueError:
-        return "failed", "failed_validation_bad_ip"
-    vrf = _resolve_by_name(VRF, vrf_name) if vrf_name else None
-    if vrf_name and vrf is None:
-        return "skipped", "skipped_prerequisite_missing"
-    existing = IPAddress.objects.filter(address=address, vrf=vrf).first()
-    if existing is not None:
-        changed = False
-        if status_name:
-            val = _pick_choice_value(existing._meta.get_field("status"), status_name)
-            if val is not None and existing.status != val:
-                existing.status = val
-                changed = True
-        if changed:
-            existing.save()
-            return "updated", "ok_updated"
-        return "skipped", "skipped_already_desired"
-    ip_obj = IPAddress(address=address, vrf=vrf)
-    if status_name:
-        val = _pick_choice_value(ip_obj._meta.get_field("status"), status_name)
-        if val is not None:
-            ip_obj.status = val
-    ip_obj.save()
-    return "created", "ok_created"
-
-
-def _apply_create_device(op: dict[str, Any]) -> tuple[str, str]:
-    from dcim.models import Device, DeviceRole, DeviceType, Location, Site
-
-    cells = op.get("cells") or {}
-    hostname = str(cells.get("Hostname") or "").strip()
-    site_name = str(cells.get("NB proposed site") or "").strip()
-    location_name = str(cells.get("NB proposed location") or "").strip()
-    role_name = str(cells.get("NB proposed role") or "").strip()
-    dtype_name = str(cells.get("NB proposed device type") or "").strip()
-    status_name = str(cells.get("NB proposed device status") or "").strip()
-    if not hostname or not site_name or not role_name or not dtype_name:
-        return "skipped", "skipped_prerequisite_missing"
-    site = _resolve_by_name(Site, site_name)
-    role = _resolve_by_name(DeviceRole, role_name)
-    dtype = _resolve_by_name(DeviceType, dtype_name)
-    if site is None or role is None or dtype is None:
-        return "skipped", "skipped_prerequisite_missing"
-    location = None
-    if location_name:
-        location = _resolve_by_name(Location, location_name)
-        if location is None:
-            return "skipped", "skipped_prerequisite_missing"
-    existing = Device.objects.filter(name=hostname).first()
-    if existing is not None:
-        changed = False
-        for field_name, target in (
-            ("site", site),
-            ("location", location),
-            ("role", role),
-            ("device_type", dtype),
-        ):
-            if target is not None and getattr(existing, f"{field_name}_id", None) != target.pk:
-                setattr(existing, field_name, target)
-                changed = True
-        if status_name:
-            val = _pick_choice_value(existing._meta.get_field("status"), status_name)
-            if val is not None and existing.status != val:
-                existing.status = val
-                changed = True
-        if changed:
-            existing.save()
-            return "updated", "ok_updated"
-        return "skipped", "skipped_already_desired"
-    dev = Device(
-        name=hostname,
-        site=site,
-        location=location,
-        role=role,
-        device_type=dtype,
-    )
-    if status_name:
-        val = _pick_choice_value(dev._meta.get_field("status"), status_name)
-        if val is not None:
-            dev.status = val
-    dev.save()
-    return "created", "ok_created"
-
-
-def _apply_known_operation(op: dict[str, Any]) -> tuple[str, str]:
-    action = str(op.get("action") or "").strip()
-    if action == "create_prefix":
-        return _apply_create_prefix(op)
-    if action == "create_floating_ip":
-        return _apply_create_floating_ip(op)
-    if action == "create_device":
-        return _apply_create_device(op)
-    return "failed", "failed_not_implemented"
-
-
 def _apply_result_from_operation(op: dict[str, Any], *, branch_context_ready: bool) -> dict[str, Any]:
     action = str(op.get("action") or "unknown").strip()
     row_key = str(op.get("row_key") or "").strip()
@@ -612,17 +452,13 @@ def _apply_result_from_operation(op: dict[str, Any], *, branch_context_ready: bo
         return result
     if action in SUPPORTED_APPLY_ACTIONS:
         try:
-            st, reason = _apply_known_operation(op)
+            st, reason = apply_row_operation(op)
         except Exception:
             result["status"] = "failed"
             result["reason"] = "failed_exception"
             return result
         result["status"] = st
         result["reason"] = reason
-        return result
-    if action == "review_device":
-        result["status"] = "skipped"
-        result["reason"] = "skipped_already_desired"
         return result
     return result
 
@@ -636,9 +472,8 @@ def apply_reconciliation_run(
     """
     Execute frozen operations with explicit row results and status transitions.
 
-    Current phase:
-    - lifecycle and result semantics are enforced
-    - operation handlers are scaffolded (writes are still not implemented)
+    Apply handlers use full per-row ``cells`` (all audit columns) via
+    ``reconciliation_apply_cells.apply_row_operation``.
     """
     allowed = {
         MAASOpenStackReconciliationRun.STATUS_BRANCH_CREATED,

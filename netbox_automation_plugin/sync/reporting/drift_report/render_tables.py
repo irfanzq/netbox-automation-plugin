@@ -246,6 +246,11 @@ def _html_col_is_role_reason(header) -> bool:
     return str(header or "").strip().lower() == "role reason"
 
 
+def _html_col_is_prefix_description(header) -> bool:
+    h = str(header or "").strip().lower()
+    return h in {"os description", "nb prefix description"}
+
+
 def _html_col_is_maas_fabric(header) -> bool:
     """Cells may list many fabrics; stack on commas, keep each full name intact."""
     return str(header or "").strip().lower() == "maas fabric"
@@ -271,6 +276,8 @@ def _html_col_is_ip(header) -> bool:
 
 def _html_th_class(header) -> str:
     h = str(header or "")
+    if _html_col_is_prefix_description(h):
+        return "small align-bottom"
     if _html_col_is_maas_fabric(h):
         return "small align-bottom text-nowrap"
     if _html_col_is_role_reason(h):
@@ -288,7 +295,9 @@ def _html_th_class(header) -> str:
 def _html_td_class(header, col_idx, notes_col_idx=None) -> str:
     h = str(header or "")
     parts = []
-    if _html_col_is_role_reason(h):
+    if _html_col_is_prefix_description(h):
+        parts.extend(["align-top"])
+    elif _html_col_is_role_reason(h):
         parts.extend(["align-top", "drift-col-role-reason"])
     elif _html_col_is_mac(h):
         parts.extend(["align-top", "text-nowrap", "font-monospace"])
@@ -320,12 +329,14 @@ def _html_table(
     selectable=False,
     selection_key=None,
     proposed_pick_columns=None,
+    editable_columns=None,
 ):
     if not headers:
         return ""
     n = len(headers)
     hdr_strs = [str(h) for h in headers]
     pick_map = proposed_pick_columns if isinstance(proposed_pick_columns, dict) else None
+    editable_set = {str(x).strip() for x in (editable_columns or []) if str(x).strip()}
     header_th_cells = []
     for col_i, h in enumerate(hdr_strs):
         label_html = _html_cell_content(h)
@@ -392,6 +403,14 @@ def _html_table(
                     if _html_col_is_maas_fabric(h)
                     else _html_cell_content(cell)
                 )
+                if selectable and h in editable_set:
+                    val = _normalize_ascii_cell(cell).strip()
+                    v = (
+                        '<span class="drift-editable-text d-inline-block w-100" contenteditable="true" '
+                        f'data-drift-col-header="{html.escape(h, quote=True)}" '
+                        f'data-drift-sel-key="{html.escape(safe_selection_key, quote=True)}" '
+                        f'data-drift-row-idx="{row_idx}">{html.escape(val)}</span>'
+                    )
             tds.append(f'<td class="{cls}"{fab_attrs}>{v}</td>')
         tr_attrs = ""
         if selectable:
@@ -494,6 +513,7 @@ class _DriftReportEmitter:
                     selectable=kw.get("selectable", False),
                     selection_key=kw.get("selection_key"),
                     proposed_pick_columns=kw.get("proposed_pick_columns"),
+                    editable_columns=kw.get("editable_columns"),
                 )
             )
         else:

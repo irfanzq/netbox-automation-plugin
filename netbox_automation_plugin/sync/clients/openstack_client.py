@@ -164,6 +164,20 @@ def _collect_neutron(conn, project_label: str) -> tuple[list, list, list]:
 
     for sn in conn.network.subnets():
         tid = getattr(sn, "tenant_id", None) or getattr(sn, "project_id", None) or ""
+        raw_pools = getattr(sn, "allocation_pools", None) or []
+        pools = []
+        for p in raw_pools:
+            try:
+                if isinstance(p, dict):
+                    start = str(p.get("start") or "").strip()
+                    end = str(p.get("end") or "").strip()
+                else:
+                    start = str(getattr(p, "start", "") or "").strip()
+                    end = str(getattr(p, "end", "") or "").strip()
+                if start and end:
+                    pools.append({"start": start, "end": end})
+            except Exception:
+                continue
         subnets.append({
             "id": sn.id,
             "cidr": getattr(sn, "cidr", ""),
@@ -175,6 +189,7 @@ def _collect_neutron(conn, project_label: str) -> tuple[list, list, list]:
             "enable_dhcp": bool(getattr(sn, "is_dhcp_enabled", False)),
             "project_id": str(tid)[:36] if tid else "",
             "project_name": project_label or "",
+            "allocation_pools": pools,
         })
 
     for fip in conn.network.ips(floating=True):

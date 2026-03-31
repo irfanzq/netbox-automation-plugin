@@ -24,6 +24,7 @@ from netbox_automation_plugin.sync.clients.netbox_client import (
 from netbox_automation_plugin.sync.reconciliation.audit_detail import (
     build_maas_netbox_interface_audit,
     build_maas_netbox_matched_rows,
+    openstack_allocation_pools_missing_ip_ranges,
     openstack_floating_ips_missing_from_netbox,
     openstack_subnet_prefix_hints,
     openstack_subnets_missing_prefixes,
@@ -1022,6 +1023,7 @@ class MAASOpenStackSyncView(LoginRequiredMixin, View):
         audit_map = None
         os_subnet_hints = None
         os_subnet_gaps = None
+        os_ip_range_gaps = []
         os_floating_gaps = []
         netbox_prefix_count = 0
         if not netbox_data.get("error"):
@@ -1047,6 +1049,7 @@ class MAASOpenStackSyncView(LoginRequiredMixin, View):
                 os_subnet_gaps = openstack_subnets_missing_prefixes(os_subnet_hints)
 
         if openstack_data and not openstack_data.get("error"):
+            os_ip_range_gaps = openstack_allocation_pools_missing_ip_ranges(openstack_data)
             os_floating_gaps = openstack_floating_ips_missing_from_netbox(openstack_data)
 
         # Optional OpenStack scope by selected NetBox locations using naming heuristics.
@@ -1069,6 +1072,7 @@ class MAASOpenStackSyncView(LoginRequiredMixin, View):
                 netbox_prefix_count = len(prefix_set)
                 os_subnet_hints = openstack_subnet_prefix_hints(openstack_data, prefix_set)
                 os_subnet_gaps = openstack_subnets_missing_prefixes(os_subnet_hints)
+            os_ip_range_gaps = openstack_allocation_pools_missing_ip_ranges(openstack_data)
             os_floating_gaps = openstack_floating_ips_missing_from_netbox(openstack_data)
         else:
             scope_meta["openstack_networks_after"] = len((openstack_data or {}).get("networks") or [])
@@ -1262,6 +1266,7 @@ class MAASOpenStackSyncView(LoginRequiredMixin, View):
             matched_rows=matched_rows,
             os_subnet_hints=os_subnet_hints,
             os_subnet_gaps=os_subnet_gaps,
+            os_ip_range_gaps=os_ip_range_gaps,
             os_floating_gaps=os_floating_gaps,
             netbox_prefix_count=netbox_prefix_count,
             interface_audit=interface_audit,
@@ -1305,6 +1310,7 @@ class MAASOpenStackSyncView(LoginRequiredMixin, View):
             "matched_rows": matched_rows,
             "os_subnet_hints": os_subnet_hints,
             "os_subnet_gaps": os_subnet_gaps,
+            "os_ip_range_gaps": os_ip_range_gaps,
             "os_floating_gaps": os_floating_gaps,
             "netbox_prefix_count": netbox_prefix_count,
             "interface_audit": interface_audit,

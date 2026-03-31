@@ -20,6 +20,7 @@ def fetch_netbox_data_local():
         "devices": [],
         "sites": [],
         "locations": [],
+        "vlans": [],
         "device_types": [],
         "device_roles": [],
         "prefix_roles": [],
@@ -123,6 +124,18 @@ def fetch_netbox_data_local():
                 })
         except Exception:
             result["vrfs"] = []
+        try:
+            from ipam.models import VLAN
+
+            for v in VLAN.objects.only("name", "vid").iterator():
+                vname = (getattr(v, "name", None) or "").strip()
+                vvid = getattr(v, "vid", None)
+                if vvid is None:
+                    continue
+                display = f"{vname} ({vvid})" if vname else str(vvid)
+                result["vlans"].append({"name": vname, "vid": int(vvid), "display": display})
+        except Exception:
+            result["vlans"] = []
         for d in Device.objects.select_related("site", "site__region", "location").only(
             "name",
             "id",

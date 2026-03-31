@@ -769,3 +769,71 @@ def openstack_floating_ips_missing_from_netbox(openstack_data: dict):
                 "floating_subnet_name": subnet_name,
             })
     return missing
+
+
+def openstack_allocation_pools_missing_ip_ranges(openstack_data: dict):
+    """
+    Allocation pools in OpenStack subnets that do not have an exact NetBox IPRange
+    with the same start/end address.
+    """
+    if not openstack_data or openstack_data.get("error"):
+        return []
+    try:
+        import ipaddress
+        from ipam.models import IPRange
+    except Exception as e:
+        logger.warning("Allocation pool vs NetBox IPRange check skipped: %s", e)
+        return []
+
+    net_by_id = {
+        (n.get("id") or ""): n
+        for n in (openstack_data.get("networks") or [])
+        if n.get("id")
+    }
+    # Compare globally by start/end values. VRF binding is proposed separately in drift rows.
+    existing_ranges = {
+        (
+            str(getattr(r, "start_address", "") or "").strip(),
+            str(getattr(r, "end_address", "") or "").strip(),
+        )
+        for r in IPRange.objects.all().only("start_address", "end_address")
+    }
+    out = []
+    for sn in openstack_data.get("subnets") or []:
+        pools = sn.get("allocation_pools") or []
+        if not isinstance(pools, list) or not pools:
+            continue
+        sid = str(sn.get("id") or "").strip()
+        cidr = str(sn.get("cidr") or "").strip()
+        nid = str(sn.get("network_id") or "").strip()
+        net = net_by_id.get(nid) or {}
+        for idx, p in enumerate(pools):
+            if not isinstance(p, dict):
+                continue
+            start = str(p.get("start") or "").strip()
+            end = str(p.get("end") or "").strip()
+            if not start or not end:
+                continue
+            try:
+                sa = ipaddress.ip_address(start)
+                ea = ipaddress.ip_address(end)
+            except ValueError:
+                continue
+            if sa.version != ea.version or int(sa) > int(ea):
+                continue
+            if (start, end) in existing_ranges:
+                continue
+            out.append({
+                "os_region": (sn.get("os_region") or openstack_data.get("openstack_region_name") or "—")[:32],
+                "project_name": sn.get("project_name") or sn.get("project_id") or "-",
+                "project_id": sn.get("project_id") or "",
+                "subnet_id": sid,
+                "subnet_name": (sn.get("name") or "-")[:64],
+                "cidr": cidr or "-",
+                "network_id": nid,
+                "network_name": (net.get("name") or "-")[:64],
+                "start_address": start,
+                "end_address": end,
+                "pool_index": idx,
+            })
+    return out

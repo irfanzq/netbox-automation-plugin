@@ -79,6 +79,7 @@
                   <th>{% trans "Section" %}</th>
                   <th>{% trans "Action" %}</th>
                   <th>{% trans "Summary" %}</th>
+                  <th>{% trans "Audit columns" %}</th>
                 </tr>
               </thead>
               <tbody>
@@ -88,6 +89,21 @@
                     <td class="small text-monospace">{{ op.selection_key|default:"—" }}</td>
                     <td class="small">{{ op.action|default:"—" }}</td>
                     <td class="small">{{ op.summary|default:"—" }}</td>
+                    <td class="small align-top" style="min-width: 12rem;">
+                      {% if op.cells %}
+                        <details>
+                          <summary class="text-primary" style="cursor: pointer;">{% trans "Show all columns" %}</summary>
+                          <dl class="row small mb-0 mt-2 border-top pt-2">
+                            {% for col, val in op.cells.items %}
+                              <dt class="col-5 text-body-secondary text-wrap">{{ col }}</dt>
+                              <dd class="col-7 mb-1 text-wrap">{% if val %}{{ val }}{% else %}—{% endif %}</dd>
+                            {% endfor %}
+                          </dl>
+                        </details>
+                      {% else %}
+                        —
+                      {% endif %}
+                    </td>
                   </tr>
                 {% endfor %}
               </tbody>
