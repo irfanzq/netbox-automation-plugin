@@ -986,9 +986,9 @@ def _proposed_changes_rows(
                     and any(x not in {"", "—"} for x in [os_mac, os_ip, os_vlan])
                 )
                 if os_has_runtime:
+                    # OS authority: Proposed properties reflect runtime only (MAAS columns still show MAAS).
                     props = (
-                        f"MAC {os_mac}; untagged VLAN {os_vlan} (from OS runtime); IPs: {os_ip}. "
-                        f"MAAS note: untagged VLAN {vlan}; IPs: {ips}"
+                        f"MAC {os_mac}; untagged VLAN {os_vlan} (from OS runtime); IPs: {os_ip}"
                     )
                 out.append(
                     [
@@ -1042,15 +1042,14 @@ def _proposed_changes_rows(
             authority_badge = "[OS]" if has_os_data else "[MAAS]"
             mgmt = os_mgmt if bool(osr) else maas_mgmt
             target_ip = os_bmc_ip if has_os_data and os_bmc_ip else bmc_ip
-            source = "OS runtime" if has_os_data and os_bmc_ip else "MAAS"
             action_parts = [f"CREATE_NETBOX_OOB_IFACE={mgmt or 'mgmt0'}"]
             if target_ip:
-                action_parts.append(f"SET_NETBOX_OOB_IP={target_ip} (from {source})")
+                action_parts.append(f"SET_NETBOX_OOB_IP={target_ip}")
             action = "; ".join(action_parts)
             bmc_mac_hint = str(m.get("bmc_mac") or "").strip()
             mac_norm = _normalize_mac(bmc_mac_hint) if bmc_mac_hint else ""
             if mac_norm and "SET_NETBOX_OOB_MAC=" not in action:
-                action += f"; SET_NETBOX_OOB_MAC={mac_norm} (from MAAS BMC)"
+                action += f"; SET_NETBOX_OOB_MAC={mac_norm}"
             out.append(
                 [
                     h,

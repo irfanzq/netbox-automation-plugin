@@ -147,6 +147,25 @@ HEADERS_DETAIL_NIC_DRIFT: list[str] = [
     "Risk",
 ]
 
+HEADERS_DETAIL_NIC_DRIFT_OS: list[str] = [
+    "Host",
+    "MAAS intf",
+    "MAAS fabric",
+    "MAAS MAC",
+    "MAAS IPs",
+    "MAAS VLAN",
+    "OS region",
+    "OS MAC",
+    "OS runtime IP",
+    "OS runtime VLAN",
+    "Authority",
+    "NB intf",
+    "NB MAC",
+    "NB IPs",
+    "NB VLAN",
+    "Risk",
+]
+
 HEADERS_BMC_NEW_DEVICES: list[str] = [
     "Host",
     "OS BMC IP",
@@ -196,7 +215,7 @@ SELECTION_KEY_TO_HEADERS: dict[str, list[str]] = {
     "detail_new_nics": HEADERS_DETAIL_NEW_NICS,
     "detail_new_nics_os": HEADERS_DETAIL_NEW_NICS,
     "detail_new_nics_maas": HEADERS_DETAIL_NEW_NICS,
-    "detail_nic_drift_os": HEADERS_DETAIL_NIC_DRIFT,
+    "detail_nic_drift_os": HEADERS_DETAIL_NIC_DRIFT_OS,
     "detail_nic_drift_maas": HEADERS_DETAIL_NIC_DRIFT,
     "detail_bmc_new_devices": HEADERS_BMC_NEW_DEVICES,
     "detail_bmc_existing": HEADERS_BMC_EXISTING,
@@ -327,6 +346,10 @@ def _apply_update_nic_subset(
     Map subset index -> global index before applying cell overrides.
     """
     h2i = {h: i for i, h in enumerate(headers)}
+    # OS authority table hides Status/Proposed Action; map visible columns back to full row indices.
+    if headers == HEADERS_DETAIL_NIC_DRIFT_OS:
+        h2i = {h: i for i, h in enumerate(HEADERS_DETAIL_NIC_DRIFT)}
+        h2i["Risk"] = 17
     global_indices = [
         i
         for i, r in enumerate(update_nic)
@@ -391,7 +414,7 @@ def merge_drift_review_overrides(
             un = p.get("update_nic")
             if isinstance(un, list):
                 _apply_update_nic_subset(
-                    un, HEADERS_DETAIL_NIC_DRIFT, section, os_authority=True
+                    un, HEADERS_DETAIL_NIC_DRIFT_OS, section, os_authority=True
                 )
             continue
         if sel_key == "detail_nic_drift_maas":

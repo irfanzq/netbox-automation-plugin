@@ -320,8 +320,30 @@ def emit_proposed_change_tables(e, prop):
             "Proposed Action",
             "Risk",
         ]
+        headers_os = [
+            "Host",
+            "MAAS intf",
+            "MAAS fabric",
+            "MAAS MAC",
+            "MAAS IPs",
+            "MAAS VLAN",
+            "OS region",
+            "OS MAC",
+            "OS runtime IP",
+            "OS runtime VLAN",
+            "Authority",
+            "NB intf",
+            "NB MAC",
+            "NB IPs",
+            "NB VLAN",
+            "Risk",
+        ]
         os_rows = [r for r in prop["update_nic"] if len(r) > 10 and str(r[10]).strip() == "[OS]"]
         maas_rows = [r for r in prop["update_nic"] if len(r) > 10 and str(r[10]).strip() != "[OS]"]
+        os_rows_display = [
+            [*list(r[:15]), (r[17] if len(r) > 17 else "Medium")]
+            for r in os_rows
+        ]
         e.paragraph(
             f"Authority split: OS runtime={len(os_rows)} row(s), MAAS fallback={len(maas_rows)} row(s)."
         )
@@ -330,8 +352,8 @@ def emit_proposed_change_tables(e, prop):
             e.subtitle("Detail — NIC drift (OS runtime authority)")
             e.spacer()
             e.table(
-                headers,
-                os_rows,
+                headers_os,
+                os_rows_display,
                 dynamic_columns=True,
                 wrap_max_width=None,
                 selectable=True,
