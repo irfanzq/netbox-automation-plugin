@@ -147,7 +147,13 @@ def _format_os_lldp_from_local_link(ll: dict) -> str:
     return " · ".join(parts)
 
 
-def _collect_neutron(conn, project_label: str) -> tuple[list, list, list]:
+def _collect_neutron(
+    conn,
+    project_label: str,
+    *,
+    project_filter_ids: set[str] | None = None,
+    project_filter_names: set[str] | None = None,
+) -> tuple[list, list, list]:
     networks = []
     subnets = []
     floating_ips = []
@@ -162,6 +168,13 @@ def _collect_neutron(conn, project_label: str) -> tuple[list, list, list]:
                 project_name_by_id[pid] = pname
     except Exception:
         project_name_by_id = {}
+
+    want_ids = {str(x).strip() for x in (project_filter_ids or set()) if str(x).strip()}
+    want_names = {
+        str(x).strip().lower()
+        for x in (project_filter_names or set())
+        if str(x).strip()
+    }
 
     for net in conn.network.networks():
         networks.append({
@@ -179,6 +192,14 @@ def _collect_neutron(conn, project_label: str) -> tuple[list, list, list]:
         # Owner project must come from resource tenant/project id mapping.
         # Do not fall back to current scan scope label (can be unrelated project).
         proj_name = project_name_by_id.get(tid_s, "")
+        if want_ids or want_names:
+            owner_ok = False
+            if tid_s and tid_s in want_ids:
+                owner_ok = True
+            if (not owner_ok) and proj_name and proj_name.strip().lower() in want_names:
+                owner_ok = True
+            if not owner_ok:
+                continue
         raw_pools = getattr(sn, "allocation_pools", None) or []
         pools = []
         for p in raw_pools:
@@ -213,6 +234,14 @@ def _collect_neutron(conn, project_label: str) -> tuple[list, list, list]:
         # Owner project must come from resource tenant/project id mapping.
         # Do not fall back to current scan scope label (can be unrelated project).
         proj_name = project_name_by_id.get(tid_s, "")
+        if want_ids or want_names:
+            owner_ok = False
+            if tid_s and tid_s in want_ids:
+                owner_ok = True
+            if (not owner_ok) and proj_name and proj_name.strip().lower() in want_names:
+                owner_ok = True
+            if not owner_ok:
+                continue
         floating_ips.append({
             "floating_ip_address": getattr(fip, "floating_ip_address", ""),
             "fixed_ip_address": getattr(fip, "fixed_ip_address", "") or "-",
@@ -703,7 +732,26 @@ def _fetch_single_project(openstack, config: dict) -> dict:
         or (config.get("openstack_project_id") or "").strip()[:12]
         or "-"
     )
-    n, s, f = _collect_neutron(conn, project_label)
+    target_ids: set[str] = set()
+    target_names: set[str] = set()
+    try:
+        pid = str(kwargs.get("project_id") or "").strip()
+        pname = str(kwargs.get("project_name") or "").strip()
+        if pid:
+            target_ids.add(pid)
+        if pname:
+            target_names.add(pname.lower())
+        cp = str(getattr(conn, "current_project_id", "") or "").strip()
+        if cp:
+            target_ids.add(cp)
+    except Exception:
+        pass
+    n, s, f = _collect_neutron(
+        conn,
+        project_label,
+        project_filter_ids=target_ids,
+        project_filter_names=target_names,
+    )
     rn = _collect_runtime_nics(conn, n)
     rb = _collect_runtime_bmc(conn)
     sc = _collect_subnet_consumers(conn, s, n)

@@ -79,6 +79,12 @@
   .drift-run-detail-readonly .drift-select-col {
     display: none !important;
   }
+  .drift-run-detail-readonly .drift-editable-text {
+    border-bottom: none !important;
+    background: transparent !important;
+    outline: none !important;
+    cursor: default !important;
+  }
 </style>
 <div id="drift-xlsx-loading-overlay" aria-hidden="true">
   <div class="drift-loading-content">
@@ -157,6 +163,10 @@
         {% endif %}
         {% if report_drift_markup == "html" %}
           <script>
+            document.querySelectorAll(".drift-run-detail-readonly [contenteditable='true']").forEach(function(el) {
+              el.setAttribute("contenteditable", "false");
+              el.setAttribute("tabindex", "-1");
+            });
             window._driftXlsxUiConfig = {
               postModifiedUrl: "{{ drift_download_xlsx_modified_post_url|default:''|escapejs }}",
               saveReviewUrl: "{{ drift_save_review_url|default:''|escapejs }}"
