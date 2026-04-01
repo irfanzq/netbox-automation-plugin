@@ -29,7 +29,9 @@ from netbox_automation_plugin.sync.reporting.drift_report.render_tables import (
     _selection_row_key,
 )
 
-from ..history_models import MAASOpenStackDriftRun
+from netbox_automation_plugin.workflows.maas_openstack_sync.history_models import (
+    MAASOpenStackDriftRun,
+)
 from .branch import (
     branch_write_context,
     create_netbox_branch,

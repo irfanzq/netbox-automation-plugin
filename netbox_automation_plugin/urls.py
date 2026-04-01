@@ -14,7 +14,7 @@ from .workflows.maas_openstack_sync.history_views import (
     MAASOpenStackSyncRunDownloadXlsxView,
     MAASOpenStackSyncRunSaveReviewView,
 )
-from .workflows.maas_openstack_sync.reconciliation.views import (
+from .sync.reconciliation.views import (
     ReconciliationApplyView,
     ReconciliationCreateView,
     ReconciliationDiscardView,
