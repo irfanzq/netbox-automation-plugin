@@ -229,7 +229,10 @@ def emit_proposed_change_tables(e, prop):
         e.subtitle("Detail — new VMs")
         e.paragraph(
             "OpenStack Nova instances (VMs and Ironic bare metal) with no NetBox Virtual Machine of the same name. "
-            "Requires an existing Cluster (NB proposed cluster). Hypervisor hostname maps to NB proposed device when the Device exists."
+            "Requires an existing Cluster (NB proposed cluster). NB proposed device (VM) is always the "
+            "Nova instance name (same as VM name). Hypervisor hostname shows Nova's compute host for "
+            "reference. Apply links a NetBox Device by that VM name first, then by hypervisor hostname "
+            "if no Device matches the VM name."
         )
         e.spacer()
         e.table(
@@ -245,7 +248,7 @@ def emit_proposed_change_tables(e, prop):
         e.spacer()
         e.subtitle("Detail — existing VMs")
         e.paragraph(
-            "Virtual Machine name matches OpenStack instance; resources or placement differ from Nova."
+            "Virtual Machine name matches OpenStack; NetBox fields below differ from Nova where noted in Drift summary."
         )
         e.spacer()
         e.table(

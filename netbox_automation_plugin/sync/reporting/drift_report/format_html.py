@@ -35,6 +35,7 @@ def format_drift_report(
     os_ip_range_gaps=None,
     os_floating_gaps=None,
     netbox_prefix_count=0,
+    netbox_inventory_counts=None,
     interface_audit=None,
     netbox_ifaces=None,
     use_html=True,
@@ -55,7 +56,13 @@ def format_drift_report(
     ref_lines = []
 
     emit_inventory_scope(
-        e, maas_data, netbox_data, openstack_data, drift, netbox_prefix_count
+        e,
+        maas_data,
+        netbox_data,
+        openstack_data,
+        drift,
+        netbox_prefix_count,
+        netbox_inventory_counts=netbox_inventory_counts,
     )
     align_rows = _alignment_review_rows(matched_rows)
     prop = _proposed_changes_rows(

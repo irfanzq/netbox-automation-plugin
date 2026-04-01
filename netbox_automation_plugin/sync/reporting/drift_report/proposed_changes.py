@@ -232,6 +232,74 @@ def _proposed_changes_rows(
         cand = exact or fuzzy
         return sorted(set(cand))[0] if cand else "—"
 
+    def _suggest_netbox_site_name_from_os_region(os_region: str) -> str:
+        """
+        NetBox **Site** display name for VM placement (matches ``Site.name`` / apply_cells).
+
+        OpenStack region strings often align with a **Location** name (e.g. Birch under site B52).
+        ``_suggest_scope_location_from_os_region`` returns that location label — wrong for
+        ``NB proposed site``. We match sites by name/slug first, then map matching locations
+        to their parent site via ``site_slug`` → site name from ``netbox_data["sites"]``.
+        """
+        reg = str(os_region or "").strip().lower()
+        if not reg or reg in {"-", "—"}:
+            return "—"
+        sites = netbox_data.get("sites") or []
+        slug_to_site_name: dict[str, str] = {}
+        for row in sites:
+            if not isinstance(row, dict):
+                continue
+            nm = str(row.get("name") or "").strip()
+            sl = str(row.get("slug") or "").strip()
+            if sl and nm:
+                slug_to_site_name[sl.lower()] = nm
+        exact_site: list[str] = []
+        fuzzy_site: list[str] = []
+        for row in sites:
+            if not isinstance(row, dict):
+                continue
+            nm = str(row.get("name") or "").strip()
+            sl = str(row.get("slug") or "").strip()
+            if not nm and not sl:
+                continue
+            nl = nm.lower()
+            ssl = sl.lower()
+            if nl == reg or ssl == reg:
+                exact_site.append(nm)
+            elif reg in nl or nl in reg or reg in ssl or ssl in reg:
+                fuzzy_site.append(nm)
+        cand_sites = exact_site or fuzzy_site
+        if cand_sites:
+            return sorted({x for x in cand_sites if x})[0]
+        locs = netbox_data.get("locations") or []
+        exact_loc: list[dict] = []
+        fuzzy_loc: list[dict] = []
+        for row in locs:
+            if not isinstance(row, dict):
+                continue
+            nm = str(row.get("name") or "").strip()
+            ss = str(row.get("site_slug") or "").strip()
+            if not nm:
+                continue
+            nl = nm.lower()
+            ssl = ss.lower()
+            if nl == reg or ssl == reg:
+                exact_loc.append(row)
+            elif reg in nl or nl in reg or reg in ssl or ssl in reg:
+                fuzzy_loc.append(row)
+        loc_rows = exact_loc or fuzzy_loc
+        parent_names: list[str] = []
+        for row in loc_rows:
+            ss = str(row.get("site_slug") or "").strip()
+            if not ss:
+                continue
+            site_nm = slug_to_site_name.get(ss.lower())
+            if site_nm:
+                parent_names.append(site_nm)
+        if parent_names:
+            return sorted(set(parent_names))[0]
+        return "—"
+
     def _suggest_vlan_from_os_segmentation_id(seg_id: Any) -> str:
         s = str(seg_id or "").strip()
         if not s or s in {"-", "—"}:
@@ -1468,53 +1536,44 @@ def _proposed_changes_rows(
     if _VMModel is not None and instances and openstack_data and not openstack_data.get("error"):
         for inst in instances:
             iname = str(inst.get("name") or "").strip()
-            iid = str(inst.get("instance_id") or "").strip()
             if not iname:
                 continue
             os_reg = str(inst.get("os_region") or openstack_data.get("openstack_region_name") or "—")[:48]
             proj = str(inst.get("project_name") or inst.get("project_id") or "-")
             hv = str(inst.get("hypervisor_hostname") or "").strip() or "—"
-            vc = inst.get("vcpus")
-            mm = inst.get("memory_mb")
-            dg = inst.get("disk_gb")
-            vc_s = str(vc) if vc is not None else "—"
-            mm_s = str(mm) if mm is not None else "—"
-            dg_s = str(dg) if dg is not None else "—"
+            # Column "NB proposed device (VM)" is always the Nova instance name (same as VM name).
+            # Hypervisor hostname column holds the compute host; apply tries that name if no Device matches the VM name.
+            prop_dev = iname
             os_st = str(inst.get("status") or "").strip() or "—"
             nb_vm_status = _os_vm_status_nb_slug(os_st)
             reg_token = os_reg.replace(",", " ").strip().split()[0] if os_reg.strip() else ""
             prop_cluster = f"{reg_token}-openstack" if reg_token and reg_token not in {"—", "-"} else "openstack"
-            nb_site = _suggest_scope_location_from_os_region(os_reg)
             os_pri = str(inst.get("os_primary_ip") or "").strip()
             prop_pri = os_pri if os_pri else "—"
-            vm = (
-                _VMModel.objects.filter(name=iname)
-                .select_related(
-                    "cluster",
-                    "tenant",
-                    "device",
-                    "primary_ip4",
-                    "primary_ip6",
-                )
-                .first()
-            )
+            try:
+                _VMModel._meta.get_field("site")
+                _vm_rel = ("cluster", "tenant", "device", "site", "primary_ip4", "primary_ip6")
+            except Exception:
+                _vm_rel = ("cluster", "tenant", "device", "primary_ip4", "primary_ip6")
+            vm = _VMModel.objects.filter(name=iname).select_related(*_vm_rel).first()
+            nb_site = "—"
+            if vm is not None and getattr(vm, "site_id", None) and getattr(vm, "site", None):
+                nb_site = (vm.site.name or "").strip() or "—"
+            if nb_site in {"—", ""}:
+                nb_site = _suggest_netbox_site_name_from_os_region(os_reg)
             if vm is None:
                 add_openstack_vms.append([
                     iname,
-                    iid,
                     os_reg,
                     os_st,
                     proj,
                     hv,
-                    vc_s,
-                    mm_s,
-                    dg_s,
                     prop_pri,
                     prop_cluster,
                     nb_site if nb_site not in {"—", ""} else "—",
                     proj if proj not in {"-", "—"} else "—",
                     nb_vm_status,
-                    hv if hv not in {"—", ""} else "—",
+                    prop_dev if prop_dev not in {"—", ""} else "—",
                     "[OS]",
                     "CREATE_NETBOX_VM_FROM_OPENSTACK",
                 ])
@@ -1531,18 +1590,16 @@ def _proposed_changes_rows(
                     cur_dev = (vm.device.name or "—").strip() or "—"
                 cur_vm_st = str(vm.status) if vm.status is not None else "—"
                 drift_vm: list[str] = []
-                if vc is not None and vm.vcpus != vc:
-                    drift_vm.append("vcpus")
-                if mm is not None and vm.memory != mm:
-                    drift_vm.append("memory")
-                if dg is not None and vm.disk != dg:
-                    drift_vm.append("disk")
+                iname_l = iname.strip().lower()
                 hv_l = (hv or "").strip().lower()
-                if hv_l and hv_l not in {"—", "-"}:
-                    if getattr(vm, "device_id", None) and vm.device:
-                        if (vm.device.name or "").strip().lower() != hv_l:
-                            drift_vm.append("device")
-                    else:
+                if hv_l in {"—", "-", ""}:
+                    hv_l = ""
+                valid_dev_names = {x for x in (iname_l, hv_l) if x}
+                cur_dn = ""
+                if getattr(vm, "device_id", None) and vm.device:
+                    cur_dn = (vm.device.name or "").strip().lower()
+                if valid_dev_names:
+                    if not cur_dn or cur_dn not in valid_dev_names:
                         drift_vm.append("device")
                 if str(vm.status).lower() != nb_vm_status.lower():
                     drift_vm.append("status")
@@ -1556,14 +1613,10 @@ def _proposed_changes_rows(
                 update_openstack_vms.append([
                     iname,
                     str(vm.pk),
-                    iid,
                     os_reg,
                     os_st,
                     proj,
                     hv,
-                    vc_s,
-                    mm_s,
-                    dg_s,
                     cur_vc,
                     cur_mm,
                     cur_dg,
@@ -1576,7 +1629,7 @@ def _proposed_changes_rows(
                     nb_site if nb_site not in {"—", ""} else "—",
                     proj if proj not in {"-", "—"} else "—",
                     nb_vm_status,
-                    hv if hv not in {"—", ""} else "—",
+                    prop_dev if prop_dev not in {"—", ""} else "—",
                     ", ".join(drift_vm),
                     "[OS]",
                     "UPDATE_NETBOX_VM_FROM_OPENSTACK",

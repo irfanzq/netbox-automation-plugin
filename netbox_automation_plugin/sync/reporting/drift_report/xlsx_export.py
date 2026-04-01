@@ -52,6 +52,7 @@ def build_drift_report_xlsx(
     os_ip_range_gaps=None,
     os_floating_gaps=None,
     netbox_prefix_count=0,
+    netbox_inventory_counts=None,
     interface_audit=None,
     netbox_ifaces=None,
     drift_overrides=None,
@@ -120,6 +121,18 @@ def build_drift_report_xlsx(
     ws_sum.append(["  Sites (included / fetched)", f"{nb_sites_included} / {nb_sites_fetched}", ""])
     if netbox_prefix_count:
         ws_sum.append(["  IPAM Prefixes (included / fetched)", f"{netbox_prefix_count} / {netbox_prefix_count}", ""])
+    nic = netbox_inventory_counts or {}
+    if nic:
+        ws_sum.append(["  Virtual machines (total)", str(nic.get("virtual_machines", 0)), ""])
+        ws_sum.append(["  IP addresses (total)", str(nic.get("ip_addresses_total", 0)), ""])
+        ws_sum.append(["  IP addresses VIP role (FIP-style)", str(nic.get("ip_addresses_vip_role", 0)), ""])
+        ws_sum.append(
+            [
+                "  IP addresses with NAT inside set (outside/public side)",
+                str(nic.get("ip_addresses_nat_outside", 0)),
+                "",
+            ]
+        )
     ws_sum.append([])
     ws_sum.append([])
     pc = _phase0_category_counts(

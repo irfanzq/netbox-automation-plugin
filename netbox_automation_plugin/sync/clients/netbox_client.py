@@ -458,3 +458,49 @@ def fetch_netbox_prefix_cidrs():
         return set()
 
 
+def fetch_netbox_ipam_inventory_counts():
+    """
+    Whole-database counts for drift report inventory (NetBox this instance).
+
+    VIP role matches OpenStack floating-IP proposals in this plugin; NAT outside
+    counts IPAddress rows with ``nat_inside`` set (public/outside side of a pair).
+    """
+    out = {
+        "virtual_machines": 0,
+        "ip_addresses_total": 0,
+        "ip_addresses_vip_role": 0,
+        "ip_addresses_nat_outside": 0,
+    }
+    try:
+        from virtualization.models import VirtualMachine
+
+        out["virtual_machines"] = VirtualMachine.objects.count()
+    except Exception:
+        logger.debug("NetBox virtual machine count skipped", exc_info=True)
+
+    try:
+        from ipam.models import IPAddress, Role
+
+        out["ip_addresses_total"] = IPAddress.objects.count()
+        vip_pk = None
+        try:
+            vip = Role.objects.filter(slug__iexact="vip").first()
+            if vip is None:
+                vip = Role.objects.filter(name__iexact="vip").first()
+            if vip is not None:
+                vip_pk = vip.pk
+        except Exception:
+            vip_pk = None
+        if vip_pk is not None:
+            out["ip_addresses_vip_role"] = IPAddress.objects.filter(role_id=vip_pk).count()
+        if hasattr(IPAddress, "nat_inside_id"):
+            out["ip_addresses_nat_outside"] = IPAddress.objects.exclude(nat_inside_id__isnull=True).count()
+    except Exception:
+        logger.exception("NetBox IP address inventory counts failed")
+        out["ip_addresses_total"] = 0
+        out["ip_addresses_vip_role"] = 0
+        out["ip_addresses_nat_outside"] = 0
+
+    return out
+
+

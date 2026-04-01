@@ -322,34 +322,26 @@ RECON_CELL_PREVIEW_KEYS_BY_SELECTION: dict[str, tuple[str, ...]] = {
     ),
     "detail_new_vms": (
         "VM name",
-        "OpenStack instance ID",
         "OS region",
         "OS status",
         "Project",
         "Hypervisor hostname",
-        "vCPUs",
-        "Memory MB",
-        "Disk GB",
         "NB proposed primary IP",
         "NB proposed cluster",
         "NB proposed site",
         "NB Proposed Tenant",
         "NB proposed VM status",
-        "NB proposed device (hypervisor)",
+        "NB proposed device (VM)",
         "Authority",
         "Proposed Action",
     ),
     "detail_existing_vms": (
         "VM name",
         "NetBox VM ID",
-        "OpenStack instance ID",
         "OS region",
         "OS status",
         "Project",
         "Hypervisor hostname",
-        "vCPUs",
-        "Memory MB",
-        "Disk GB",
         "NB current vCPUs",
         "NB current Memory MB",
         "NB current Disk GB",
@@ -362,7 +354,7 @@ RECON_CELL_PREVIEW_KEYS_BY_SELECTION: dict[str, tuple[str, ...]] = {
         "NB proposed site",
         "NB Proposed Tenant",
         "NB proposed VM status",
-        "NB proposed device (hypervisor)",
+        "NB proposed device (VM)",
         "Drift summary",
         "Authority",
         "Proposed Action",
@@ -1428,20 +1420,17 @@ def apply_create_openstack_vm(op: dict[str, Any]) -> tuple[str, str]:
         return "skipped", "skipped_already_desired"
 
     consumed = {
-        _norm_header("OpenStack instance ID"),
         _norm_header("OS region"),
         _norm_header("VM name"),
         _norm_header("OS status"),
         _norm_header("Project"),
         _norm_header("Hypervisor hostname"),
-        _norm_header("vCPUs"),
-        _norm_header("Memory MB"),
-        _norm_header("Disk GB"),
         _norm_header("NB proposed primary IP"),
         _norm_header("NB proposed cluster"),
         _norm_header("NB proposed site"),
         _norm_header("NB Proposed Tenant"),
         _norm_header("NB proposed VM status"),
+        _norm_header("NB proposed device (VM)"),
         _norm_header("NB proposed device (hypervisor)"),
         _norm_header("Authority"),
         _norm_header("Proposed Action"),
@@ -1463,26 +1452,17 @@ def apply_create_openstack_vm(op: dict[str, Any]) -> tuple[str, str]:
         val = _pick_choice_value(vm._meta.get_field("status"), status_name)
         if val is not None:
             vm.status = val
-    hv = _cell(cells, "NB proposed device (hypervisor)")
-    if not hv or hv in {"—", "-"}:
-        hv = _cell(cells, "Hypervisor hostname")
-    if hv and hv not in {"—", "-"}:
-        dev = Device.objects.filter(name=hv).first()
-        if dev is not None and hasattr(vm, "device_id"):
-            vm.device = dev
-
-    for field, header, caster in (
-        ("vcpus", "vCPUs", int),
-        ("memory", "Memory MB", int),
-        ("disk", "Disk GB", int),
+    dev = None
+    for nm in (
+        _cell(cells, "NB proposed device (VM)", "NB proposed device (hypervisor)"),
+        _cell(cells, "Hypervisor hostname"),
     ):
-        raw = _cell(cells, header)
-        if not raw or raw in {"—", "-"}:
-            continue
-        try:
-            setattr(vm, field, caster(raw))
-        except (TypeError, ValueError):
-            pass
+        if nm and nm not in {"—", "-"}:
+            dev = Device.objects.filter(name=nm).first()
+            if dev is not None:
+                break
+    if dev is not None and hasattr(vm, "device_id"):
+        vm.device = dev
 
     vm.save()
     pri_ch = _apply_vm_primary_ip_from_cell(vm, cells)
@@ -1516,7 +1496,6 @@ def apply_update_openstack_vm(op: dict[str, Any]) -> tuple[str, str]:
 
     consumed = {
         _norm_header("NetBox VM ID"),
-        _norm_header("OpenStack instance ID"),
         _norm_header("OS region"),
         _norm_header("VM name"),
         _norm_header("OS status"),
@@ -1530,14 +1509,12 @@ def apply_update_openstack_vm(op: dict[str, Any]) -> tuple[str, str]:
         _norm_header("NB current device"),
         _norm_header("NB current VM status"),
         _norm_header("Drift summary"),
-        _norm_header("vCPUs"),
-        _norm_header("Memory MB"),
-        _norm_header("Disk GB"),
         _norm_header("NB proposed primary IP"),
         _norm_header("NB proposed cluster"),
         _norm_header("NB proposed site"),
         _norm_header("NB Proposed Tenant"),
         _norm_header("NB proposed VM status"),
+        _norm_header("NB proposed device (VM)"),
         _norm_header("NB proposed device (hypervisor)"),
         _norm_header("Authority"),
         _norm_header("Proposed Action"),
@@ -1570,31 +1547,19 @@ def apply_update_openstack_vm(op: dict[str, Any]) -> tuple[str, str]:
         if val is not None and vm.status != val:
             vm.status = val
             changed = True
-    hv = _cell(cells, "NB proposed device (hypervisor)")
-    if not hv or hv in {"—", "-"}:
-        hv = _cell(cells, "Hypervisor hostname")
-    if hv and hv not in {"—", "-"}:
-        dev = Device.objects.filter(name=hv).first()
-        if dev is not None and hasattr(vm, "device_id"):
-            if getattr(vm, "device_id", None) != dev.pk:
-                vm.device = dev
-                changed = True
-
-    for field, header, caster in (
-        ("vcpus", "vCPUs", int),
-        ("memory", "Memory MB", int),
-        ("disk", "Disk GB", int),
+    dev = None
+    for nm in (
+        _cell(cells, "NB proposed device (VM)", "NB proposed device (hypervisor)"),
+        _cell(cells, "Hypervisor hostname"),
     ):
-        raw = _cell(cells, header)
-        if not raw or raw in {"—", "-"}:
-            continue
-        try:
-            val = caster(raw)
-            if getattr(vm, field) != val:
-                setattr(vm, field, val)
-                changed = True
-        except (TypeError, ValueError):
-            pass
+        if nm and nm not in {"—", "-"}:
+            dev = Device.objects.filter(name=nm).first()
+            if dev is not None:
+                break
+    if dev is not None and hasattr(vm, "device_id"):
+        if getattr(vm, "device_id", None) != dev.pk:
+            vm.device = dev
+            changed = True
 
     merge_ch = _merge_audit_residual_onto_object(
         vm, cells, consumed, attr_names=("comments", "description"), max_len=8000

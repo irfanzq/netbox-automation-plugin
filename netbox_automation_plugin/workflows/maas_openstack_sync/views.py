@@ -19,6 +19,7 @@ from netbox_automation_plugin.sync.clients.netbox_client import (
     fetch_netbox_data_local,
     fetch_netbox_audit_detail_for_names,
     fetch_netbox_interfaces_for_names,
+    fetch_netbox_ipam_inventory_counts,
     fetch_netbox_prefix_cidrs,
 )
 from netbox_automation_plugin.sync.reconciliation.audit_detail import (
@@ -137,11 +138,11 @@ def _report_body_for_resumed_drift_run(audit_run: MAASOpenStackDriftRun) -> tupl
     return report_body, markup
 
 
-def _drift_nb_picker_catalog_for_markup(markup: str):
+def _drift_nb_picker_catalog_for_markup(markup: str, user=None):
     if str(markup or "").lower() != "html":
         return None
     try:
-        return build_drift_nb_picker_catalog()
+        return build_drift_nb_picker_catalog(user=user)
     except Exception as e:
         logger.warning("Drift NB picker catalog failed: %s", e)
         return {}
@@ -731,7 +732,7 @@ class MAASOpenStackSyncView(LoginRequiredMixin, View):
                             "recent_runs": _recent_drift_runs(),
                             "audit_run_id": audit_run.pk,
                             "drift_nb_picker_catalog": _drift_nb_picker_catalog_for_markup(
-                                report_drift_markup
+                                report_drift_markup, user=request.user
                             ),
                             **_drift_review_ui_context(request, audit_run),
                             **_reconciliation_ui_context(request),
@@ -823,6 +824,7 @@ class MAASOpenStackSyncView(LoginRequiredMixin, View):
                         os_subnet_gaps=cached.get("os_subnet_gaps"),
                         os_floating_gaps=cached.get("os_floating_gaps"),
                         netbox_prefix_count=cached.get("netbox_prefix_count", 0),
+                        netbox_inventory_counts=cached.get("netbox_inventory_counts"),
                         interface_audit=cached.get("interface_audit"),
                         netbox_ifaces=cached.get("netbox_ifaces"),
                     )
@@ -848,7 +850,7 @@ class MAASOpenStackSyncView(LoginRequiredMixin, View):
                             "download_xlsx_url": _live_baseline_xlsx_download_uri(request, None),
                             "recent_runs": _recent_drift_runs(),
                             "drift_nb_picker_catalog": _drift_nb_picker_catalog_for_markup(
-                                report_drift_markup
+                                report_drift_markup, user=request.user
                             ),
                             **_drift_review_ui_context(request, None),
                             **_reconciliation_ui_context(request),
@@ -1054,6 +1056,7 @@ class MAASOpenStackSyncView(LoginRequiredMixin, View):
         os_ip_range_gaps = []
         os_floating_gaps = []
         netbox_prefix_count = 0
+        netbox_inventory_counts = {}
         if not netbox_data.get("error"):
             maas_h = {
                 (m.get("hostname") or "").strip()
@@ -1072,6 +1075,7 @@ class MAASOpenStackSyncView(LoginRequiredMixin, View):
             )
             prefix_set = fetch_netbox_prefix_cidrs()
             netbox_prefix_count = len(prefix_set)
+            netbox_inventory_counts = fetch_netbox_ipam_inventory_counts()
             if openstack_data and not openstack_data.get("error"):
                 os_subnet_hints = openstack_subnet_prefix_hints(openstack_data, prefix_set)
                 os_subnet_gaps = openstack_subnets_missing_prefixes(os_subnet_hints)
@@ -1098,6 +1102,7 @@ class MAASOpenStackSyncView(LoginRequiredMixin, View):
             if not netbox_data.get("error"):
                 prefix_set = fetch_netbox_prefix_cidrs()
                 netbox_prefix_count = len(prefix_set)
+                netbox_inventory_counts = fetch_netbox_ipam_inventory_counts()
                 os_subnet_hints = openstack_subnet_prefix_hints(openstack_data, prefix_set)
                 os_subnet_gaps = openstack_subnets_missing_prefixes(os_subnet_hints)
             os_ip_range_gaps = openstack_allocation_pools_missing_ip_ranges(openstack_data)
@@ -1297,6 +1302,7 @@ class MAASOpenStackSyncView(LoginRequiredMixin, View):
             os_ip_range_gaps=os_ip_range_gaps,
             os_floating_gaps=os_floating_gaps,
             netbox_prefix_count=netbox_prefix_count,
+            netbox_inventory_counts=netbox_inventory_counts,
             interface_audit=interface_audit,
             netbox_ifaces=netbox_ifaces_for_report,
         )
@@ -1341,6 +1347,7 @@ class MAASOpenStackSyncView(LoginRequiredMixin, View):
             "os_ip_range_gaps": os_ip_range_gaps,
             "os_floating_gaps": os_floating_gaps,
             "netbox_prefix_count": netbox_prefix_count,
+            "netbox_inventory_counts": netbox_inventory_counts,
             "interface_audit": interface_audit,
             "netbox_ifaces": netbox_ifaces_for_report,
         }
@@ -1389,7 +1396,7 @@ class MAASOpenStackSyncView(LoginRequiredMixin, View):
                     "recent_runs": _recent_drift_runs(),
                     "audit_run_id": getattr(audit_run, "id", None),
                     "drift_nb_picker_catalog": _drift_nb_picker_catalog_for_markup(
-                        report_drift_markup
+                        report_drift_markup, user=request.user
                     ),
                     **_drift_review_ui_context(request, audit_run),
                     **_reconciliation_ui_context(request),
@@ -1409,7 +1416,7 @@ class MAASOpenStackSyncView(LoginRequiredMixin, View):
                 "recent_runs": _recent_drift_runs(),
                 "audit_run_id": getattr(audit_run, "id", None),
                 "drift_nb_picker_catalog": _drift_nb_picker_catalog_for_markup(
-                    report_drift_markup
+                    report_drift_markup, user=request.user
                 ),
                 **_drift_review_ui_context(request, audit_run),
                 **_reconciliation_ui_context(request),

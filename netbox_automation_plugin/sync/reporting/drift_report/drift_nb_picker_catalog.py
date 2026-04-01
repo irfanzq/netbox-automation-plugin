@@ -11,10 +11,56 @@ import logging
 logger = logging.getLogger("netbox_automation_plugin")
 
 
-def build_drift_nb_picker_catalog() -> dict[str, list[str]]:
+def _picker_field_values_main_branch(
+    model_cls, field_name: str, user, *, restrict_view: bool = True
+) -> list[str]:
+    """
+    Distinct non-empty values for ``field_name``, ordered for display.
+
+    When netbox-branching is active, ORM queries run in the branch schema by default; VM cluster
+    pickers need every cluster name from the main dataset. We query inside ``deactivate_branch()``
+    when that API exists, then fall back to the active connection on failure.
+
+    When ``restrict_view`` is True and ``user`` is authenticated, applies NetBox
+    ``restrict(..., "view")``. Cluster pickers pass ``restrict_view=False`` so the menu lists
+    **all** clusters: object-level view rules are often scoped by site/tenant and would hide valid
+    targets for ``NB proposed cluster`` even though reconciliation still resolves by name.
+    """
+
+    def _fetch() -> list[str]:
+        qs = model_cls.objects.order_by(field_name)
+        if (
+            restrict_view
+            and user is not None
+            and getattr(user, "is_authenticated", False)
+        ):
+            qs = qs.restrict(user, "view")
+        names: list[str] = []
+        for val in qs.values_list(field_name, flat=True).iterator(chunk_size=4096):
+            s = (val or "").strip()
+            if s:
+                names.append(s)
+        return sorted(set(names))
+
+    try:
+        from netbox_branching.utilities import deactivate_branch
+    except ImportError:
+        return _fetch()
+    try:
+        with deactivate_branch():
+            return _fetch()
+    except Exception as e:
+        logger.debug("drift picker main-branch %s: %s", getattr(model_cls, "__name__", "?"), e)
+        return _fetch()
+
+
+def build_drift_nb_picker_catalog(*, user=None) -> dict[str, list[str]]:
     """
     Return serializable dict: kind -> sorted unique display strings.
     Safe to call outside NetBox (returns empty lists).
+
+    Pass ``user`` (typically ``request.user``) for pickers that use view restriction; VM cluster
+    names are listed in full (no ``restrict``) so site-scoped permissions do not trim the dropdown.
     """
     out: dict[str, list[str]] = {
         "vrf": [],
@@ -289,8 +335,8 @@ def build_drift_nb_picker_catalog() -> dict[str, list[str]]:
     try:
         from virtualization.models import Cluster
 
-        out["vm_cluster"] = sorted(
-            {(x.name or "").strip() for x in Cluster.objects.only("name").iterator()} - {""}
+        out["vm_cluster"] = _picker_field_values_main_branch(
+            Cluster, "name", user, restrict_view=False
         )
     except Exception as e:
         logger.debug("drift picker vm_cluster: %s", e)
@@ -298,8 +344,8 @@ def build_drift_nb_picker_catalog() -> dict[str, list[str]]:
     try:
         from virtualization.models import ClusterType
 
-        out["vm_cluster_type"] = sorted(
-            {(x.name or "").strip() for x in ClusterType.objects.only("name").iterator()} - {""}
+        out["vm_cluster_type"] = _picker_field_values_main_branch(
+            ClusterType, "name", user, restrict_view=False
         )
     except Exception as e:
         logger.debug("drift picker vm_cluster_type: %s", e)

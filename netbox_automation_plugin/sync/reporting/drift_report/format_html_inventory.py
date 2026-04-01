@@ -3,7 +3,15 @@
 from netbox_automation_plugin.sync.reporting.drift_report.metrics import _run_metadata_rows
 
 
-def emit_inventory_scope(e, maas_data, netbox_data, openstack_data, drift, netbox_prefix_count):
+def emit_inventory_scope(
+    e,
+    maas_data,
+    netbox_data,
+    openstack_data,
+    drift,
+    netbox_prefix_count,
+    netbox_inventory_counts=None,
+):
     scope_meta = (drift or {}).get("scope_meta") or {}
     e.banner("INVENTORY")
     e.spacer()
@@ -49,6 +57,22 @@ def emit_inventory_scope(e, maas_data, netbox_data, openstack_data, drift, netbo
         ]
         if netbox_prefix_count:
             inv_rows.append(["IPAM Prefix objects (included / fetched)", f"{netbox_prefix_count} / {netbox_prefix_count}"])
+        nic = netbox_inventory_counts or {}
+        if nic:
+            inv_rows.append(["Virtual machines (total)", str(nic.get("virtual_machines", 0))])
+            inv_rows.append(["IP addresses (total)", str(nic.get("ip_addresses_total", 0))])
+            inv_rows.append(
+                [
+                    "IP addresses VIP role (FIP-style)",
+                    str(nic.get("ip_addresses_vip_role", 0)),
+                ]
+            )
+            inv_rows.append(
+                [
+                    "IP addresses with NAT inside set (outside/public side)",
+                    str(nic.get("ip_addresses_nat_outside", 0)),
+                ]
+            )
         e.table(["Metric", "Count"], inv_rows)
 
     if scope_meta:

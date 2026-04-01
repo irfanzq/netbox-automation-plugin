@@ -29,8 +29,8 @@ def fetch_openstack_data(config: dict):
       - networks: list of {id, name}
       - subnets: list of {id, cidr, network_id}
       - floating_ips: list of {floating_ip_address, fixed_ip_address, id, project_id, project_name}
-      - compute_instances: list of Nova server dicts (instance_id, name, status, hypervisor_hostname,
-        os_primary_ip from Nova addresses when details=True, …)
+      - compute_instances: list of Nova server dicts (instance_id, name, status, hypervisor_hostname
+        resolved from hypervisor UUID when Nova reports OS-EXT-SRV-ATTR:host as an id, …)
       - error: str if connection failed
       - openstack_projects_scanned: int (optional) when multi-project mode ran
     """
@@ -517,6 +517,47 @@ def _server_dict_for_audit(srv) -> dict:
     }
 
 
+def _hypervisor_uuid_to_hostname_map(conn) -> dict[str, str]:
+    """
+    Nova often puts a hypervisor **id** (UUID) in OS-EXT-SRV-ATTR:host / compute host; the CLI
+    "Host" column shows that id while `openstack hypervisor list` shows the real hostname.
+    Map id → hypervisor_hostname so drift "Hypervisor hostname" and NetBox Device matching use names.
+    """
+    mapping: dict[str, str] = {}
+    try:
+        try:
+            hvs = conn.compute.hypervisors(details=True)
+        except TypeError:
+            hvs = conn.compute.hypervisors()
+        for hv in hvs:
+            hid = getattr(hv, "id", None)
+            if hid is None:
+                continue
+            key = str(hid).strip()
+            if not key:
+                continue
+            hn = (
+                str(getattr(hv, "hypervisor_hostname", None) or "").strip()
+                or str(getattr(hv, "name", None) or "").strip()
+            )
+            if hn:
+                mapping[key] = hn[:255]
+    except Exception as e:
+        logger.debug("OpenStack: hypervisor list for Host UUID resolution: %s", e)
+    return mapping
+
+
+def _resolve_compute_host_to_hostname(host_val: str, hv_map: dict[str, str]) -> str:
+    s = str(host_val or "").strip()
+    if not s or not hv_map:
+        return s
+    if _PROJECT_ID_RE.match(s):
+        return hv_map.get(s, s)
+    if s.isdigit():
+        return hv_map.get(s, s)
+    return s
+
+
 def _collect_compute_instances(
     conn,
     project_label: str,
@@ -528,11 +569,16 @@ def _collect_compute_instances(
     """
     out: list[dict] = []
     try:
+        hv_map = _hypervisor_uuid_to_hostname_map(conn)
         for srv in conn.compute.servers(details=True):
             row = _server_dict_for_audit(srv)
             if not row.get("instance_id") or not row.get("name"):
                 continue
             row["project_name"] = project_label if force_project_label_display else project_label
+            if hv_map:
+                row["hypervisor_hostname"] = _resolve_compute_host_to_hostname(
+                    row.get("hypervisor_hostname") or "", hv_map
+                )
             out.append(row)
     except Exception as e:
         logger.warning("OpenStack: Nova server list failed: %s", e)
