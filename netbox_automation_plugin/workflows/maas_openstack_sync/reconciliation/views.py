@@ -17,8 +17,8 @@ from django.views.decorators.cache import never_cache
 
 from netbox_automation_plugin.models import MAASOpenStackReconciliationRun
 
-from .history_models import MAASOpenStackDriftRun
-from .reconciliation_service import (
+from ..history_models import MAASOpenStackDriftRun
+from .service import (
     frozen_operations_for_display,
     RECONCILIATION_DISCARD_BLOCKED_STATUSES,
     apply_reconciliation_run,

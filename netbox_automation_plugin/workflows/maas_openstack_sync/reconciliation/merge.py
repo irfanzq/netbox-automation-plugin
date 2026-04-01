@@ -28,7 +28,7 @@ from netbox_automation_plugin.sync.reporting.drift_report.render_tables import (
     _selection_row_key,
 )
 
-from .history_models import MAASOpenStackDriftRun
+from ..history_models import MAASOpenStackDriftRun
 
 
 def merge_review_override_layers(

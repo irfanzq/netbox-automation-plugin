@@ -3,7 +3,7 @@
 Each frozen op carries ``cells``: header → string value sent to the recon preview/apply path.
 
 - ``detail_new_nics``, ``detail_new_nics_os``, ``detail_new_nics_maas``: minimal payload
-  only (see ``reconciliation_apply_cells.NEW_NIC_RECON_PAYLOAD_HEADERS``): Host, label,
+  only (see ``apply_cells.NEW_NIC_RECON_PAYLOAD_HEADERS``): Host, label,
   interface type, suggested NetBox name, Proposed properties, plus Parsed MAC / Parsed
   untagged VLAN / Parsed IPs extracted from Proposed properties for the preview.
 
@@ -29,15 +29,15 @@ from netbox_automation_plugin.sync.reporting.drift_report.render_tables import (
     _selection_row_key,
 )
 
-from .history_models import MAASOpenStackDriftRun
-from .reconciliation_branch import (
+from ..history_models import MAASOpenStackDriftRun
+from .branch import (
     branch_write_context,
     create_netbox_branch,
     delete_netbox_branch_instance,
     get_netbox_branch,
     netbox_branch_exists,
 )
-from .reconciliation_apply_cells import (
+from .apply_cells import (
     NEW_NIC_RECON_PAYLOAD_HEADERS,
     RECON_CELL_PREVIEW_KEYS_BY_SELECTION,
     SUPPORTED_APPLY_ACTIONS,
@@ -45,7 +45,7 @@ from .reconciliation_apply_cells import (
     new_nic_cells_for_reconciliation,
     recon_operation_display_cells,
 )
-from .reconciliation_merge import (
+from .merge import (
     _safe_selection_key,
     all_registered_selection_keys,
     build_row_key_index,
@@ -639,7 +639,7 @@ def apply_reconciliation_run(
     Execute frozen operations with explicit row results and status transitions.
 
     Apply handlers use full per-row ``cells`` (all audit columns) via
-    ``reconciliation_apply_cells.apply_row_operation``.
+    ``apply_cells.apply_row_operation``.
     """
     allowed = {
         MAASOpenStackReconciliationRun.STATUS_BRANCH_CREATED,

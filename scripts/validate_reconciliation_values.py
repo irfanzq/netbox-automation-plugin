@@ -56,11 +56,11 @@ def _validate_run(run_id: int, *, verbose: bool = False) -> dict[str, Any]:
     from netbox_automation_plugin.sync.reporting.drift_report.drift_overrides_apply import (
         SELECTION_KEY_TO_HEADERS,
     )
-    from netbox_automation_plugin.workflows.maas_openstack_sync.reconciliation_apply_cells import (
+    from netbox_automation_plugin.workflows.maas_openstack_sync.reconciliation.apply_cells import (
         SUPPORTED_APPLY_ACTIONS,
         apply_row_operation,
     )
-    from netbox_automation_plugin.workflows.maas_openstack_sync.reconciliation_service import (
+    from netbox_automation_plugin.workflows.maas_openstack_sync.reconciliation.service import (
         SK_TO_ACTION,
     )
 
