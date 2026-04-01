@@ -38,6 +38,7 @@ from .reconciliation_branch import (
     netbox_branch_exists,
 )
 from .reconciliation_apply_cells import (
+    NEW_NIC_RECON_PAYLOAD_HEADERS,
     RECON_CELL_PREVIEW_KEYS_BY_SELECTION,
     SUPPORTED_APPLY_ACTIONS,
     apply_row_operation,
@@ -380,6 +381,21 @@ def _row_diffs_vs_baseline(
                     ],
                 }
             )
+    return out
+
+
+def frozen_operations_for_display(frozen: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Shallow copy of frozen ops with ``cells`` reduced to NetBox-oriented preview fields."""
+    out: list[dict[str, Any]] = []
+    for op in frozen:
+        if not isinstance(op, dict):
+            continue
+        o2 = dict(op)
+        o2["cells"] = recon_operation_display_cells(
+            str(op.get("selection_key") or ""),
+            dict(op.get("cells") or {}),
+        )
+        out.append(o2)
     return out
 
 
