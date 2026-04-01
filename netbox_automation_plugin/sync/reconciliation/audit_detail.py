@@ -862,11 +862,11 @@ def openstack_floating_ips_nat_inside_drift(openstack_data: dict) -> list[dict]:
             continue
         try:
             ip_obj = IPAddress.objects.filter(address=str(net)).select_related(
-                "nat_inside", "vrf", "vrf__name"
+                "nat_inside", "vrf"
             ).first()
         except Exception:
             ip_obj = IPAddress.objects.filter(address=net).select_related(
-                "nat_inside", "vrf", "vrf__name"
+                "nat_inside", "vrf"
             ).first()
         if ip_obj is None:
             continue
