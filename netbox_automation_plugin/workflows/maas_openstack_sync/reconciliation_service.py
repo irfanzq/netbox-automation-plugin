@@ -1,4 +1,15 @@
-"""Preview, signed acknowledgement, and frozen operations for branch reconciliation."""
+"""Preview, signed acknowledgement, and frozen operations for branch reconciliation.
+
+Each frozen op carries ``cells``: header → string value sent to the recon preview/apply path.
+
+- ``detail_new_nics``, ``detail_new_nics_os``, ``detail_new_nics_maas``: minimal payload
+  only (see ``reconciliation_apply_cells.NEW_NIC_RECON_PAYLOAD_HEADERS``): Host, label,
+  interface type, suggested NetBox name, Proposed properties, plus Parsed MAC / Parsed
+  untagged VLAN / Parsed IPs extracted from Proposed properties for the preview.
+
+- All other ``SK_TO_ACTION`` sections: full audit table row (every column header for that
+  section).
+"""
 
 from __future__ import annotations
 
@@ -26,7 +37,13 @@ from .reconciliation_branch import (
     get_netbox_branch,
     netbox_branch_exists,
 )
-from .reconciliation_apply_cells import SUPPORTED_APPLY_ACTIONS, apply_row_operation
+from .reconciliation_apply_cells import (
+    RECON_CELL_PREVIEW_KEYS_BY_SELECTION,
+    SUPPORTED_APPLY_ACTIONS,
+    apply_row_operation,
+    new_nic_cells_for_reconciliation,
+    recon_operation_display_cells,
+)
 from .reconciliation_merge import (
     _safe_selection_key,
     all_registered_selection_keys,
@@ -44,6 +61,8 @@ SK_TO_ACTION = {
     "detail_new_ip_ranges": "create_ip_range",
     "detail_new_fips": "create_floating_ip",
     "detail_new_nics": "create_interface",
+    "detail_new_nics_os": "create_interface",
+    "detail_new_nics_maas": "create_interface",
     "detail_nic_drift_os": "update_interface",
     "detail_nic_drift_maas": "update_interface",
     "detail_bmc_new_devices": "bmc_documentation",
@@ -51,6 +70,81 @@ SK_TO_ACTION = {
     "detail_serial_review": "serial_review",
     "detail_placement_lifecycle_alignment": "placement_alignment",
 }
+
+# Drift audit HTML order: format_html_drift (placement) → format_html_proposed top-to-bottom.
+# Ensures e.g. new devices run before new NICs (interfaces need a Device), BMC after NIC tables, etc.
+AUDIT_REPORT_APPLY_ORDER: tuple[str, ...] = (
+    "detail_placement_lifecycle_alignment",
+    "detail_new_devices",
+    "detail_review_only_devices",
+    "detail_new_prefixes",
+    "detail_new_ip_ranges",
+    "detail_new_fips",
+    "detail_new_nics",
+    "detail_new_nics_os",
+    "detail_new_nics_maas",
+    "detail_nic_drift_os",
+    "detail_nic_drift_maas",
+    "detail_bmc_new_devices",
+    "detail_bmc_existing",
+    "detail_serial_review",
+)
+
+_APPLY_ORDER_RANK: dict[str, int] = {sk: i for i, sk in enumerate(AUDIT_REPORT_APPLY_ORDER)}
+
+# New-NIC drift tables: frozen op["cells"] is minimal (not the full HTML row).
+NEW_NIC_SELECTION_KEYS: frozenset[str] = frozenset(
+    {"detail_new_nics", "detail_new_nics_os", "detail_new_nics_maas"}
+)
+
+# When selection_key is missing from SK_TO_ACTION (e.g. stale plugin HTML), infer from row metadata.
+_PROP_LIST_KEY_FALLBACK_ACTION: dict[str, str] = {
+    "add_nb_interfaces": "create_interface",
+}
+
+
+def _frozen_op_action(selection_key: str, meta: dict[str, Any]) -> str:
+    sk = str(selection_key or "").strip()
+    if sk in SK_TO_ACTION:
+        return SK_TO_ACTION[sk]
+    pk = meta.get("prop_list_key")
+    if isinstance(pk, str) and pk in _PROP_LIST_KEY_FALLBACK_ACTION:
+        return _PROP_LIST_KEY_FALLBACK_ACTION[pk]
+    return "unknown"
+
+
+def _canonical_selection_key(sk: str, allowed: frozenset[str]) -> str | None:
+    if sk in allowed:
+        return sk
+    safe = _safe_selection_key(sk)
+    for cand in allowed:
+        if _safe_selection_key(cand) == safe:
+            return cand
+    return None
+
+
+def _selected_keys_in_audit_order(
+    selected: dict[str, list[dict[str, Any]]], allowed: frozenset[str]
+) -> list[str]:
+    tail = len(AUDIT_REPORT_APPLY_ORDER)
+
+    def rank(k: str) -> tuple[int, str]:
+        canon = _canonical_selection_key(k, allowed)
+        r = _APPLY_ORDER_RANK.get(canon, tail) if canon else tail
+        return (r, k)
+
+    return sorted(selected.keys(), key=rank)
+
+
+def _operation_apply_sort_key(op: dict[str, Any]) -> tuple[int, int, str]:
+    msk = str(op.get("selection_key") or "")
+    rank = _APPLY_ORDER_RANK.get(msk, len(AUDIT_REPORT_APPLY_ORDER))
+    ri = op.get("row_index")
+    try:
+        ri_int = int(ri) if ri is not None and ri != "" else 0
+    except (TypeError, ValueError):
+        ri_int = 0
+    return (rank, ri_int, str(op.get("row_key") or ""))
 
 
 def _cells_dict(headers: list, row: list) -> dict[str, str]:
@@ -82,11 +176,20 @@ def _operation_summary(meta: dict[str, Any]) -> str:
     if sk == "detail_new_fips":
         fip = cells.get("Floating IP") or "—"
         return f"Floating IP: {fip}"
-    if sk == "detail_new_nics":
+    if sk in NEW_NIC_SELECTION_KEYS:
         base = f"New interface: {host or '—'}"
-        mac = (cells.get("MAAS MAC") or cells.get("OS MAC") or "").strip()
-        vlan = (cells.get("MAAS VLAN") or cells.get("OS runtime VLAN") or "").strip()
-        ips = (cells.get("MAAS IPs") or cells.get("OS runtime IP") or "").strip()
+        if_name = (cells.get("Suggested NB name") or "").strip()
+        if if_name:
+            base += f" / {if_name}"
+        mac = (cells.get("Parsed MAC") or "").strip()
+        vlan = (cells.get("Parsed untagged VLAN") or "").strip()
+        ips = (cells.get("Parsed IPs") or "").strip()
+        if not mac:
+            mac = (cells.get("MAAS MAC") or cells.get("OS MAC") or "").strip()
+        if not vlan:
+            vlan = (cells.get("MAAS VLAN") or cells.get("OS runtime VLAN") or "").strip()
+        if not ips:
+            ips = (cells.get("MAAS IPs") or cells.get("OS runtime IP") or "").strip()
         props = (
             cells.get("Proposed properties")
             or cells.get("Proposed properties (from MAAS)")
@@ -163,13 +266,8 @@ def build_frozen_operations(
         }:
             raise ValueError(f"Unknown selection section: {sk}")
 
-    for sk in sorted(selected.keys()):
-        canon_sk = sk if sk in allowed else None
-        if canon_sk is None:
-            for cand in allowed:
-                if _safe_selection_key(cand) == sk:
-                    canon_sk = cand
-                    break
+    for sk in _selected_keys_in_audit_order(selected, allowed):
+        canon_sk = _canonical_selection_key(sk, allowed)
         if canon_sk is None:
             raise ValueError(f"Unknown selection section: {sk}")
         safe = _safe_selection_key(canon_sk)
@@ -198,22 +296,35 @@ def build_frozen_operations(
             if row_key_final in seen:
                 continue
             seen.add(row_key_final)
+            summary = _operation_summary(meta)
             cells = _cells_dict(meta["headers"], meta["row"])
+            if msk in NEW_NIC_SELECTION_KEYS:
+                cells = new_nic_cells_for_reconciliation(cells)
             op: dict[str, Any] = {
                 "row_key": row_key_final,
                 "selection_key": msk,
                 "prop_list_key": meta.get("prop_list_key"),
                 "row_index": meta["row_index"],
                 "cells": cells,
-                "summary": _operation_summary(meta),
-                "action": SK_TO_ACTION.get(msk, "unknown"),
+                "summary": summary,
+                "action": _frozen_op_action(msk, meta),
             }
             if "global_row_index" in meta:
                 op["global_row_index"] = meta["global_row_index"]
             ops.append(op)
 
-    ops.sort(key=lambda o: (o["selection_key"], o["row_index"], o["row_key"]))
+    ops.sort(key=_operation_apply_sort_key)
     return ops
+
+
+def _audit_diff_header_allowlist(msk: str) -> frozenset[str] | None:
+    """Limit audit diff to NetBox-oriented columns (same as recon operation preview)."""
+    if msk in NEW_NIC_SELECTION_KEYS:
+        return frozenset(NEW_NIC_RECON_PAYLOAD_HEADERS)
+    tup = RECON_CELL_PREVIEW_KEYS_BY_SELECTION.get(msk)
+    if tup:
+        return frozenset(tup)
+    return None
 
 
 def _row_diffs_vs_baseline(
@@ -228,8 +339,11 @@ def _row_diffs_vs_baseline(
         ri = int(op["row_index"]) if op.get("row_index") is not None else 0
         bmeta = stable_baseline.get((safe_m, ri))
         cells_a = dict(op.get("cells") or {})
+        allow = _audit_diff_header_allowlist(msk)
         if not bmeta:
             headers = list(cells_a.keys())
+            if allow is not None:
+                headers = [h for h in headers if h in allow]
             if headers:
                 out.append(
                     {
@@ -244,7 +358,11 @@ def _row_diffs_vs_baseline(
                 )
             continue
         cells_b = _cells_dict(bmeta["headers"], bmeta["row"])
-        keys = sorted(set(bmeta["headers"]) | set(cells_a.keys()))
+        if msk in NEW_NIC_SELECTION_KEYS:
+            cells_b = new_nic_cells_for_reconciliation(cells_b)
+        keys = sorted(set(cells_b.keys()) | set(cells_a.keys()))
+        if allow is not None:
+            keys = [h for h in keys if h in allow]
         changed = [h for h in keys if cells_b.get(h, "") != cells_a.get(h, "")]
         if changed:
             out.append(
@@ -343,10 +461,16 @@ def preview_reconciliation(
         sk = op.get("selection_key") or ""
         by_section[sk] = by_section.get(sk, 0) + 1
 
+    unknown_sections = sorted(
+        {str(o.get("selection_key") or "") for o in frozen if o.get("action") == "unknown"}
+    )
     warnings: list[str] = []
-    for op in frozen:
-        if op.get("action") == "unknown":
-            warnings.append(f"Unhandled action type for section {op.get('selection_key')}.")
+    if unknown_sections:
+        warnings.append(
+            "No apply handler registered for section(s): "
+            + ", ".join(s for s in unknown_sections if s)
+            + "."
+        )
 
     return {
         "drift_run_id": drift_run.pk,
@@ -358,7 +482,10 @@ def preview_reconciliation(
                 "summary": o["summary"],
                 "action": o["action"],
                 "section": o["selection_key"],
-                "cells": dict(o.get("cells") or {}),
+                "cells": recon_operation_display_cells(
+                    str(o.get("selection_key") or ""),
+                    dict(o.get("cells") or {}),
+                ),
             }
             for o in frozen
         ],

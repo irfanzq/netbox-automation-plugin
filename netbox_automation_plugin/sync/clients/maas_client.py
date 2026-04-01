@@ -695,6 +695,82 @@ def _ip_host_only(addr: str) -> str:
     return str(addr).split("/", 1)[0].strip().lower()
 
 
+def _iface_extended_from_rest(item: dict) -> dict:
+    """Extra MAAS REST interface fields for drift (link speed, identity, VLAN name, MTU)."""
+    if not isinstance(item, dict):
+        return {}
+    vlan = item.get("vlan")
+    vn = ""
+    if isinstance(vlan, dict):
+        vn = str(vlan.get("name") or "").strip()
+    ls = item.get("link_speed")
+    if ls in (None, ""):
+        ls = item.get("link_speed_mbps") or item.get("speed")
+    vendor = str(item.get("vendor") or item.get("vendor_name") or "").strip()
+    product = str(
+        item.get("product") or item.get("product_name") or item.get("firmware_version") or ""
+    ).strip()
+    mtu = item.get("mtu") if item.get("mtu") not in (None, "") else item.get("mtu_size")
+    emtu = item.get("effective_mtu")
+    return {
+        "link_speed": ls if ls not in (None, "") else "",
+        "vendor": vendor,
+        "product": product,
+        "vlan_name": vn,
+        "mtu": mtu if mtu not in (None, "") else "",
+        "effective_mtu": emtu if emtu not in (None, "") else "",
+    }
+
+
+def _iface_extended_from_viscera(iface) -> dict:
+    out = {
+        "link_speed": "",
+        "vendor": "",
+        "product": "",
+        "vlan_name": "",
+        "mtu": "",
+        "effective_mtu": "",
+    }
+    try:
+        v = getattr(iface, "vlan", None)
+        if v is not None:
+            n = getattr(v, "name", None)
+            if n:
+                out["vlan_name"] = str(n).strip()
+        ls = getattr(iface, "link_speed", None)
+        if ls in (None, ""):
+            ls = getattr(iface, "speed", None)
+        if ls not in (None, ""):
+            out["link_speed"] = ls
+        vendor = getattr(iface, "vendor", None) or getattr(iface, "vendor_name", None)
+        if vendor:
+            out["vendor"] = str(vendor).strip()
+        product = getattr(iface, "product", None) or getattr(iface, "product_name", None)
+        if product:
+            out["product"] = str(product).strip()
+        mtu = getattr(iface, "mtu", None)
+        if mtu not in (None, ""):
+            out["mtu"] = mtu
+        emtu = getattr(iface, "effective_mtu", None)
+        if emtu not in (None, ""):
+            out["effective_mtu"] = emtu
+        vd = getattr(iface, "_data", None)
+        if isinstance(vd, dict):
+            if not out["vendor"]:
+                out["vendor"] = str(vd.get("vendor") or vd.get("vendor_name") or "").strip()
+            if not out["product"]:
+                out["product"] = str(
+                    vd.get("product") or vd.get("product_name") or ""
+                ).strip()
+            if not out["link_speed"] and vd.get("link_speed") not in (None, ""):
+                out["link_speed"] = vd.get("link_speed")
+            elif not out["link_speed"] and vd.get("speed") not in (None, ""):
+                out["link_speed"] = vd.get("speed")
+    except Exception:
+        pass
+    return out
+
+
 def _ifaces_from_viscera_list(iface_list):
     """
     Build interface dicts from python-libmaas Interface objects.
@@ -749,14 +825,16 @@ def _ifaces_from_viscera_list(iface_list):
                                 iface_fabric = str(fd["name"]).strip()
             except Exception:
                 pass
-            rows.append({
+            row = {
                 "name": name,
                 "mac": mac,
                 "ips": ips,
                 "type": itype,
                 "vlan_vid": vid,
                 "iface_fabric": iface_fabric,
-            })
+            }
+            row.update(_iface_extended_from_viscera(iface))
+            rows.append(row)
         except Exception as e:
             logger.debug("MAAS viscera iface skip: %s", e)
             continue
@@ -874,14 +952,16 @@ def _rest_rows_from_iface_dicts(items: list, fabric_catalog: dict | None = None)
         if isinstance(vlan, dict):
             vid = str(vlan.get("vid") or vlan.get("id") or "")
         iface_fabric = _fabric_name_from_interface_item(item, fabric_catalog)
-        rows.append({
+        row = {
             "name": name,
             "mac": mac,
             "ips": ips,
             "type": itype,
             "vlan_vid": vid,
             "iface_fabric": iface_fabric,
-        })
+        }
+        row.update(_iface_extended_from_rest(item))
+        rows.append(row)
     return rows
 
 

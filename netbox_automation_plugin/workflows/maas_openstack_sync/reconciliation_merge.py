@@ -7,10 +7,12 @@ from typing import Any
 
 from netbox_automation_plugin.sync.reporting.drift_report.drift_overrides_apply import (
     HEADERS_DETAIL_NIC_DRIFT,
+    HEADERS_DETAIL_NEW_NICS,
     SELECTION_KEY_TO_HEADERS,
     SELECTION_KEY_TO_PROP_LIST,
     merge_drift_review_overrides,
     normalize_drift_review_overrides,
+    _new_nic_row_is_os_authority,
     _update_nic_row_is_os_authority,
 )
 from netbox_automation_plugin.sync.reporting.drift_report.fabric_alignment import (
@@ -158,8 +160,37 @@ def build_row_key_index(
                 index[rk] = meta
                 stable[(safe, sub_idx)] = meta
 
+    add_nb = prop.get("add_nb_interfaces")
+    if isinstance(add_nb, list):
+        for sk, want_os in (("detail_new_nics_os", True), ("detail_new_nics_maas", False)):
+            headers = HEADERS_DETAIL_NEW_NICS
+            safe = _safe_selection_key(sk)
+            sub_indices = [
+                i
+                for i, r in enumerate(add_nb)
+                if isinstance(r, (list, tuple))
+                and (_new_nic_row_is_os_authority(r) == want_os)
+            ]
+            for sub_idx, gi in enumerate(sub_indices):
+                row_list = list(add_nb[gi])
+                n = len(headers)
+                padded = row_list[:n] + [""] * (n - min(len(row_list), n))
+                rk = _selection_row_key(safe, sub_idx, padded)
+                meta = {
+                    "selection_key": sk,
+                    "prop_list_key": "add_nb_interfaces",
+                    "row_index": sub_idx,
+                    "global_row_index": gi,
+                    "headers": headers,
+                    "row": padded,
+                }
+                index[rk] = meta
+                stable[(safe, sub_idx)] = meta
+
     for sk, pk in SELECTION_KEY_TO_PROP_LIST.items():
         if sk in ("detail_nic_drift_os", "detail_nic_drift_maas"):
+            continue
+        if sk in ("detail_new_nics_os", "detail_new_nics_maas"):
             continue
         headers = SELECTION_KEY_TO_HEADERS.get(sk)
         if not headers:

@@ -116,11 +116,17 @@ HEADERS_DETAIL_NEW_NICS: list[str] = [
     "MAAS MAC",
     "MAAS IPs",
     "MAAS VLAN",
+    "MAAS link speed",
+    "OS link speed",
+    "OS LLDP / switch_info",
+    "MAAS NIC model",
     "OS region",
     "OS MAC",
     "OS runtime IP",
     "OS runtime VLAN",
     "Authority",
+    "NB Proposed intf Label",
+    "NB Proposed intf Type",
     "Suggested NB name",
     "Proposed properties",
     "Risk",
@@ -133,6 +139,10 @@ HEADERS_DETAIL_NIC_DRIFT: list[str] = [
     "MAAS MAC",
     "MAAS IPs",
     "MAAS VLAN",
+    "MAAS link speed",
+    "OS link speed",
+    "OS LLDP / switch_info",
+    "MAAS NIC model",
     "OS region",
     "OS MAC",
     "OS runtime IP",
@@ -142,6 +152,8 @@ HEADERS_DETAIL_NIC_DRIFT: list[str] = [
     "NB MAC",
     "NB IPs",
     "NB VLAN",
+    "NB Proposed intf Label",
+    "NB Proposed intf Type",
     "Proposed Action",
     "Risk",
 ]
@@ -160,6 +172,12 @@ HEADERS_BMC_NEW_DEVICES: list[str] = [
     "MAAS vendor",
     "MAAS product",
     "MAAS BMC MAC",
+    "MAAS link speed",
+    "OS link speed",
+    "OS LLDP / switch_info",
+    "MAAS NIC model",
+    "NB Proposed intf Label",
+    "NB Proposed intf Type",
     "Suggested NB mgmt iface",
     "NB mgmt iface IP",
     "Authority",
@@ -174,6 +192,12 @@ HEADERS_BMC_EXISTING: list[str] = [
     "MAAS BMC IP",
     "MAAS power_type",
     "MAAS BMC MAC",
+    "MAAS link speed",
+    "OS link speed",
+    "OS LLDP / switch_info",
+    "MAAS NIC model",
+    "NB Proposed intf Label",
+    "NB Proposed intf Type",
     "Suggested NB OOB Port",
     "NetBox OOB",
     "NB IP coverage",
@@ -277,12 +301,12 @@ def _remap_legacy_truncated_nb_placement_headers(
 
 def _update_nic_row_is_os_authority(row) -> bool:
     """Matches format_html_proposed split for NIC drift (OS vs MAAS) tables."""
-    return len(row) > 10 and str(row[10]).strip() == "[OS]"
+    return len(row) > 14 and str(row[14]).strip() == "[OS]"
 
 
 def _new_nic_row_is_os_authority(row) -> bool:
     """Matches format_html_proposed split for new NICs (OS vs MAAS) tables."""
-    return len(row) > 12 and str(row[12]).strip() == "[OS]"
+    return len(row) > 16 and str(row[16]).strip() == "[OS]"
 
 
 def _apply_new_nics_subset(

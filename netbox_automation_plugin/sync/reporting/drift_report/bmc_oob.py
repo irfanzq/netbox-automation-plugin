@@ -3,6 +3,22 @@
 import re
 
 from netbox_automation_plugin.sync.reporting.drift_report.misc_utils import _ip_address_host
+from netbox_automation_plugin.sync.reporting.drift_report.proposed_nic_derived import (
+    bmc_row_proposed_defaults,
+)
+
+
+def _bmc_drift_extra_columns(maas_machine: dict) -> dict[str, str]:
+    ex = bmc_row_proposed_defaults(maas_machine)
+    v = str(maas_machine.get("hardware_vendor") or "").strip()
+    p = str(maas_machine.get("hardware_product") or "").strip()
+    if v and p:
+        ex["maas_nic_model"] = f"{v[:32]} / {p[:64]}"
+    elif v:
+        ex["maas_nic_model"] = v[:96]
+    elif p:
+        ex["maas_nic_model"] = p[:96]
+    return ex
 
 # NetBox **port names** operators use for BMC/OOB (heuristic coverage); *-nic here is a label, not “host NIC”.
 _MGMT_INTERFACE_NAME_HINTS = frozenset({
@@ -256,6 +272,7 @@ def _build_proposed_mgmt_interface_rows(
             if maas_mac or maas_vlan:
                 action += f" MAAS hints: MAC={maas_mac or '—'} VLAN={maas_vlan or '—'}."
             risk = "High"
+            bx = _bmc_drift_extra_columns(m)
             out.append([
                 h,
                 "—",
@@ -264,6 +281,12 @@ def _build_proposed_mgmt_interface_rows(
                 "—",
                 pt,
                 maas_mac or "—",
+                bx["maas_link_speed_disp"],
+                bx["os_link_speed_disp"],
+                bx["os_switch_disp"],
+                bx["maas_nic_model"],
+                bx["nb_proposed_intf_label"],
+                bx["nb_proposed_intf_type"],
                 maas_oob_new,
                 nb_oob or "—",
                 cov,
@@ -440,6 +463,7 @@ def _build_proposed_mgmt_interface_rows(
 
         if str(status).strip().upper() == "OK":
             continue
+        bx = _bmc_drift_extra_columns(m)
         out.append([
             h,
             os_bmc_ip or "—",
@@ -447,6 +471,12 @@ def _build_proposed_mgmt_interface_rows(
             bmc or "—",
             pt,
             maas_mac or "—",
+            bx["maas_link_speed_disp"],
+            bx["os_link_speed_disp"],
+            bx["os_switch_disp"],
+            bx["maas_nic_model"],
+            bx["nb_proposed_intf_label"],
+            bx["nb_proposed_intf_type"],
             oob_port_hint,
             nb_oob or "—",
             cov,

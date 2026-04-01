@@ -31,6 +31,8 @@ def build_drift_nb_picker_catalog() -> dict[str, list[str]]:
         "prefix_role": [],
         "ip_status": [],
         "ip_role": [],
+        "intf_role": [],
+        "interface_type": [],
     }
     out["_vlan_by_scope_location"] = {}
     try:
@@ -256,5 +258,28 @@ def build_drift_nb_picker_catalog() -> dict[str, list[str]]:
         out["prefix_status"] = ["active", "reserved"]
     if not out["ip_status"]:
         out["ip_status"] = list(out["prefix_status"])
+
+    try:
+        from netbox_automation_plugin.sync.reporting.drift_report.proposed_nic_derived import (
+            intf_role_catalog_values,
+        )
+
+        out["intf_role"] = intf_role_catalog_values()
+    except Exception as e:
+        logger.debug("drift picker intf_role: %s", e)
+
+    try:
+        from dcim.models import Interface
+
+        field = Interface._meta.get_field("type")
+        ch = getattr(field, "choices", None) or []
+        slugs = []
+        for val, _lab in ch:
+            if val is None or val == "":
+                continue
+            slugs.append(str(val).strip())
+        out["interface_type"] = sorted(set(slugs) - {""})
+    except Exception as e:
+        logger.debug("drift picker interface_type: %s", e)
 
     return out

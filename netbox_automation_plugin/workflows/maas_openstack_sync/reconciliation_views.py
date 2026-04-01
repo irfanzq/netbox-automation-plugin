@@ -19,6 +19,7 @@ from netbox_automation_plugin.models import MAASOpenStackReconciliationRun
 
 from .history_models import MAASOpenStackDriftRun
 from .reconciliation_service import (
+    frozen_operations_for_display,
     RECONCILIATION_DISCARD_BLOCKED_STATUSES,
     apply_reconciliation_run,
     create_reconciliation_run,
@@ -177,7 +178,9 @@ class ReconciliationRunDetailView(LoginRequiredMixin, View):
             self.template_name,
             {
                 "run": run,
-                "frozen_ops": run.frozen_operations if isinstance(run.frozen_operations, list) else [],
+                "frozen_ops": frozen_operations_for_display(
+                    run.frozen_operations if isinstance(run.frozen_operations, list) else []
+                ),
                 "apply_results": run.apply_results if isinstance(run.apply_results, dict) else {},
                 "apply_url": reverse(
                     "plugins:netbox_automation_plugin:maas_openstack_reconciliation_apply",

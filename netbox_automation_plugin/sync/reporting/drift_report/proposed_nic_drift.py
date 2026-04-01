@@ -1,5 +1,8 @@
 """NIC drift and serial-review rows for proposed-change buckets."""
 
+from netbox_automation_plugin.sync.reporting.drift_report.proposed_nic_derived import (
+    derive_nic_proposed_columns,
+)
 from netbox_automation_plugin.sync.reporting.drift_report.proposed_nic_helpers import (
     _drift_table_status_is_ok_only,
 )
@@ -75,6 +78,9 @@ def _build_update_nic_rows(interface_audit):
             if _drift_table_status_is_ok_only(status_cell):
                 continue
 
+            ex = derive_nic_proposed_columns(
+                hn, row, bmc_mac=str(row.get("host_bmc_mac") or "")
+            )
             update_nic.append([
                 hn,
                 row.get("maas_if") or "",
@@ -82,6 +88,10 @@ def _build_update_nic_rows(interface_audit):
                 row.get("maas_mac") or "",
                 row.get("maas_ips") or "",
                 maas_vlan,
+                ex["maas_link_speed_disp"],
+                ex["os_link_speed_disp"],
+                ex["os_switch_disp"],
+                ex["maas_nic_model"],
                 os_region,
                 os_mac,
                 os_ip,
@@ -91,6 +101,8 @@ def _build_update_nic_rows(interface_audit):
                 row.get("nb_mac") or "—",
                 row.get("nb_ips") or "—",
                 nb_vlan,
+                ex["nb_proposed_intf_label"],
+                ex["nb_proposed_intf_type"],
                 "; ".join(dict.fromkeys([a for a in actions if a])),
                 risk,
             ])

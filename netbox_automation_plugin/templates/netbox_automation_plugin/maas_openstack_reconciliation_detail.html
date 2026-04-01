@@ -79,7 +79,7 @@
                   <th>{% trans "Section" %}</th>
                   <th>{% trans "Action" %}</th>
                   <th>{% trans "Summary" %}</th>
-                  <th>{% trans "Audit columns" %}</th>
+                  <th>{% trans "NetBox payload" %}</th>
                 </tr>
               </thead>
               <tbody>
@@ -92,7 +92,7 @@
                     <td class="small align-top" style="min-width: 12rem;">
                       {% if op.cells %}
                         <details>
-                          <summary class="text-primary" style="cursor: pointer;">{% trans "Show all columns" %}</summary>
+                          <summary class="text-primary" style="cursor: pointer;">{% trans "Show payload fields" %}</summary>
                           <dl class="row small mb-0 mt-2 border-top pt-2">
                             {% for col, val in op.cells.items %}
                               <dt class="col-5 text-body-secondary text-wrap">{{ col }}</dt>

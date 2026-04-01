@@ -23,7 +23,7 @@
           {% endif %}
         </p>
         <p class="small text-body-secondary mb-0">
-          {% blocktrans trimmed %}Each operation’s expandable <strong>Audit columns</strong> are the same cell values stored for apply (MAC, VLAN, MAAS properties, etc.).{% endblocktrans %}
+          {% blocktrans trimmed %}Each operation’s expandable <strong>NetBox payload</strong> lists only audit columns that apply uses to write NetBox (not Risk or other read-only context). The same frozen payload is what apply runs against.{% endblocktrans %}
         </p>
         <h6 class="text-body-secondary text-uppercase small mt-3">{% trans "Next steps" %}</h6>
         <ol class="small mb-4">
@@ -58,7 +58,7 @@
         {% if row_diffs %}
           <h6 class="text-body-secondary text-uppercase small mt-3">{% trans "Audit diff (auto-proposed vs your review)" %}</h6>
           <p class="small text-body-secondary mb-2">
-            {% blocktrans trimmed %}Cells that differ between the automatic proposal and the merged review (saved edits plus any unsent picker values from the audit page) for the rows you included.{% endblocktrans %}
+            {% blocktrans trimmed %}Only <strong>NetBox-oriented</strong> columns are compared. Each row appears only if at least one such column differs between the automatic proposal and your merged review (saved edits plus any unsent picker values). Rows you did not edit match the auto proposal and are omitted.{% endblocktrans %}
           </p>
           <div class="table-responsive border rounded mb-3">
             <table class="table table-sm mb-0">
@@ -109,7 +109,7 @@
                   <th>{% trans "Section" %}</th>
                   <th>{% trans "Action" %}</th>
                   <th>{% trans "Summary" %}</th>
-                  <th>{% trans "Audit columns" %}</th>
+                  <th>{% trans "NetBox payload" %}</th>
                 </tr>
               </thead>
               <tbody>
@@ -122,7 +122,7 @@
                     <td class="small align-top" style="min-width: 12rem;">
                       {% if op.cells %}
                         <details class="drift-recon-op-cells">
-                          <summary class="text-primary" style="cursor: pointer;">{% trans "Show all columns" %}</summary>
+                          <summary class="text-primary" style="cursor: pointer;">{% trans "Show payload fields" %}</summary>
                           <dl class="row small mb-0 mt-2 border-top pt-2">
                             {% for col, val in op.cells.items %}
                               <dt class="col-5 text-body-secondary text-wrap">{{ col }}</dt>

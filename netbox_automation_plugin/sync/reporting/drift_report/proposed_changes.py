@@ -880,6 +880,7 @@ def _proposed_changes_rows(
         network/subnet/project/region strings (plus selected location labels for tie-break).
         """
         blob = " ".join([
+            str(g.get("subnet_name") or ""),
             str(g.get("network_name") or ""),
             str(g.get("project_name") or ""),
             str(g.get("os_region") or ""),
@@ -988,6 +989,28 @@ def _proposed_changes_rows(
                 if os_has_runtime:
                     # OS authority: Proposed properties reflect runtime only (MAAS columns still show MAAS).
                     props = f"MAC {os_mac}; untagged VLAN {os_vlan}; IPs: {os_ip}"
+                from netbox_automation_plugin.sync.reporting.drift_report.proposed_nic_derived import (
+                    derive_nic_proposed_columns,
+                    format_os_switch_cell,
+                )
+
+                vn = str(r.get("vlan_name") or "").strip()
+                if not vn:
+                    vv = r.get("vlan")
+                    if isinstance(vv, dict):
+                        vn = str(vv.get("name") or "").strip()
+                audit_like = {
+                    "maas_mac": mac,
+                    "maas_link_speed": r.get("link_speed") or r.get("speed"),
+                    "maas_nic_vendor": str(r.get("vendor") or ""),
+                    "maas_nic_product": str(r.get("product") or ""),
+                    "maas_vlan_name": vn,
+                    "os_switch_info": format_os_switch_cell(osr),
+                    "os_link_speed_raw": osr.get("link_speed") or osr.get("os_link_speed"),
+                }
+                ex = derive_nic_proposed_columns(
+                    h, audit_like, bmc_mac=_norm_mac_local(str(m.get("bmc_mac") or ""))
+                )
                 out.append(
                     [
                         h,
@@ -998,11 +1021,17 @@ def _proposed_changes_rows(
                         mac,
                         ips,
                         vlan,
+                        ex["maas_link_speed_disp"],
+                        ex["os_link_speed_disp"],
+                        ex["os_switch_disp"],
+                        ex["maas_nic_model"],
                         os_reg,
                         os_mac,
                         os_ip,
                         os_vlan,
                         "[OS]" if os_has_runtime else "[MAAS]",
+                        ex["nb_proposed_intf_label"],
+                        ex["nb_proposed_intf_type"],
                         suggested_name,
                         props,
                         "Medium",
@@ -1052,6 +1081,17 @@ def _proposed_changes_rows(
             mac_norm = _normalize_mac(bmc_mac_hint) if bmc_mac_hint else ""
             if mac_norm and "SET_NETBOX_OOB_MAC=" not in action:
                 action += f"; SET_NETBOX_OOB_MAC={mac_norm}"
+            from netbox_automation_plugin.sync.reporting.drift_report.proposed_nic_derived import (
+                bmc_row_proposed_defaults,
+            )
+
+            bx = bmc_row_proposed_defaults(m)
+            if maas_vendor not in ("—", "") and maas_product not in ("—", ""):
+                bx["maas_nic_model"] = f"{maas_vendor[:32]} / {maas_product[:64]}"
+            elif maas_vendor not in ("—", ""):
+                bx["maas_nic_model"] = maas_vendor[:96]
+            elif maas_product not in ("—", ""):
+                bx["maas_nic_model"] = maas_product[:96]
             out.append(
                 [
                     h,
@@ -1064,6 +1104,12 @@ def _proposed_changes_rows(
                     maas_vendor,
                     maas_product,
                     str(m.get("bmc_mac") or "—"),
+                    bx["maas_link_speed_disp"],
+                    bx["os_link_speed_disp"],
+                    bx["os_switch_disp"],
+                    bx["maas_nic_model"],
+                    bx["nb_proposed_intf_label"],
+                    bx["nb_proposed_intf_type"],
                     mgmt,
                     bmc_ip or "—",
                     authority_badge,
@@ -1185,7 +1231,8 @@ def _proposed_changes_rows(
     for g in (os_subnet_gaps or []):
         role_name, role_reason = _suggest_prefix_role(g)
         vrf_name = _suggest_vrf_for_prefix_gap(g, selected_locations)
-        os_desc = str(g.get("network_name") or "-")
+        # Match CLI: `openstack subnet list` Name column (Neutron subnet name), not network name.
+        os_desc = _first_meaningful_text(g.get("subnet_name"), g.get("network_name"))
         tenant_name = str(
             g.get("project_owner_name")
             or g.get("project_name")
@@ -1245,9 +1292,10 @@ def _proposed_changes_rows(
     # Enforce host-level authority gate across NIC drift rows:
     # - non-authoritative OS host: never keep OS-only NIC rows
     # - remaining rows on that host are treated as MAAS fallback authority
+    _nic_drift_auth_col = 14
     filtered_update_nic = []
     for row in update_nic:
-        if len(row) <= 10:
+        if len(row) <= _nic_drift_auth_col:
             filtered_update_nic.append(row)
             continue
         host = (row[0] or "").strip().lower()
@@ -1261,7 +1309,7 @@ def _proposed_changes_rows(
             if not maas_seen:
                 # OS-only observation for non-authoritative host: skip from drift updates.
                 continue
-            row[10] = "[MAAS]"
+            row[_nic_drift_auth_col] = "[MAAS]"
         filtered_update_nic.append(row)
     update_nic = filtered_update_nic
     review_serial = _build_review_serial_rows(matched_rows)

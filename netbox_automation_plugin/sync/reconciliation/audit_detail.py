@@ -115,6 +115,38 @@ def _maas_iface_row_fabric(m: dict, mi: dict) -> str:
     return (m.get("fabric_name") or "").strip()
 
 
+def _nic_audit_sidecar(mi: dict, os_row: dict | None, *, host_bmc_mac: str) -> dict:
+    """MAAS/OpenStack fields joined onto interface audit rows for drift NIC tables."""
+    from netbox_automation_plugin.sync.reporting.drift_report.proposed_nic_derived import (
+        format_os_switch_cell,
+    )
+
+    vn = str(mi.get("vlan_name") or "").strip()
+    if not vn:
+        v = mi.get("vlan")
+        if isinstance(v, dict):
+            vn = str(v.get("name") or "").strip()
+    ls = mi.get("link_speed")
+    if ls in (None, ""):
+        ls = mi.get("speed")
+    osl = ""
+    if os_row:
+        osl = os_row.get("link_speed")
+        if osl in (None, ""):
+            osl = os_row.get("os_link_speed")
+    return {
+        "maas_link_speed": ls if ls not in (None, "") else "",
+        "maas_nic_vendor": str(mi.get("vendor") or "").strip(),
+        "maas_nic_product": str(mi.get("product") or "").strip(),
+        "maas_vlan_name": vn,
+        "maas_mtu": mi.get("mtu") if mi.get("mtu") not in (None, "") else mi.get("mtu_size"),
+        "maas_effective_mtu": mi.get("effective_mtu"),
+        "os_switch_info": format_os_switch_cell(os_row),
+        "os_link_speed_raw": osl if osl not in (None, "") else "",
+        "host_bmc_mac": host_bmc_mac or "",
+    }
+
+
 def _normalize_mac(mac: str) -> str:
     if not mac:
         return ""
@@ -200,6 +232,7 @@ def build_maas_netbox_interface_audit(
 
         maas_macs_with_nic = set()
         rows = []
+        host_bmc_norm = _normalize_mac(m.get("bmc_mac") or "")
         for mi in maas_ifaces:
             if maas_iface_filter is not None:
                 try:
@@ -216,7 +249,7 @@ def build_maas_netbox_interface_audit(
             row_fab = (_maas_iface_row_fabric(m, mi) or m.get("fabric_name") or "-")[:14]
 
             if not mac:
-                rows.append({
+                row_no_mac = {
                     "maas_fabric": row_fab,
                     "maas_pool": m_pool,
                     "nb_site": ctx_site,
@@ -231,7 +264,9 @@ def build_maas_netbox_interface_audit(
                     "nb_ips": "—",
                     "status": "MAAS_NO_MAC",
                     "notes": f"type={itype or '?'} (bond/vlan child — match parent MAC if needed)",
-                })
+                }
+                row_no_mac.update(_nic_audit_sidecar(mi, None, host_bmc_mac=host_bmc_norm))
+                rows.append(row_no_mac)
                 continue
 
             maas_macs_with_nic.add(mac)
@@ -248,7 +283,7 @@ def build_maas_netbox_interface_audit(
                         nb = cand
                         matched_by_name = True
                     elif cmac != mac:
-                        rows.append({
+                        row_mm = {
                             "maas_fabric": row_fab,
                             "maas_pool": m_pool,
                             "nb_site": ctx_site,
@@ -266,7 +301,9 @@ def build_maas_netbox_interface_audit(
                                 f"Same iface name as NetBox but MAC differs "
                                 f"(NB={cmac} MAAS={mac})"
                             ),
-                        })
+                        }
+                        row_mm.update(_nic_audit_sidecar(mi, None, host_bmc_mac=host_bmc_norm))
+                        rows.append(row_mm)
                         mac_mismatch_done = True
                     else:
                         nb = cand
@@ -301,7 +338,7 @@ def build_maas_netbox_interface_audit(
                         f" Ironic: {ironic_line} (no active instance — Neutron IP/VLAN often empty)."
                     )
                     ironic_note_done = True
-                rows.append({
+                row_nib = {
                     "maas_fabric": row_fab,
                     "maas_pool": m_pool,
                     "nb_site": ctx_site,
@@ -321,7 +358,9 @@ def build_maas_netbox_interface_audit(
                     "nb_ips": "—",
                     "status": "NOT_IN_NETBOX",
                     "notes": nib_notes,
-                })
+                }
+                row_nib.update(_nic_audit_sidecar(mi, os_nib, host_bmc_mac=host_bmc_norm))
+                rows.append(row_nib)
                 continue
 
             nb_ips_set = set(nb.get("ips") or [])
@@ -465,7 +504,7 @@ def build_maas_netbox_interface_audit(
                 )
                 ironic_note_done = True
 
-            rows.append({
+            row_ok = {
                 "maas_fabric": row_fab,
                 "maas_pool": m_pool,
                 "nb_site": ctx_site,
@@ -485,7 +524,9 @@ def build_maas_netbox_interface_audit(
                 "nb_ips": nb_ip_str,
                 "status": status,
                 "notes": "; ".join(notes) if notes else "—",
-            })
+            }
+            row_ok.update(_nic_audit_sidecar(mi, os_row, host_bmc_mac=host_bmc_norm))
+            rows.append(row_ok)
 
         netbox_only = []
         for nb in nb_list:
@@ -682,6 +723,7 @@ def openstack_subnet_prefix_hints(openstack_data: dict, netbox_prefixes: set):
             "cidr": cidr,
             "os_region": (sn.get("os_region") or openstack_data.get("openstack_region_name") or "—")[:32],
             "subnet_id": (sn.get("id") or "")[:36],
+            "subnet_name": (sn.get("name") or "")[:64],
             "network_id": nid[:36] if nid else "",
             "network_name": (net.get("name") or "")[:48],
             "project_name": (sn.get("project_name") or sn.get("project_id") or "-")[:56],

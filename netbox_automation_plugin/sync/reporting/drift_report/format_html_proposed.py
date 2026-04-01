@@ -27,6 +27,10 @@ _PROPOSED_NB_PICK_FIP = {
     "NB proposed role": "ip_role",
     "NB proposed VRF": "vrf",
 }
+_PROPOSED_NB_PICK_NIC = {
+    "NB Proposed intf Label": "intf_role",
+    "NB Proposed intf Type": "interface_type",
+}
 
 
 def emit_proposed_change_tables(e, prop):
@@ -258,17 +262,23 @@ def emit_proposed_change_tables(e, prop):
             "MAAS MAC",
             "MAAS IPs",
             "MAAS VLAN",
+            "MAAS link speed",
+            "OS link speed",
+            "OS LLDP / switch_info",
+            "MAAS NIC model",
             "OS region",
             "OS MAC",
             "OS runtime IP",
             "OS runtime VLAN",
             "Authority",
+            "NB Proposed intf Label",
+            "NB Proposed intf Type",
             "Suggested NB name",
             "Proposed properties",
             "Risk",
         ]
-        os_rows = [r for r in prop["add_nb_interfaces"] if len(r) > 12 and str(r[12]).strip() == "[OS]"]
-        maas_rows = [r for r in prop["add_nb_interfaces"] if len(r) <= 12 or str(r[12]).strip() != "[OS]"]
+        os_rows = [r for r in prop["add_nb_interfaces"] if len(r) > 16 and str(r[16]).strip() == "[OS]"]
+        maas_rows = [r for r in prop["add_nb_interfaces"] if len(r) <= 16 or str(r[16]).strip() != "[OS]"]
         e.paragraph(
             f"Authority split: OS runtime={len(os_rows)} row(s), MAAS fallback={len(maas_rows)} row(s)."
         )
@@ -283,6 +293,7 @@ def emit_proposed_change_tables(e, prop):
                 wrap_max_width=None,
                 selectable=True,
                 selection_key="detail_new_nics_os",
+                proposed_pick_columns=_PROPOSED_NB_PICK_NIC,
             )
         if maas_rows:
             e.spacer()
@@ -295,6 +306,7 @@ def emit_proposed_change_tables(e, prop):
                 wrap_max_width=None,
                 selectable=True,
                 selection_key="detail_new_nics_maas",
+                proposed_pick_columns=_PROPOSED_NB_PICK_NIC,
             )
     if prop["update_nic"]:
         e.spacer()
@@ -307,6 +319,10 @@ def emit_proposed_change_tables(e, prop):
             "MAAS MAC",
             "MAAS IPs",
             "MAAS VLAN",
+            "MAAS link speed",
+            "OS link speed",
+            "OS LLDP / switch_info",
+            "MAAS NIC model",
             "OS region",
             "OS MAC",
             "OS runtime IP",
@@ -316,11 +332,13 @@ def emit_proposed_change_tables(e, prop):
             "NB MAC",
             "NB IPs",
             "NB VLAN",
+            "NB Proposed intf Label",
+            "NB Proposed intf Type",
             "Proposed Action",
             "Risk",
         ]
-        os_rows = [r for r in prop["update_nic"] if len(r) > 10 and str(r[10]).strip() == "[OS]"]
-        maas_rows = [r for r in prop["update_nic"] if len(r) > 10 and str(r[10]).strip() != "[OS]"]
+        os_rows = [r for r in prop["update_nic"] if len(r) > 14 and str(r[14]).strip() == "[OS]"]
+        maas_rows = [r for r in prop["update_nic"] if len(r) <= 14 or str(r[14]).strip() != "[OS]"]
         e.paragraph(
             f"Authority split: OS runtime={len(os_rows)} row(s), MAAS fallback={len(maas_rows)} row(s)."
         )
@@ -335,6 +353,7 @@ def emit_proposed_change_tables(e, prop):
                 wrap_max_width=None,
                 selectable=True,
                 selection_key="detail_nic_drift_os",
+                proposed_pick_columns=_PROPOSED_NB_PICK_NIC,
             )
         if maas_rows:
             e.spacer()
@@ -347,6 +366,7 @@ def emit_proposed_change_tables(e, prop):
                 wrap_max_width=None,
                 selectable=True,
                 selection_key="detail_nic_drift_maas",
+                proposed_pick_columns=_PROPOSED_NB_PICK_NIC,
             )
 
     if prop.get("add_mgmt_iface_new_devices"):
@@ -365,6 +385,12 @@ def emit_proposed_change_tables(e, prop):
                 "MAAS vendor",
                 "MAAS product",
                 "MAAS BMC MAC",
+                "MAAS link speed",
+                "OS link speed",
+                "OS LLDP / switch_info",
+                "MAAS NIC model",
+                "NB Proposed intf Label",
+                "NB Proposed intf Type",
                 "Suggested NB mgmt iface",
                 "NB mgmt iface IP",
                 "Authority",
@@ -376,6 +402,7 @@ def emit_proposed_change_tables(e, prop):
             wrap_max_width=None,
             selectable=True,
             selection_key="detail_bmc_new_devices",
+            proposed_pick_columns=_PROPOSED_NB_PICK_NIC,
         )
 
     if prop["add_mgmt_iface"]:
@@ -390,6 +417,12 @@ def emit_proposed_change_tables(e, prop):
                 "MAAS BMC IP",
                 "MAAS power_type",
                 "MAAS BMC MAC",
+                "MAAS link speed",
+                "OS link speed",
+                "OS LLDP / switch_info",
+                "MAAS NIC model",
+                "NB Proposed intf Label",
+                "NB Proposed intf Type",
                 "Suggested NB OOB Port",
                 "NetBox OOB",
                 "NB IP coverage",
@@ -405,6 +438,7 @@ def emit_proposed_change_tables(e, prop):
             wrap_max_width=None,
             selectable=True,
             selection_key="detail_bmc_existing",
+            proposed_pick_columns=_PROPOSED_NB_PICK_NIC,
         )
 
     e.spacer()

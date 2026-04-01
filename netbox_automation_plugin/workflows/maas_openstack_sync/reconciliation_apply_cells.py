@@ -1,7 +1,8 @@
 """Apply frozen reconciliation rows using full audit table cells (all columns).
 
 Each op[\"cells\"] mirrors the drift HTML/XLSX row: NB proposed *, MAAS/OS fields,
-Status, Proposed Action, Risk, notes, etc. Handlers map every applicable field to NetBox.
+Status, Proposed Action (workflow hint only — not written to NetBox), Risk, notes, etc.
+Handlers map audit columns to NetBox where applicable.
 """
 
 from __future__ import annotations
@@ -154,6 +155,65 @@ def _normalize_mac(raw: str) -> str | None:
     return None
 
 
+def _nic_proposed_property_segment_ok(val: str | None) -> bool:
+    if val is None:
+        return False
+    t = str(val).strip()
+    return bool(t) and t not in ("—", "-")
+
+
+def _parse_nic_proposed_properties_segments(raw: str) -> tuple[str | None, str | None, str | None]:
+    """
+    ``Detail — new NICs`` / ``Proposed properties`` text, e.g.
+    ``MAC c4:cb:e1:e5:93:be; untagged VLAN 2148; IPs: 10.25.56.154``.
+    Missing clauses or ``—`` segments are handled by the caller.
+    """
+    s = (raw or "").strip()
+    if not s or s in ("—", "-"):
+        return None, None, None
+    mac_val = vlan_val = ips_val = None
+    m = re.search(r"\bMAC\s+([^;]+)", s, flags=re.IGNORECASE)
+    if m:
+        mac_val = m.group(1).strip()
+    m = re.search(r"\buntagged\s+VLAN\s+([^;]+)", s, flags=re.IGNORECASE)
+    if m:
+        vlan_val = m.group(1).strip()
+    m = re.search(r"\bIPs:\s*(.+)", s, flags=re.IGNORECASE)
+    if m:
+        ips_val = m.group(1).strip()
+    return mac_val, vlan_val, ips_val
+
+
+NEW_NIC_RECON_PAYLOAD_HEADERS: tuple[str, ...] = (
+    "Host",
+    "NB Proposed intf Label",
+    "NB Proposed intf Type",
+    "Suggested NB name",
+    "Proposed properties",
+    "Parsed MAC",
+    "Parsed untagged VLAN",
+    "Parsed IPs",
+)
+
+
+def new_nic_cells_for_reconciliation(full_cells: dict[str, str]) -> dict[str, str]:
+    """
+    Frozen reconciliation ops for new-NIC tables only carry these keys (plus parsed L2 fields).
+
+    ``apply_create_interface`` reads MAC/VLAN/IPs from ``Proposed properties`` (same parser);
+    ``Parsed *`` keys are for preview/diff and interface description headlines.
+    """
+    out: dict[str, str] = {}
+    for k in NEW_NIC_RECON_PAYLOAD_HEADERS[:5]:
+        out[k] = str(full_cells.get(k) or "").strip()
+    props = out["Proposed properties"]
+    p_mac, p_vlan, p_ips = _parse_nic_proposed_properties_segments(props)
+    out["Parsed MAC"] = (p_mac or "").strip() if _nic_proposed_property_segment_ok(p_mac) else ""
+    out["Parsed untagged VLAN"] = (p_vlan or "").strip() if _nic_proposed_property_segment_ok(p_vlan) else ""
+    out["Parsed IPs"] = (p_ips or "").strip() if _nic_proposed_property_segment_ok(p_ips) else ""
+    return out
+
+
 def _split_ip_candidates(blob: str) -> list[str]:
     out: list[str] = []
     for chunk in re.split(r"[,;\s]+", str(blob or "").strip()):
@@ -169,6 +229,197 @@ _DRIFT_AUDIT_MARKER = "\n=== Drift reconciliation (full row) ===\n"
 
 def _norm_header(k: str) -> str:
     return str(k or "").strip().lower()
+
+
+# Reconciliation HTML preview: show only columns that apply_* reads for NetBox (not Risk, etc.).
+_RECON_PREVIEW_NO_FILTER: frozenset[str] = frozenset(
+    {"detail_new_nics", "detail_new_nics_os", "detail_new_nics_maas"}
+)
+
+RECON_CELL_PREVIEW_KEYS_BY_SELECTION: dict[str, tuple[str, ...]] = {
+    "detail_placement_lifecycle_alignment": (
+        "Host",
+        "NetBox site",
+        "NetBox location",
+        "NB proposed device status",
+        "NB state (current)",
+        "Authority",
+    ),
+    "detail_new_prefixes": (
+        "CIDR",
+        "NB proposed VRF",
+        "NB proposed status",
+        "NB proposed role",
+        "NB Proposed Tenant",
+        "NB Proposed Scope",
+        "NB Proposed VLAN",
+        "NB Proposed Prefix description (editable)",
+        "OS region",
+        "OS Description",
+        "Project",
+        "Role reason",
+        "Authority",
+        "Proposed Action",
+    ),
+    "detail_new_ip_ranges": (
+        "Start address",
+        "End address",
+        "NB proposed status",
+        "NB proposed role",
+        "NB proposed VRF",
+        "NB Proposed Description",
+        "OS Pool Description",
+        "OS region",
+        "CIDR",
+        "Project",
+        "Authority",
+        "Proposed Action",
+    ),
+    "detail_new_fips": (
+        "Floating IP",
+        "NB proposed status",
+        "NB proposed role",
+        "NB proposed VRF",
+        "NB Proposed Tenant",
+        "Name",
+        "NAT inside IP (from OpenStack fixed IP)",
+        "OS region",
+        "Project",
+        "Proposed Action",
+    ),
+    "detail_new_devices": (
+        "Hostname",
+        "NB proposed region",
+        "NB proposed site",
+        "NB proposed location",
+        "NB proposed role",
+        "NB proposed device type",
+        "NB proposed device status",
+        "Serial Number",
+        "NB proposed tag",
+        "NB proposed platform",
+        "NB proposed asset tag",
+        "Primary MAC (MAAS)",
+        "Primary MAC (OS)",
+        "OS region",
+        "MAAS fabric",
+        "Authority",
+        "Proposed Action",
+    ),
+    "detail_review_only_devices": (
+        "Hostname",
+        "NB proposed region",
+        "NB proposed site",
+        "NB proposed location",
+        "NB proposed role",
+        "NB proposed device type",
+        "NB proposed device status",
+        "Serial Number",
+        "NB proposed tag",
+        "NB proposed platform",
+        "NB proposed asset tag",
+        "Primary MAC (MAAS)",
+        "Primary MAC (OS)",
+        "OS region",
+        "MAAS fabric",
+        "Authority",
+        "Proposed Action",
+    ),
+    "detail_nic_drift_os": (
+        "Host",
+        "NB intf",
+        "MAAS intf",
+        "MAAS MAC",
+        "OS MAC",
+        "NB MAC",
+        "MAAS VLAN",
+        "OS runtime VLAN",
+        "NB VLAN",
+        "MAAS IPs",
+        "OS runtime IP",
+        "NB IPs",
+        "NB Proposed intf Label",
+        "NB Proposed intf Type",
+        "Proposed Action",
+    ),
+    "detail_nic_drift_maas": (
+        "Host",
+        "NB intf",
+        "MAAS intf",
+        "MAAS MAC",
+        "OS MAC",
+        "NB MAC",
+        "MAAS VLAN",
+        "OS runtime VLAN",
+        "NB VLAN",
+        "MAAS IPs",
+        "OS runtime IP",
+        "NB IPs",
+        "NB Proposed intf Label",
+        "NB Proposed intf Type",
+        "Proposed Action",
+    ),
+    "detail_bmc_new_devices": (
+        "Host",
+        "MAAS BMC IP",
+        "OS BMC IP",
+        "NB mgmt iface IP",
+        "MAAS BMC MAC",
+        "NB Proposed intf Label",
+        "NB Proposed intf Type",
+        "Suggested NB mgmt iface",
+        "OS mgmt type",
+        "MAAS power_type",
+        "MAAS link speed",
+        "OS link speed",
+        "OS LLDP / switch_info",
+        "MAAS NIC model",
+        "Proposed action",
+    ),
+    "detail_bmc_existing": (
+        "Host",
+        "MAAS BMC IP",
+        "OS BMC IP",
+        "NB mgmt iface IP",
+        "MAAS BMC MAC",
+        "NB OOB MAC",
+        "NB Proposed intf Label",
+        "NB Proposed intf Type",
+        "Suggested NB OOB Port",
+        "NetBox OOB",
+        "NB IP coverage",
+        "Actual NB Port Carrying BMC IP",
+        "OS mgmt type",
+        "MAAS power_type",
+        "MAAS link speed",
+        "OS link speed",
+        "OS LLDP / switch_info",
+        "MAAS NIC model",
+        "Proposed action",
+    ),
+    "detail_serial_review": (
+        "Hostname",
+        "MAAS Serial",
+        "NetBox Serial",
+        "Proposed Action",
+    ),
+}
+
+
+def recon_operation_display_cells(selection_key: str, cells: dict[str, str]) -> dict[str, str]:
+    """Subset of audit cells shown on the reconciliation preview (NetBox-oriented fields)."""
+    sk = str(selection_key or "").strip()
+    if sk in _RECON_PREVIEW_NO_FILTER:
+        return dict(cells)
+    want = RECON_CELL_PREVIEW_KEYS_BY_SELECTION.get(sk)
+    if not want:
+        return dict(cells)
+    by_lower = {_norm_header(k): (k, v) for k, v in cells.items()}
+    out: dict[str, str] = {}
+    for label in want:
+        pair = by_lower.get(_norm_header(label))
+        out[label] = str(pair[1]).strip() if pair else ""
+    return out
 
 
 def _audit_residual_text(cells: dict[str, str], consumed_lower: set[str]) -> str:
@@ -221,7 +472,7 @@ def _merge_audit_residual_onto_object(
 
 
 def _interface_audit_description(cells: dict[str, str], consumed_lower: set[str]) -> str:
-    """Single description: headline NB/MAAS/proposed columns + full residual (no audit column omitted)."""
+    """Headline columns plus residual lines for cell keys not in consumed_lower (exclude Proposed Action via that set)."""
     # Each tuple: display label first, then synonym header names to match in cells.
     headline_specs: tuple[tuple[str, ...], ...] = (
         ("Proposed properties", "Proposed properties (from MAAS)"),
@@ -229,11 +480,17 @@ def _interface_audit_description(cells: dict[str, str], consumed_lower: set[str]
         ("Risk",),
         ("Authority",),
         ("Status",),
-        ("Proposed Action", "Proposed action"),
         ("Suggested NB vrf", "NB proposed VRF", "NB VRF"),
         ("NetBox site", "NB site"),
         ("NB proposed tag", "NetBox tags", "Suggested NetBox tags"),
         ("NetBox actions", "Suggested NetBox actions", "NB proposed actions"),
+        ("MAAS link speed",),
+        ("OS link speed",),
+        ("NB Proposed intf Label",),
+        ("NB Proposed intf Type",),
+        ("Parsed MAC",),
+        ("Parsed untagged VLAN",),
+        ("Parsed IPs",),
     )
     consumed2 = set(consumed_lower)
     headline: list[str] = []
@@ -248,6 +505,48 @@ def _interface_audit_description(cells: dict[str, str], consumed_lower: set[str]
     parts = [p for p in ("\n".join(headline), residual) if p]
     out = "\n\n".join(parts).strip()
     return out[:4096] if len(out) > 4096 else out
+
+
+def _resolve_interface_type_slug(cell_val: str):
+    """NetBox Interface.type choice value from drift cell (slug or human label)."""
+    try:
+        from dcim.models import Interface
+    except Exception:
+        return None
+    s = str(cell_val or "").strip()
+    if not s or s in ("—", "-"):
+        return None
+    field = Interface._meta.get_field("type")
+    ch = getattr(field, "choices", None) or []
+    slow = s.lower()
+    for val, lab in ch:
+        if val is None or val == "":
+            continue
+        if str(val).strip().lower() == slow:
+            return val
+    for val, lab in ch:
+        if str(lab).strip().lower() == slow:
+            return val
+    return None
+
+
+def _merge_interface_role_tag(iface, label_cell: str) -> bool:
+    """Attach a Tag named like the drift role (Management, Data, …) when non-empty."""
+    from django.utils.text import slugify
+    from extras.models import Tag
+
+    raw = str(label_cell or "").strip()
+    if not raw or raw in ("—", "-"):
+        return False
+    slug_base = slugify(raw) or "tag"
+    slug = slug_base[:50]
+    tag, _ = Tag.objects.get_or_create(
+        slug=slug, defaults={"name": raw[:100] if len(raw) <= 100 else raw[:97] + "..."}
+    )
+    if iface.tags.filter(pk=tag.pk).exists():
+        return False
+    iface.tags.add(tag)
+    return True
 
 
 def _merge_device_tags(device, tag_cell: str) -> bool:
@@ -283,7 +582,6 @@ _NEW_DEVICE_DRIFT_TO_CF_KEYS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("BMC present", ("bmc_present", "drift_bmc_present")),
     ("NIC count", ("nic_count", "drift_nic_count")),
     ("Authority", ("drift_authority", "authority")),
-    ("Proposed Action", ("drift_proposed_action", "proposed_action")),
 )
 
 
@@ -358,6 +656,143 @@ def _merge_new_device_row_into_custom_fields(device: Any, cells: dict[str, str])
     return changed, applied_headers
 
 
+def _meaningful_cell_val(v: str | None) -> bool:
+    vv = "" if v is None else str(v).strip()
+    return bool(vv and vv not in ("—", "-"))
+
+
+# Detail — new prefixes: ordered snapshot lines (must match drift table headers).
+_NEW_PREFIX_DRIFT_SNAPSHOT_HEADERS: tuple[str, ...] = (
+    "OS region",
+    "CIDR",
+    "OS Description",
+    "Project",
+    "NB Proposed Prefix description (editable)",
+    "NB Proposed Tenant",
+    "NB Proposed Scope",
+    "NB Proposed VLAN",
+    "NB proposed role",
+    "NB proposed status",
+    "NB proposed VRF",
+    "Role reason",
+    "Authority",
+)
+
+_NEW_PREFIX_DRIFT_TO_CF_KEYS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("OS region", ("openstack_region", "os_region", "region")),
+    ("OS Description", ("openstack_description", "os_description", "os_subnet_description")),
+    ("Project", ("openstack_project", "project")),
+    ("Role reason", ("role_reason", "drift_role_reason")),
+    ("Authority", ("drift_authority", "authority")),
+)
+
+
+@lru_cache(maxsize=1)
+def _prefix_custom_field_keys_cached() -> frozenset[str]:
+    try:
+        from ipam.models import Prefix
+        from extras.models import CustomField
+    except Exception:
+        return frozenset()
+    keys: set[str] = set()
+    for cf in CustomField.objects.iterator():
+        if not _custom_field_targets_model(cf, Prefix):
+            continue
+        k = getattr(cf, "key", None)
+        if k:
+            keys.add(str(k))
+    return frozenset(keys)
+
+
+def _merge_prefix_row_into_custom_fields(prefix_obj: Any, cells: dict[str, str]) -> tuple[bool, set[str]]:
+    """Map drift columns into Prefix.custom_field_data when matching Custom Field keys exist."""
+    valid = _prefix_custom_field_keys_cached()
+    if not valid or not hasattr(prefix_obj, "custom_field_data"):
+        return False, set()
+    data = dict(prefix_obj.custom_field_data or {})
+    changed = False
+    applied_headers: set[str] = set()
+    for header, slug_opts in _NEW_PREFIX_DRIFT_TO_CF_KEYS:
+        val = _cell(cells, header)
+        if not _meaningful_cell_val(val):
+            continue
+        for slug in slug_opts:
+            if slug not in valid:
+                continue
+            if data.get(slug) != val:
+                data[slug] = val
+                changed = True
+            applied_headers.add(header)
+            break
+    if changed:
+        prefix_obj.custom_field_data = data
+    return changed, applied_headers
+
+
+def _prefix_description_max_len() -> int:
+    from ipam.models import Prefix
+
+    f = Prefix._meta.get_field("description")
+    ml = getattr(f, "max_length", None)
+    return int(ml) if ml else 4000
+
+
+def _prefix_drift_snapshot_lines(
+    cells: dict[str, str], *, skip_headers: frozenset[str] | None = None
+) -> list[str]:
+    skip = skip_headers or frozenset()
+    lines: list[str] = []
+    for h in _NEW_PREFIX_DRIFT_SNAPSHOT_HEADERS:
+        if h in skip:
+            continue
+        v = _cell(cells, h)
+        if not _meaningful_cell_val(v):
+            continue
+        lines.append(f"{h}: {v}")
+    return lines
+
+
+def _prefix_description_from_cells(cells: dict[str, str], *, max_len: int) -> str:
+    """
+    Operator-facing text first (editable column), then a fixed-order snapshot of the rest
+    of the drift row so every column is persisted on the Prefix record.
+    """
+    editable = (_cell(cells, "NB Proposed Prefix description (editable)") or "").strip()
+    skip_editable = frozenset({"NB Proposed Prefix description (editable)"})
+    snap_lines = _prefix_drift_snapshot_lines(cells, skip_headers=skip_editable)
+    if snap_lines:
+        block = "\n".join(snap_lines)
+        if editable:
+            body = f"{editable}\n\n--- Drift row (reconciliation) ---\n{block}".strip()
+        else:
+            body = f"--- Drift row (reconciliation) ---\n{block}".strip()
+    else:
+        body = editable
+    if max_len and len(body) > max_len:
+        return body[: max_len - 3] + "..."
+    return body
+
+
+def _try_set_prefix_site_from_cells(prefix_obj: Any, cells: dict[str, str]) -> bool:
+    """If Prefix has site and OS region matches a NetBox Site name, set site."""
+    if not hasattr(prefix_obj, "site_id"):
+        return False
+    try:
+        from dcim.models import Site
+    except Exception:
+        return False
+    reg = _cell(cells, "OS region")
+    if not _meaningful_cell_val(reg):
+        return False
+    site = _resolve_by_name(Site, reg)
+    if site is None:
+        return False
+    if getattr(prefix_obj, "site_id", None) != site.pk:
+        prefix_obj.site = site
+        return True
+    return False
+
+
 def apply_create_prefix(op: dict[str, Any]) -> tuple[str, str]:
     from ipam.models import Prefix, Role, VRF
 
@@ -371,29 +806,26 @@ def apply_create_prefix(op: dict[str, Any]) -> tuple[str, str]:
     tenant_name = _cell(cells, "NB Proposed Tenant")
     scope_name = _cell(cells, "NB Proposed Scope")
     vlan_name = _cell(cells, "NB Proposed VLAN")
-    descr = _cell(
-        cells,
-        "NB Proposed Prefix description (editable)",
-        "NB Proposed Prefix description",
-        "NB Prefix description",
-        "OS Description",
-        "Role reason",
-        "Authority",
-    )
+    dmax = _prefix_description_max_len()
+    full_descr = _prefix_description_from_cells(cells, max_len=dmax)
+    # All drift table headers consumed so residual audit is not merged into Prefix.description
+    # (full row is embedded via _prefix_description_from_cells + typed fields + optional CF).
     consumed = {
+        _norm_header("OS region"),
         _norm_header("CIDR"),
         _norm_header("OS Description"),
+        _norm_header("Project"),
         _norm_header("NB Proposed Prefix description (editable)"),
-        _norm_header("NB Proposed Prefix description"),
-        _norm_header("NB Prefix description"),
-        _norm_header("NB proposed VRF"),
-        _norm_header("NB proposed status"),
-        _norm_header("NB proposed role"),
         _norm_header("NB Proposed Tenant"),
         _norm_header("NB Proposed Scope"),
         _norm_header("NB Proposed VLAN"),
+        _norm_header("NB proposed role"),
+        _norm_header("NB proposed status"),
+        _norm_header("NB proposed VRF"),
         _norm_header("Role reason"),
         _norm_header("Authority"),
+        # Proposed Action: routing hint for apply; not a NetBox field — consume for residual merge only.
+        _norm_header("Proposed Action"),
     }
     if not cidr:
         return "skipped", "skipped_prerequisite_missing"
@@ -453,12 +885,17 @@ def apply_create_prefix(op: dict[str, Any]) -> tuple[str, str]:
         if vlan_obj is not None and hasattr(existing, "vlan_id") and existing.vlan_id != vlan_obj.pk:
             existing.vlan = vlan_obj
             changed = True
-        if descr and hasattr(existing, "description"):
-            if (existing.description or "") != descr[:2000]:
-                existing.description = descr[:2000]
+        if _try_set_prefix_site_from_cells(existing, cells):
+            changed = True
+        if hasattr(existing, "description"):
+            if (existing.description or "").strip() != full_descr.strip():
+                existing.description = full_descr
                 changed = True
+        cf_ch, _ = _merge_prefix_row_into_custom_fields(existing, cells)
+        if cf_ch:
+            changed = True
         merge_ch = _merge_audit_residual_onto_object(
-            existing, cells, consumed, attr_names=("description",), max_len=4000
+            existing, cells, consumed, attr_names=("description",), max_len=max(dmax, 8000)
         )
         if changed or merge_ch:
             existing.save()
@@ -477,10 +914,14 @@ def apply_create_prefix(op: dict[str, Any]) -> tuple[str, str]:
         obj.scope = scope_obj
     if vlan_obj is not None and hasattr(obj, "vlan"):
         obj.vlan = vlan_obj
-    if descr and hasattr(obj, "description"):
-        obj.description = descr[:2000]
+    _try_set_prefix_site_from_cells(obj, cells)
+    if hasattr(obj, "description"):
+        obj.description = full_descr
+    _merge_prefix_row_into_custom_fields(obj, cells)
     obj.save()
-    if _merge_audit_residual_onto_object(obj, cells, consumed, attr_names=("description",), max_len=4000):
+    if _merge_audit_residual_onto_object(
+        obj, cells, consumed, attr_names=("description",), max_len=max(dmax, 8000)
+    ):
         obj.save()
     return "created", "ok_created"
 
@@ -504,13 +945,18 @@ def apply_create_ip_range(op: dict[str, Any]) -> tuple[str, str]:
     if vrf_name in {"—", "-"}:
         vrf_name = ""
     consumed = {
+        _norm_header("OS region"),
+        _norm_header("CIDR"),
         _norm_header("Start address"),
         _norm_header("End address"),
         _norm_header("OS Pool Description"),
         _norm_header("NB Proposed Description"),
+        _norm_header("Project"),
         _norm_header("NB proposed status"),
         _norm_header("NB proposed role"),
         _norm_header("NB proposed VRF"),
+        _norm_header("Authority"),
+        _norm_header("Proposed Action"),
     }
     if not start_addr or not end_addr:
         return "skipped", "skipped_prerequisite_missing"
@@ -561,6 +1007,152 @@ def apply_create_ip_range(op: dict[str, Any]) -> tuple[str, str]:
     return "created", "ok_created"
 
 
+# Detail — new floating IPs (headers must match format_html_proposed / xlsx_export).
+_NEW_FIP_DRIFT_SNAPSHOT_HEADERS: tuple[str, ...] = (
+    "OS region",
+    "Floating IP",
+    "Name",
+    "NAT inside IP (from OpenStack fixed IP)",
+    "Project",
+    "NB Proposed Tenant",
+    "NB proposed status",
+    "NB proposed role",
+    "NB proposed VRF",
+)
+
+_NEW_FIP_DRIFT_TO_CF_KEYS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("OS region", ("openstack_region", "os_region", "region")),
+    ("Name", ("floating_ip_name", "fip_name")),
+    ("Project", ("openstack_project", "project")),
+    ("NAT inside IP (from OpenStack fixed IP)", ("nat_inside_hint", "fixed_ip", "openstack_fixed_ip")),
+)
+
+
+@lru_cache(maxsize=1)
+def _ip_address_custom_field_keys_cached() -> frozenset[str]:
+    try:
+        from extras.models import CustomField
+        from ipam.models import IPAddress
+    except Exception:
+        return frozenset()
+    keys: set[str] = set()
+    for cf in CustomField.objects.iterator():
+        if not _custom_field_targets_model(cf, IPAddress):
+            continue
+        k = getattr(cf, "key", None)
+        if k:
+            keys.add(str(k))
+    return frozenset(keys)
+
+
+def _merge_ip_address_row_into_custom_fields(ip_obj: Any, cells: dict[str, str]) -> tuple[bool, set[str]]:
+    valid = _ip_address_custom_field_keys_cached()
+    if not valid or not hasattr(ip_obj, "custom_field_data"):
+        return False, set()
+    data = dict(ip_obj.custom_field_data or {})
+    changed = False
+    applied_headers: set[str] = set()
+    for header, slug_opts in _NEW_FIP_DRIFT_TO_CF_KEYS:
+        val = _cell(cells, header)
+        if not _meaningful_cell_val(val):
+            continue
+        for slug in slug_opts:
+            if slug not in valid:
+                continue
+            if data.get(slug) != val:
+                data[slug] = val
+                changed = True
+            applied_headers.add(header)
+            break
+    if changed:
+        ip_obj.custom_field_data = data
+    return changed, applied_headers
+
+
+def _ip_address_description_max_len() -> int:
+    from ipam.models import IPAddress
+
+    f = IPAddress._meta.get_field("description")
+    ml = getattr(f, "max_length", None)
+    return int(ml) if ml else 4000
+
+
+def _fip_drift_snapshot_lines(
+    cells: dict[str, str], *, skip_headers: frozenset[str] | None = None
+) -> list[str]:
+    skip = skip_headers or frozenset()
+    lines: list[str] = []
+    for h in _NEW_FIP_DRIFT_SNAPSHOT_HEADERS:
+        if h in skip:
+            continue
+        v = _cell(cells, h)
+        if not _meaningful_cell_val(v):
+            continue
+        lines.append(f"{h}: {v}")
+    return lines
+
+
+def _fip_description_from_cells(cells: dict[str, str], *, max_len: int) -> str:
+    """Name column as description headline only (not written to IPAddress.dns_name)."""
+    name_head = (_cell(cells, "Name") or "").strip()
+    skip_name = frozenset({"Name"})
+    snap_lines = _fip_drift_snapshot_lines(cells, skip_headers=skip_name)
+    if snap_lines:
+        block = "\n".join(snap_lines)
+        if name_head:
+            body = f"{name_head}\n\n--- Drift row (reconciliation) ---\n{block}".strip()
+        else:
+            body = f"--- Drift row (reconciliation) ---\n{block}".strip()
+    else:
+        body = name_head
+    if max_len and len(body) > max_len:
+        return body[: max_len - 3] + "..."
+    return body
+
+
+def _resolve_nat_inside_ipaddress(inside_raw: str, vrf_preferred: Any) -> Any:
+    """
+    NetBox: public / floating side stores NAT inside on IPAddress.nat_inside (inside address object).
+    Prefer same VRF as the floating IP, then Global (null VRF), then any single match.
+    """
+    from ipam.models import IPAddress
+
+    if not _meaningful_cell_val(inside_raw):
+        return None
+    try:
+        inside_addr = _normalize_ip_for_netbox(inside_raw)
+    except ValueError:
+        return None
+    qs = IPAddress.objects.filter(address=inside_addr)
+    if vrf_preferred is not None:
+        hit = qs.filter(vrf=vrf_preferred).first()
+        if hit is not None:
+            return hit
+    hit = qs.filter(vrf__isnull=True).first()
+    if hit is not None:
+        return hit
+    if qs.count() == 1:
+        return qs.first()
+    return None
+
+
+def _apply_fip_nat_inside(ip_obj: Any, cells: dict[str, str], vrf: Any) -> bool:
+    if not hasattr(ip_obj, "nat_inside_id"):
+        return False
+    inside_raw = _cell(
+        cells,
+        "NAT inside IP (from OpenStack fixed IP)",
+        "NAT inside IP",
+    )
+    inner = _resolve_nat_inside_ipaddress(inside_raw, vrf)
+    if inner is None:
+        return False
+    if getattr(ip_obj, "nat_inside_id", None) == inner.pk:
+        return False
+    ip_obj.nat_inside = inner
+    return True
+
+
 def apply_create_floating_ip(op: dict[str, Any]) -> tuple[str, str]:
     from ipam.models import IPAddress, VRF
 
@@ -572,12 +1164,20 @@ def apply_create_floating_ip(op: dict[str, Any]) -> tuple[str, str]:
     vrf_name = _cell(cells, "NB proposed VRF")
     role_name = _cell(cells, "NB proposed role")
     tenant_name = _cell(cells, "NB Proposed Tenant")
+    dmax = _ip_address_description_max_len()
+    full_descr = _fip_description_from_cells(cells, max_len=dmax)
     consumed = {
+        _norm_header("OS region"),
         _norm_header("Floating IP"),
+        _norm_header("Name"),
+        _norm_header("NAT inside IP (from OpenStack fixed IP)"),
+        _norm_header("Project"),
         _norm_header("NB Proposed Tenant"),
         _norm_header("NB proposed status"),
-        _norm_header("NB proposed VRF"),
         _norm_header("NB proposed role"),
+        _norm_header("NB proposed VRF"),
+        # Proposed Action: workflow hint only; consume so it is not merged into description.
+        _norm_header("Proposed Action"),
     }
     if not raw_ip:
         return "skipped", "skipped_prerequisite_missing"
@@ -622,8 +1222,17 @@ def apply_create_floating_ip(op: dict[str, Any]) -> tuple[str, str]:
         if tenant_obj is not None and hasattr(existing, "tenant_id") and existing.tenant_id != tenant_obj.pk:
             existing.tenant = tenant_obj
             changed = True
+        if hasattr(existing, "description"):
+            if (existing.description or "").strip() != full_descr.strip():
+                existing.description = full_descr
+                changed = True
+        if _apply_fip_nat_inside(existing, cells, vrf):
+            changed = True
+        cf_ch, _ = _merge_ip_address_row_into_custom_fields(existing, cells)
+        if cf_ch:
+            changed = True
         merge_ch = _merge_audit_residual_onto_object(
-            existing, cells, consumed, attr_names=("description",), max_len=4000
+            existing, cells, consumed, attr_names=("description",), max_len=max(dmax, 8000)
         )
         if changed or merge_ch:
             existing.save()
@@ -638,8 +1247,14 @@ def apply_create_floating_ip(op: dict[str, Any]) -> tuple[str, str]:
         ip_obj.role = role_obj
     if tenant_obj is not None and hasattr(ip_obj, "tenant"):
         ip_obj.tenant = tenant_obj
+    if hasattr(ip_obj, "description"):
+        ip_obj.description = full_descr
+    _apply_fip_nat_inside(ip_obj, cells, vrf)
+    _merge_ip_address_row_into_custom_fields(ip_obj, cells)
     ip_obj.save()
-    if _merge_audit_residual_onto_object(ip_obj, cells, consumed, attr_names=("description",), max_len=4000):
+    if _merge_audit_residual_onto_object(
+        ip_obj, cells, consumed, attr_names=("description",), max_len=max(dmax, 8000)
+    ):
         ip_obj.save()
     return "created", "ok_created"
 
@@ -682,6 +1297,7 @@ def _apply_device_core(cells: dict[str, str], *, create_if_missing: bool) -> tup
         _norm_header("NB proposed platform"),
         _norm_header("NB proposed asset tag"),
         _norm_header("Asset tag"),
+        _norm_header("Proposed Action"),
     }
     if not hostname:
         return "skipped", "skipped_prerequisite_missing"
@@ -855,6 +1471,7 @@ def apply_serial_review(op: dict[str, Any]) -> tuple[str, str]:
         _norm_header("MAAS Serial"),
         _norm_header("NetBox Serial"),
         _norm_header("Serial Number"),
+        _norm_header("Proposed Action"),
     }
     if not host:
         return "skipped", "skipped_prerequisite_missing"
@@ -1019,11 +1636,26 @@ def apply_create_interface(op: dict[str, Any]) -> tuple[str, str]:
         return "skipped", reason
     host = _cell(cells, "Host")
     if_name = _cell(cells, "Suggested NB name", "MAAS intf")
-    mac = _normalize_mac(_cell(cells, "MAAS MAC", "OS MAC"))
-    vid = _parse_vlan_vid(_cell(cells, "MAAS VLAN", "OS runtime VLAN"))
-    ip_blob = _cell(cells, "MAAS IPs", "OS runtime IP")
+    p_mac, p_vlan, p_ips = _parse_nic_proposed_properties_segments(
+        _cell(cells, "Proposed properties", "Proposed properties (from MAAS)")
+    )
+    mac = _normalize_mac(p_mac) if _nic_proposed_property_segment_ok(p_mac) else None
+    if not mac:
+        mac = _normalize_mac(_cell(cells, "MAAS MAC", "OS MAC"))
+    vid: int | None = None
+    if _nic_proposed_property_segment_ok(p_vlan):
+        vid = _parse_vlan_vid(p_vlan)
+    if vid is None:
+        vid = _parse_vlan_vid(_cell(cells, "MAAS VLAN", "OS runtime VLAN"))
+    ip_blob = ""
+    if _nic_proposed_property_segment_ok(p_ips):
+        ip_blob = str(p_ips).strip()
+    if not ip_blob:
+        ip_blob = _cell(cells, "MAAS IPs", "OS runtime IP")
     site_hint = _cell(cells, "NB site")
     loc_hint = _cell(cells, "NB location")
+    type_slug = _resolve_interface_type_slug(_cell(cells, "NB Proposed intf Type"))
+    role_label = _cell(cells, "NB Proposed intf Label")
     consumed_i = {
         _norm_header("Host"),
         _norm_header("NB site"),
@@ -1036,6 +1668,18 @@ def apply_create_interface(op: dict[str, Any]) -> tuple[str, str]:
         _norm_header("OS runtime VLAN"),
         _norm_header("MAAS IPs"),
         _norm_header("OS runtime IP"),
+        _norm_header("MAAS link speed"),
+        _norm_header("OS link speed"),
+        _norm_header("OS LLDP / switch_info"),
+        _norm_header("MAAS NIC model"),
+        _norm_header("NB Proposed intf Label"),
+        _norm_header("NB Proposed intf Type"),
+        _norm_header("Parsed MAC"),
+        _norm_header("Parsed untagged VLAN"),
+        _norm_header("Parsed IPs"),
+        _norm_header("Proposed properties"),
+        _norm_header("Proposed properties (from MAAS)"),
+        _norm_header("Proposed Action"),
     }
     if not host or not if_name:
         return "skipped", "skipped_prerequisite_missing"
@@ -1059,7 +1703,11 @@ def apply_create_interface(op: dict[str, Any]) -> tuple[str, str]:
     untagged = _resolve_vlan_for_device(dev, vid) if vid else None
     full_desc = _interface_audit_description(cells, consumed_i)
     if iface is None:
-        iface = Interface(device=dev, name=if_name, type=_iface_type_default())
+        iface = Interface(
+            device=dev,
+            name=if_name,
+            type=type_slug if type_slug is not None else _iface_type_default(),
+        )
         if mac:
             iface.mac_address = mac
         if untagged:
@@ -1067,6 +1715,11 @@ def apply_create_interface(op: dict[str, Any]) -> tuple[str, str]:
         if full_desc and hasattr(iface, "description"):
             iface.description = full_desc
         iface.save()
+        tag_ch = False
+        if role_label and hasattr(iface, "tags"):
+            tag_ch = _merge_interface_role_tag(iface, role_label)
+        if tag_ch:
+            iface.save()
         vrf = None
         if ip_blob:
             _assign_ips_to_interface(iface, ip_blob, vrf)
@@ -1078,11 +1731,20 @@ def apply_create_interface(op: dict[str, Any]) -> tuple[str, str]:
     if untagged and iface.untagged_vlan_id != untagged.pk:
         iface.untagged_vlan = untagged
         changed = True
+    if type_slug is not None and getattr(iface, "type", None) != type_slug:
+        iface.type = type_slug
+        changed = True
     if full_desc and hasattr(iface, "description") and (iface.description or "").strip() != full_desc:
         iface.description = full_desc
         changed = True
     if changed:
         iface.save()
+    tag_ch = False
+    if role_label and hasattr(iface, "tags"):
+        tag_ch = _merge_interface_role_tag(iface, role_label)
+    if tag_ch:
+        iface.save()
+        changed = True
     vrf = None
     if ip_blob and _assign_ips_to_interface(iface, ip_blob, vrf):
         changed = True
@@ -1103,6 +1765,8 @@ def apply_update_interface(op: dict[str, Any]) -> tuple[str, str]:
     mac = _normalize_mac(_cell(cells, "MAAS MAC", "OS MAC", "NB MAC"))
     vid = _parse_vlan_vid(_cell(cells, "MAAS VLAN", "OS runtime VLAN", "NB VLAN"))
     ip_blob = _cell(cells, "MAAS IPs", "OS runtime IP", "NB IPs")
+    type_slug = _resolve_interface_type_slug(_cell(cells, "NB Proposed intf Type"))
+    role_label = _cell(cells, "NB Proposed intf Label")
     consumed_i = {
         _norm_header("Host"),
         _norm_header("NB intf"),
@@ -1116,6 +1780,13 @@ def apply_update_interface(op: dict[str, Any]) -> tuple[str, str]:
         _norm_header("MAAS IPs"),
         _norm_header("OS runtime IP"),
         _norm_header("NB IPs"),
+        _norm_header("MAAS link speed"),
+        _norm_header("OS link speed"),
+        _norm_header("OS LLDP / switch_info"),
+        _norm_header("MAAS NIC model"),
+        _norm_header("NB Proposed intf Label"),
+        _norm_header("NB Proposed intf Type"),
+        _norm_header("Proposed Action"),
     }
     full_desc = _interface_audit_description(cells, consumed_i)
     if not host:
@@ -1138,11 +1809,20 @@ def apply_update_interface(op: dict[str, Any]) -> tuple[str, str]:
     if untagged and iface.untagged_vlan_id != untagged.pk:
         iface.untagged_vlan = untagged
         changed = True
+    if type_slug is not None and getattr(iface, "type", None) != type_slug:
+        iface.type = type_slug
+        changed = True
     if full_desc and hasattr(iface, "description") and (iface.description or "").strip() != full_desc:
         iface.description = full_desc
         changed = True
     if changed:
         iface.save()
+    tag_ch = False
+    if role_label and hasattr(iface, "tags"):
+        tag_ch = _merge_interface_role_tag(iface, role_label)
+    if tag_ch:
+        iface.save()
+        changed = True
     vrf = None
     if ip_blob and _assign_ips_to_interface(iface, ip_blob, vrf):
         changed = True
@@ -1167,6 +1847,8 @@ def _bmc_apply(op: dict[str, Any], *, existing_oob: bool) -> tuple[str, str]:
         cells,
         "Suggested NB mgmt iface" if not existing_oob else "Suggested NB OOB Port",
     )
+    type_slug = _resolve_interface_type_slug(_cell(cells, "NB Proposed intf Type"))
+    role_label = _cell(cells, "NB Proposed intf Label")
     consumed_b = {
         _norm_header("Host"),
         _norm_header("MAAS BMC IP"),
@@ -1178,6 +1860,13 @@ def _bmc_apply(op: dict[str, Any], *, existing_oob: bool) -> tuple[str, str]:
         _norm_header("Suggested NB OOB Port"),
         _norm_header("OS mgmt type"),
         _norm_header("MAAS power_type"),
+        _norm_header("MAAS link speed"),
+        _norm_header("OS link speed"),
+        _norm_header("OS LLDP / switch_info"),
+        _norm_header("MAAS NIC model"),
+        _norm_header("NB Proposed intf Label"),
+        _norm_header("NB Proposed intf Type"),
+        _norm_header("Proposed Action"),
     }
     if existing_oob:
         consumed_b.update(
@@ -1196,7 +1885,11 @@ def _bmc_apply(op: dict[str, Any], *, existing_oob: bool) -> tuple[str, str]:
         return "skipped", "skipped_prerequisite_missing"
     iface = Interface.objects.filter(device=dev, name=if_name).first()
     if iface is None:
-        iface = Interface(device=dev, name=if_name, type=_iface_type_default())
+        iface = Interface(
+            device=dev,
+            name=if_name,
+            type=type_slug if type_slug is not None else _iface_type_default(),
+        )
         if bmc_mac:
             iface.mac_address = bmc_mac
         iface.save()
@@ -1206,6 +1899,9 @@ def _bmc_apply(op: dict[str, Any], *, existing_oob: bool) -> tuple[str, str]:
         ch = False
         if bmc_mac and str(iface.mac_address or "").upper() != bmc_mac.upper():
             iface.mac_address = bmc_mac
+            ch = True
+        if type_slug is not None and getattr(iface, "type", None) != type_slug:
+            iface.type = type_slug
             ch = True
         if ch:
             iface.save()
@@ -1225,9 +1921,14 @@ def _bmc_apply(op: dict[str, Any], *, existing_oob: bool) -> tuple[str, str]:
     if full_desc and hasattr(iface, "description") and (iface.description or "").strip() != full_desc:
         iface.description = full_desc
         desc_changed = True
+    tag_ch = False
+    if role_label and hasattr(iface, "tags"):
+        tag_ch = _merge_interface_role_tag(iface, role_label)
+    if tag_ch:
+        iface.save()
     if desc_changed:
         iface.save()
-    if ip_changed or desc_changed or created:
+    if ip_changed or desc_changed or created or tag_ch:
         return ("created", "ok_created") if created else ("updated", "ok_updated")
     return "skipped", "skipped_already_desired"
 
