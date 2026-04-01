@@ -20,11 +20,15 @@ from netbox_automation_plugin.sync.reporting.drift_report.placement import _drif
 from netbox_automation_plugin.sync.reporting.drift_report.drift_overrides_apply import (
     HEADERS_BMC_EXISTING,
     HEADERS_BMC_NEW_DEVICES,
+    HEADERS_DETAIL_EXISTING_FIPS,
+    HEADERS_DETAIL_EXISTING_PREFIXES,
+    HEADERS_DETAIL_EXISTING_VMS,
     HEADERS_DETAIL_NEW_DEVICES,
     HEADERS_DETAIL_NEW_FIPS,
     HEADERS_DETAIL_NEW_IP_RANGES,
     HEADERS_DETAIL_NEW_NICS,
     HEADERS_DETAIL_NEW_PREFIXES,
+    HEADERS_DETAIL_NEW_VMS,
     HEADERS_DETAIL_NIC_DRIFT,
     HEADERS_SERIAL_REVIEW,
     merge_drift_review_overrides,
@@ -246,6 +250,7 @@ def build_drift_report_xlsx(
         os_floating_gaps or [],
         openstack_data=openstack_data,
         netbox_ifaces=netbox_ifaces,
+        os_subnet_hints=os_subnet_hints or [],
     )
     norm = normalize_drift_review_overrides(drift_overrides)
     if norm:
@@ -282,8 +287,12 @@ def build_drift_report_xlsx(
     total_props_x = (
         len(prop["add_devices"])
         + len(prop["add_prefixes"])
+        + len(prop.get("update_prefixes", []))
         + len(prop.get("add_ip_ranges", []))
         + len(prop["add_fips"])
+        + len(prop.get("update_fips", []))
+        + len(prop.get("add_openstack_vms", []))
+        + len(prop.get("update_openstack_vms", []))
         + len(prop["update_nic"])
         + len(prop["add_nb_interfaces"])
         + len(prop["add_mgmt_iface"])
@@ -293,8 +302,12 @@ def build_drift_report_xlsx(
     ws_sum.append(["New devices", str(len(prop["add_devices"]))])
     ws_sum.append(["Review-only MAAS-only hosts", str(len(prop.get("add_devices_review_only", [])))])
     ws_sum.append(["New prefixes", str(len(prop["add_prefixes"]))])
+    ws_sum.append(["Existing prefixes (drift)", str(len(prop.get("update_prefixes", [])))])
     ws_sum.append(["New IP ranges (allocation pools)", str(len(prop.get("add_ip_ranges", [])))])
     ws_sum.append(["New floating IPs", str(len(prop["add_fips"]))])
+    ws_sum.append(["Existing floating IPs (NAT drift)", str(len(prop.get("update_fips", [])))])
+    ws_sum.append(["New VMs (OpenStack)", str(len(prop.get("add_openstack_vms", [])))])
+    ws_sum.append(["Existing VMs (drift)", str(len(prop.get("update_openstack_vms", [])))])
     ws_sum.append(["New NICs", str(len(prop["add_nb_interfaces"]))])
     ws_sum.append(["NIC drift", str(len(prop["update_nic"]))])
     ws_sum.append(["BMC / OOB", str(len(prop["add_mgmt_iface"]) + len(prop.get("add_mgmt_iface_new_devices", [])))])
@@ -314,8 +327,12 @@ def build_drift_report_xlsx(
     ws_prop.append(["New devices (MAAS fallback)", len(prop["add_devices"])])
     ws_prop.append(["Review-only MAAS-only hosts", len(prop.get("add_devices_review_only", []))])
     ws_prop.append(["New prefixes (OpenStack authority)", len(prop["add_prefixes"])])
+    ws_prop.append(["Existing prefixes (drift)", len(prop.get("update_prefixes", []))])
     ws_prop.append(["New IP ranges (OpenStack authority)", len(prop.get("add_ip_ranges", []))])
     ws_prop.append(["New floating IPs (OpenStack authority)", len(prop["add_fips"])])
+    ws_prop.append(["Existing floating IPs (NAT drift)", len(prop.get("update_fips", []))])
+    ws_prop.append(["New VMs (OpenStack)", len(prop.get("add_openstack_vms", []))])
+    ws_prop.append(["Existing VMs (drift)", len(prop.get("update_openstack_vms", []))])
     ws_prop.append(["New NICs", len(prop["add_nb_interfaces"])])
     ws_prop.append(["NIC drift (OS runtime authority)", len(nic_drift_os)])
     ws_prop.append(["NIC drift (MAAS fallback authority)", len(nic_drift_maas)])
@@ -353,6 +370,11 @@ def build_drift_report_xlsx(
         ),
     )
     _append_block(
+        "A) Existing prefixes (OpenStack drift)",
+        list(HEADERS_DETAIL_EXISTING_PREFIXES),
+        prop.get("update_prefixes", []),
+    )
+    _append_block(
         "A) New IP ranges (allocation pools)",
         list(HEADERS_DETAIL_NEW_IP_RANGES),
         prop.get("add_ip_ranges", []),
@@ -361,6 +383,21 @@ def build_drift_report_xlsx(
         "A) New floating IPs",
         list(HEADERS_DETAIL_NEW_FIPS),
         prop["add_fips"],
+    )
+    _append_block(
+        "A) Existing floating IPs (NAT drift)",
+        list(HEADERS_DETAIL_EXISTING_FIPS),
+        prop.get("update_fips", []),
+    )
+    _append_block(
+        "A) New VMs (OpenStack Nova)",
+        list(HEADERS_DETAIL_NEW_VMS),
+        prop.get("add_openstack_vms", []),
+    )
+    _append_block(
+        "A) Existing VMs (OpenStack drift)",
+        list(HEADERS_DETAIL_EXISTING_VMS),
+        prop.get("update_openstack_vms", []),
     )
     new_nics_os = [r for r in prop["add_nb_interfaces"] if _new_nic_row_is_os_authority(r)]
     new_nics_maas = [r for r in prop["add_nb_interfaces"] if not _new_nic_row_is_os_authority(r)]

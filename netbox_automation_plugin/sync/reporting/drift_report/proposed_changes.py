@@ -35,6 +35,9 @@ from netbox_automation_plugin.sync.reporting.drift_report.proposed_lldp_tables i
 from netbox_automation_plugin.sync.reporting.drift_report.proposed_nic_helpers import (
     _build_add_nb_interface_rows,
 )
+from netbox_automation_plugin.sync.reconciliation.audit_detail import (
+    openstack_floating_ips_nat_inside_drift,
+)
 
 
 def _friendly_neutron_owners_line(owners: str) -> str:
@@ -204,6 +207,7 @@ def _proposed_changes_rows(
     os_floating_gaps,
     openstack_data=None,
     netbox_ifaces=None,
+    os_subnet_hints=None,
 ):
     def _suggest_scope_location_from_os_region(os_region: str) -> str:
         reg = str(os_region or "").strip().lower()
@@ -1284,6 +1288,300 @@ def _proposed_changes_rows(
             "CREATE_NETBOX_IPADDRESS_FROM_OS_FIP",
         ])
 
+    update_prefixes: list[list] = []
+    try:
+        from ipam.models import Prefix as _PrefixModel
+    except Exception:
+        _PrefixModel = None
+
+    if _PrefixModel is not None and (os_subnet_hints or []) and openstack_data and not openstack_data.get(
+        "error"
+    ):
+        for g in os_subnet_hints or []:
+            if not g.get("exact_prefix_in_netbox"):
+                continue
+            cidr = (g.get("cidr") or "").strip()
+            if not cidr:
+                continue
+            role_name, role_reason = _suggest_prefix_role(g)
+            vrf_name = _suggest_vrf_for_prefix_gap(g, selected_locations)
+            sugg_status = _suggest_prefix_status(g)
+            os_desc = _first_meaningful_text(g.get("subnet_name"), g.get("network_name"))
+            tenant_name = str(
+                g.get("project_owner_name")
+                or g.get("project_name")
+                or g.get("project_id")
+                or "-"
+            )
+            nb_scope = _suggest_scope_location_from_os_region(g.get("os_region") or "")
+            nb_vlan = _suggest_vlan_from_os_segmentation_id(g.get("provider_segmentation_id"))
+            try:
+                candidates = list(
+                    _PrefixModel.objects.filter(prefix=cidr).select_related("vrf", "role", "tenant")
+                )
+            except Exception:
+                candidates = []
+            if not candidates:
+                continue
+            p = None
+            for cand in candidates:
+                cv = "Global"
+                if cand.vrf_id:
+                    cv = (cand.vrf.name or "Global").strip() or "Global"
+                if cv == vrf_name:
+                    p = cand
+                    break
+            if p is None:
+                p = candidates[0]
+            cur_vrf = "Global"
+            if p.vrf_id:
+                cur_vrf = (p.vrf.name or "Global").strip() or "Global"
+            cur_role = (p.role.name if getattr(p, "role_id", None) else "—")
+            cur_status = str(getattr(p, "status", "") or "").strip()
+            cur_tenant = "—"
+            if hasattr(p, "tenant_id") and getattr(p, "tenant_id", None) and getattr(p, "tenant", None):
+                cur_tenant = (p.tenant.name or "—").strip() or "—"
+            cur_desc = ((p.description or "").strip())[:200]
+            drift_parts: list[str] = []
+            if cur_vrf != vrf_name:
+                drift_parts.append(f"VRF {cur_vrf!r} → {vrf_name!r}")
+            if cur_status.lower() != (sugg_status or "").lower():
+                drift_parts.append(f"status {cur_status!r} → {sugg_status!r}")
+            if (cur_role or "—") != (role_name or "—"):
+                drift_parts.append(f"role {cur_role!r} → {role_name!r}")
+            ct = (cur_tenant or "—").strip()
+            tt = (tenant_name or "—").strip()
+            if ct != tt and tt not in {"—", "-", ""}:
+                drift_parts.append("tenant")
+            if cur_desc != (os_desc or "").strip()[:200] and (os_desc or "").strip():
+                drift_parts.append("description")
+            if not drift_parts:
+                continue
+            drift_summary = "; ".join(drift_parts)
+            update_prefixes.append([
+                str(p.pk),
+                g.get("os_region") or "—",
+                cidr,
+                os_desc,
+                g.get("project_name", "-"),
+                cur_vrf,
+                cur_status or "—",
+                cur_role or "—",
+                cur_tenant,
+                cur_desc or "—",
+                os_desc,
+                tenant_name,
+                nb_scope,
+                nb_vlan,
+                role_name,
+                sugg_status,
+                vrf_name,
+                drift_summary,
+                role_reason,
+                "[OS]",
+                "UPDATE_NETBOX_PREFIX_FROM_OS",
+            ])
+
+    update_fips: list[list] = []
+    nat_rows = (
+        openstack_floating_ips_nat_inside_drift(openstack_data or {})
+        if openstack_data and not openstack_data.get("error")
+        else []
+    )
+    for d in nat_rows:
+        fip = d.get("floating_ip", "")
+        fip_name = _first_meaningful_text(
+            d.get("floating_subnet_name"),
+            d.get("floating_network_name"),
+        )
+        tenant_name = _first_meaningful_text(
+            d.get("project_owner_name"),
+            d.get("project_name"),
+            d.get("project_id"),
+        )
+        nb_vrf = _suggest_vrf_for_floating_ip_gap(d)
+        nb_status = "active" if str(d.get("port_id") or "").strip() else "reserved"
+        update_fips.append([
+            d.get("nb_current_nat_inside") or "—",
+            d.get("os_region") or "—",
+            fip,
+            fip_name,
+            d.get("fixed_ip_address", "-"),
+            d.get("project_name") or d.get("project_id") or "-",
+            tenant_name,
+            nb_status,
+            "VIP",
+            nb_vrf,
+            "UPDATE_NETBOX_IPADDRESS_NAT_FROM_OS_FIP",
+        ])
+
+    add_openstack_vms: list[list] = []
+    update_openstack_vms: list[list] = []
+
+    def _ip_host_norm(s: str) -> str:
+        t = (s or "").strip()
+        if not t or t in {"—", "-"}:
+            return ""
+        return t.split("/", 1)[0].strip().lower()
+
+    def _vm_netbox_primary_display(vm) -> str:
+        try:
+            if getattr(vm, "primary_ip4_id", None) and vm.primary_ip4:
+                return str(vm.primary_ip4.address)
+            if getattr(vm, "primary_ip6_id", None) and vm.primary_ip6:
+                return str(vm.primary_ip6.address)
+        except Exception:
+            pass
+        return "—"
+
+    def _os_vm_status_nb_slug(os_status: str) -> str:
+        m = {
+            "ACTIVE": "active",
+            "SHUTOFF": "offline",
+            "PAUSED": "paused",
+            "SUSPENDED": "suspended",
+            "ERROR": "failed",
+            "BUILD": "staging",
+            "BUILDING": "staging",
+            "DELETED": "decommissioning",
+            "SOFT_DELETED": "decommissioning",
+            "SHELVED": "decommissioning",
+            "SHELVED_OFFLOADED": "decommissioning",
+            "UNKNOWN": "offline",
+            "RESCUE": "failed",
+            "RESIZE": "active",
+            "VERIFY_RESIZE": "active",
+            "MIGRATING": "active",
+            "HARD_REBOOT": "active",
+            "REBOOT": "active",
+            "PASSWORD": "active",
+            "REBUILD": "staging",
+        }
+        return m.get((os_status or "").strip().upper(), "active")
+
+    try:
+        from virtualization.models import VirtualMachine as _VMModel
+    except Exception:
+        _VMModel = None
+
+    instances = (openstack_data or {}).get("compute_instances") or []
+    if _VMModel is not None and instances and openstack_data and not openstack_data.get("error"):
+        for inst in instances:
+            iname = str(inst.get("name") or "").strip()
+            iid = str(inst.get("instance_id") or "").strip()
+            if not iname:
+                continue
+            os_reg = str(inst.get("os_region") or openstack_data.get("openstack_region_name") or "—")[:48]
+            proj = str(inst.get("project_name") or inst.get("project_id") or "-")
+            hv = str(inst.get("hypervisor_hostname") or "").strip() or "—"
+            vc = inst.get("vcpus")
+            mm = inst.get("memory_mb")
+            dg = inst.get("disk_gb")
+            vc_s = str(vc) if vc is not None else "—"
+            mm_s = str(mm) if mm is not None else "—"
+            dg_s = str(dg) if dg is not None else "—"
+            os_st = str(inst.get("status") or "").strip() or "—"
+            nb_vm_status = _os_vm_status_nb_slug(os_st)
+            reg_token = os_reg.replace(",", " ").strip().split()[0] if os_reg.strip() else ""
+            prop_cluster = f"{reg_token}-openstack" if reg_token and reg_token not in {"—", "-"} else "openstack"
+            nb_site = _suggest_scope_location_from_os_region(os_reg)
+            os_pri = str(inst.get("os_primary_ip") or "").strip()
+            prop_pri = os_pri if os_pri else "—"
+            vm = (
+                _VMModel.objects.filter(name=iname)
+                .select_related(
+                    "cluster",
+                    "tenant",
+                    "device",
+                    "primary_ip4",
+                    "primary_ip6",
+                )
+                .first()
+            )
+            if vm is None:
+                add_openstack_vms.append([
+                    iname,
+                    iid,
+                    os_reg,
+                    os_st,
+                    proj,
+                    hv,
+                    vc_s,
+                    mm_s,
+                    dg_s,
+                    prop_pri,
+                    prop_cluster,
+                    nb_site if nb_site not in {"—", ""} else "—",
+                    proj if proj not in {"-", "—"} else "—",
+                    nb_vm_status,
+                    hv if hv not in {"—", ""} else "—",
+                    "[OS]",
+                    "CREATE_NETBOX_VM_FROM_OPENSTACK",
+                ])
+            else:
+                cur_vc = str(vm.vcpus) if vm.vcpus is not None else "—"
+                cur_mm = str(vm.memory) if vm.memory is not None else "—"
+                cur_dg = str(vm.disk) if vm.disk is not None else "—"
+                cur_pri_disp = _vm_netbox_primary_display(vm)
+                cur_nb_host = _ip_host_norm(cur_pri_disp)
+                os_pri_host = _ip_host_norm(os_pri)
+                cur_cl = vm.cluster.name if vm.cluster_id else "—"
+                cur_dev = "—"
+                if getattr(vm, "device_id", None) and vm.device:
+                    cur_dev = (vm.device.name or "—").strip() or "—"
+                cur_vm_st = str(vm.status) if vm.status is not None else "—"
+                drift_vm: list[str] = []
+                if vc is not None and vm.vcpus != vc:
+                    drift_vm.append("vcpus")
+                if mm is not None and vm.memory != mm:
+                    drift_vm.append("memory")
+                if dg is not None and vm.disk != dg:
+                    drift_vm.append("disk")
+                hv_l = (hv or "").strip().lower()
+                if hv_l and hv_l not in {"—", "-"}:
+                    if getattr(vm, "device_id", None) and vm.device:
+                        if (vm.device.name or "").strip().lower() != hv_l:
+                            drift_vm.append("device")
+                    else:
+                        drift_vm.append("device")
+                if str(vm.status).lower() != nb_vm_status.lower():
+                    drift_vm.append("status")
+                if prop_cluster and cur_cl != prop_cluster:
+                    drift_vm.append("cluster")
+                if os_pri_host:
+                    if not cur_nb_host or os_pri_host != cur_nb_host:
+                        drift_vm.append("primary_ip")
+                if not drift_vm:
+                    continue
+                update_openstack_vms.append([
+                    iname,
+                    str(vm.pk),
+                    iid,
+                    os_reg,
+                    os_st,
+                    proj,
+                    hv,
+                    vc_s,
+                    mm_s,
+                    dg_s,
+                    cur_vc,
+                    cur_mm,
+                    cur_dg,
+                    cur_pri_disp,
+                    cur_cl,
+                    cur_dev,
+                    cur_vm_st,
+                    prop_pri,
+                    prop_cluster,
+                    nb_site if nb_site not in {"—", ""} else "—",
+                    proj if proj not in {"-", "—"} else "—",
+                    nb_vm_status,
+                    hv if hv not in {"—", ""} else "—",
+                    ", ".join(drift_vm),
+                    "[OS]",
+                    "UPDATE_NETBOX_VM_FROM_OPENSTACK",
+                ])
+
     # Temporarily disabled per operator request: do not emit allocation-pool IPRange proposals.
     add_ip_ranges = []
 
@@ -1320,6 +1618,10 @@ def _proposed_changes_rows(
         "add_prefixes": add_prefixes,
         "add_ip_ranges": add_ip_ranges,
         "add_fips": add_fips,
+        "update_prefixes": update_prefixes,
+        "update_fips": update_fips,
+        "add_openstack_vms": add_openstack_vms,
+        "update_openstack_vms": update_openstack_vms,
         "lldp_new": lldp_new,
         "lldp_update": lldp_update,
         "update_nic": update_nic,

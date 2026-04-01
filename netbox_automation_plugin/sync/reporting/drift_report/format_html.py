@@ -69,6 +69,7 @@ def format_drift_report(
         os_floating_gaps or [],
         openstack_data=openstack_data,
         netbox_ifaces=netbox_ifaces,
+        os_subnet_hints=os_subnet_hints or [],
     )
     norm = normalize_drift_review_overrides(drift_overrides)
     if norm:

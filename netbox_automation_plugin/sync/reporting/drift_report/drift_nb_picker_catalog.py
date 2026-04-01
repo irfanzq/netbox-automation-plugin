@@ -33,6 +33,10 @@ def build_drift_nb_picker_catalog() -> dict[str, list[str]]:
         "ip_role": [],
         "intf_role": [],
         "interface_type": [],
+        "vm_cluster": [],
+        "vm_cluster_type": [],
+        "vm_primary_ip": [],
+        "vm_status": [],
     }
     out["_vlan_by_scope_location"] = {}
     try:
@@ -281,5 +285,56 @@ def build_drift_nb_picker_catalog() -> dict[str, list[str]]:
         out["interface_type"] = sorted(set(slugs) - {""})
     except Exception as e:
         logger.debug("drift picker interface_type: %s", e)
+
+    try:
+        from virtualization.models import Cluster
+
+        out["vm_cluster"] = sorted(
+            {(x.name or "").strip() for x in Cluster.objects.only("name").iterator()} - {""}
+        )
+    except Exception as e:
+        logger.debug("drift picker vm_cluster: %s", e)
+
+    try:
+        from virtualization.models import ClusterType
+
+        out["vm_cluster_type"] = sorted(
+            {(x.name or "").strip() for x in ClusterType.objects.only("name").iterator()} - {""}
+        )
+    except Exception as e:
+        logger.debug("drift picker vm_cluster_type: %s", e)
+
+    try:
+        from virtualization.models import VirtualMachine
+
+        field = VirtualMachine._meta.get_field("status")
+        ch = getattr(field, "choices", None) or []
+        slugs = []
+        for val, _lab in ch:
+            if val is None or val == "":
+                continue
+            slugs.append(str(val).strip())
+        out["vm_status"] = sorted(set(slugs) - {""})
+    except Exception as e:
+        logger.debug("drift picker vm_status: %s", e)
+
+    # Host-only strings are not valid NetBox IPAddress.address values; picker lists DB prefixes.
+    _VM_PRIMARY_CAP = 12000
+    try:
+        from ipam.models import IPAddress
+
+        vals: list[str] = []
+        for a in IPAddress.objects.only("address").iterator():
+            try:
+                s = str(getattr(a, "address", "") or "").strip()
+            except Exception:
+                continue
+            if s:
+                vals.append(s)
+            if len(vals) >= _VM_PRIMARY_CAP:
+                break
+        out["vm_primary_ip"] = sorted(set(vals))
+    except Exception as e:
+        logger.debug("drift picker vm_primary_ip: %s", e)
 
     return out

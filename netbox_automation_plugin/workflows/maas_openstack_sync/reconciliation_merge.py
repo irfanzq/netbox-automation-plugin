@@ -94,6 +94,7 @@ def merged_proposed_from_drift_run(
         payload.get("os_floating_gaps") or [],
         openstack_data=payload.get("openstack_data"),
         netbox_ifaces=payload.get("netbox_ifaces"),
+        os_subnet_hints=payload.get("os_subnet_hints") or [],
     )
     if norm:
         prop, align_rows = merge_drift_review_overrides(prop, align_rows, norm)

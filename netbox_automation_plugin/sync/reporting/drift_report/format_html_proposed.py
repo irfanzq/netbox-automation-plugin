@@ -3,11 +3,15 @@
 from netbox_automation_plugin.sync.reporting.drift_report.drift_overrides_apply import (
     HEADERS_BMC_EXISTING,
     HEADERS_BMC_NEW_DEVICES,
+    HEADERS_DETAIL_EXISTING_FIPS,
+    HEADERS_DETAIL_EXISTING_PREFIXES,
+    HEADERS_DETAIL_EXISTING_VMS,
     HEADERS_DETAIL_NEW_DEVICES,
     HEADERS_DETAIL_NEW_FIPS,
     HEADERS_DETAIL_NEW_IP_RANGES,
     HEADERS_DETAIL_NEW_NICS,
     HEADERS_DETAIL_NEW_PREFIXES,
+    HEADERS_DETAIL_NEW_VMS,
     HEADERS_DETAIL_NIC_DRIFT,
     HEADERS_SERIAL_REVIEW,
     _new_nic_row_is_os_authority,
@@ -40,6 +44,13 @@ _PROPOSED_NB_PICK_FIP = {
     "NB proposed role": "ip_role",
     "NB proposed VRF": "vrf",
 }
+_PROPOSED_NB_PICK_VM = {
+    "NB proposed primary IP": "vm_primary_ip",
+    "NB proposed cluster": "vm_cluster",
+    "NB proposed site": "site",
+    "NB Proposed Tenant": "tenant",
+    "NB proposed VM status": "vm_status",
+}
 _PROPOSED_NB_PICK_NIC = {
     "NB Proposed intf Label": "intf_role",
     "NB Proposed intf Type": "interface_type",
@@ -66,7 +77,23 @@ def emit_proposed_change_tables(e, prop):
                 "Not safe to auto-propose (status/data quality policy)",
             ],
             ["New prefixes (OpenStack authority)", str(len(prop["add_prefixes"])), "Subnet not in IPAM"],
+            [
+                "Existing prefixes (OpenStack drift)",
+                str(len(prop.get("update_prefixes", []))),
+                "Prefix exists; VRF/status/role/tenant/description differ from OpenStack-derived proposal",
+            ],
             ["New floating IPs (OpenStack authority)", str(len(prop["add_fips"])), "FIP not in IPAM"],
+            [
+                "Existing floating IPs (NAT drift)",
+                str(len(prop.get("update_fips", []))),
+                "FIP in IPAM; OpenStack fixed IP ≠ NetBox nat_inside",
+            ],
+            ["New VMs (OpenStack Nova)", str(len(prop.get("add_openstack_vms", []))), "Instance not modeled as NetBox Virtual Machine"],
+            [
+                "Existing VMs (OpenStack drift)",
+                str(len(prop.get("update_openstack_vms", []))),
+                "Virtual Machine exists; vCPU/memory/disk/status/device/cluster differ",
+            ],
         ],
     )
     e.spacer()
@@ -130,6 +157,25 @@ def emit_proposed_change_tables(e, prop):
             proposed_pick_columns=_PROPOSED_NB_PICK_PREFIX,
             editable_columns=["NB Proposed Prefix description (editable)"],
         )
+    if prop.get("update_prefixes"):
+        e.spacer()
+        e.subtitle("Detail — existing prefixes")
+        e.paragraph(
+            "Subnet already has an exact matching NetBox Prefix, but OpenStack-derived VRF, status, role, "
+            "tenant, or description does not match. Apply uses NetBox prefix ID plus proposed columns "
+            "(same handler as new prefixes)."
+        )
+        e.spacer()
+        e.table(
+            list(HEADERS_DETAIL_EXISTING_PREFIXES),
+            prop["update_prefixes"],
+            dynamic_columns=True,
+            wrap_max_width=None,
+            selectable=True,
+            selection_key="detail_existing_prefixes",
+            proposed_pick_columns=_PROPOSED_NB_PICK_PREFIX,
+            editable_columns=["NB Proposed Prefix description (editable)"],
+        )
     if prop.get("add_ip_ranges"):
         e.spacer()
         e.subtitle("Detail — new IP ranges (allocation pools)")
@@ -160,6 +206,56 @@ def emit_proposed_change_tables(e, prop):
             selectable=True,
             selection_key="detail_new_fips",
             proposed_pick_columns=_PROPOSED_NB_PICK_FIP,
+        )
+    if prop.get("update_fips"):
+        e.spacer()
+        e.subtitle("Detail — existing floating IPs")
+        e.paragraph(
+            "Floating IP exists in NetBox IPAM but NAT inside does not match OpenStack fixed IP "
+            "(reassignment or first link). Same apply handler as new FIPs."
+        )
+        e.spacer()
+        e.table(
+            list(HEADERS_DETAIL_EXISTING_FIPS),
+            prop["update_fips"],
+            dynamic_columns=True,
+            wrap_max_width=None,
+            selectable=True,
+            selection_key="detail_existing_fips",
+            proposed_pick_columns=_PROPOSED_NB_PICK_FIP,
+        )
+    if prop.get("add_openstack_vms"):
+        e.spacer()
+        e.subtitle("Detail — new VMs")
+        e.paragraph(
+            "OpenStack Nova instances (VMs and Ironic bare metal) with no NetBox Virtual Machine of the same name. "
+            "Requires an existing Cluster (NB proposed cluster). Hypervisor hostname maps to NB proposed device when the Device exists."
+        )
+        e.spacer()
+        e.table(
+            list(HEADERS_DETAIL_NEW_VMS),
+            prop["add_openstack_vms"],
+            dynamic_columns=True,
+            wrap_max_width=None,
+            selectable=True,
+            selection_key="detail_new_vms",
+            proposed_pick_columns=_PROPOSED_NB_PICK_VM,
+        )
+    if prop.get("update_openstack_vms"):
+        e.spacer()
+        e.subtitle("Detail — existing VMs")
+        e.paragraph(
+            "Virtual Machine name matches OpenStack instance; resources or placement differ from Nova."
+        )
+        e.spacer()
+        e.table(
+            list(HEADERS_DETAIL_EXISTING_VMS),
+            prop["update_openstack_vms"],
+            dynamic_columns=True,
+            wrap_max_width=None,
+            selectable=True,
+            selection_key="detail_existing_vms",
+            proposed_pick_columns=_PROPOSED_NB_PICK_VM,
         )
 
     e.spacer()
@@ -303,7 +399,9 @@ def emit_proposed_change_tables(e, prop):
     e.subtitle("Summary")
     e.spacer()
     total_props = (
-        len(prop["add_devices"]) + len(prop["add_prefixes"]) + len(prop["add_fips"]) +
+        len(prop["add_devices"]) + len(prop["add_prefixes"]) + len(prop.get("update_prefixes", [])) +
+        len(prop["add_fips"]) + len(prop.get("update_fips", [])) +
+        len(prop.get("add_openstack_vms", [])) + len(prop.get("update_openstack_vms", [])) +
         len(prop["update_nic"]) + len(prop["add_nb_interfaces"]) +
         len(prop["add_mgmt_iface"]) + len(prop.get("add_mgmt_iface_new_devices", [])) +
         len(prop["review_serial"])
@@ -313,7 +411,11 @@ def emit_proposed_change_tables(e, prop):
         [
             ["New devices", str(len(prop["add_devices"]))],
             ["New prefixes", str(len(prop["add_prefixes"]))],
+            ["Existing prefixes (drift)", str(len(prop.get("update_prefixes", [])))],
             ["New floating IPs", str(len(prop["add_fips"]))],
+            ["Existing floating IPs (NAT drift)", str(len(prop.get("update_fips", [])))],
+            ["New VMs (OpenStack)", str(len(prop.get("add_openstack_vms", [])))],
+            ["Existing VMs (drift)", str(len(prop.get("update_openstack_vms", [])))],
             ["New NICs", str(len(prop["add_nb_interfaces"]))],
             ["NIC drift", str(len(prop["update_nic"]))],
             ["BMC / OOB", str(len(prop["add_mgmt_iface"]) + len(prop.get("add_mgmt_iface_new_devices", [])))],

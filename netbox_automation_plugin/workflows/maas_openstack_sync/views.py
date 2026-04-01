@@ -445,6 +445,7 @@ def _filter_openstack_by_locations(openstack_data: dict, selected_location_names
     runtime_before = list(openstack_data.get("runtime_nics") or [])
     bmc_before = list(openstack_data.get("runtime_bmc") or [])
     sc_before = list(openstack_data.get("subnet_consumers") or [])
+    inst_before = list(openstack_data.get("compute_instances") or [])
 
     filtered_runtime = [
         r
@@ -463,6 +464,16 @@ def _filter_openstack_by_locations(openstack_data: dict, selected_location_names
         if isinstance(sc, dict)
         and (str(sc.get("subnet_id") or "").strip() in filtered_subnet_ids)
     ]
+    filtered_ci = [
+        inst
+        for inst in inst_before
+        if isinstance(inst, dict)
+        and (
+            _text_matches_locations(str(inst.get("os_region") or ""), selected_location_names)
+            or _text_matches_locations(str(inst.get("hypervisor_hostname") or ""), selected_location_names)
+            or _text_matches_locations(str(inst.get("project_name") or ""), selected_location_names)
+        )
+    ]
 
     scoped = dict(openstack_data)
     scoped["networks"] = filtered_nets
@@ -471,6 +482,7 @@ def _filter_openstack_by_locations(openstack_data: dict, selected_location_names
     scoped["runtime_nics"] = filtered_runtime
     scoped["runtime_bmc"] = filtered_bmc
     scoped["subnet_consumers"] = filtered_sc
+    scoped["compute_instances"] = filtered_ci
     scoped["openstack_region_name"] = _openstack_regions_from_scoped_payload(scoped)
 
     unmatched_network_names = sorted({
@@ -491,6 +503,8 @@ def _filter_openstack_by_locations(openstack_data: dict, selected_location_names
         "openstack_runtime_bmc_after": len(filtered_bmc),
         "openstack_subnet_consumers_before": len(sc_before),
         "openstack_subnet_consumers_after": len(filtered_sc),
+        "openstack_compute_instances_before": len(inst_before),
+        "openstack_compute_instances_after": len(filtered_ci),
         "openstack_unmatched_network_names": unmatched_network_names[:20],
         "openstack_unmatched_network_names_more": max(0, len(unmatched_network_names) - 20),
     }
@@ -557,7 +571,7 @@ def _openstack_bmc_row_matches_locations(row: dict, selected_location_names: set
 def _openstack_regions_from_scoped_payload(scoped: dict) -> str:
     """Recompute merged top-level region label after per-resource filtering."""
     regs: set[str] = set()
-    for coll in ("networks", "subnets", "floating_ips", "runtime_nics", "runtime_bmc"):
+    for coll in ("networks", "subnets", "floating_ips", "runtime_nics", "runtime_bmc", "compute_instances"):
         for item in scoped.get(coll) or []:
             if not isinstance(item, dict):
                 continue
@@ -926,6 +940,7 @@ class MAASOpenStackSyncView(LoginRequiredMixin, View):
                     "runtime_nics": [],
                     "runtime_bmc": [],
                     "subnet_consumers": [],
+                    "compute_instances": [],
                     "openstack_region_name": "—",
                     "error": "OpenStack auth URL set but no OS_PASSWORD (or application credential ID/secret). Drift report will omit OpenStack data.",
                     "openstack_cred_missing": True,
@@ -940,6 +955,7 @@ class MAASOpenStackSyncView(LoginRequiredMixin, View):
                     "runtime_nics": [],
                     "runtime_bmc": [],
                     "subnet_consumers": [],
+                    "compute_instances": [],
                     "openstack_region_name": "—",
                     "error": None,
                 }
@@ -960,9 +976,18 @@ class MAASOpenStackSyncView(LoginRequiredMixin, View):
                         merged["runtime_nics"].extend(data.get("runtime_nics") or [])
                         merged["runtime_bmc"].extend(data.get("runtime_bmc") or [])
                         merged["subnet_consumers"].extend(data.get("subnet_consumers") or [])
+                        merged["compute_instances"].extend(data.get("compute_instances") or [])
+                _inst_u: dict[str, dict] = {}
+                for row in merged["compute_instances"]:
+                    if not isinstance(row, dict):
+                        continue
+                    uid = (row.get("instance_id") or "").strip()
+                    if uid:
+                        _inst_u[uid] = row
+                merged["compute_instances"] = list(_inst_u.values())
                 if merged_region_labels:
                     merged["openstack_region_name"] = ", ".join(merged_region_labels)
-                if errors and not merged["networks"] and not merged["subnets"] and not merged["floating_ips"]:
+                if errors and not merged["networks"] and not merged["subnets"] and not merged["floating_ips"] and not merged["compute_instances"]:
                     merged["error"] = "; ".join(errors)
                 elif errors:
                     merged["error"] = None  # partial success; report combined data
@@ -980,6 +1005,7 @@ class MAASOpenStackSyncView(LoginRequiredMixin, View):
                         "runtime_nics": len(data.get("runtime_nics") or []),
                         "runtime_bmc": len(data.get("runtime_bmc") or []),
                         "subnet_consumers": len(data.get("subnet_consumers") or []),
+                        "compute_instances": len(data.get("compute_instances") or []),
                         "error": (err[:200] if err else None),
                     })
                 openstack_data = merged

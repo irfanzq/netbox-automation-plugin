@@ -59,8 +59,12 @@ SK_TO_ACTION = {
     "detail_new_devices": "create_device",
     "detail_review_only_devices": "review_device",
     "detail_new_prefixes": "create_prefix",
+    "detail_existing_prefixes": "create_prefix",
     "detail_new_ip_ranges": "create_ip_range",
     "detail_new_fips": "create_floating_ip",
+    "detail_existing_fips": "create_floating_ip",
+    "detail_new_vms": "create_openstack_vm",
+    "detail_existing_vms": "update_openstack_vm",
     "detail_new_nics": "create_interface",
     "detail_new_nics_os": "create_interface",
     "detail_new_nics_maas": "create_interface",
@@ -79,8 +83,12 @@ AUDIT_REPORT_APPLY_ORDER: tuple[str, ...] = (
     "detail_new_devices",
     "detail_review_only_devices",
     "detail_new_prefixes",
+    "detail_existing_prefixes",
     "detail_new_ip_ranges",
     "detail_new_fips",
+    "detail_existing_fips",
+    "detail_new_vms",
+    "detail_existing_vms",
     "detail_new_nics",
     "detail_new_nics_os",
     "detail_new_nics_maas",
@@ -169,6 +177,10 @@ def _operation_summary(meta: dict[str, Any]) -> str:
         cidr = cells.get("CIDR") or "—"
         vrf = cells.get("NB proposed VRF") or "—"
         return f"Prefix: {cidr} (VRF {vrf})"
+    if sk == "detail_existing_prefixes":
+        cidr = cells.get("CIDR") or "—"
+        pid = cells.get("NetBox prefix ID") or "—"
+        return f"Prefix update: id {pid} {cidr}"
     if sk == "detail_new_ip_ranges":
         s = cells.get("Start address") or "—"
         e = cells.get("End address") or "—"
@@ -177,6 +189,13 @@ def _operation_summary(meta: dict[str, Any]) -> str:
     if sk == "detail_new_fips":
         fip = cells.get("Floating IP") or "—"
         return f"Floating IP: {fip}"
+    if sk == "detail_existing_fips":
+        fip = cells.get("Floating IP") or "—"
+        return f"Floating IP (NAT drift): {fip}"
+    if sk == "detail_new_vms":
+        return f"New VM: {cells.get('VM name') or '—'}"
+    if sk == "detail_existing_vms":
+        return f"VM update: {cells.get('VM name') or '—'} (id {cells.get('NetBox VM ID') or '—'})"
     if sk in NEW_NIC_SELECTION_KEYS:
         base = f"New interface: {host or '—'}"
         if_name = (cells.get("Suggested NB name") or "").strip()

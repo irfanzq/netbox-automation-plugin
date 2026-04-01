@@ -813,6 +813,104 @@ def openstack_floating_ips_missing_from_netbox(openstack_data: dict):
     return missing
 
 
+def _ip_host_only(addr_val) -> str:
+    if addr_val is None:
+        return ""
+    s = str(addr_val).strip()
+    if "/" in s:
+        s = s.split("/", 1)[0].strip()
+    return s.lower()
+
+
+def openstack_floating_ips_nat_inside_drift(openstack_data: dict) -> list[dict]:
+    """
+    Floating IPs that already exist as NetBox IPAddress but OpenStack fixed IP
+    does not match ``nat_inside`` (or OS has a fixed IP and NetBox has none).
+    """
+    if not openstack_data or openstack_data.get("error"):
+        return []
+    try:
+        import netaddr as na
+        from ipam.models import IPAddress
+    except Exception as e:
+        logger.warning("Floating IP NAT drift check skipped: %s", e)
+        return []
+
+    net_by_id = {
+        (n.get("id") or ""): n
+        for n in (openstack_data.get("networks") or [])
+        if n.get("id")
+    }
+    subnet_by_id = {
+        (s.get("id") or ""): s
+        for s in (openstack_data.get("subnets") or [])
+        if s.get("id")
+    }
+    drift: list[dict] = []
+    for f in openstack_data.get("floating_ips") or []:
+        ip = (f.get("floating_ip_address") or "").strip()
+        if not ip or ip == "-":
+            continue
+        try:
+            if ":" in ip:
+                net = na.IPNetwork(f"{ip}/128")
+            else:
+                net = na.IPNetwork(f"{ip}/32")
+        except Exception:
+            continue
+        try:
+            ip_obj = IPAddress.objects.filter(address=str(net)).select_related(
+                "nat_inside", "vrf", "vrf__name"
+            ).first()
+        except Exception:
+            ip_obj = IPAddress.objects.filter(address=net).select_related(
+                "nat_inside", "vrf", "vrf__name"
+            ).first()
+        if ip_obj is None:
+            continue
+        os_fixed_raw = str(f.get("fixed_ip_address") or "").strip()
+        os_fixed = ""
+        if os_fixed_raw and os_fixed_raw not in {"-", "—"}:
+            os_fixed = _ip_host_only(os_fixed_raw)
+        nb_inside = ""
+        try:
+            ni = getattr(ip_obj, "nat_inside", None)
+            if ni is not None:
+                nb_inside = _ip_host_only(getattr(ni, "address", ""))
+        except Exception:
+            nb_inside = ""
+        if os_fixed == nb_inside:
+            continue
+        if not os_fixed and not nb_inside:
+            continue
+        fnid = f.get("floating_network_id") or ""
+        fnet = net_by_id.get(fnid) or {}
+        subnet_name = "-"
+        subnet_ids = fnet.get("subnets") or []
+        if isinstance(subnet_ids, list):
+            for sid in subnet_ids:
+                sn = subnet_by_id.get(str(sid) or "")
+                if sn and (sn.get("name") or "").strip():
+                    subnet_name = (sn.get("name") or "").strip()
+                    break
+        drift.append({
+            "floating_ip": ip,
+            "os_region": (f.get("os_region") or openstack_data.get("openstack_region_name") or "—")[:32],
+            "fixed_ip_address": f.get("fixed_ip_address") or "-",
+            "nb_current_nat_inside": nb_inside or "—",
+            "id": f.get("id", ""),
+            "port_id": f.get("port_id") or "",
+            "project_owner_name": f.get("project_owner_name") or f.get("project_name") or "",
+            "project_name": f.get("project_name") or "-",
+            "project_id": f.get("project_id") or "",
+            "floating_network_id": fnid,
+            "floating_network_name": fnet.get("name") or "-",
+            "floating_subnet_name": subnet_name,
+            "netbox_ipaddress_pk": getattr(ip_obj, "pk", "") or "",
+        })
+    return drift
+
+
 def openstack_allocation_pools_missing_ip_ranges(openstack_data: dict):
     """
     Allocation pools in OpenStack subnets that do not have an exact NetBox IPRange

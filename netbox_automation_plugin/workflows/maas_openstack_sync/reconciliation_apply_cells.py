@@ -33,6 +33,8 @@ SUPPORTED_APPLY_ACTIONS: frozenset[str] = frozenset(
         "serial_review",
         "bmc_documentation",
         "bmc_alignment",
+        "create_openstack_vm",
+        "update_openstack_vm",
     }
 )
 
@@ -285,6 +287,84 @@ RECON_CELL_PREVIEW_KEYS_BY_SELECTION: dict[str, tuple[str, ...]] = {
         "NAT inside IP (from OpenStack fixed IP)",
         "OS region",
         "Project",
+        "Proposed Action",
+    ),
+    "detail_existing_prefixes": (
+        "NetBox prefix ID",
+        "CIDR",
+        "NB proposed VRF",
+        "NB proposed status",
+        "NB proposed role",
+        "NB Proposed Tenant",
+        "NB Proposed Scope",
+        "NB Proposed VLAN",
+        "NB Proposed Prefix description (editable)",
+        "OS region",
+        "OS Description",
+        "Project",
+        "Drift summary",
+        "Role reason",
+        "Authority",
+        "Proposed Action",
+    ),
+    "detail_existing_fips": (
+        "Floating IP",
+        "NB proposed status",
+        "NB proposed role",
+        "NB proposed VRF",
+        "NB Proposed Tenant",
+        "Name",
+        "NAT inside IP (from OpenStack fixed IP)",
+        "NB current NAT inside",
+        "OS region",
+        "Project",
+        "Proposed Action",
+    ),
+    "detail_new_vms": (
+        "VM name",
+        "OpenStack instance ID",
+        "OS region",
+        "OS status",
+        "Project",
+        "Hypervisor hostname",
+        "vCPUs",
+        "Memory MB",
+        "Disk GB",
+        "NB proposed primary IP",
+        "NB proposed cluster",
+        "NB proposed site",
+        "NB Proposed Tenant",
+        "NB proposed VM status",
+        "NB proposed device (hypervisor)",
+        "Authority",
+        "Proposed Action",
+    ),
+    "detail_existing_vms": (
+        "VM name",
+        "NetBox VM ID",
+        "OpenStack instance ID",
+        "OS region",
+        "OS status",
+        "Project",
+        "Hypervisor hostname",
+        "vCPUs",
+        "Memory MB",
+        "Disk GB",
+        "NB current vCPUs",
+        "NB current Memory MB",
+        "NB current Disk GB",
+        "NB current primary IP",
+        "NB current cluster",
+        "NB current device",
+        "NB current VM status",
+        "NB proposed primary IP",
+        "NB proposed cluster",
+        "NB proposed site",
+        "NB Proposed Tenant",
+        "NB proposed VM status",
+        "NB proposed device (hypervisor)",
+        "Drift summary",
+        "Authority",
         "Proposed Action",
     ),
     "detail_new_devices": (
@@ -813,6 +893,13 @@ def apply_create_prefix(op: dict[str, Any]) -> tuple[str, str]:
     # All drift table headers consumed so residual audit is not merged into Prefix.description
     # (full row is embedded via _prefix_description_from_cells + typed fields + optional CF).
     consumed = {
+        _norm_header("NetBox prefix ID"),
+        _norm_header("NB current VRF"),
+        _norm_header("NB current status"),
+        _norm_header("NB current role"),
+        _norm_header("NB current tenant"),
+        _norm_header("NB current description"),
+        _norm_header("Drift summary"),
         _norm_header("OS region"),
         _norm_header("CIDR"),
         _norm_header("OS Description"),
@@ -838,7 +925,7 @@ def apply_create_prefix(op: dict[str, Any]) -> tuple[str, str]:
     if role_name and role is None:
         return "skipped", "skipped_prerequisite_missing"
     tenant = None
-    if tenant_name:
+    if tenant_name and tenant_name not in {"—", "-"}:
         try:
             from tenancy.models import Tenant
 
@@ -865,9 +952,17 @@ def apply_create_prefix(op: dict[str, Any]) -> tuple[str, str]:
             vlan_obj = None
         if vlan_obj is None:
             return "skipped", "skipped_prerequisite_missing"
-    existing = Prefix.objects.filter(prefix=cidr, vrf=vrf).first()
+    prefix_pk_raw = _cell(cells, "NetBox prefix ID")
+    existing = None
+    if prefix_pk_raw and str(prefix_pk_raw).strip().isdigit():
+        existing = Prefix.objects.filter(pk=int(str(prefix_pk_raw).strip())).first()
+    if existing is None:
+        existing = Prefix.objects.filter(prefix=cidr, vrf=vrf).first()
     if existing is not None:
         changed = False
+        if vrf is not None and getattr(existing, "vrf_id", None) != vrf.pk:
+            existing.vrf = vrf
+            changed = True
         if status_name:
             val = _pick_choice_value(existing._meta.get_field("status"), status_name)
             if val is not None and existing.status != val:
@@ -1169,6 +1264,7 @@ def apply_create_floating_ip(op: dict[str, Any]) -> tuple[str, str]:
     dmax = _ip_address_description_max_len()
     full_descr = _fip_description_from_cells(cells, max_len=dmax)
     consumed = {
+        _norm_header("NB current NAT inside"),
         _norm_header("OS region"),
         _norm_header("Floating IP"),
         _norm_header("Name"),
@@ -1259,6 +1355,254 @@ def apply_create_floating_ip(op: dict[str, Any]) -> tuple[str, str]:
     ):
         ip_obj.save()
     return "created", "ok_created"
+
+
+def _resolve_ipaddress_for_vm_primary(raw: str):
+    """Match NetBox IPAddress rows from drift cell (full prefix or host-only from OpenStack)."""
+    from ipam.models import IPAddress
+
+    raw = (raw or "").strip()
+    if not raw or raw in {"—", "-"}:
+        return None
+    o = IPAddress.objects.filter(address=raw).first()
+    if o is not None:
+        return o
+    host = raw.split("/", 1)[0].strip()
+    try:
+        ver = ipaddress.ip_address(host).version
+    except ValueError:
+        return None
+    suffix = "/32" if ver == 4 else "/128"
+    o = IPAddress.objects.filter(address=host + suffix).first()
+    if o is not None:
+        return o
+    try:
+        return IPAddress.objects.filter(address__startswith=host + "/").order_by("pk").first()
+    except Exception:
+        return None
+
+
+def _apply_vm_primary_ip_from_cell(vm, cells: dict[str, str]) -> bool:
+    pri = _cell(cells, "NB proposed primary IP")
+    ip_obj = _resolve_ipaddress_for_vm_primary(pri)
+    if ip_obj is None:
+        return False
+    try:
+        ver = int(ip_obj.address.version)
+    except Exception:
+        try:
+            ver = ipaddress.ip_address(str(ip_obj.address).split("/", 1)[0]).version
+        except Exception:
+            return False
+    changed = False
+    if ver == 4 and hasattr(vm, "primary_ip4_id"):
+        if getattr(vm, "primary_ip4_id", None) != ip_obj.pk:
+            vm.primary_ip4 = ip_obj
+            changed = True
+    elif ver == 6 and hasattr(vm, "primary_ip6_id"):
+        if getattr(vm, "primary_ip6_id", None) != ip_obj.pk:
+            vm.primary_ip6 = ip_obj
+            changed = True
+    return changed
+
+
+def apply_create_openstack_vm(op: dict[str, Any]) -> tuple[str, str]:
+    try:
+        from virtualization.models import VirtualMachine, Cluster
+        from dcim.models import Device, Site
+        from tenancy.models import Tenant
+    except Exception:
+        return "failed", "failed_virtualization_not_available"
+
+    cells = op.get("cells") or {}
+    if (reason := skip_reason_from_row_guides(cells)) is not None:
+        return "skipped", reason
+    name = _cell(cells, "VM name")
+    cluster_name = _cell(cells, "NB proposed cluster")
+    if not name or not cluster_name or cluster_name in {"—", "-"}:
+        return "skipped", "skipped_prerequisite_missing"
+    cluster = Cluster.objects.filter(name=cluster_name).first()
+    if cluster is None:
+        return "skipped", "skipped_prerequisite_missing"
+    if VirtualMachine.objects.filter(name=name).exists():
+        return "skipped", "skipped_already_desired"
+
+    consumed = {
+        _norm_header("OpenStack instance ID"),
+        _norm_header("OS region"),
+        _norm_header("VM name"),
+        _norm_header("OS status"),
+        _norm_header("Project"),
+        _norm_header("Hypervisor hostname"),
+        _norm_header("vCPUs"),
+        _norm_header("Memory MB"),
+        _norm_header("Disk GB"),
+        _norm_header("NB proposed primary IP"),
+        _norm_header("NB proposed cluster"),
+        _norm_header("NB proposed site"),
+        _norm_header("NB Proposed Tenant"),
+        _norm_header("NB proposed VM status"),
+        _norm_header("NB proposed device (hypervisor)"),
+        _norm_header("Authority"),
+        _norm_header("Proposed Action"),
+    }
+
+    vm = VirtualMachine(name=name, cluster=cluster)
+    site_name = _cell(cells, "NB proposed site")
+    if site_name and site_name not in {"—", "-"}:
+        site = _resolve_by_name(Site, site_name)
+        if site is not None and hasattr(vm, "site_id"):
+            vm.site = site
+    tenant_name = _cell(cells, "NB Proposed Tenant")
+    if tenant_name and tenant_name not in {"—", "-"}:
+        tenant = _resolve_by_name(Tenant, tenant_name)
+        if tenant is not None and hasattr(vm, "tenant_id"):
+            vm.tenant = tenant
+    status_name = _cell(cells, "NB proposed VM status")
+    if status_name and status_name not in {"—", "-"}:
+        val = _pick_choice_value(vm._meta.get_field("status"), status_name)
+        if val is not None:
+            vm.status = val
+    hv = _cell(cells, "NB proposed device (hypervisor)")
+    if not hv or hv in {"—", "-"}:
+        hv = _cell(cells, "Hypervisor hostname")
+    if hv and hv not in {"—", "-"}:
+        dev = Device.objects.filter(name=hv).first()
+        if dev is not None and hasattr(vm, "device_id"):
+            vm.device = dev
+
+    for field, header, caster in (
+        ("vcpus", "vCPUs", int),
+        ("memory", "Memory MB", int),
+        ("disk", "Disk GB", int),
+    ):
+        raw = _cell(cells, header)
+        if not raw or raw in {"—", "-"}:
+            continue
+        try:
+            setattr(vm, field, caster(raw))
+        except (TypeError, ValueError):
+            pass
+
+    vm.save()
+    pri_ch = _apply_vm_primary_ip_from_cell(vm, cells)
+    merge_ch = _merge_audit_residual_onto_object(
+        vm, cells, consumed, attr_names=("comments", "description"), max_len=8000
+    )
+    if pri_ch or merge_ch:
+        vm.save()
+    return "created", "ok_created"
+
+
+def apply_update_openstack_vm(op: dict[str, Any]) -> tuple[str, str]:
+    try:
+        from virtualization.models import VirtualMachine, Cluster
+        from dcim.models import Device, Site
+        from tenancy.models import Tenant
+    except Exception:
+        return "failed", "failed_virtualization_not_available"
+
+    cells = op.get("cells") or {}
+    if (reason := skip_reason_from_row_guides(cells)) is not None:
+        return "skipped", reason
+    pk_raw = _cell(cells, "NetBox VM ID")
+    if not pk_raw or not str(pk_raw).strip().isdigit():
+        return "skipped", "skipped_prerequisite_missing"
+    vm = VirtualMachine.objects.filter(pk=int(str(pk_raw).strip())).select_related(
+        "cluster", "device", "tenant", "primary_ip4", "primary_ip6"
+    ).first()
+    if vm is None:
+        return "skipped", "skipped_prerequisite_missing"
+
+    consumed = {
+        _norm_header("NetBox VM ID"),
+        _norm_header("OpenStack instance ID"),
+        _norm_header("OS region"),
+        _norm_header("VM name"),
+        _norm_header("OS status"),
+        _norm_header("Project"),
+        _norm_header("Hypervisor hostname"),
+        _norm_header("NB current vCPUs"),
+        _norm_header("NB current Memory MB"),
+        _norm_header("NB current Disk GB"),
+        _norm_header("NB current primary IP"),
+        _norm_header("NB current cluster"),
+        _norm_header("NB current device"),
+        _norm_header("NB current VM status"),
+        _norm_header("Drift summary"),
+        _norm_header("vCPUs"),
+        _norm_header("Memory MB"),
+        _norm_header("Disk GB"),
+        _norm_header("NB proposed primary IP"),
+        _norm_header("NB proposed cluster"),
+        _norm_header("NB proposed site"),
+        _norm_header("NB Proposed Tenant"),
+        _norm_header("NB proposed VM status"),
+        _norm_header("NB proposed device (hypervisor)"),
+        _norm_header("Authority"),
+        _norm_header("Proposed Action"),
+    }
+
+    changed = False
+    if _apply_vm_primary_ip_from_cell(vm, cells):
+        changed = True
+    cluster_name = _cell(cells, "NB proposed cluster")
+    if cluster_name and cluster_name not in {"—", "-"}:
+        cl = Cluster.objects.filter(name=cluster_name).first()
+        if cl is not None and vm.cluster_id != cl.pk:
+            vm.cluster = cl
+            changed = True
+    site_name = _cell(cells, "NB proposed site")
+    if site_name and site_name not in {"—", "-"} and hasattr(vm, "site_id"):
+        site = _resolve_by_name(Site, site_name)
+        if site is not None and getattr(vm, "site_id", None) != site.pk:
+            vm.site = site
+            changed = True
+    tenant_name = _cell(cells, "NB Proposed Tenant")
+    if tenant_name and tenant_name not in {"—", "-"}:
+        tenant = _resolve_by_name(Tenant, tenant_name)
+        if tenant is not None and getattr(vm, "tenant_id", None) != tenant.pk:
+            vm.tenant = tenant
+            changed = True
+    status_name = _cell(cells, "NB proposed VM status")
+    if status_name and status_name not in {"—", "-"}:
+        val = _pick_choice_value(vm._meta.get_field("status"), status_name)
+        if val is not None and vm.status != val:
+            vm.status = val
+            changed = True
+    hv = _cell(cells, "NB proposed device (hypervisor)")
+    if not hv or hv in {"—", "-"}:
+        hv = _cell(cells, "Hypervisor hostname")
+    if hv and hv not in {"—", "-"}:
+        dev = Device.objects.filter(name=hv).first()
+        if dev is not None and hasattr(vm, "device_id"):
+            if getattr(vm, "device_id", None) != dev.pk:
+                vm.device = dev
+                changed = True
+
+    for field, header, caster in (
+        ("vcpus", "vCPUs", int),
+        ("memory", "Memory MB", int),
+        ("disk", "Disk GB", int),
+    ):
+        raw = _cell(cells, header)
+        if not raw or raw in {"—", "-"}:
+            continue
+        try:
+            val = caster(raw)
+            if getattr(vm, field) != val:
+                setattr(vm, field, val)
+                changed = True
+        except (TypeError, ValueError):
+            pass
+
+    merge_ch = _merge_audit_residual_onto_object(
+        vm, cells, consumed, attr_names=("comments", "description"), max_len=8000
+    )
+    if changed or merge_ch:
+        vm.save()
+        return "updated", "ok_updated"
+    return "skipped", "skipped_already_desired"
 
 
 def _apply_device_core(cells: dict[str, str], *, create_if_missing: bool) -> tuple[str, str]:
@@ -1955,6 +2299,8 @@ _APPLY_FUNCS: dict[str, Any] = {
     "serial_review": apply_serial_review,
     "bmc_documentation": apply_bmc_documentation,
     "bmc_alignment": apply_bmc_alignment,
+    "create_openstack_vm": apply_create_openstack_vm,
+    "update_openstack_vm": apply_update_openstack_vm,
 }
 
 

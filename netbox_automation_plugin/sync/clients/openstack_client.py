@@ -6,6 +6,7 @@ for bare-metal nodes (hostname + MAC + runtime IP + provider VLAN where availabl
 Supports optional multi-project scan (all Keystone projects or a comma-separated allow list).
 """
 
+import ipaddress
 import logging
 import re
 from collections import defaultdict
@@ -28,6 +29,8 @@ def fetch_openstack_data(config: dict):
       - networks: list of {id, name}
       - subnets: list of {id, cidr, network_id}
       - floating_ips: list of {floating_ip_address, fixed_ip_address, id, project_id, project_name}
+      - compute_instances: list of Nova server dicts (instance_id, name, status, hypervisor_hostname,
+        os_primary_ip from Nova addresses when details=True, …)
       - error: str if connection failed
       - openstack_projects_scanned: int (optional) when multi-project mode ran
     """
@@ -108,6 +111,7 @@ def _annotate_openstack_payload(payload: dict, region: str) -> None:
         "runtime_nics",
         "runtime_bmc",
         "subnet_consumers",
+        "compute_instances",
     ):
         for item in payload.get(key) or []:
             if isinstance(item, dict):
@@ -398,6 +402,143 @@ def _collect_subnet_consumers(conn, subnets: list[dict], networks: list[dict]) -
     return out
 
 
+def _iter_nova_address_entries(raw: dict, srv) -> list[tuple[str, int, str]]:
+    """
+    Parse Nova server addresses into (host, ip_version, type) with type fixed | floating | unknown.
+    """
+    addrs = raw.get("addresses")
+    if addrs is None:
+        addrs = getattr(srv, "addresses", None) or {}
+    if not isinstance(addrs, dict):
+        return []
+    out: list[tuple[str, int, str]] = []
+    for _net, lst in addrs.items():
+        if not isinstance(lst, list):
+            continue
+        for entry in lst:
+            if not isinstance(entry, dict):
+                continue
+            addr = str(entry.get("addr") or entry.get("address") or "").strip()
+            if not addr:
+                continue
+            try:
+                ver = int(entry.get("version") or 4)
+            except (TypeError, ValueError):
+                ver = 4
+            typ = str(entry.get("OS-EXT-IPS:type") or entry.get("type") or "").strip().lower() or "unknown"
+            try:
+                ipaddress.ip_address(addr.split("/", 1)[0])
+            except ValueError:
+                continue
+            out.append((addr.split("/", 1)[0], ver, typ))
+    return out
+
+
+def _pick_os_primary_ip(entries: list[tuple[str, int, str]]) -> str:
+    """
+    Prefer fixed over floating; then IPv4 over IPv6; stable order by address string.
+    """
+    if not entries:
+        return ""
+    fixed = [e for e in entries if e[2] == "fixed"]
+    pool = fixed if fixed else entries
+    v4 = [e for e in pool if e[1] == 4]
+    pick_from = v4 if v4 else pool
+    pick_from = sorted(pick_from, key=lambda e: e[0])
+    return pick_from[0][0] if pick_from else ""
+
+
+def _server_dict_for_audit(srv) -> dict:
+    """Normalize a Nova Server (openstacksdk) for drift / NetBox VM proposals."""
+    flavor = getattr(srv, "flavor", None)
+    vcpus, ram_mb, disk_gb = None, None, None
+    if isinstance(flavor, dict):
+        try:
+            vcpus = int(flavor["vcpus"]) if flavor.get("vcpus") is not None else None
+        except (TypeError, ValueError):
+            vcpus = None
+        try:
+            ram_mb = int(flavor["ram"]) if flavor.get("ram") is not None else None
+        except (TypeError, ValueError):
+            ram_mb = None
+        try:
+            disk_gb = int(flavor["disk"]) if flavor.get("disk") is not None else None
+        except (TypeError, ValueError):
+            disk_gb = None
+    elif flavor is not None:
+        try:
+            vcpus = int(getattr(flavor, "vcpus", None) or 0) or None
+        except (TypeError, ValueError):
+            vcpus = None
+        try:
+            ram_mb = int(getattr(flavor, "ram", None) or 0) or None
+        except (TypeError, ValueError):
+            ram_mb = None
+        try:
+            disk_gb = int(getattr(flavor, "disk", None) or 0) or None
+        except (TypeError, ValueError):
+            disk_gb = None
+
+    raw: dict = {}
+    try:
+        if hasattr(srv, "to_dict"):
+            raw = srv.to_dict() or {}
+    except Exception:
+        raw = {}
+    compute_host = (
+        raw.get("OS-EXT-SRV-ATTR:host")
+        or getattr(srv, "compute_host", None)
+        or getattr(srv, "hypervisor_hostname", None)
+        or ""
+    )
+    compute_host = str(compute_host or "").strip()
+
+    iid = str(getattr(srv, "id", "") or "").strip()
+    name = str(getattr(srv, "name", "") or "").strip()
+    status = str(getattr(srv, "status", "") or "").strip()
+    proj = str(
+        getattr(srv, "project_id", None) or getattr(srv, "tenant_id", None) or ""
+    ).strip()
+
+    addr_entries = _iter_nova_address_entries(raw, srv)
+    os_primary_ip = _pick_os_primary_ip(addr_entries)
+
+    return {
+        "instance_id": iid,
+        "name": name,
+        "status": status,
+        "project_id": proj[:36] if proj else "",
+        "project_name": "",  # filled by caller with display label when known
+        "hypervisor_hostname": compute_host[:255] if compute_host else "",
+        "vcpus": vcpus,
+        "memory_mb": ram_mb,
+        "disk_gb": disk_gb,
+        "os_primary_ip": os_primary_ip,
+    }
+
+
+def _collect_compute_instances(
+    conn,
+    project_label: str,
+    *,
+    force_project_label_display: bool = False,
+) -> list:
+    """
+    List Nova servers (VMs and Ironic bare-metal instances) for Virtual Machine drift.
+    """
+    out: list[dict] = []
+    try:
+        for srv in conn.compute.servers(details=True):
+            row = _server_dict_for_audit(srv)
+            if not row.get("instance_id") or not row.get("name"):
+                continue
+            row["project_name"] = project_label if force_project_label_display else project_label
+            out.append(row)
+    except Exception as e:
+        logger.warning("OpenStack: Nova server list failed: %s", e)
+    return out
+
+
 def _normalize_mac_neutron(mac: str) -> str:
     if not mac:
         return ""
@@ -667,12 +808,14 @@ def _merge_openstack_into_maps(
     runtime_by_key: dict,
     bmc_by_key: dict,
     subnet_consumers_by_sid: dict,
+    instances_by_id: dict,
     networks: list,
     subnets: list,
     floating_ips: list,
     runtime_nics: list,
     runtime_bmc: list,
     subnet_consumers: list,
+    compute_instances: list,
 ) -> None:
     for n in networks:
         nid = n.get("id")
@@ -702,6 +845,10 @@ def _merge_openstack_into_maps(
         sid = (sc.get("subnet_id") or "").strip()
         if sid:
             subnet_consumers_by_sid[sid] = sc
+    for inst in compute_instances or []:
+        iid = (inst.get("instance_id") or "").strip()
+        if iid:
+            instances_by_id[iid] = inst
 
 
 def _allowlist_matches_project(allow_norm: set, proj_id: str, proj_name: str) -> bool:
@@ -753,6 +900,7 @@ def _fetch_single_project(openstack, config: dict) -> dict:
         "runtime_nics": [],
         "runtime_bmc": [],
         "subnet_consumers": [],
+        "compute_instances": [],
         "error": None,
         "openstack_projects_scanned": 1,
     }
@@ -769,12 +917,14 @@ def _fetch_single_project(openstack, config: dict) -> dict:
     rn = _collect_runtime_nics(conn, n)
     rb = _collect_runtime_bmc(conn)
     sc = _collect_subnet_consumers(conn, s, n)
+    ci = _collect_compute_instances(conn, project_label, force_project_label_display=False)
     result["networks"] = n
     result["subnets"] = s
     result["floating_ips"] = f
     result["runtime_nics"] = rn
     result["runtime_bmc"] = rb
     result["subnet_consumers"] = sc
+    result["compute_instances"] = ci
     _annotate_openstack_payload(result, _resolved_openstack_region_name(config))
     return result
 
@@ -790,6 +940,7 @@ def _fetch_multi_project(openstack, config: dict, audit_all: bool, allowlist: li
         "runtime_nics": [],
         "runtime_bmc": [],
         "subnet_consumers": [],
+        "compute_instances": [],
         "error": None,
         "openstack_projects_scanned": 0,
     }
@@ -799,6 +950,7 @@ def _fetch_multi_project(openstack, config: dict, audit_all: bool, allowlist: li
     runtime_by_key: dict = {}
     bmc_by_key: dict = {}
     subnet_consumers_by_sid: dict = {}
+    instances_by_id: dict = {}
     scan_errors: list[str] = []
 
     allow_tokens = [str(x).strip() for x in (allowlist or []) if str(x).strip()]
@@ -869,6 +1021,7 @@ def _fetch_multi_project(openstack, config: dict, audit_all: bool, allowlist: li
             rn = _collect_runtime_nics(conn, n)
             rb = _collect_runtime_bmc(conn)
             sc = _collect_subnet_consumers(conn, s, n)
+            ci = _collect_compute_instances(conn, label, force_project_label_display=True)
             _merge_openstack_into_maps(
                 nets_by_id,
                 subs_by_id,
@@ -876,12 +1029,14 @@ def _fetch_multi_project(openstack, config: dict, audit_all: bool, allowlist: li
                 runtime_by_key,
                 bmc_by_key,
                 subnet_consumers_by_sid,
+                instances_by_id,
                 n,
                 s,
                 f,
                 rn,
                 rb,
                 sc,
+                ci,
             )
             result["openstack_projects_scanned"] += 1
         except Exception as e:
@@ -895,6 +1050,7 @@ def _fetch_multi_project(openstack, config: dict, audit_all: bool, allowlist: li
     result["runtime_nics"] = list(runtime_by_key.values())
     result["runtime_bmc"] = list(bmc_by_key.values())
     result["subnet_consumers"] = list(subnet_consumers_by_sid.values())
+    result["compute_instances"] = list(instances_by_id.values())
 
     if result["openstack_projects_scanned"] == 0 and scan_errors:
         result["error"] = "; ".join(scan_errors[:5])
@@ -923,6 +1079,7 @@ def fetch_openstack_data_for_config(config: dict):
         "runtime_nics": [],
         "runtime_bmc": [],
         "subnet_consumers": [],
+        "compute_instances": [],
         "error": None,
     }
 
