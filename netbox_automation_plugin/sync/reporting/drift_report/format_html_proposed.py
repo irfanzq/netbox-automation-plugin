@@ -1,5 +1,18 @@
 """PROPOSED CHANGES and summary tables for the drift HTML/ASCII report."""
 
+from netbox_automation_plugin.sync.reporting.drift_report.drift_overrides_apply import (
+    HEADERS_BMC_EXISTING,
+    HEADERS_BMC_NEW_DEVICES,
+    HEADERS_DETAIL_NEW_DEVICES,
+    HEADERS_DETAIL_NEW_FIPS,
+    HEADERS_DETAIL_NEW_IP_RANGES,
+    HEADERS_DETAIL_NEW_NICS,
+    HEADERS_DETAIL_NEW_PREFIXES,
+    HEADERS_DETAIL_NIC_DRIFT,
+    HEADERS_SERIAL_REVIEW,
+    _new_nic_row_is_os_authority,
+    _update_nic_row_is_os_authority,
+)
 from netbox_automation_plugin.sync.reporting.drift_report.maas_netbox_status import (
     maas_to_netbox_mapping_reference_rows,
 )
@@ -75,30 +88,7 @@ def emit_proposed_change_tables(e, prop):
         e.subtitle("Detail — new devices")
         e.spacer()
         e.table(
-            [
-                "Hostname",
-                "NB proposed region",
-                "NB proposed site",
-                "NB proposed location",
-                "OS region",
-                "OS provision",
-                "OS power",
-                "OS maintenance",
-                "NB proposed device type",
-                "NB proposed role",
-                "MAAS fabric",
-                "MAAS status",
-                "Serial Number",
-                "Power type",
-                "BMC present",
-                "NIC count",
-                "Primary MAC (MAAS)",
-                "Primary MAC (OS)",
-                "Authority",
-                "NB proposed device status",
-                "NB proposed tag",
-                "Proposed Action",
-            ],
+            list(HEADERS_DETAIL_NEW_DEVICES),
             prop["add_devices"],
             dynamic_columns=True,
             wrap_max_width=None,
@@ -111,30 +101,7 @@ def emit_proposed_change_tables(e, prop):
         e.subtitle("Detail — MAAS-only hosts (manual review required)")
         e.spacer()
         e.table(
-            [
-                "Hostname",
-                "NB proposed region",
-                "NB proposed site",
-                "NB proposed location",
-                "OS region",
-                "OS provision",
-                "OS power",
-                "OS maintenance",
-                "NB proposed device type",
-                "NB proposed role",
-                "MAAS fabric",
-                "MAAS status",
-                "Serial Number",
-                "Power type",
-                "BMC present",
-                "NIC count",
-                "Primary MAC (MAAS)",
-                "Primary MAC (OS)",
-                "Authority",
-                "NB proposed device status",
-                "NB proposed tag",
-                "Proposed Action",
-            ],
+            list(HEADERS_DETAIL_NEW_DEVICES),
             prop["add_devices_review_only"],
             dynamic_columns=True,
             wrap_max_width=None,
@@ -154,22 +121,7 @@ def emit_proposed_change_tables(e, prop):
         )
         e.spacer()
         e.table(
-            [
-                "OS region",
-                "CIDR",
-                "OS Description",
-                "Project",
-                "NB Proposed Prefix description (editable)",
-                "NB Proposed Tenant",
-                "NB Proposed Scope",
-                "NB Proposed VLAN",
-                "NB proposed role",
-                "NB proposed status",
-                "NB proposed VRF",
-                "Role reason",
-                "Authority",
-                "Proposed Action",
-            ],
+            list(HEADERS_DETAIL_NEW_PREFIXES),
             prop["add_prefixes"],
             dynamic_columns=True,
             wrap_max_width=None,
@@ -187,20 +139,7 @@ def emit_proposed_change_tables(e, prop):
         )
         e.spacer()
         e.table(
-            [
-                "OS region",
-                "CIDR",
-                "Start address",
-                "End address",
-                "OS Pool Description",
-                "NB Proposed Description",
-                "Project",
-                "NB proposed status",
-                "NB proposed role",
-                "NB proposed VRF",
-                "Authority",
-                "Proposed Action",
-            ],
+            list(HEADERS_DETAIL_NEW_IP_RANGES),
             prop["add_ip_ranges"],
             dynamic_columns=True,
             wrap_max_width=None,
@@ -214,18 +153,7 @@ def emit_proposed_change_tables(e, prop):
         e.subtitle("Detail — new floating IPs")
         e.spacer()
         e.table(
-            [
-                "OS region",
-                "Floating IP",
-                "Name",
-                "NAT inside IP (from OpenStack fixed IP)",
-                "Project",
-                "NB Proposed Tenant",
-                "NB proposed status",
-                "NB proposed role",
-                "NB proposed VRF",
-                "Proposed Action",
-            ],
+            list(HEADERS_DETAIL_NEW_FIPS),
             prop["add_fips"],
             dynamic_columns=True,
             wrap_max_width=None,
@@ -253,32 +181,9 @@ def emit_proposed_change_tables(e, prop):
         e.spacer()
         e.subtitle("Detail — new NICs")
         e.spacer()
-        headers = [
-            "Host",
-            "NB site",
-            "NB location",
-            "MAAS intf",
-            "MAAS fabric",
-            "MAAS MAC",
-            "MAAS IPs",
-            "MAAS VLAN",
-            "MAAS link speed",
-            "OS link speed",
-            "OS LLDP / switch_info",
-            "MAAS NIC model",
-            "OS region",
-            "OS MAC",
-            "OS runtime IP",
-            "OS runtime VLAN",
-            "Authority",
-            "NB Proposed intf Label",
-            "NB Proposed intf Type",
-            "Suggested NB name",
-            "Proposed properties",
-            "Risk",
-        ]
-        os_rows = [r for r in prop["add_nb_interfaces"] if len(r) > 16 and str(r[16]).strip() == "[OS]"]
-        maas_rows = [r for r in prop["add_nb_interfaces"] if len(r) <= 16 or str(r[16]).strip() != "[OS]"]
+        headers = list(HEADERS_DETAIL_NEW_NICS)
+        os_rows = [r for r in prop["add_nb_interfaces"] if _new_nic_row_is_os_authority(r)]
+        maas_rows = [r for r in prop["add_nb_interfaces"] if not _new_nic_row_is_os_authority(r)]
         e.paragraph(
             f"Authority split: OS runtime={len(os_rows)} row(s), MAAS fallback={len(maas_rows)} row(s)."
         )
@@ -312,33 +217,9 @@ def emit_proposed_change_tables(e, prop):
         e.spacer()
         e.subtitle("Detail — NIC drift")
         e.spacer()
-        headers = [
-            "Host",
-            "MAAS intf",
-            "MAAS fabric",
-            "MAAS MAC",
-            "MAAS IPs",
-            "MAAS VLAN",
-            "MAAS link speed",
-            "OS link speed",
-            "OS LLDP / switch_info",
-            "MAAS NIC model",
-            "OS region",
-            "OS MAC",
-            "OS runtime IP",
-            "OS runtime VLAN",
-            "Authority",
-            "NB intf",
-            "NB MAC",
-            "NB IPs",
-            "NB VLAN",
-            "NB Proposed intf Label",
-            "NB Proposed intf Type",
-            "Proposed Action",
-            "Risk",
-        ]
-        os_rows = [r for r in prop["update_nic"] if len(r) > 14 and str(r[14]).strip() == "[OS]"]
-        maas_rows = [r for r in prop["update_nic"] if len(r) <= 14 or str(r[14]).strip() != "[OS]"]
+        headers = list(HEADERS_DETAIL_NIC_DRIFT)
+        os_rows = [r for r in prop["update_nic"] if _update_nic_row_is_os_authority(r)]
+        maas_rows = [r for r in prop["update_nic"] if not _update_nic_row_is_os_authority(r)]
         e.paragraph(
             f"Authority split: OS runtime={len(os_rows)} row(s), MAAS fallback={len(maas_rows)} row(s)."
         )
@@ -374,29 +255,7 @@ def emit_proposed_change_tables(e, prop):
         e.subtitle("Detail — new BMC / OOB interfaces")
         e.spacer()
         e.table(
-            [
-                "Host",
-                "OS BMC IP",
-                "OS mgmt type",
-                "OS vendor",
-                "OS model",
-                "MAAS BMC IP",
-                "MAAS power_type",
-                "MAAS vendor",
-                "MAAS product",
-                "MAAS BMC MAC",
-                "MAAS link speed",
-                "OS link speed",
-                "OS LLDP / switch_info",
-                "MAAS NIC model",
-                "NB Proposed intf Label",
-                "NB Proposed intf Type",
-                "Suggested NB mgmt iface",
-                "NB mgmt iface IP",
-                "Authority",
-                "Proposed action",
-                "Risk",
-            ],
+            list(HEADERS_BMC_NEW_DEVICES),
             prop["add_mgmt_iface_new_devices"],
             dynamic_columns=True,
             wrap_max_width=None,
@@ -410,29 +269,7 @@ def emit_proposed_change_tables(e, prop):
         e.subtitle("Detail — existing BMC / OOB")
         e.spacer()
         e.table(
-            [
-                "Host",
-                "OS BMC IP",
-                "OS mgmt type",
-                "MAAS BMC IP",
-                "MAAS power_type",
-                "MAAS BMC MAC",
-                "MAAS link speed",
-                "OS link speed",
-                "OS LLDP / switch_info",
-                "MAAS NIC model",
-                "NB Proposed intf Label",
-                "NB Proposed intf Type",
-                "Suggested NB OOB Port",
-                "NetBox OOB",
-                "NB IP coverage",
-                "Actual NB Port Carrying BMC IP",
-                "NB OOB MAC",
-                "Authority",
-                "Status",
-                "Proposed action",
-                "Risk",
-            ],
+            list(HEADERS_BMC_EXISTING),
             prop["add_mgmt_iface"],
             dynamic_columns=True,
             wrap_max_width=None,
@@ -455,7 +292,7 @@ def emit_proposed_change_tables(e, prop):
         e.subtitle("Detail — serials")
         e.spacer()
         e.table(
-            ["Hostname", "MAAS Serial", "NetBox Serial", "Proposed Action", "Risk"],
+            list(HEADERS_SERIAL_REVIEW),
             prop["review_serial"],
             dynamic_columns=True,
             wrap_max_width=None,

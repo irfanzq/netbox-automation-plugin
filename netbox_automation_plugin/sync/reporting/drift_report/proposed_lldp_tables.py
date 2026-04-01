@@ -376,9 +376,9 @@ def build_lldp_drift_rows(
                 ) + action_new
             lldp_new.append([
                 host,
+                maas_int,
                 os_reg,
                 mac,
-                maas_int,
                 os_switch,
                 os_switch_mac,
                 os_port,
@@ -392,17 +392,17 @@ def build_lldp_drift_rows(
             snippet = os_lldp[:180] + ("…" if len(os_lldp) > 180 else "")
             lldp_update.append([
                 host,
+                maas_int,
                 os_reg,
+                mac,
+                os_switch,
+                os_switch_mac,
+                os_port,
                 nb_site,
                 nb_loc,
                 nb_iface,
                 nb_mac,
                 nb_peer,
-                mac,
-                maas_int,
-                os_switch,
-                os_switch_mac,
-                os_port,
                 nb_port_disp,
                 nb_port_status,
                 (
@@ -417,6 +417,6 @@ def build_lldp_drift_rows(
                 ),
             ])
 
-    lldp_new.sort(key=lambda row: ((row[0] or "").lower(), row[2] or ""))
-    lldp_update.sort(key=lambda row: ((row[0] or "").lower(), row[7] or ""))  # OS MAC
+    lldp_new.sort(key=lambda row: ((row[0] or "").lower(), row[3] or ""))
+    lldp_update.sort(key=lambda row: ((row[0] or "").lower(), row[3] or ""))
     return lldp_new, lldp_update

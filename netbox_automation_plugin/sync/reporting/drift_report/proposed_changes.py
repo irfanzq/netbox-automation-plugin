@@ -21,6 +21,10 @@ from netbox_automation_plugin.sync.reporting.drift_report.placement import (
     _maas_machine_by_hostname,
     _netbox_placement_from_maas_machine,
 )
+from netbox_automation_plugin.sync.reporting.drift_report.proposed_nic_derived import (
+    NIC_DRIFT_AUTHORITY_COL_INDEX,
+    bmc_row_proposed_defaults,
+)
 from netbox_automation_plugin.sync.reporting.drift_report.proposed_nic_drift import (
     _build_review_serial_rows,
     _build_update_nic_rows,
@@ -1014,26 +1018,26 @@ def _proposed_changes_rows(
                 out.append(
                     [
                         h,
-                        nb_site,
-                        nb_loc,
                         maas_if,
                         maas_fab,
                         mac,
                         ips,
                         vlan,
                         ex["maas_link_speed_disp"],
+                        ex["maas_nic_model"],
                         ex["os_link_speed_disp"],
                         ex["os_switch_disp"],
-                        ex["maas_nic_model"],
                         os_reg,
                         os_mac,
                         os_ip,
                         os_vlan,
-                        "[OS]" if os_has_runtime else "[MAAS]",
+                        nb_site,
+                        nb_loc,
                         ex["nb_proposed_intf_label"],
                         ex["nb_proposed_intf_type"],
                         suggested_name,
                         props,
+                        "[OS]" if os_has_runtime else "[MAAS]",
                         "Medium",
                     ]
                 )
@@ -1081,10 +1085,6 @@ def _proposed_changes_rows(
             mac_norm = _normalize_mac(bmc_mac_hint) if bmc_mac_hint else ""
             if mac_norm and "SET_NETBOX_OOB_MAC=" not in action:
                 action += f"; SET_NETBOX_OOB_MAC={mac_norm}"
-            from netbox_automation_plugin.sync.reporting.drift_report.proposed_nic_derived import (
-                bmc_row_proposed_defaults,
-            )
-
             bx = bmc_row_proposed_defaults(m)
             if maas_vendor not in ("—", "") and maas_product not in ("—", ""):
                 bx["maas_nic_model"] = f"{maas_vendor[:32]} / {maas_product[:64]}"
@@ -1095,23 +1095,23 @@ def _proposed_changes_rows(
             out.append(
                 [
                     h,
-                    os_bmc_ip or "—",
-                    os_mgmt_type or "—",
-                    os_vendor,
-                    os_model,
                     bmc_ip or "—",
                     power_type or "—",
                     maas_vendor,
                     maas_product,
                     str(m.get("bmc_mac") or "—"),
                     bx["maas_link_speed_disp"],
+                    bx["maas_nic_model"],
+                    os_bmc_ip or "—",
+                    os_mgmt_type or "—",
+                    os_vendor,
+                    os_model,
                     bx["os_link_speed_disp"],
                     bx["os_switch_disp"],
-                    bx["maas_nic_model"],
                     bx["nb_proposed_intf_label"],
                     bx["nb_proposed_intf_type"],
                     mgmt,
-                    bmc_ip or "—",
+                    str(target_ip or "").strip() or "—",
                     authority_badge,
                     action,
                     "Medium",
@@ -1184,37 +1184,36 @@ def _proposed_changes_rows(
         else:
             proposed_tag = "review-only"
         nb_prop_state = proposed_netbox_status_for_new_maas_machine(m, osr)
-        tail = [
+        serial = str(m.get("serial") or "—")
+        action = (
+            "CREATE_NETBOX_DEVICE_AND_PORTS"
+            if is_candidate
+            else "REVIEW_ONLY_NOT_SAFE_CANDIDATE"
+        )
+        row = [
+            h,
+            maas_fabric_disp,
+            str(m.get("status_name", "-")),
+            serial,
             power_type,
             bmc_present,
             str(nic_count),
             primary_mac,
-            primary_mac_os,
-            authority_badge,
-            nb_prop_state,
-            proposed_tag,
-            (
-                "CREATE_NETBOX_DEVICE_AND_PORTS"
-                if is_candidate
-                else "REVIEW_ONLY_NOT_SAFE_CANDIDATE"
-            ),
-        ]
-        head_common = [
-            h,
-            nb_region,
-            nb_site,
-            nb_loc,
             os_reg,
             os_prov,
             os_pow,
             os_maint,
+            primary_mac_os,
+            nb_region,
+            nb_site,
+            nb_loc,
             nb_dtype,
             nb_role,
-            maas_fabric_disp,
-            str(m.get("status_name", "-")),
+            nb_prop_state,
+            proposed_tag,
+            authority_badge,
+            action,
         ]
-        serial = str(m.get("serial") or "—")
-        row = [*head_common, serial, *tail]
         if is_candidate:
             add_devices.append((status_rank, h.lower(), row))
         else:
@@ -1292,7 +1291,7 @@ def _proposed_changes_rows(
     # Enforce host-level authority gate across NIC drift rows:
     # - non-authoritative OS host: never keep OS-only NIC rows
     # - remaining rows on that host are treated as MAAS fallback authority
-    _nic_drift_auth_col = 14
+    _nic_drift_auth_col = NIC_DRIFT_AUTHORITY_COL_INDEX
     filtered_update_nic = []
     for row in update_nic:
         if len(row) <= _nic_drift_auth_col:

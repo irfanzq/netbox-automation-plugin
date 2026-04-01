@@ -238,11 +238,17 @@ def _build_proposed_mgmt_interface_rows(
         m = maas_by_hostname.get(h) or {}
         bmc = (m.get("bmc_ip") or "").strip()
         pt = (m.get("power_type") or "").strip() or "—"
+        maas_vendor = str(m.get("hardware_vendor") or "").strip() or "—"
+        maas_product = str(m.get("hardware_product") or "").strip() or "—"
         os_row = os_bmc_by_h.get(h.lower()) or {}
         os_bmc_ip = (os_row.get("os_bmc_ip") or "").strip()
         os_drv = (os_row.get("driver") or "").strip()
         os_pif = (os_row.get("power_interface") or "").strip()
         os_vendor = (os_row.get("vendor") or "").strip()
+        os_model = (
+            str(os_row.get("model") or os_row.get("product") or os_row.get("hardware_model") or "")
+            .strip() or "—"
+        )
         authority = "openstack_runtime" if _os_is_authoritative_for_host(os_row) else "maas_fallback"
         authority_badge = "[OS]" if authority == "openstack_runtime" else "[MAAS]"
         bmc_effective = os_bmc_ip or bmc
@@ -276,15 +282,18 @@ def _build_proposed_mgmt_interface_rows(
             out.append([
                 h,
                 "—",
-                "—",
-                "—",
-                "—",
                 pt,
+                maas_vendor,
+                maas_product,
                 maas_mac or "—",
                 bx["maas_link_speed_disp"],
+                bx["maas_nic_model"],
+                "—",
+                "—",
+                "—",
+                "—",
                 bx["os_link_speed_disp"],
                 bx["os_switch_disp"],
-                bx["maas_nic_model"],
                 bx["nb_proposed_intf_label"],
                 bx["nb_proposed_intf_type"],
                 maas_oob_new,
@@ -466,15 +475,19 @@ def _build_proposed_mgmt_interface_rows(
         bx = _bmc_drift_extra_columns(m)
         out.append([
             h,
-            os_bmc_ip or "—",
-            (os_drv or os_pif or "—"),
             bmc or "—",
             pt,
+            maas_vendor,
+            maas_product,
             maas_mac or "—",
             bx["maas_link_speed_disp"],
+            bx["maas_nic_model"],
+            os_bmc_ip or "—",
+            (os_drv or os_pif or "—"),
+            os_vendor or "—",
+            os_model,
             bx["os_link_speed_disp"],
             bx["os_switch_disp"],
-            bx["maas_nic_model"],
             bx["nb_proposed_intf_label"],
             bx["nb_proposed_intf_type"],
             oob_port_hint,

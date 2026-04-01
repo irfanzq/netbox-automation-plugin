@@ -38,22 +38,21 @@ def _build_add_nb_interface_rows(interface_audit):
             )
             out.append([
                 hn,
-                nb_site,
-                nb_loc,
                 maas_if,
                 maas_fab,
                 mac,
                 ips,
                 vlan,
                 ex["maas_link_speed_disp"],
+                ex["maas_nic_model"],
                 ex["os_link_speed_disp"],
                 ex["os_switch_disp"],
-                ex["maas_nic_model"],
                 os_region,
                 os_mac or "—",
                 os_ip or "—",
                 os_vlan or "—",
-                authority_badge,
+                nb_site,
+                nb_loc,
                 ex["nb_proposed_intf_label"],
                 ex["nb_proposed_intf_type"],
                 (
@@ -62,6 +61,7 @@ def _build_add_nb_interface_rows(interface_audit):
                     else (f"maas-nic-{mac.replace(':', '')[-6:]}" if mac else "maas-nic")
                 ),
                 props,
+                authority_badge,
                 "Medium",
             ])
     return sorted(out, key=lambda x: (x[0] or "").lower())

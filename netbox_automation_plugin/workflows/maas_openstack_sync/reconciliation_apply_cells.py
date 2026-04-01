@@ -398,7 +398,7 @@ RECON_CELL_PREVIEW_KEYS_BY_SELECTION: dict[str, tuple[str, ...]] = {
         "Proposed action",
     ),
     "detail_serial_review": (
-        "Hostname",
+        "Host",
         "MAAS Serial",
         "NetBox Serial",
         "Proposed Action",
@@ -538,6 +538,8 @@ def _merge_interface_role_tag(iface, label_cell: str) -> bool:
     raw = str(label_cell or "").strip()
     if not raw or raw in ("—", "-"):
         return False
+    if raw.upper() == "DATA":
+        raw = "Data"
     slug_base = slugify(raw) or "tag"
     slug = slug_base[:50]
     tag, _ = Tag.objects.get_or_create(

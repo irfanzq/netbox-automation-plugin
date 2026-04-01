@@ -18,8 +18,19 @@ from netbox_automation_plugin.sync.reporting.drift_report.metrics import (
 )
 from netbox_automation_plugin.sync.reporting.drift_report.placement import _drift_for_user_reports
 from netbox_automation_plugin.sync.reporting.drift_report.drift_overrides_apply import (
+    HEADERS_BMC_EXISTING,
+    HEADERS_BMC_NEW_DEVICES,
+    HEADERS_DETAIL_NEW_DEVICES,
+    HEADERS_DETAIL_NEW_FIPS,
+    HEADERS_DETAIL_NEW_IP_RANGES,
+    HEADERS_DETAIL_NEW_NICS,
+    HEADERS_DETAIL_NEW_PREFIXES,
+    HEADERS_DETAIL_NIC_DRIFT,
+    HEADERS_SERIAL_REVIEW,
     merge_drift_review_overrides,
     normalize_drift_review_overrides,
+    _new_nic_row_is_os_authority,
+    _update_nic_row_is_os_authority,
 )
 from netbox_automation_plugin.sync.reporting.drift_report.proposed_changes import (
     _proposed_changes_rows,
@@ -298,8 +309,8 @@ def build_drift_report_xlsx(
     ws_prop.cell(row=1, column=1).font = header_font
     ws_prop.append([])
     _append_header(ws_prop, ["Section", "Count"])
-    nic_drift_os = [r for r in prop["update_nic"] if len(r) > 14 and str(r[14]).strip() == "[OS]"]
-    nic_drift_maas = [r for r in prop["update_nic"] if len(r) <= 14 or str(r[14]).strip() != "[OS]"]
+    nic_drift_os = [r for r in prop["update_nic"] if _update_nic_row_is_os_authority(r)]
+    nic_drift_maas = [r for r in prop["update_nic"] if not _update_nic_row_is_os_authority(r)]
     ws_prop.append(["New devices (MAAS fallback)", len(prop["add_devices"])])
     ws_prop.append(["Review-only MAAS-only hosts", len(prop.get("add_devices_review_only", []))])
     ws_prop.append(["New prefixes (OpenStack authority)", len(prop["add_prefixes"])])
@@ -323,78 +334,17 @@ def build_drift_report_xlsx(
 
     _append_block(
         "A) New devices",
-        [
-            "Hostname",
-            "NB proposed region",
-            "NB proposed site",
-            "NB proposed location",
-            "OS region",
-            "OS provision",
-            "OS power",
-            "OS maintenance",
-            "NB proposed device type",
-            "NB proposed role",
-            "MAAS fabric",
-            "MAAS status",
-            "Serial Number",
-            "Power type",
-            "BMC present",
-            "NIC count",
-            "Primary MAC (MAAS)",
-            "Primary MAC (OS)",
-            "Authority",
-            "NB proposed device status",
-            "NB proposed tag",
-            "Proposed Action",
-        ],
+        list(HEADERS_DETAIL_NEW_DEVICES),
         prop["add_devices"],
     )
     _append_block(
         "A) MAAS-only hosts (manual review required)",
-        [
-            "Hostname",
-            "NB proposed region",
-            "NB proposed site",
-            "NB proposed location",
-            "OS region",
-            "OS provision",
-            "OS power",
-            "OS maintenance",
-            "NB proposed device type",
-            "NB proposed role",
-            "MAAS fabric",
-            "MAAS status",
-            "Serial Number",
-            "Power type",
-            "BMC present",
-            "NIC count",
-            "Primary MAC (MAAS)",
-            "Primary MAC (OS)",
-            "Authority",
-            "NB proposed device status",
-            "NB proposed tag",
-            "Proposed Action",
-        ],
+        list(HEADERS_DETAIL_NEW_DEVICES),
         prop.get("add_devices_review_only", []),
     )
     _append_block(
         "A) New prefixes",
-        [
-            "OS region",
-            "CIDR",
-            "OS Description",
-            "Project",
-            "NB Proposed Prefix description (editable)",
-            "NB Proposed Tenant",
-            "NB Proposed Scope",
-            "NB Proposed VLAN",
-            "NB proposed role",
-            "NB proposed status",
-            "NB proposed VRF",
-            "Role reason",
-            "Authority",
-            "Proposed Action",
-        ],
+        list(HEADERS_DETAIL_NEW_PREFIXES),
         prop["add_prefixes"],
         note=(
             "NB proposed status: reserved when no Neutron ports were counted on that subnet in this scan; "
@@ -404,166 +354,49 @@ def build_drift_report_xlsx(
     )
     _append_block(
         "A) New IP ranges (allocation pools)",
-        [
-            "OS region",
-            "CIDR",
-            "Start address",
-            "End address",
-            "OS Pool Description",
-            "NB Proposed Description",
-            "Project",
-            "NB proposed status",
-            "NB proposed role",
-            "NB proposed VRF",
-            "Authority",
-            "Proposed Action",
-        ],
+        list(HEADERS_DETAIL_NEW_IP_RANGES),
         prop.get("add_ip_ranges", []),
     )
     _append_block(
         "A) New floating IPs",
-        [
-            "OS region",
-            "Floating IP",
-            "Name",
-            "NAT inside IP (from OpenStack fixed IP)",
-            "Project",
-            "NB Proposed Tenant",
-            "NB proposed status",
-            "NB proposed role",
-            "NB proposed VRF",
-            "Proposed Action",
-        ],
+        list(HEADERS_DETAIL_NEW_FIPS),
         prop["add_fips"],
     )
-    new_nics_os = [r for r in prop["add_nb_interfaces"] if len(r) > 16 and str(r[16]).strip() == "[OS]"]
-    new_nics_maas = [r for r in prop["add_nb_interfaces"] if len(r) <= 16 or str(r[16]).strip() != "[OS]"]
-    _nic_new_headers = [
-        "Host",
-        "NB site",
-        "NB location",
-        "MAAS intf",
-        "MAAS fabric",
-        "MAAS MAC",
-        "MAAS IPs",
-        "MAAS VLAN",
-        "MAAS link speed",
-        "OS link speed",
-        "OS LLDP / switch_info",
-        "MAAS NIC model",
-        "OS region",
-        "OS MAC",
-        "OS runtime IP",
-        "OS runtime VLAN",
-        "Authority",
-        "NB Proposed intf Label",
-        "NB Proposed intf Type",
-        "Suggested NB name",
-        "Proposed properties",
-        "Risk",
-    ]
+    new_nics_os = [r for r in prop["add_nb_interfaces"] if _new_nic_row_is_os_authority(r)]
+    new_nics_maas = [r for r in prop["add_nb_interfaces"] if not _new_nic_row_is_os_authority(r)]
     _append_block(
         "B) New NICs (OS authority)",
-        _nic_new_headers,
+        list(HEADERS_DETAIL_NEW_NICS),
         new_nics_os,
     )
     _append_block(
         "B) New NICs (MAAS authority)",
-        _nic_new_headers,
+        list(HEADERS_DETAIL_NEW_NICS),
         new_nics_maas,
     )
-    _nic_drift_headers = [
-        "Host",
-        "MAAS intf",
-        "MAAS fabric",
-        "MAAS MAC",
-        "MAAS IPs",
-        "MAAS VLAN",
-        "MAAS link speed",
-        "OS link speed",
-        "OS LLDP / switch_info",
-        "MAAS NIC model",
-        "OS region",
-        "OS MAC",
-        "OS runtime IP",
-        "OS runtime VLAN",
-        "Authority",
-        "NB intf",
-        "NB MAC",
-        "NB IPs",
-        "NB VLAN",
-        "NB Proposed intf Label",
-        "NB Proposed intf Type",
-        "Proposed Action",
-        "Risk",
-    ]
     _append_block(
         "B) NIC drift (OS runtime authority)",
-        _nic_drift_headers,
+        list(HEADERS_DETAIL_NIC_DRIFT),
         nic_drift_os,
     )
     _append_block(
         "B) NIC drift (MAAS fallback authority)",
-        _nic_drift_headers,
+        list(HEADERS_DETAIL_NIC_DRIFT),
         nic_drift_maas,
     )
     _append_block(
         "B) BMC / OOB",
-        [
-            "Host",
-            "OS BMC IP",
-            "OS mgmt type",
-            "MAAS BMC IP",
-            "MAAS power_type",
-            "MAAS BMC MAC",
-            "MAAS link speed",
-            "OS link speed",
-            "OS LLDP / switch_info",
-            "MAAS NIC model",
-            "NB Proposed intf Label",
-            "NB Proposed intf Type",
-            "Suggested NB OOB Port",
-            "NetBox OOB",
-            "NB IP coverage",
-            "Actual NB Port Carrying BMC IP",
-            "NB OOB MAC",
-            "Authority",
-            "Status",
-            "Proposed action",
-            "Risk",
-        ],
+        list(HEADERS_BMC_EXISTING),
         prop["add_mgmt_iface"],
     )
     _append_block(
         "B) New-device BMC / OOB interfaces",
-        [
-            "Host",
-            "OS BMC IP",
-            "OS mgmt type",
-            "OS vendor",
-            "OS model",
-            "MAAS BMC IP",
-            "MAAS power_type",
-            "MAAS vendor",
-            "MAAS product",
-            "MAAS BMC MAC",
-            "MAAS link speed",
-            "OS link speed",
-            "OS LLDP / switch_info",
-            "MAAS NIC model",
-            "NB Proposed intf Label",
-            "NB Proposed intf Type",
-            "Suggested NB mgmt iface",
-            "NB mgmt iface IP",
-            "Authority",
-            "Proposed action",
-            "Risk",
-        ],
+        list(HEADERS_BMC_NEW_DEVICES),
         prop.get("add_mgmt_iface_new_devices", []),
     )
     _append_block(
         "C) Serials",
-        ["Hostname", "MAAS Serial", "NetBox Serial", "Proposed Action", "Risk"],
+        list(HEADERS_SERIAL_REVIEW),
         prop["review_serial"],
     )
 

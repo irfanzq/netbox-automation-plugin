@@ -6,6 +6,11 @@ import copy
 import json
 from typing import Any
 
+from netbox_automation_plugin.sync.reporting.drift_report.proposed_nic_derived import (
+    NIC_DRIFT_AUTHORITY_COL_INDEX,
+    NIC_NEW_AUTHORITY_COL_INDEX,
+)
+
 # selection_key (HTML data-selection-key) -> prop dict key
 SELECTION_KEY_TO_PROP_LIST: dict[str, str] = {
     "detail_new_devices": "add_devices",
@@ -23,15 +28,6 @@ SELECTION_KEY_TO_PROP_LIST: dict[str, str] = {
 
 HEADERS_DETAIL_NEW_DEVICES: list[str] = [
     "Hostname",
-    "NB proposed region",
-    "NB proposed site",
-    "NB proposed location",
-    "OS region",
-    "OS provision",
-    "OS power",
-    "OS maintenance",
-    "NB proposed device type",
-    "NB proposed role",
     "MAAS fabric",
     "MAAS status",
     "Serial Number",
@@ -39,10 +35,19 @@ HEADERS_DETAIL_NEW_DEVICES: list[str] = [
     "BMC present",
     "NIC count",
     "Primary MAC (MAAS)",
+    "OS region",
+    "OS provision",
+    "OS power",
+    "OS maintenance",
     "Primary MAC (OS)",
-    "Authority",
+    "NB proposed region",
+    "NB proposed site",
+    "NB proposed location",
+    "NB proposed device type",
+    "NB proposed role",
     "NB proposed device status",
     "NB proposed tag",
+    "Authority",
     "Proposed Action",
 ]
 
@@ -109,26 +114,26 @@ HEADERS_PLACEMENT_ALIGNMENT: list[str] = [
 
 HEADERS_DETAIL_NEW_NICS: list[str] = [
     "Host",
-    "NB site",
-    "NB location",
     "MAAS intf",
     "MAAS fabric",
     "MAAS MAC",
     "MAAS IPs",
     "MAAS VLAN",
     "MAAS link speed",
+    "MAAS NIC model",
     "OS link speed",
     "OS LLDP / switch_info",
-    "MAAS NIC model",
     "OS region",
     "OS MAC",
     "OS runtime IP",
     "OS runtime VLAN",
-    "Authority",
+    "NB site",
+    "NB location",
     "NB Proposed intf Label",
     "NB Proposed intf Type",
     "Suggested NB name",
     "Proposed properties",
+    "Authority",
     "Risk",
 ]
 
@@ -140,20 +145,20 @@ HEADERS_DETAIL_NIC_DRIFT: list[str] = [
     "MAAS IPs",
     "MAAS VLAN",
     "MAAS link speed",
+    "MAAS NIC model",
     "OS link speed",
     "OS LLDP / switch_info",
-    "MAAS NIC model",
     "OS region",
     "OS MAC",
     "OS runtime IP",
     "OS runtime VLAN",
-    "Authority",
     "NB intf",
     "NB MAC",
     "NB IPs",
     "NB VLAN",
     "NB Proposed intf Label",
     "NB Proposed intf Type",
+    "Authority",
     "Proposed Action",
     "Risk",
 ]
@@ -163,19 +168,19 @@ HEADERS_DETAIL_NIC_DRIFT_OS: list[str] = list(HEADERS_DETAIL_NIC_DRIFT)
 
 HEADERS_BMC_NEW_DEVICES: list[str] = [
     "Host",
-    "OS BMC IP",
-    "OS mgmt type",
-    "OS vendor",
-    "OS model",
     "MAAS BMC IP",
     "MAAS power_type",
     "MAAS vendor",
     "MAAS product",
     "MAAS BMC MAC",
     "MAAS link speed",
+    "MAAS NIC model",
+    "OS BMC IP",
+    "OS mgmt type",
+    "OS vendor",
+    "OS model",
     "OS link speed",
     "OS LLDP / switch_info",
-    "MAAS NIC model",
     "NB Proposed intf Label",
     "NB Proposed intf Type",
     "Suggested NB mgmt iface",
@@ -187,15 +192,19 @@ HEADERS_BMC_NEW_DEVICES: list[str] = [
 
 HEADERS_BMC_EXISTING: list[str] = [
     "Host",
-    "OS BMC IP",
-    "OS mgmt type",
     "MAAS BMC IP",
     "MAAS power_type",
+    "MAAS vendor",
+    "MAAS product",
     "MAAS BMC MAC",
     "MAAS link speed",
+    "MAAS NIC model",
+    "OS BMC IP",
+    "OS mgmt type",
+    "OS vendor",
+    "OS model",
     "OS link speed",
     "OS LLDP / switch_info",
-    "MAAS NIC model",
     "NB Proposed intf Label",
     "NB Proposed intf Type",
     "Suggested NB OOB Port",
@@ -210,7 +219,7 @@ HEADERS_BMC_EXISTING: list[str] = [
 ]
 
 HEADERS_SERIAL_REVIEW: list[str] = [
-    "Hostname",
+    "Host",
     "MAAS Serial",
     "NetBox Serial",
     "Proposed Action",
@@ -301,12 +310,14 @@ def _remap_legacy_truncated_nb_placement_headers(
 
 def _update_nic_row_is_os_authority(row) -> bool:
     """Matches format_html_proposed split for NIC drift (OS vs MAAS) tables."""
-    return len(row) > 14 and str(row[14]).strip() == "[OS]"
+    i = NIC_DRIFT_AUTHORITY_COL_INDEX
+    return len(row) > i and str(row[i]).strip() == "[OS]"
 
 
 def _new_nic_row_is_os_authority(row) -> bool:
     """Matches format_html_proposed split for new NICs (OS vs MAAS) tables."""
-    return len(row) > 16 and str(row[16]).strip() == "[OS]"
+    i = NIC_NEW_AUTHORITY_COL_INDEX
+    return len(row) > i and str(row[i]).strip() == "[OS]"
 
 
 def _apply_new_nics_subset(

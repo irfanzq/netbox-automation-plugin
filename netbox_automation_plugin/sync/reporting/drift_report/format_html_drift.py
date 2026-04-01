@@ -152,7 +152,7 @@ def emit_drift_counts_and_alignment(
             ],
             align_rows,
             dynamic_columns=True,
-            notes_col_idx=12,
+            notes_col_idx=11,
             wrap_max_width=None,
             selectable=True,
             selection_key="detail_placement_lifecycle_alignment",

@@ -10,13 +10,12 @@ from __future__ import annotations
 import re
 from typing import Any
 
-# Column indices (0-based) after MAAS VLAN + link/OS context columns; used by proposed_changes.
-NIC_DRIFT_AUTHORITY_COL_INDEX = 14
-# add_nb row: Authority after OS VLAN (MAAS link/OS link/LLDP/NIC model + OS cols).
-NIC_NEW_AUTHORITY_COL_INDEX = 16
+# Authority column (0-based): Host → MAAS → OS → NB → Authority → action/risk.
+NIC_DRIFT_AUTHORITY_COL_INDEX = 19
+NIC_NEW_AUTHORITY_COL_INDEX = 20
 
 # Drift picker + default suggestions must match these strings exactly.
-INTF_ROLE_PICKLIST = ("BMC", "Management", "DATA", "GPU", "CPU")
+INTF_ROLE_PICKLIST = ("BMC", "Management", "Data", "GPU", "CPU")
 
 # MAAS link_speed is typically Mb/s (e.g. 400000 -> 400 Gbps).
 _SPEED_MBPS_TO_LABEL: tuple[tuple[int, str], ...] = (
@@ -228,14 +227,14 @@ def derive_nic_proposed_columns(
         if (gpu_product or gpu_host) and ls is not None and ls >= 100_000:
             label = "GPU"
         else:
-            label = "DATA"
+            label = "Data"
     elif ls == 10_000 or "10gbase-t" in _compact_alnum(product):
         label = "Management"
     elif ls is not None and ls >= 100_000:
         if gpu_product or gpu_host:
             label = "GPU"
         else:
-            label = "DATA"
+            label = "Data"
     elif "cpu" in hn:
         label = "CPU"
 
