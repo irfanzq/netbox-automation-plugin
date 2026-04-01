@@ -7,15 +7,17 @@ import re
 from collections import defaultdict
 from typing import Dict, Optional
 
-from netbox_automation_plugin.sync.reporting.drift_report.maas_netbox_status import (
-    proposed_netbox_status_slug_from_maas,
-)
-
 logger = logging.getLogger("netbox_automation_plugin.sync")
 
 
 def _maas_nb_alignment_suffix(machine: dict) -> str:
     """Append MAAS lifecycle → NetBox status slug for drift alignment hints (matches report column)."""
+    # Import inside function: avoid circular import (drift_report package __init__ → format_html →
+    # proposed_changes → audit_detail → must not import drift_report.* at module load).
+    from netbox_automation_plugin.sync.reporting.drift_report.maas_netbox_status import (
+        proposed_netbox_status_slug_from_maas,
+    )
+
     slug = proposed_netbox_status_slug_from_maas(
         str(machine.get("status_name") or machine.get("status") or "")
     )
