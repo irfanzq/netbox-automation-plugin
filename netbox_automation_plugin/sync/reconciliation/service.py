@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import re
 import secrets
 from datetime import datetime, timezone as dt_timezone
@@ -39,11 +40,13 @@ from .branch import (
 from .apply_cells import (
     NEW_NIC_SELECTION_KEYS,
     SUPPORTED_APPLY_ACTIONS,
+    _nic_proposed_property_segment_ok,
     apply_row_operation,
     netbox_write_preview_cells,
     netbox_write_preview_fieldnames,
     new_nic_cells_for_reconciliation,
     recon_operation_display_cells,
+    reconciliation_apply_snapshot_cells,
 )
 from .merge import (
     _safe_selection_key,
@@ -53,7 +56,76 @@ from .merge import (
     merged_proposed_from_drift_run,
 )
 
+logger = logging.getLogger(__name__)
+
 PREVIEW_TOKEN_SALT = "netbox_automation_plugin.ma_openstack_recon.preview.v1"
+
+# Cap stored exception text for JSON / UI (full trace still in server logs).
+_APPLY_EXCEPTION_MESSAGE_MAX = 4000
+
+
+def _apply_result_row_shell(op: dict[str, Any]) -> dict[str, Any]:
+    row_key = str(op.get("row_key") or "").strip()
+    return {
+        "row_key": row_key,
+        "idempotency_key": row_key,
+        "selection_key": str(op.get("selection_key") or ""),
+        "action": str(op.get("action") or "unknown").strip(),
+        "summary": str(op.get("summary") or ""),
+        "applied_at": timezone.now().isoformat(),
+    }
+
+
+def _truncate_exc_message(msg: str, *, max_len: int = _APPLY_EXCEPTION_MESSAGE_MAX) -> str:
+    s = (msg or "").strip()
+    if len(s) > max_len:
+        return s[: max_len - 3] + "..."
+    return s
+
+
+def _failed_apply_row(op: dict[str, Any], exc: Exception) -> dict[str, Any]:
+    """Row result for an unexpected exception (with type + message for UI and logs)."""
+    result = _apply_result_row_shell(op)
+    result["status"] = "failed"
+    result["reason"] = "failed_exception"
+    et = type(exc).__name__
+    em = _truncate_exc_message(str(exc).strip() or repr(exc))
+    result["exception_type"] = et
+    result["exception_message"] = em
+    result["reason_detail"] = _truncate_exc_message(f"{et}: {em}", max_len=_APPLY_EXCEPTION_MESSAGE_MAX + 64)
+    return result
+
+
+def _execute_branch_apply(op: dict[str, Any]) -> dict[str, Any]:
+    """Run one apply inside a per-row savepoint (caller wraps with transaction.atomic(using=…))."""
+    result = _apply_result_row_shell(op)
+    action = result["action"]
+    if action not in SUPPORTED_APPLY_ACTIONS:
+        result["status"] = "failed"
+        result["reason"] = "failed_not_implemented"
+        return result
+    st, reason = apply_row_operation(op)
+    result["status"] = st
+    result["reason"] = reason
+    return result
+
+
+def _first_failed_exception_snapshot(rows: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """First row that failed with ``failed_exception`` (unexpected error / DB issue)."""
+    for r in rows:
+        if not isinstance(r, dict):
+            continue
+        if r.get("status") != "failed" or r.get("reason") != "failed_exception":
+            continue
+        return {
+            "summary": r.get("summary"),
+            "selection_key": r.get("selection_key"),
+            "action": r.get("action"),
+            "exception_type": r.get("exception_type"),
+            "exception_message": r.get("exception_message"),
+            "reason_detail": r.get("reason_detail"),
+        }
+    return None
 
 SK_TO_ACTION = {
     "detail_new_devices": "create_device",
@@ -100,6 +172,25 @@ AUDIT_REPORT_APPLY_ORDER: tuple[str, ...] = (
 )
 
 _APPLY_ORDER_RANK: dict[str, int] = {sk: i for i, sk in enumerate(AUDIT_REPORT_APPLY_ORDER)}
+
+# Secondary ordering when selection_key is missing from AUDIT_REPORT_APPLY_ORDER or ties:
+# ensure create_device runs before create_interface, etc. (matches coarse dependency tiers).
+_ACTION_APPLY_PHASE: dict[str, int] = {
+    "placement_alignment": 0,
+    "create_device": 1,
+    "review_device": 1,
+    "create_prefix": 2,
+    "create_ip_range": 2,
+    "create_floating_ip": 2,
+    "create_openstack_vm": 3,
+    "update_openstack_vm": 3,
+    "create_interface": 4,
+    "update_interface": 4,
+    "bmc_documentation": 5,
+    "bmc_alignment": 5,
+    "serial_review": 6,
+    "unknown": 99,
+}
 
 # Human titles for reconciliation tables (same order as AUDIT_REPORT_APPLY_ORDER).
 RECON_SECTION_TITLES: dict[str, str] = {
@@ -162,15 +253,18 @@ def _selected_keys_in_audit_order(
     return sorted(selected.keys(), key=rank)
 
 
-def _operation_apply_sort_key(op: dict[str, Any]) -> tuple[int, int, str]:
+def _operation_apply_sort_key(op: dict[str, Any], *, allowed: frozenset[str]) -> tuple[int, int, int, str]:
     msk = str(op.get("selection_key") or "")
-    rank = _APPLY_ORDER_RANK.get(msk, len(AUDIT_REPORT_APPLY_ORDER))
+    canon = _canonical_selection_key(msk, allowed) or msk
+    rank = _APPLY_ORDER_RANK.get(canon, len(AUDIT_REPORT_APPLY_ORDER))
+    action = str(op.get("action") or "unknown")
+    phase = _ACTION_APPLY_PHASE.get(action, 50)
     ri = op.get("row_index")
     try:
         ri_int = int(ri) if ri is not None and ri != "" else 0
     except (TypeError, ValueError):
         ri_int = 0
-    return (rank, ri_int, str(op.get("row_key") or ""))
+    return (rank, phase, ri_int, str(op.get("row_key") or ""))
 
 
 def _cells_dict(headers: list, row: list) -> dict[str, str]:
@@ -182,6 +276,75 @@ def _cells_dict(headers: list, row: list) -> dict[str, str]:
         val = row[i] if i < len(row) else ""
         out[key] = "" if val is None else str(val).strip()
     return out
+
+
+def _norm_host_key(host: str) -> str:
+    return str(host or "").strip().casefold()
+
+
+def _validate_new_nic_requires_selected_new_devices(
+    selected: dict[str, list[dict[str, Any]]],
+    row_index: dict[str, dict[str, Any]],
+    stable_index: dict[tuple[str, int], dict[str, Any]],
+) -> None:
+    """
+    Block reconciliation when New interface rows are selected without the matching
+    New device rows for the same host(s). Apply order cannot create a device that was
+    never selected.
+    """
+    allowed = all_registered_selection_keys()
+    nic_host_by_norm: dict[str, str] = {}
+    new_device_hosts_nf: set[str] = set()
+
+    for sk_raw in selected:
+        canon = _canonical_selection_key(sk_raw, allowed)
+        if canon is None:
+            continue
+        if canon not in NEW_NIC_SELECTION_KEYS and canon != "detail_new_devices":
+            continue
+        safe = _safe_selection_key(canon)
+        for item in selected[sk_raw]:
+            rk = str(item.get("row_key") or "").strip()
+            ri = item.get("row_index")
+            try:
+                ri_int = int(ri) if ri is not None and ri != "" else None
+            except (TypeError, ValueError):
+                ri_int = None
+            meta = None
+            if rk and rk in row_index:
+                meta = row_index[rk]
+            if meta is None and ri_int is not None:
+                meta = stable_index.get((safe, ri_int))
+            if not meta:
+                continue
+            if _safe_selection_key(str(meta["selection_key"])) != safe:
+                continue
+            cells = _cells_dict(meta["headers"], meta["row"])
+            if canon in NEW_NIC_SELECTION_KEYS:
+                h = (cells.get("Host") or "").strip()
+                if h:
+                    nk = _norm_host_key(h)
+                    nic_host_by_norm.setdefault(nk, h)
+            if canon == "detail_new_devices":
+                h = (cells.get("Hostname") or "").strip()
+                if h:
+                    new_device_hosts_nf.add(_norm_host_key(h))
+
+    if not nic_host_by_norm:
+        return
+    missing_labels = sorted(
+        {nic_host_by_norm[k] for k in nic_host_by_norm if k not in new_device_hosts_nf},
+        key=str.lower,
+    )
+    if not missing_labels:
+        return
+    raise ValueError(
+        "New interface rows require the matching New device row(s) for the same host(s) to "
+        "stay selected. Reconciliation only runs operations you include; apply order does not "
+        "create a device that was unchecked. "
+        f"Select New device for: {', '.join(missing_labels)} "
+        f"or deselect the new interface row(s) for those host(s)."
+    )
 
 
 def _operation_summary(meta: dict[str, Any]) -> str:
@@ -221,11 +384,11 @@ def _operation_summary(meta: dict[str, Any]) -> str:
         mac = (cells.get("Parsed MAC") or "").strip()
         vlan = (cells.get("Parsed untagged VLAN") or "").strip()
         ips = (cells.get("Parsed IPs") or "").strip()
-        if not mac:
+        if not _nic_proposed_property_segment_ok(mac):
             mac = (cells.get("MAAS MAC") or cells.get("OS MAC") or "").strip()
-        if not vlan:
+        if not _nic_proposed_property_segment_ok(vlan):
             vlan = (cells.get("MAAS VLAN") or cells.get("OS runtime VLAN") or "").strip()
-        if not ips:
+        if not _nic_proposed_property_segment_ok(ips):
             ips = (cells.get("MAAS IPs") or cells.get("OS runtime IP") or "").strip()
         props = (
             cells.get("Proposed Action")
@@ -235,15 +398,16 @@ def _operation_summary(meta: dict[str, Any]) -> str:
             or ""
         ).strip()
         bits = []
-        if mac:
+        if _nic_proposed_property_segment_ok(mac):
             bits.append(f"MAC {mac}")
-        if vlan:
+        if _nic_proposed_property_segment_ok(vlan):
             bits.append(f"VLAN {vlan}")
-        if ips:
+        if _nic_proposed_property_segment_ok(ips):
             bits.append(f"IPs {ips}")
         if bits:
             base += " — " + "; ".join(bits)
-        if props:
+        elif props:
+            # No structured MAC/VLAN/IP columns: show Proposed Action once (not twice with bits).
             p = props if len(props) <= 160 else props[:157].rstrip() + "…"
             base += " — " + p
         return base
@@ -352,7 +516,7 @@ def build_frozen_operations(
                 op["global_row_index"] = meta["global_row_index"]
             ops.append(op)
 
-    ops.sort(key=_operation_apply_sort_key)
+    ops.sort(key=lambda o: _operation_apply_sort_key(o, allowed=allowed))
     return ops
 
 
@@ -465,17 +629,50 @@ def _row_diffs_vs_baseline(
 
 
 def frozen_operations_for_display(frozen: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Shallow copy of frozen ops with ``cells`` reduced to NetBox-oriented preview fields."""
+    """Shallow copy of frozen ops with ``cells`` reduced to NetBox-oriented preview fields.
+
+    Rows are ordered like apply (section rank, then action phase, then row index) so the
+    reconciliation page matches execution order even for older runs stored out of order.
+    """
+    allowed = all_registered_selection_keys()
+    ordered = sorted(
+        [o for o in frozen if isinstance(o, dict)],
+        key=lambda op: _operation_apply_sort_key(op, allowed=allowed),
+    )
     out: list[dict[str, Any]] = []
-    for op in frozen:
-        if not isinstance(op, dict):
-            continue
+    for op in ordered:
         o2 = dict(op)
         o2["cells"] = recon_operation_display_cells(
             str(op.get("selection_key") or ""),
             dict(op.get("cells") or {}),
         )
         out.append(o2)
+    return out
+
+
+def frozen_operations_apply_snapshots(frozen: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """
+    One entry per frozen op (apply order): attributes and values actually passed into
+    ``apply_row_operation`` after scoping — for UI comparison with the write-preview tables.
+    """
+    allowed = all_registered_selection_keys()
+    ordered = sorted(
+        [o for o in frozen if isinstance(o, dict)],
+        key=lambda op: _operation_apply_sort_key(op, allowed=allowed),
+    )
+    out: list[dict[str, Any]] = []
+    for op in ordered:
+        sk = str(op.get("selection_key") or "")
+        snap = reconciliation_apply_snapshot_cells(sk, dict(op.get("cells") or {}))
+        out.append(
+            {
+                "selection_key": sk,
+                "action": op.get("action"),
+                "summary": op.get("summary"),
+                "row_key": op.get("row_key"),
+                "attrs": sorted(snap.items(), key=lambda x: str(x[0]).lower()),
+            }
+        )
     return out
 
 
@@ -542,6 +739,7 @@ def preview_reconciliation(
     prop_f, align_f = merged_proposed_from_drift_run(drift_run, review_norm=final_norm)
     _, stable_auto = build_row_key_index(prop_auto, align_auto)
     row_index_f, stable_f = build_row_key_index(prop_f, align_f)
+    _validate_new_nic_requires_selected_new_devices(selected, row_index_f, stable_f)
     frozen = build_frozen_operations(selected, row_index_f, stable_f)
     digest = operations_digest(frozen)
     token = make_preview_token(drift_run_id=int(drift_run.pk), digest=digest)
@@ -581,6 +779,7 @@ def preview_reconciliation(
         for o in frozen
     ]
     operation_tables = group_reconciliation_operation_tables(operations)
+    apply_snapshot_ops = frozen_operations_apply_snapshots(frozen)
 
     return {
         "drift_run_id": drift_run.pk,
@@ -589,6 +788,7 @@ def preview_reconciliation(
         "preview_ack_token": token,
         "operations": operations,
         "operation_tables": operation_tables,
+        "apply_snapshot_ops": apply_snapshot_ops,
         "counts_by_action": counts,
         "counts_by_section": by_section,
         "warnings": warnings,
@@ -614,6 +814,7 @@ def create_reconciliation_run(
     final_norm = effective_review_norm_for_run(drift_run, posted_review_overrides_raw)
     prop_f, align_f = merged_proposed_from_drift_run(drift_run, review_norm=final_norm)
     row_index_f, stable_f = build_row_key_index(prop_f, align_f)
+    _validate_new_nic_requires_selected_new_devices(selected, row_index_f, stable_f)
     frozen = build_frozen_operations(selected, row_index_f, stable_f)
     digest = operations_digest(frozen)
 
@@ -665,29 +866,24 @@ def create_reconciliation_run(
 
 
 def _apply_result_from_operation(op: dict[str, Any], *, branch_context_ready: bool) -> dict[str, Any]:
+    """Apply one row without an inner savepoint (fallback when branch DB alias is unknown)."""
     action = str(op.get("action") or "unknown").strip()
-    row_key = str(op.get("row_key") or "").strip()
-    result = {
-        "row_key": row_key,
-        "idempotency_key": row_key,
-        "selection_key": str(op.get("selection_key") or ""),
-        "action": action,
-        "summary": str(op.get("summary") or ""),
-        "status": "failed",
-        "reason": "failed_not_implemented",
-        "applied_at": timezone.now().isoformat(),
-    }
+    result = _apply_result_row_shell(op)
+    result["status"] = "failed"
+    result["reason"] = "failed_not_implemented"
     if not branch_context_ready:
-        result["status"] = "failed"
         result["reason"] = "failed_branch_context_unavailable"
         return result
     if action in SUPPORTED_APPLY_ACTIONS:
         try:
             st, reason = apply_row_operation(op)
-        except Exception:
-            result["status"] = "failed"
-            result["reason"] = "failed_exception"
-            return result
+        except Exception as exc:
+            logger.exception(
+                "Reconciliation apply exception (no per-row savepoint): row_key=%s action=%s",
+                result.get("row_key"),
+                action,
+            )
+            return _failed_apply_row(op, exc)
         result["status"] = st
         result["reason"] = reason
         return result
@@ -702,6 +898,9 @@ def apply_reconciliation_run(
 ) -> MAASOpenStackReconciliationRun:
     """
     Execute frozen operations with explicit row results and status transitions.
+
+    Operations are sorted by drift audit section order (devices before new NICs, etc.) and
+    by action phase before each row runs, including full apply and retry-failed-only passes.
 
     Apply handlers use full per-row ``cells`` (all audit columns) via
     ``apply_cells.apply_row_operation``.
@@ -747,6 +946,12 @@ def apply_reconciliation_run(
     if retry_failed_only and not target_ops:
         raise ValueError("No failed rows available to retry.")
 
+    allowed_sk = all_registered_selection_keys()
+    target_ops = sorted(
+        target_ops,
+        key=lambda o: _operation_apply_sort_key(o, allowed=allowed_sk),
+    )
+
     with transaction.atomic():
         run = (
             MAASOpenStackReconciliationRun.objects.select_for_update()
@@ -764,15 +969,34 @@ def apply_reconciliation_run(
         applied_rows: list[dict[str, Any]] = []
         if branch_obj is not None:
             try:
+                branch_db = getattr(branch_obj, "connection_name", None) or None
                 with branch_write_context(branch=branch_obj):
                     for op in target_ops:
-                        applied_rows.append(
-                            _apply_result_from_operation(op, branch_context_ready=True)
-                        )
+                        if branch_db:
+                            try:
+                                with transaction.atomic(using=branch_db):
+                                    applied_rows.append(_execute_branch_apply(op))
+                            except Exception as exc:
+                                logger.exception(
+                                    "Reconciliation apply row failed: row_key=%s action=%s",
+                                    str(op.get("row_key") or ""),
+                                    str(op.get("action") or ""),
+                                )
+                                applied_rows.append(_failed_apply_row(op, exc))
+                        else:
+                            applied_rows.append(
+                                _apply_result_from_operation(op, branch_context_ready=True)
+                            )
             except Exception as e:
+                et = type(e).__name__
+                em = _truncate_exc_message(str(e).strip() or repr(e))
                 for op in target_ops:
                     row = _apply_result_from_operation(op, branch_context_ready=False)
-                    row["reason_detail"] = str(e)
+                    row["exception_type"] = et
+                    row["exception_message"] = em
+                    row["reason_detail"] = _truncate_exc_message(
+                        f"{et}: {em}", max_len=_APPLY_EXCEPTION_MESSAGE_MAX + 64
+                    )
                     applied_rows.append(row)
         else:
             for op in target_ops:
@@ -808,6 +1032,7 @@ def apply_reconciliation_run(
         else:
             final_status = MAASOpenStackReconciliationRun.STATUS_APPLY_FAILED_PARTIAL
 
+        first_fail = _first_failed_exception_snapshot(applied_rows)
         run.apply_results = {
             "attempted_at": timezone.now().isoformat(),
             "attempted_by": getattr(actor, "username", None) or "",
@@ -818,6 +1043,7 @@ def apply_reconciliation_run(
                 "updated": updated,
                 "skipped": skipped,
                 "failed": failed,
+                **({"first_failed_exception": first_fail} if first_fail else {}),
             },
             "rows": merged_rows,
         }

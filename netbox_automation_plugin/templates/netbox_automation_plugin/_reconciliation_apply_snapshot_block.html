@@ -1,0 +1,43 @@
+{% load i18n %}
+{% if apply_snapshot_ops %}
+<h5 class="text-body-secondary text-uppercase small mb-2 mt-4">{% trans "Apply payload (attributes passed to NetBox)" %}</h5>
+<p class="small text-body-secondary mb-3">
+  {% blocktrans trimmed %}Same order as apply. Each card lists column names and values actually handed to the apply step after scoping (recon-oriented columns plus workflow fields such as Proposed Action when set; empty and “—” placeholders removed). Compare these to the write-preview tables above to confirm what will reach NetBox.{% endblocktrans %}
+</p>
+{% for row in apply_snapshot_ops %}
+<div class="card mb-3 border-secondary border-opacity-25">
+  <div class="card-header py-2 small d-flex flex-wrap align-items-center gap-2">
+    <span class="badge text-bg-dark">{{ row.action|default:"—" }}</span>
+    <code class="text-muted small mb-0">{{ row.selection_key|default:"—" }}</code>
+    {% if row.row_key %}
+      <span class="text-muted font-monospace small text-truncate" style="max-width: 18rem;" title="{{ row.row_key }}">{{ row.row_key }}</span>
+    {% endif %}
+  </div>
+  <div class="card-body py-2">
+    <p class="small text-body-secondary mb-2">{{ row.summary|default:"—" }}</p>
+    {% if row.attrs %}
+    <div class="table-responsive">
+      <table class="table table-sm table-bordered mb-0 align-middle">
+        <thead class="table-light">
+          <tr>
+            <th class="small" style="width: 32%;">{% trans "Attribute" %}</th>
+            <th class="small">{% trans "Value applied" %}</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for attr, val in row.attrs %}
+          <tr>
+            <td class="small text-break font-monospace">{{ attr }}</td>
+            <td class="small text-break">{% if val %}{{ val }}{% else %}—{% endif %}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% else %}
+    <p class="small text-muted mb-0">{% trans "No attributes after scoping (placeholders only or empty row)." %}</p>
+    {% endif %}
+  </div>
+</div>
+{% endfor %}
+{% endif %}

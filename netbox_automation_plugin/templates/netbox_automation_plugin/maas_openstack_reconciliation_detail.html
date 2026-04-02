@@ -21,7 +21,12 @@
           <dt class="col-sm-3">{% trans "Status" %}</dt>
           <dd class="col-sm-9"><span class="badge text-bg-primary">{{ run.get_status_display }}</span></dd>
           <dt class="col-sm-3">{% trans "Branch" %}</dt>
-          <dd class="col-sm-9 text-monospace">{{ run.branch_name|default:"—" }}{% if run.branch_id %} <span class="text-muted">(pk {{ run.branch_id }})</span>{% endif %}</dd>
+          <dd class="col-sm-9 text-monospace">
+            {{ run.branch_name|default:"—" }}{% if run.branch_id %} <span class="text-muted">(pk {{ run.branch_id }})</span>{% endif %}
+            {% if branching_branch_url %}
+              <a class="btn btn-outline-secondary btn-sm ms-2 align-baseline" href="{{ branching_branch_url }}">{% trans "Open branch page" %}</a>
+            {% endif %}
+          </dd>
           <dt class="col-sm-3">{% trans "Digest" %}</dt>
           <dd class="col-sm-9 text-monospace small">{{ run.operations_digest|default:"—" }}</dd>
           <dt class="col-sm-3">{% trans "Operations" %}</dt>
@@ -40,12 +45,15 @@
         <p class="text-body-secondary small mb-2">
           {% blocktrans trimmed %}Apply writes frozen operations into the branch schema only. Discard abandons the run and deletes the NetBox branch when possible; it does not undo individual rows inside an existing branch. Merge to main uses NetBox Branching (not wired here yet).{% endblocktrans %}
         </p>
-        <div class="d-flex flex-wrap gap-1">
-          <button type="button" class="btn btn-primary btn-sm js-recon-apply" {% if not can_apply %}disabled{% endif %}>{% trans "Apply selected changes to branch" %}</button>
-          <button type="button" class="btn btn-outline-primary btn-sm js-recon-retry" {% if not can_retry_failed %}disabled{% endif %}>{% trans "Re-apply failed items" %}</button>
+        <div class="d-flex flex-wrap gap-1 align-items-center">
+          <button type="button" class="btn btn-primary btn-sm js-recon-apply js-recon-lifecycle-btn" data-initial-disabled="{% if not can_apply %}true{% else %}false{% endif %}" {% if not can_apply %}disabled{% endif %}>{% trans "Apply selected changes to branch" %}</button>
+          <button type="button" class="btn btn-outline-primary btn-sm js-recon-retry js-recon-lifecycle-btn" data-initial-disabled="{% if not can_retry_failed %}true{% else %}false{% endif %}" {% if not can_retry_failed %}disabled{% endif %}>{% trans "Re-apply failed items" %}</button>
           <button type="button" class="btn btn-outline-secondary btn-sm" disabled title="{% trans 'Not implemented yet' %}">{% trans "Run validation" %}</button>
           <button type="button" class="btn btn-outline-secondary btn-sm" disabled title="{% trans 'Not implemented yet' %}">{% trans "Merge to main" %}</button>
-          <button type="button" class="btn btn-outline-danger btn-sm js-recon-discard" {% if not can_discard %}disabled{% endif %} title="{% trans 'Deletes the branch record in NetBox when possible' %}">{% trans "Discard run" %}</button>
+          <button type="button" class="btn btn-outline-danger btn-sm js-recon-discard js-recon-lifecycle-btn" data-initial-disabled="{% if not can_discard %}true{% else %}false{% endif %}" {% if not can_discard %}disabled{% endif %} title="{% trans 'Deletes the branch record in NetBox when possible' %}">{% trans "Discard run" %}</button>
+          <span class="badge text-bg-secondary d-none ms-1 align-self-center" id="reconLifecycleLoadingBadge" role="status">
+            <span class="spinner-border spinner-border-sm me-1" aria-hidden="true"></span>{% trans "Working…" %}
+          </span>
         </div>
         <div id="reconApplyMsg" class="small mt-2 text-body-secondary"></div>
       </div>
@@ -63,6 +71,19 @@
             <div class="col-md-2"><strong>{% trans "Failed" %}:</strong> {{ apply_results.summary.failed|default:0 }}</div>
             <div class="col-md-2"><strong>{% trans "Retry only" %}:</strong> {{ apply_results.retry_failed_only|yesno:"yes,no" }}</div>
           </div>
+          {% if apply_results.summary.first_failed_exception %}
+            <div class="alert alert-warning small mb-0 mt-3">
+              <strong>{% trans "First exception (per-row savepoints isolate later rows)" %}</strong>
+              <div class="mt-1 font-monospace">
+                {{ apply_results.summary.first_failed_exception.exception_type|default:"—" }}:
+                {{ apply_results.summary.first_failed_exception.exception_message|default:"—" }}
+              </div>
+              <div class="text-body-secondary mt-1">
+                {{ apply_results.summary.first_failed_exception.summary|default:"" }}
+                <span class="text-muted">({{ apply_results.summary.first_failed_exception.selection_key|default:"—" }})</span>
+              </div>
+            </div>
+          {% endif %}
         </div>
       </div>
     {% endif %}
@@ -150,6 +171,7 @@
         </div>
       </div>
     {% endif %}
+    {% include "netbox_automation_plugin/_reconciliation_apply_snapshot_block.html" %}
 
     {% if apply_results.rows %}
       <div class="card mt-3">
@@ -164,6 +186,7 @@
                   <th>{% trans "Section" %}</th>
                   <th>{% trans "Action" %}</th>
                   <th>{% trans "Summary" %}</th>
+                  <th>{% trans "Exception / detail" %}</th>
                 </tr>
               </thead>
               <tbody>
@@ -174,6 +197,15 @@
                     <td class="small text-monospace">{{ row.selection_key|default:"—" }}</td>
                     <td class="small">{{ row.action|default:"—" }}</td>
                     <td class="small">{{ row.summary|default:"—" }}</td>
+                    <td class="small text-break font-monospace">
+                      {% if row.reason_detail %}
+                        {{ row.reason_detail }}
+                      {% elif row.exception_type or row.exception_message %}
+                        {{ row.exception_type|default:"" }}{% if row.exception_type and row.exception_message %}: {% endif %}{{ row.exception_message|default:"" }}
+                      {% else %}
+                        —
+                      {% endif %}
+                    </td>
                   </tr>
                 {% endfor %}
               </tbody>
@@ -191,10 +223,39 @@
       var el = document.querySelector("#recon-csrf-anchor input[name=csrfmiddlewaretoken]");
       return el ? el.value : "";
     }
-    function postAction(url, btn) {
+    var loadingBtnHtml = '<span class="spinner-border spinner-border-sm me-1" role="status" aria-hidden="true"></span>{% filter escapejs %}{% trans "Working…" %}{% endfilter %}';
+    var lifecycleBadge = document.getElementById("reconLifecycleLoadingBadge");
+    function lifecycleButtons() {
+      return document.querySelectorAll(".js-recon-lifecycle-btn");
+    }
+    function setLifecycleBusy(busy, activeBtn) {
+      if (busy) {
+        lifecycleButtons().forEach(function(b) {
+          b.disabled = true;
+          if (activeBtn && b === activeBtn) {
+            b.dataset.reconSavedHtml = b.innerHTML;
+            b.innerHTML = loadingBtnHtml;
+          }
+        });
+        if (lifecycleBadge) lifecycleBadge.classList.remove("d-none");
+      } else {
+        lifecycleButtons().forEach(function(b2) {
+          if (b2.dataset.reconSavedHtml) {
+            b2.innerHTML = b2.dataset.reconSavedHtml;
+            delete b2.dataset.reconSavedHtml;
+          }
+          b2.disabled = b2.getAttribute("data-initial-disabled") === "true";
+        });
+        if (lifecycleBadge) lifecycleBadge.classList.add("d-none");
+      }
+    }
+    function postAction(url, btn, opts) {
+      opts = opts || {};
       if (!url || !btn) return;
-      btn.disabled = true;
       var msg = document.getElementById("reconApplyMsg");
+      var willReload = false;
+      if (msg) msg.textContent = "";
+      setLifecycleBusy(true, btn);
       fetch(url, {
         method: "POST",
         credentials: "same-origin",
@@ -207,27 +268,36 @@
         return r.json().then(function(j) { return { ok: r.ok, body: j }; });
       }).then(function(res) {
         if (res.ok && res.body && res.body.ok) {
-          if (msg) msg.textContent = "Action complete. Refreshing results...";
+          willReload = true;
+          if (opts.openBranchPageRefresh && res.body.branching_branch_url) {
+            var base = res.body.branching_branch_url;
+            var sep = base.indexOf("?") >= 0 ? "&" : "?";
+            try {
+              window.open(base + sep + "_nap_branch_refresh=" + Date.now(), "_blank", "noopener");
+            } catch (e) {}
+          }
+          if (msg) msg.textContent = "{% filter escapejs %}{% trans "Action complete. Refreshing…" %}{% endfilter %}";
           window.location.reload();
           return;
         }
-        if (msg) msg.textContent = (res.body && res.body.error) ? res.body.error : "Request failed.";
+        if (msg) msg.textContent = (res.body && res.body.error) ? res.body.error : "{% filter escapejs %}{% trans "Request failed." %}{% endfilter %}";
       }).catch(function(err) {
         if (msg) msg.textContent = String(err);
       }).finally(function() {
-        btn.disabled = false;
+        if (willReload) return;
+        setLifecycleBusy(false, null);
       });
     }
     var applyBtn = document.querySelector(".js-recon-apply");
     var retryBtn = document.querySelector(".js-recon-retry");
     if (applyBtn) {
       applyBtn.addEventListener("click", function() {
-        postAction("{{ apply_url|escapejs }}", applyBtn);
+        postAction("{{ apply_url|escapejs }}", applyBtn, { openBranchPageRefresh: true });
       });
     }
     if (retryBtn) {
       retryBtn.addEventListener("click", function() {
-        postAction("{{ retry_failed_url|escapejs }}", retryBtn);
+        postAction("{{ retry_failed_url|escapejs }}", retryBtn, { openBranchPageRefresh: true });
       });
     }
     var discardBtn = document.querySelector(".js-recon-discard");

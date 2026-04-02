@@ -25,7 +25,7 @@
           {% endif %}
         </p>
         <p class="small text-body-secondary mb-0">
-          {% blocktrans trimmed %}Tables below follow the <strong>same order as the drift audit</strong> (e.g. new devices before new interfaces). Each column is a <strong>NetBox write preview</strong>: values that drive apply (typed fields and resolved MAC/VLAN/IP where applicable), not full MAAS/OS audit context. Apply still uses the full frozen row from the drift run.{% endblocktrans %}
+          {% blocktrans trimmed %}Tables below follow the <strong>same order as the drift audit</strong> (e.g. new devices before new interfaces). Each column is a <strong>NetBox write preview</strong>: values that drive apply (typed fields and resolved MAC/VLAN/IP where applicable), not full MAAS/OS audit context. The <strong>Apply payload</strong> section further down lists each operation’s attribute/value pairs exactly as passed into apply after scoping, so you can match preview tables to what NetBox will see.{% endblocktrans %}
         </p>
         <h6 class="text-body-secondary text-uppercase small mt-3">{% trans "Next steps" %}</h6>
         <ol class="small mb-4">
@@ -94,7 +94,12 @@
           </div>
         {% endif %}
         <div class="d-flex flex-wrap gap-2 align-items-center mb-3">
-          <button type="button" class="btn btn-primary btn-sm" id="maas-recon-create-branch">{% trans "Create NetBox branch from this preview" %}</button>
+          <button type="button" class="btn btn-primary btn-sm" id="maas-recon-create-branch">
+            {% trans "Create NetBox branch from this preview" %}
+          </button>
+          <span class="badge text-bg-secondary d-none align-self-center" id="maas-recon-create-loading-badge" role="status">
+            <span class="spinner-border spinner-border-sm me-1" aria-hidden="true"></span>{% trans "Working…" %}
+          </span>
           <span class="small text-body-secondary" id="maas-recon-create-msg"></span>
         </div>
       </div>
@@ -183,6 +188,7 @@
         </div>
       </div>
     {% endif %}
+    {% include "netbox_automation_plugin/_reconciliation_apply_snapshot_block.html" %}
   </div>
 </div>
 
@@ -199,6 +205,8 @@
     var tokEl = document.getElementById("maas-recon-preview-token");
     var createUrl = "{{ create_url|escapejs }}";
     var driftRunId = {{ drift_run.pk }};
+    var loadingBtnHtml = '<span class="spinner-border spinner-border-sm me-1" role="status" aria-hidden="true"></span>{% filter escapejs %}{% trans "Creating branch…" %}{% endfilter %}';
+    var badge = document.getElementById("maas-recon-create-loading-badge");
     function csrf() {
       var el = document.querySelector("#recon-action-csrf input[name=csrfmiddlewaretoken]");
       return el ? el.value : "";
@@ -225,7 +233,10 @@
           posted = {};
         }
       }
+      var origBtnHtml = btn.innerHTML;
+      btn.innerHTML = loadingBtnHtml;
       btn.disabled = true;
+      if (badge) badge.classList.remove("d-none");
       if (msg) msg.textContent = "";
       var payload = {
         drift_run_id: driftRunId,
@@ -252,12 +263,16 @@
             window.location.href = res.body.redirect_url;
             return;
           }
+          btn.innerHTML = origBtnHtml;
           btn.disabled = false;
+          if (badge) badge.classList.add("d-none");
           var err = (res.body && res.body.error) ? res.body.error : ("HTTP " + res.status);
           if (msg) msg.textContent = err;
         })
         .catch(function(e) {
+          btn.innerHTML = origBtnHtml;
           btn.disabled = false;
+          if (badge) badge.classList.add("d-none");
           if (msg) msg.textContent = String(e);
         });
     });

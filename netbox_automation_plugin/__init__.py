@@ -73,5 +73,13 @@ class NetBoxAutomationPluginConfig(PluginConfig):
         """Return the path to the plugin's templates directory."""
         return Path(__file__).parent / 'templates'
 
+    def ready(self):
+        super().ready()
+        from netbox_automation_plugin.integrations.netbox_branching_router_patch import (
+            apply_branch_router_objectchange_write_patch,
+        )
+
+        apply_branch_router_objectchange_write_patch()
+
 
 config = NetBoxAutomationPluginConfig

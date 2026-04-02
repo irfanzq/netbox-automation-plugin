@@ -9,7 +9,7 @@ from django.contrib import messages
 from django.contrib.auth.mixins import LoginRequiredMixin
 from django.http import JsonResponse
 from django.shortcuts import get_object_or_404, redirect, render
-from django.urls import reverse
+from django.urls import NoReverseMatch, reverse
 from django.utils.translation import gettext_lazy as _
 from django.utils.decorators import method_decorator
 from django.views import View
@@ -21,6 +21,7 @@ from netbox_automation_plugin.workflows.maas_openstack_sync.history_models impor
     MAASOpenStackDriftRun,
 )
 from .service import (
+    frozen_operations_apply_snapshots,
     frozen_operations_for_display,
     group_reconciliation_operation_tables,
     RECONCILIATION_DISCARD_BLOCKED_STATUSES,
@@ -33,6 +34,21 @@ from .service import (
 logger = logging.getLogger(__name__)
 
 MAAS_RECON_STAGING_SESSION_KEY = "maas_recon_staging_v1"
+
+
+def _netbox_branching_branch_url(*, branch_pk: int | None) -> str | None:
+    """Relative URL to the NetBox Branching branch detail page, if installed."""
+    if branch_pk is None:
+        return None
+    for name in (
+        "plugins:netbox_branching:branch",
+        "plugins:netbox_branching:branch_detail",
+    ):
+        try:
+            return reverse(name, kwargs={"pk": branch_pk})
+        except NoReverseMatch:
+            continue
+    return None
 
 
 @method_decorator(never_cache, name="dispatch")
@@ -190,6 +206,8 @@ class ReconciliationRunDetailView(LoginRequiredMixin, View):
             if isinstance(o, dict)
         ]
         operation_tables = group_reconciliation_operation_tables(ops_for_tables)
+        raw_frozen = run.frozen_operations if isinstance(run.frozen_operations, list) else []
+        apply_snapshot_ops = frozen_operations_apply_snapshots(raw_frozen)
         return render(
             request,
             self.template_name,
@@ -197,6 +215,7 @@ class ReconciliationRunDetailView(LoginRequiredMixin, View):
                 "run": run,
                 "frozen_ops": frozen_ops,
                 "operation_tables": operation_tables,
+                "apply_snapshot_ops": apply_snapshot_ops,
                 "apply_results": run.apply_results if isinstance(run.apply_results, dict) else {},
                 "apply_url": reverse(
                     "plugins:netbox_automation_plugin:maas_openstack_reconciliation_apply",
@@ -210,6 +229,7 @@ class ReconciliationRunDetailView(LoginRequiredMixin, View):
                     "plugins:netbox_automation_plugin:maas_openstack_reconciliation_discard",
                     args=[run.pk],
                 ),
+                "branching_branch_url": _netbox_branching_branch_url(branch_pk=run.branch_id),
                 "can_discard": run.status not in blocked_discard,
                 "can_apply": run.status in apply_ok,
                 "can_retry_failed": run.status in apply_ok
@@ -232,14 +252,16 @@ class ReconciliationApplyView(LoginRequiredMixin, View):
         except Exception as e:
             logger.exception("Reconciliation apply failed for run %s", run_id)
             return JsonResponse({"ok": False, "error": str(e)}, status=500)
-        return JsonResponse(
-            {
-                "ok": True,
-                "run_id": run.pk,
-                "status": run.status,
-                "apply_results": run.apply_results if isinstance(run.apply_results, dict) else {},
-            }
-        )
+        payload = {
+            "ok": True,
+            "run_id": run.pk,
+            "status": run.status,
+            "apply_results": run.apply_results if isinstance(run.apply_results, dict) else {},
+        }
+        bu = _netbox_branching_branch_url(branch_pk=run.branch_id)
+        if bu:
+            payload["branching_branch_url"] = bu
+        return JsonResponse(payload)
 
 
 @method_decorator(never_cache, name="dispatch")
@@ -255,14 +277,16 @@ class ReconciliationRetryFailedView(LoginRequiredMixin, View):
         except Exception as e:
             logger.exception("Reconciliation retry-failed failed for run %s", run_id)
             return JsonResponse({"ok": False, "error": str(e)}, status=500)
-        return JsonResponse(
-            {
-                "ok": True,
-                "run_id": run.pk,
-                "status": run.status,
-                "apply_results": run.apply_results if isinstance(run.apply_results, dict) else {},
-            }
-        )
+        payload = {
+            "ok": True,
+            "run_id": run.pk,
+            "status": run.status,
+            "apply_results": run.apply_results if isinstance(run.apply_results, dict) else {},
+        }
+        bu = _netbox_branching_branch_url(branch_pk=run.branch_id)
+        if bu:
+            payload["branching_branch_url"] = bu
+        return JsonResponse(payload)
 
 
 @method_decorator(never_cache, name="dispatch")
@@ -333,6 +357,9 @@ class ReconciliationStagingView(LoginRequiredMixin, View):
                 "operations": data.get("operations") if isinstance(data.get("operations"), list) else [],
                 "operation_tables": data.get("operation_tables")
                 if isinstance(data.get("operation_tables"), list)
+                else [],
+                "apply_snapshot_ops": data.get("apply_snapshot_ops")
+                if isinstance(data.get("apply_snapshot_ops"), list)
                 else [],
                 "counts_by_action": data.get("counts_by_action")
                 if isinstance(data.get("counts_by_action"), dict)
@@ -405,6 +432,7 @@ class ReconciliationStagingView(LoginRequiredMixin, View):
             "operation_count": payload.get("operation_count") or 0,
             "operations": payload.get("operations") or [],
             "operation_tables": payload.get("operation_tables") or [],
+            "apply_snapshot_ops": payload.get("apply_snapshot_ops") or [],
             "counts_by_action": payload.get("counts_by_action") or {},
             "counts_by_section": payload.get("counts_by_section") or {},
             "warnings": payload.get("warnings") or [],
