@@ -565,7 +565,7 @@
                        id="maas-recon-open-new-tab-link"
                        target="_blank"
                        rel="noopener noreferrer"
-                       title="{% trans 'Right-click or middle-click to open in another tab while keeping this audit open. Selection is synced from Include checkboxes and table edits.' %}">{% trans "Open preview in new tab" %}</a>
+                       title="{% trans 'Right-click or middle-click to open the reconciliation preview in another tab while keeping this audit open. Selection is synced from Include checkboxes and table edits.' %}">{% trans "Open reconciliation preview in new tab" %}</a>
                   {% endif %}
                 </div>
               </div>
@@ -585,7 +585,7 @@
                 </details>
               {% endif %}
               {% if audit_run_id and report_drift_markup == "html" %}
-                <p class="small text-body-secondary mt-2 mb-0">{% blocktrans trimmed %}Reconciliation uses the same saved data as modified Excel: if you edited NetBox pickers, we save those edits when you continue (or use <strong>Save edits</strong> first). Then the next page shows operations and a diff against the automatic proposal. Use <strong>Open preview in new tab</strong> to compare this audit side-by-side (same Include rows and current table edits).{% endblocktrans %}</p>
+                <p class="small text-body-secondary mt-2 mb-0">{% blocktrans trimmed %}Reconciliation uses the same saved data as modified Excel: if you edited NetBox pickers, we save those edits when you continue (or use <strong>Save edits</strong> first). Then the next page shows operations and a diff against the automatic proposal. Use <strong>Open reconciliation preview in new tab</strong> to compare this audit side-by-side (same Include rows and current table edits).{% endblocktrans %}</p>
               {% endif %}
               <p class="small text-muted mt-2 mb-0">{% trans "Excel can be opened in Microsoft Excel or Google Sheets." %}</p>
             </div>

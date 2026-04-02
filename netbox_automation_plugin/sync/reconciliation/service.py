@@ -865,19 +865,31 @@ def preview_reconciliation(
             + "."
         )
 
-    operations = [
+    # Tables must see raw audit ``cells``; ``netbox_write_preview_cells`` maps those headers.
+    # (``recon_operation_display_cells`` is only for the flat operations / payload disclosure.)
+    operations_for_tables = [
         {
             "summary": o["summary"],
             "action": o["action"],
             "section": o["selection_key"],
-            "cells": recon_operation_display_cells(
-                str(o.get("selection_key") or ""),
-                dict(o.get("cells") or {}),
-            ),
+            "selection_key": o["selection_key"],
+            "cells": dict(o.get("cells") or {}),
         }
         for o in frozen
     ]
-    operation_tables = group_reconciliation_operation_tables(operations)
+    operations = [
+        {
+            "summary": op["summary"],
+            "action": op["action"],
+            "section": op["section"],
+            "cells": recon_operation_display_cells(
+                str(op.get("selection_key") or op.get("section") or ""),
+                dict(op.get("cells") or {}),
+            ),
+        }
+        for op in operations_for_tables
+    ]
+    operation_tables = group_reconciliation_operation_tables(operations_for_tables)
     apply_snapshot_ops = frozen_operations_apply_snapshots(frozen)
     apply_snapshot_tables = group_apply_snapshot_tables(apply_snapshot_ops)
 

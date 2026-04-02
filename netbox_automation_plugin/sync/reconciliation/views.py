@@ -194,22 +194,21 @@ class ReconciliationRunDetailView(LoginRequiredMixin, View):
             MAASOpenStackReconciliationRun.STATUS_APPLY_FAILED_PARTIAL,
             MAASOpenStackReconciliationRun.STATUS_APPLY_FAILED,
         }
-        frozen_ops = frozen_operations_for_display(
-            run.frozen_operations if isinstance(run.frozen_operations, list) else []
-        )
+        raw_frozen_list = run.frozen_operations if isinstance(run.frozen_operations, list) else []
+        frozen_ops = frozen_operations_for_display(raw_frozen_list)
         ops_for_tables = [
             {
                 "summary": o.get("summary"),
                 "action": o.get("action"),
                 "section": o.get("selection_key"),
-                "cells": o.get("cells") or {},
+                "selection_key": o.get("selection_key"),
+                "cells": dict(o.get("cells") or {}),
             }
-            for o in frozen_ops
+            for o in raw_frozen_list
             if isinstance(o, dict)
         ]
         operation_tables = group_reconciliation_operation_tables(ops_for_tables)
-        raw_frozen = run.frozen_operations if isinstance(run.frozen_operations, list) else []
-        apply_snapshot_ops = frozen_operations_apply_snapshots(raw_frozen)
+        apply_snapshot_ops = frozen_operations_apply_snapshots(raw_frozen_list)
         apply_snapshot_tables = group_apply_snapshot_tables(apply_snapshot_ops)
         return render(
             request,
