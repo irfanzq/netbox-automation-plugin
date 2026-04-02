@@ -164,6 +164,30 @@ def _nic_proposed_property_segment_ok(val: str | None) -> bool:
     return bool(t) and t not in ("—", "-")
 
 
+def _parse_set_netbox_interface_directives(raw: str) -> tuple[str | None, str | None, str | None]:
+    """
+    Workflow ``Proposed Action`` tokens: SET_NETBOX_MAC=…; SET_NETBOX_UNTAGGED_VLAN=…; SET_NETBOX_IP=…
+    (semicolon-separated). Multiple IP directives are concatenated with comma+space.
+    """
+    s = (raw or "").strip()
+    if not s:
+        return None, None, None
+    mac_val = vlan_val = None
+    m = re.search(r"\bSET_NETBOX_MAC=([^;]+)", s, flags=re.IGNORECASE)
+    if m:
+        mac_val = m.group(1).strip()
+    m = re.search(r"\bSET_NETBOX_UNTAGGED_VLAN=([^;]+)", s, flags=re.IGNORECASE)
+    if m:
+        vlan_val = m.group(1).strip()
+    ip_chunks: list[str] = []
+    for m in re.finditer(r"\bSET_NETBOX_IP=([^;]+)", s, flags=re.IGNORECASE):
+        t = m.group(1).strip()
+        if t:
+            ip_chunks.append(t)
+    ips_val = ", ".join(ip_chunks) if ip_chunks else None
+    return mac_val, vlan_val, ips_val
+
+
 def _parse_nic_proposed_properties_segments(raw: str) -> tuple[str | None, str | None, str | None]:
     """
     ``Proposed Action`` text with MAC / untagged VLAN / IPs clauses, e.g.
@@ -198,29 +222,40 @@ def _cell_nic_proposed_body(cells: dict[str, str]) -> str:
 
 
 def _text_has_derivable_nic_clauses(raw: str) -> bool:
-    """True when text has at least one MAC / untagged VLAN / IPs clause with a real value (not workflow-only)."""
+    """True when Proposed Action carries human-readable or SET_NETBOX_* NIC intent."""
     mac, vlan, ips = _parse_nic_proposed_properties_segments(raw)
-    return (
+    if (
         _nic_proposed_property_segment_ok(mac)
         or _nic_proposed_property_segment_ok(vlan)
         or _nic_proposed_property_segment_ok(ips)
-    )
+    ):
+        return True
+    sm, sv, si = _parse_set_netbox_interface_directives(raw)
+    if _nic_proposed_property_segment_ok(sm):
+        return True
+    if sv and _parse_vlan_vid(sv) is not None:
+        return True
+    if _nic_proposed_property_segment_ok(si):
+        return True
+    return False
 
 
 def _interface_mac_vlan_ip_from_cells(
     cells: dict[str, str], *, include_nb_fallback: bool
 ) -> tuple[str | None, int | None, str]:
     """
-    Prefer structured clauses in ``Proposed Action`` when present; else MAAS/OS columns
-    (and NetBox columns when ``include_nb_fallback`` for NIC drift).
+    Per field: human-readable ``MAC`` / ``untagged VLAN`` / ``IPs:`` clauses in Proposed Action,
+    then ``SET_NETBOX_MAC`` / ``SET_NETBOX_UNTAGGED_VLAN`` / ``SET_NETBOX_IP`` directives,
+    then MAAS/OS (and NetBox when ``include_nb_fallback`` for NIC drift).
     """
     body = _cell_nic_proposed_body(cells)
-    p_mac = p_vlan = p_ips = None
-    if body and _text_has_derivable_nic_clauses(body):
-        p_mac, p_vlan, p_ips = _parse_nic_proposed_properties_segments(body)
+    p_mac, p_vlan, p_ips = _parse_nic_proposed_properties_segments(body)
+    s_mac, s_vlan, s_ips = _parse_set_netbox_interface_directives(body)
 
     mac = _normalize_mac(p_mac) if _nic_proposed_property_segment_ok(p_mac) else None
-    if not mac:
+    if mac is None and _nic_proposed_property_segment_ok(s_mac):
+        mac = _normalize_mac(s_mac)
+    if mac is None:
         if include_nb_fallback:
             mac = _normalize_mac(_cell(cells, "MAAS MAC", "OS MAC", "NB MAC"))
         else:
@@ -229,6 +264,8 @@ def _interface_mac_vlan_ip_from_cells(
     vid: int | None = None
     if _nic_proposed_property_segment_ok(p_vlan):
         vid = _parse_vlan_vid(p_vlan)
+    if vid is None and s_vlan:
+        vid = _parse_vlan_vid(s_vlan)
     if vid is None:
         if include_nb_fallback:
             vid = _parse_vlan_vid(_cell(cells, "MAAS VLAN", "OS runtime VLAN", "NB VLAN"))
@@ -238,6 +275,8 @@ def _interface_mac_vlan_ip_from_cells(
     ip_blob = ""
     if _nic_proposed_property_segment_ok(p_ips):
         ip_blob = str(p_ips).strip()
+    if not ip_blob and _nic_proposed_property_segment_ok(s_ips):
+        ip_blob = str(s_ips).strip()
     if not ip_blob:
         if include_nb_fallback:
             ip_blob = _cell(cells, "MAAS IPs", "OS runtime IP", "NB IPs")
@@ -286,6 +325,13 @@ def new_nic_cells_for_reconciliation(full_cells: dict[str, str]) -> dict[str, st
             out[k] = str(full_cells.get(k) or "").strip()
     props = out["Proposed Action"]
     p_mac, p_vlan, p_ips = _parse_nic_proposed_properties_segments(props)
+    s_mac, s_vlan, s_ips = _parse_set_netbox_interface_directives(props)
+    if not _nic_proposed_property_segment_ok(p_mac) and _nic_proposed_property_segment_ok(s_mac):
+        p_mac = s_mac
+    if not _nic_proposed_property_segment_ok(p_vlan) and s_vlan and _parse_vlan_vid(s_vlan) is not None:
+        p_vlan = s_vlan
+    if not _nic_proposed_property_segment_ok(p_ips) and _nic_proposed_property_segment_ok(s_ips):
+        p_ips = s_ips
     out["Parsed MAC"] = (p_mac or "").strip() if _nic_proposed_property_segment_ok(p_mac) else ""
     out["Parsed untagged VLAN"] = (p_vlan or "").strip() if _nic_proposed_property_segment_ok(p_vlan) else ""
     out["Parsed IPs"] = (p_ips or "").strip() if _nic_proposed_property_segment_ok(p_ips) else ""
