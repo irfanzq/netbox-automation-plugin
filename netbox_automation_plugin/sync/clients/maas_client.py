@@ -1244,6 +1244,9 @@ async def fetch_maas_data(maas_url: str, maas_api_key: str, maas_insecure: bool)
             serial = ""
             hardware_vendor = ""
             hardware_product = ""
+            osystem_str = ""
+            distro_series_str = ""
+            hardware_uuid_str = ""
             try:
                 md = getattr(m, "_data", None)
                 if isinstance(md, dict):
@@ -1263,8 +1266,17 @@ async def fetch_maas_data(maas_url: str, maas_api_key: str, maas_insecure: bool)
                     serial = _serial_from_maas_machine_json(md)
                     hardware_vendor = _vendor_from_maas_machine_json(md)
                     hardware_product = _product_from_maas_machine_json(md)
+                    osystem_str = str(md.get("osystem") or "").strip()
+                    distro_series_str = str(md.get("distro_series") or "").strip()
+                    hardware_uuid_str = str(md.get("hardware_uuid") or "").strip()
             except Exception:
                 pass
+            if not osystem_str:
+                osystem_str = str(getattr(m, "osystem", "") or "").strip()
+            if not distro_series_str:
+                distro_series_str = str(getattr(m, "distro_series", "") or "").strip()
+            if not hardware_uuid_str:
+                hardware_uuid_str = str(getattr(m, "hardware_uuid", "") or "").strip()
             if not serial:
                 for attr in ("serial", "serial_number"):
                     v = getattr(m, attr, None)
@@ -1294,6 +1306,9 @@ async def fetch_maas_data(maas_url: str, maas_api_key: str, maas_insecure: bool)
                 "power_type": power_type_str,
                 "hardware_vendor": str(hardware_vendor).strip(),
                 "hardware_product": str(hardware_product).strip(),
+                "osystem": osystem_str,
+                "distro_series": distro_series_str,
+                "hardware_uuid": hardware_uuid_str,
             })
         await asyncio.to_thread(
             _enrich_machines_lldp_op_details,

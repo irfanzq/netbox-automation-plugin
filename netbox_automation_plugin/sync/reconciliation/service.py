@@ -1,7 +1,7 @@
 """Preview, signed acknowledgement, and frozen operations for branch reconciliation.
 
 Each frozen op carries full audit ``cells`` for apply. The recon UI shows
-``netbox_write_preview_cells`` per section: NetBox-oriented columns only, in audit/apply order
+``netbox_write_preview_cells`` per section: NetBox model field names (values from audit cells)
 (see ``group_reconciliation_operation_tables`` and ``AUDIT_REPORT_APPLY_ORDER``).
 
 New-NIC sections store a minimal frozen row (``new_nic_cells_for_reconciliation``); preview
@@ -44,6 +44,7 @@ from .apply_cells import (
     apply_row_operation,
     netbox_write_preview_cells,
     netbox_write_preview_fieldnames,
+    netbox_write_preview_ordered_fieldnames,
     new_nic_cells_for_reconciliation,
     recon_operation_display_cells,
     reconciliation_apply_snapshot_cells,
@@ -575,16 +576,15 @@ def group_reconciliation_operation_tables(
     tables: list[dict[str, Any]] = []
     for sk in sorted(by_sk.keys(), key=rank):
         rows = by_sk[sk]
-        headers: list[str] = []
-        if rows and isinstance(rows[0].get("cells"), dict):
-            headers = list(rows[0]["cells"].keys())
+        headers = list(netbox_write_preview_ordered_fieldnames(sk))
         display_rows: list[dict[str, Any]] = []
         for op in rows:
             if not isinstance(op, dict):
                 continue
             o2 = dict(op)
             c = o2.get("cells") if isinstance(o2.get("cells"), dict) else {}
-            o2["cell_values"] = [str(c.get(h, "")).strip() for h in headers]
+            proj = netbox_write_preview_cells(sk, c)
+            o2["cell_values"] = [str(proj.get(h, "")).strip() for h in headers]
             display_rows.append(o2)
         tables.append(
             {
@@ -613,7 +613,7 @@ def _row_diffs_vs_baseline(
         if msk in NEW_NIC_SELECTION_KEYS:
             cells_a = new_nic_cells_for_reconciliation(cells_a)
         proj_a = netbox_write_preview_cells(msk, cells_a)
-        fieldnames = sorted(netbox_write_preview_fieldnames(msk))
+        fieldnames = list(netbox_write_preview_ordered_fieldnames(msk))
         if not fieldnames:
             fieldnames = sorted(proj_a.keys())
         if not bmeta:
@@ -634,7 +634,13 @@ def _row_diffs_vs_baseline(
         if msk in NEW_NIC_SELECTION_KEYS:
             cells_b = new_nic_cells_for_reconciliation(cells_b)
         proj_b = netbox_write_preview_cells(msk, cells_b)
-        fieldnames_cmp = sorted(set(proj_a.keys()) | set(proj_b.keys()))
+        _ord = list(netbox_write_preview_ordered_fieldnames(msk))
+        _seen = set(_ord)
+        for _k in sorted(set(proj_a.keys()) | set(proj_b.keys())):
+            if _k not in _seen:
+                _ord.append(_k)
+                _seen.add(_k)
+        fieldnames_cmp = _ord
         changed = [
             h
             for h in fieldnames_cmp
@@ -731,29 +737,30 @@ def group_apply_snapshot_tables(
     tables: list[dict[str, Any]] = []
     for sk in sorted(by_sk.keys(), key=rank):
         group = by_sk[sk]
-        all_keys: set[str] = set()
-        for r in group:
-            attrs = r.get("attrs") or []
-            for item in attrs:
-                if isinstance(item, (list, tuple)) and item:
-                    all_keys.add(str(item[0]).strip())
-        headers = sorted(all_keys, key=lambda x: str(x).casefold())
-        display_rows: list[dict[str, Any]] = []
+        projected: list[dict[str, str]] = []
         for r in group:
             cells: dict[str, str] = {}
-            attrs = r.get("attrs") or []
-            for item in attrs:
+            for item in r.get("attrs") or []:
                 if isinstance(item, (list, tuple)) and len(item) >= 2:
                     k, v = str(item[0]).strip(), item[1]
                     cells[k] = "" if v is None else str(v).strip()
                 elif isinstance(item, (list, tuple)) and len(item) == 1:
                     cells[str(item[0]).strip()] = ""
+            projected.append(netbox_write_preview_cells(sk, cells))
+        headers = list(netbox_write_preview_ordered_fieldnames(sk))
+        _seen_h = set(headers)
+        for p in projected:
+            for k in p:
+                if k not in _seen_h:
+                    _seen_h.add(k)
+                    headers.append(k)
+        display_rows: list[dict[str, Any]] = []
+        for r, p in zip(group, projected):
             display_rows.append(
                 {
                     "action": r.get("action"),
-                    "summary": r.get("summary"),
                     "row_key": r.get("row_key"),
-                    "cell_values": [cells.get(h, "").strip() for h in headers],
+                    "cell_values": [str(p.get(h, "")).strip() for h in headers],
                 }
             )
         tables.append(

@@ -125,6 +125,49 @@ def _openstack_ironic_bmc_row(openstack_data, hostname: str) -> dict | None:
     return None
 
 
+def _audit_nb_proposed_platform_asset(
+    m: dict,
+    serial: str,
+    osr: dict | None,
+) -> tuple[str, str]:
+    """
+    NetBox-oriented strings for new-device audit columns, from MAAS machine + optional Ironic row.
+
+    *platform*: MAAS ``osystem`` + ``distro_series`` when set; else Ironic ``instance_info.image_source``
+    tail or ``resource_class`` hint.
+    *asset_tag*: MAAS ``hardware_uuid``, else Ironic ``instance_uuid`` / ``node_uuid``, else
+    ``system_id``, else hardware serial as last resort.
+    """
+    dash = "—"
+    osl = str(m.get("osystem") or "").strip()
+    ds = str(m.get("distro_series") or "").strip()
+    bits: list[str] = []
+    if osl and osl.lower() not in ("", "none"):
+        bits.append(osl)
+    if ds and ds.lower() not in ("", "none"):
+        bits.append(ds)
+    platform_s = " ".join(bits).strip()
+    if not platform_s and osr:
+        img = str(osr.get("ironic_image_source") or "").strip()
+        rc = str(osr.get("resource_class") or "").strip()
+        if img:
+            platform_s = img[:160]
+        elif rc:
+            platform_s = f"resource_class={rc}"[:160]
+    if not platform_s:
+        platform_s = dash
+
+    hwu = str(m.get("hardware_uuid") or "").strip()
+    sysid = str(m.get("system_id") or "").strip()
+    inst = str((osr or {}).get("instance_uuid") or "").strip()
+    node_uuid = str((osr or {}).get("node_uuid") or "").strip()
+    asset = hwu or inst or node_uuid or sysid or dash
+    ser = str(serial or "").strip()
+    if asset == dash and ser and ser not in ("—", "-"):
+        asset = ser[:64]
+    return platform_s, asset
+
+
 def _os_host_authority_map(openstack_data) -> dict[str, bool]:
     out: dict[str, bool] = {}
     for row in (openstack_data or {}).get("runtime_bmc") or []:
@@ -1263,6 +1306,7 @@ def _proposed_changes_rows(
             proposed_tag = "review-only"
         nb_prop_state = proposed_netbox_status_for_new_maas_machine(m, osr)
         serial = str(m.get("serial") or "—")
+        nb_prop_platform, nb_prop_asset = _audit_nb_proposed_platform_asset(m, serial, osr)
         action = (
             "CREATE_NETBOX_DEVICE_AND_PORTS"
             if is_candidate
@@ -1289,6 +1333,8 @@ def _proposed_changes_rows(
             nb_role,
             nb_prop_state,
             proposed_tag,
+            nb_prop_platform,
+            nb_prop_asset,
             authority_badge,
             action,
         ]

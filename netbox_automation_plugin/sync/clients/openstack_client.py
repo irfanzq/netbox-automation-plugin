@@ -838,6 +838,12 @@ def _collect_runtime_bmc(conn) -> list[dict]:
                 bmc_host = bmc_host.split(":", 1)[0]
                 break
 
+            instance_info = getattr(n, "instance_info", None)
+            if not isinstance(instance_info, dict):
+                instance_info = {}
+            image_src = str(instance_info.get("image_source") or "").strip()
+            if "/" in image_src:
+                image_src = image_src.rsplit("/", 1)[-1].split("?", 1)[0]
             out.append({
                 "hostname": hostname,
                 "node_uuid": node_uuid,
@@ -851,6 +857,8 @@ def _collect_runtime_bmc(conn) -> list[dict]:
                 "instance_uuid": str(
                     getattr(n, "instance_uuid", None) or getattr(n, "instance_id", None) or ""
                 ).strip(),
+                "ironic_image_source": image_src,
+                "resource_class": str(getattr(n, "resource_class", "") or "").strip(),
                 "os_bmc_endpoint": endpoint,
                 "os_bmc_ip": bmc_host,
             })

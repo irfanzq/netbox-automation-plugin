@@ -51,6 +51,8 @@ HEADERS_DETAIL_NEW_DEVICES: list[str] = [
     "NB proposed role",
     "NB proposed device status",
     "NB proposed tag",
+    "NB proposed platform",
+    "NB proposed asset tag",
     "Authority",
     "Proposed Action",
 ]

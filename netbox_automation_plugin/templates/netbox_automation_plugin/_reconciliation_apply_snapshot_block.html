@@ -2,7 +2,7 @@
 {% if apply_snapshot_tables %}
 <h5 class="text-body-secondary text-uppercase small mb-2 mt-4">{% trans "Apply payload (attributes passed to NetBox)" %}</h5>
 <p class="small text-body-secondary mb-3">
-  {% blocktrans trimmed %}Same order as apply. Tables are grouped by audit section (like the write preview above). Each row is one frozen operation; columns are the attribute names and values actually handed to the apply step after scoping (recon-oriented columns plus workflow fields such as Proposed Action when set; empty and “—” placeholders removed). Scroll horizontally for many columns; scroll vertically inside each table for long runs.{% endblocktrans %}
+  {% blocktrans trimmed %}Same order as apply. Each row is one frozen operation; columns are NetBox attribute names and projected values after scoping (empty and “—” removed). Scroll horizontally for many columns; scroll vertically inside each table for long runs.{% endblocktrans %}
 </p>
 {% for tbl in apply_snapshot_tables %}
 <div class="card mb-3">
@@ -16,22 +16,14 @@
       <table class="table table-sm table-striped mb-0 align-middle">
         <thead class="table-light" style="position: sticky; top: 0; z-index: 1;">
           <tr>
-            <th class="text-nowrap small">#</th>
-            <th class="text-nowrap small">{% trans "Action" %}</th>
-            <th class="text-nowrap small">{% trans "Summary" %}</th>
-            <th class="text-nowrap small font-monospace">{% trans "Row key" %}</th>
             {% for h in tbl.headers %}
-            <th class="small text-wrap" style="min-width: 5rem;">{{ h }}</th>
+            <th class="small text-wrap font-monospace" style="min-width: 5rem;" title="NetBox attribute">{{ h }}</th>
             {% endfor %}
           </tr>
         </thead>
         <tbody>
           {% for op in tbl.rows %}
           <tr>
-            <td class="text-muted small">{{ forloop.counter }}</td>
-            <td class="small text-nowrap">{{ op.action|default:"—" }}</td>
-            <td class="small">{{ op.summary|default:"—" }}</td>
-            <td class="small font-monospace text-muted text-break" style="max-width: 10rem;" title="{{ op.row_key|default:'' }}">{{ op.row_key|default:"—" }}</td>
             {% for v in op.cell_values %}
             <td class="small text-break">{% if v %}{{ v }}{% else %}—{% endif %}</td>
             {% endfor %}

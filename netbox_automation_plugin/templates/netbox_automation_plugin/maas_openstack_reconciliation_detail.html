@@ -51,9 +51,6 @@
           <button type="button" class="btn btn-outline-secondary btn-sm" disabled title="{% trans 'Not implemented yet' %}">{% trans "Run validation" %}</button>
           <button type="button" class="btn btn-outline-secondary btn-sm" disabled title="{% trans 'Not implemented yet' %}">{% trans "Merge to main" %}</button>
           <button type="button" class="btn btn-outline-danger btn-sm js-recon-discard js-recon-lifecycle-btn" data-initial-disabled="{% if not can_discard %}true{% else %}false{% endif %}" {% if not can_discard %}disabled{% endif %} title="{% trans 'Deletes the branch record in NetBox when possible' %}">{% trans "Discard run" %}</button>
-          <span class="badge text-bg-secondary d-none ms-1 align-self-center" id="reconLifecycleLoadingBadge" role="status">
-            <span class="spinner-border spinner-border-sm me-1" aria-hidden="true"></span>{% trans "Working…" %}
-          </span>
         </div>
         <div id="reconApplyMsg" class="small mt-2 text-body-secondary"></div>
       </div>
@@ -101,20 +98,14 @@
             <table class="table table-sm table-striped mb-0 align-middle">
               <thead class="table-light">
                 <tr>
-                  <th>#</th>
-                  <th>{% trans "Action" %}</th>
-                  <th>{% trans "Summary" %}</th>
                   {% for h in tbl.headers %}
-                  <th class="small text-wrap" style="min-width: 6rem;">{{ h }}</th>
+                  <th class="small text-wrap font-monospace" style="min-width: 6rem;" title="NetBox attribute">{{ h }}</th>
                   {% endfor %}
                 </tr>
               </thead>
               <tbody>
                 {% for op in tbl.rows %}
                 <tr>
-                  <td class="text-muted">{{ forloop.counter }}</td>
-                  <td class="small text-nowrap">{{ op.action|default:"—" }}</td>
-                  <td class="small">{{ op.summary|default:"—" }}</td>
                   {% for v in op.cell_values %}
                   <td class="small text-break">{% if v %}{{ v }}{% else %}—{% endif %}</td>
                   {% endfor %}
@@ -137,7 +128,6 @@
                   <th>{# #}</th>
                   <th>{% trans "Section" %}</th>
                   <th>{% trans "Action" %}</th>
-                  <th>{% trans "Summary" %}</th>
                   <th>{% trans "NetBox payload" %}</th>
                 </tr>
               </thead>
@@ -147,7 +137,6 @@
                     <td class="text-muted">{{ forloop.counter }}</td>
                     <td class="small text-monospace">{{ op.selection_key|default:"—" }}</td>
                     <td class="small">{{ op.action|default:"—" }}</td>
-                    <td class="small">{{ op.summary|default:"—" }}</td>
                     <td class="small align-top" style="min-width: 12rem;">
                       {% if op.cells %}
                         <details>
@@ -224,7 +213,6 @@
       return el ? el.value : "";
     }
     var loadingBtnHtml = '<span class="spinner-border spinner-border-sm me-1" role="status" aria-hidden="true"></span>{% filter escapejs %}{% trans "Working…" %}{% endfilter %}';
-    var lifecycleBadge = document.getElementById("reconLifecycleLoadingBadge");
     function lifecycleButtons() {
       return document.querySelectorAll(".js-recon-lifecycle-btn");
     }
@@ -237,7 +225,6 @@
             b.innerHTML = loadingBtnHtml;
           }
         });
-        if (lifecycleBadge) lifecycleBadge.classList.remove("d-none");
       } else {
         lifecycleButtons().forEach(function(b2) {
           if (b2.dataset.reconSavedHtml) {
@@ -246,7 +233,6 @@
           }
           b2.disabled = b2.getAttribute("data-initial-disabled") === "true";
         });
-        if (lifecycleBadge) lifecycleBadge.classList.add("d-none");
       }
     }
     function postAction(url, btn, opts) {

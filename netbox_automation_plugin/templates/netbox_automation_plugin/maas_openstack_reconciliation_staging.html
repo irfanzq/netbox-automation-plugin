@@ -66,9 +66,8 @@
             <table class="table table-sm mb-0">
               <thead>
                 <tr>
-                  <th>{% trans "Summary" %}</th>
                   <th>{% trans "Section" %}</th>
-                  <th>{% trans "Column" %}</th>
+                  <th>{% trans "Field" %}</th>
                   <th>{% trans "Before → after" %}</th>
                 </tr>
               </thead>
@@ -77,7 +76,6 @@
                   {% for ch in d.changes %}
                   <tr>
                     {% if forloop.first %}
-                    <td class="small" rowspan="{{ d.changes|length }}">{{ d.summary|default:"—" }}</td>
                     <td class="small text-monospace" rowspan="{{ d.changes|length }}">{{ d.section|default:"—" }}</td>
                     {% endif %}
                     <td class="small"><code>{{ ch.header|default:"—" }}</code></td>
@@ -97,9 +95,6 @@
           <button type="button" class="btn btn-primary btn-sm" id="maas-recon-create-branch">
             {% trans "Create NetBox branch from this preview" %}
           </button>
-          <span class="badge text-bg-secondary d-none align-self-center" id="maas-recon-create-loading-badge" role="status">
-            <span class="spinner-border spinner-border-sm me-1" aria-hidden="true"></span>{% trans "Working…" %}
-          </span>
           <span class="small text-body-secondary" id="maas-recon-create-msg"></span>
         </div>
       </div>
@@ -118,20 +113,14 @@
             <table class="table table-sm table-striped mb-0 align-middle">
               <thead class="table-light">
                 <tr>
-                  <th class="text-nowrap">#</th>
-                  <th class="text-nowrap">{% trans "Action" %}</th>
-                  <th class="text-nowrap">{% trans "Summary" %}</th>
                   {% for h in tbl.headers %}
-                  <th class="small text-wrap" style="min-width: 6rem;">{{ h }}</th>
+                  <th class="small text-wrap font-monospace" style="min-width: 6rem;" title="NetBox attribute">{{ h }}</th>
                   {% endfor %}
                 </tr>
               </thead>
               <tbody>
                 {% for op in tbl.rows %}
                 <tr>
-                  <td class="text-muted">{{ forloop.counter }}</td>
-                  <td class="small text-nowrap">{{ op.action|default:"—" }}</td>
-                  <td class="small">{{ op.summary|default:"—" }}</td>
                   {% for v in op.cell_values %}
                   <td class="small text-break">{% if v %}{{ v }}{% else %}—{% endif %}</td>
                   {% endfor %}
@@ -154,7 +143,6 @@
                   <th>#</th>
                   <th>{% trans "Section" %}</th>
                   <th>{% trans "Action" %}</th>
-                  <th>{% trans "Summary" %}</th>
                   <th>{% trans "NetBox payload" %}</th>
                 </tr>
               </thead>
@@ -164,7 +152,6 @@
                     <td class="text-muted">{{ forloop.counter }}</td>
                     <td class="small text-monospace">{{ op.section|default:"—" }}</td>
                     <td class="small">{{ op.action|default:"—" }}</td>
-                    <td class="small">{{ op.summary|default:"—" }}</td>
                     <td class="small align-top" style="min-width: 12rem;">
                       {% if op.cells %}
                         <details class="drift-recon-op-cells">
@@ -206,7 +193,6 @@
     var createUrl = "{{ create_url|escapejs }}";
     var driftRunId = {{ drift_run.pk }};
     var loadingBtnHtml = '<span class="spinner-border spinner-border-sm me-1" role="status" aria-hidden="true"></span>{% filter escapejs %}{% trans "Creating branch…" %}{% endfilter %}';
-    var badge = document.getElementById("maas-recon-create-loading-badge");
     function csrf() {
       var el = document.querySelector("#recon-action-csrf input[name=csrfmiddlewaretoken]");
       return el ? el.value : "";
@@ -236,7 +222,6 @@
       var origBtnHtml = btn.innerHTML;
       btn.innerHTML = loadingBtnHtml;
       btn.disabled = true;
-      if (badge) badge.classList.remove("d-none");
       if (msg) msg.textContent = "";
       var payload = {
         drift_run_id: driftRunId,
@@ -265,14 +250,12 @@
           }
           btn.innerHTML = origBtnHtml;
           btn.disabled = false;
-          if (badge) badge.classList.add("d-none");
           var err = (res.body && res.body.error) ? res.body.error : ("HTTP " + res.status);
           if (msg) msg.textContent = err;
         })
         .catch(function(e) {
           btn.innerHTML = origBtnHtml;
           btn.disabled = false;
-          if (badge) badge.classList.add("d-none");
           if (msg) msg.textContent = String(e);
         });
     });
