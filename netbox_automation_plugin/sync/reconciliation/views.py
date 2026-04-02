@@ -10,7 +10,8 @@ from django.contrib.auth.mixins import LoginRequiredMixin
 from django.http import JsonResponse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import NoReverseMatch, reverse
-from django.utils.translation import gettext_lazy as _
+from django.utils.html import format_html, linebreaks
+from django.utils.translation import gettext, gettext_lazy as _
 from django.utils.decorators import method_decorator
 from django.views import View
 from django.views.decorators.cache import never_cache
@@ -414,11 +415,27 @@ class ReconciliationStagingView(LoginRequiredMixin, View):
                 posted_review_overrides_raw=posted_overrides,
             )
         except ValueError as e:
-            messages.error(request, str(e))
+            messages.error(
+                request,
+                format_html(
+                    '<span class="fw-semibold d-block mb-1">{}</span>'
+                    '<div class="text-body text-start small reconciliation-msg-detail">{}</div>',
+                    gettext("Reconciliation preview blocked"),
+                    linebreaks(str(e)),
+                ),
+            )
             return redirect(back)
         except Exception as e:
             logger.exception("Reconciliation staging preview failed for drift run %s", drift_run_id)
-            messages.error(request, str(e))
+            messages.error(
+                request,
+                format_html(
+                    '<span class="fw-semibold d-block mb-1">{}</span>'
+                    '<div class="text-body text-start small reconciliation-msg-detail">{}</div>',
+                    gettext("Reconciliation preview failed"),
+                    linebreaks(str(e)),
+                ),
+            )
             return redirect(back)
 
         posted_store = posted_overrides if isinstance(posted_overrides, dict) else {}

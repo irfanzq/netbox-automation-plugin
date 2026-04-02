@@ -1896,7 +1896,9 @@ def apply_review_device(op: dict[str, Any]) -> tuple[str, str]:
     cells = op.get("cells") or {}
     if (reason := skip_reason_from_row_guides(cells)) is not None:
         return "skipped", reason
-    return _apply_device_core(cells, create_if_missing=False)
+    # Same creation path as new-device rows when the operator includes this row in apply:
+    # review-only means the report flagged weak/unsafe MAAS state, not "never create in NB".
+    return _apply_device_core(cells, create_if_missing=True)
 
 
 def apply_placement_alignment(op: dict[str, Any]) -> tuple[str, str]:

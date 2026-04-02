@@ -282,25 +282,45 @@ def _norm_host_key(host: str) -> str:
     return str(host or "").strip().casefold()
 
 
+def _maas_only_device_report_hostnames(row_index: dict[str, dict[str, Any]]) -> set[str]:
+    """
+    Hostnames that appear on **Detail — new devices** or **Detail — review-only devices**
+    rows in this drift report. Matched (already-in-NetBox) hosts do not appear there, so
+    new-NIC rows for those hosts must not require a device-row selection.
+    """
+    sk_ok = frozenset({"detail_new_devices", "detail_review_only_devices"})
+    out: set[str] = set()
+    for meta in row_index.values():
+        if str(meta.get("selection_key") or "") not in sk_ok:
+            continue
+        cells = _cells_dict(meta.get("headers") or [], meta.get("row") or [])
+        h = (cells.get("Hostname") or "").strip()
+        if h:
+            out.add(_norm_host_key(h))
+    return out
+
+
 def _validate_new_nic_requires_selected_new_devices(
     selected: dict[str, list[dict[str, Any]]],
     row_index: dict[str, dict[str, Any]],
     stable_index: dict[tuple[str, int], dict[str, Any]],
 ) -> None:
     """
-    Block reconciliation when New interface rows are selected without the matching
-    New device rows for the same host(s). Apply order cannot create a device that was
-    never selected.
+    For hosts that appear in the MAAS-only device sections of this report only: block when
+    New interface rows are selected without a matching selected device row (new or
+    review-only). Hosts that already have a NetBox device (new NICs from interface audit
+    only) are not in those tables and are excluded from this check.
     """
     allowed = all_registered_selection_keys()
     nic_host_by_norm: dict[str, str] = {}
     new_device_hosts_nf: set[str] = set()
+    _device_sk = frozenset({"detail_new_devices", "detail_review_only_devices"})
 
     for sk_raw in selected:
         canon = _canonical_selection_key(sk_raw, allowed)
         if canon is None:
             continue
-        if canon not in NEW_NIC_SELECTION_KEYS and canon != "detail_new_devices":
+        if canon not in NEW_NIC_SELECTION_KEYS and canon not in _device_sk:
             continue
         safe = _safe_selection_key(canon)
         for item in selected[sk_raw]:
@@ -325,26 +345,37 @@ def _validate_new_nic_requires_selected_new_devices(
                 if h:
                     nk = _norm_host_key(h)
                     nic_host_by_norm.setdefault(nk, h)
-            if canon == "detail_new_devices":
+            if canon in _device_sk:
                 h = (cells.get("Hostname") or "").strip()
                 if h:
                     new_device_hosts_nf.add(_norm_host_key(h))
 
     if not nic_host_by_norm:
         return
+    maas_only_hosts = _maas_only_device_report_hostnames(row_index)
     missing_labels = sorted(
-        {nic_host_by_norm[k] for k in nic_host_by_norm if k not in new_device_hosts_nf},
+        {
+            nic_host_by_norm[k]
+            for k in nic_host_by_norm
+            if k in maas_only_hosts and k not in new_device_hosts_nf
+        },
         key=str.lower,
     )
     if not missing_labels:
         return
-    raise ValueError(
-        "New interface rows require the matching New device row(s) for the same host(s) to "
-        "stay selected. Reconciliation only runs operations you include; apply order does not "
-        "create a device that was unchecked. "
-        f"Select New device for: {', '.join(missing_labels)} "
-        f"or deselect the new interface row(s) for those host(s)."
-    )
+    lines = [
+        "For MAAS-only hosts (listed under New devices or MAAS-only manual review), new "
+        "interface rows need a matching device row selected for the same hostname.",
+        "Hosts that already exist in NetBox only need interface rows.",
+        "",
+        "Each line below is a hostname that has new interface(s) selected but no matching "
+        "device row included (unchecked or never selected). Fix by selecting Include on that "
+        "host's device row in New devices or MAAS-only manual review, or deselect the new "
+        "interface row(s) for that host.",
+        "",
+    ]
+    lines.extend(f"• {h}" for h in missing_labels)
+    raise ValueError("\n".join(lines))
 
 
 def _operation_summary(meta: dict[str, Any]) -> str:
