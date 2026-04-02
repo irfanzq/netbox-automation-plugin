@@ -21,7 +21,6 @@ from netbox_automation_plugin.workflows.maas_openstack_sync.history_models impor
     MAASOpenStackDriftRun,
 )
 from .service import (
-    filter_frozen_ops_for_recon_ui,
     frozen_operations_for_display,
     group_reconciliation_operation_tables,
     RECONCILIATION_DISCARD_BLOCKED_STATUSES,
@@ -180,7 +179,6 @@ class ReconciliationRunDetailView(LoginRequiredMixin, View):
         frozen_ops = frozen_operations_for_display(
             run.frozen_operations if isinstance(run.frozen_operations, list) else []
         )
-        frozen_ops = filter_frozen_ops_for_recon_ui(frozen_ops)
         ops_for_tables = [
             {
                 "summary": o.get("summary"),

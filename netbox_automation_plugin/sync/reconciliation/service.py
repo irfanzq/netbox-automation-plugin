@@ -102,11 +102,8 @@ AUDIT_REPORT_APPLY_ORDER: tuple[str, ...] = (
 _APPLY_ORDER_RANK: dict[str, int] = {sk: i for i, sk in enumerate(AUDIT_REPORT_APPLY_ORDER)}
 
 # Human titles for reconciliation tables (same order as AUDIT_REPORT_APPLY_ORDER).
-# Hidden from staging + run-detail operation tables and counts; still in frozen_operations / digest / apply.
-RECON_UI_HIDDEN_SELECTION_KEYS: frozenset[str] = frozenset({"detail_placement_lifecycle_alignment"})
-
 RECON_SECTION_TITLES: dict[str, str] = {
-    "detail_placement_lifecycle_alignment": "Placement / lifecycle alignment",
+    "detail_placement_lifecycle_alignment": "Detail — placement & lifecycle alignment",
     "detail_new_devices": "New devices",
     "detail_review_only_devices": "Review-only devices",
     "detail_new_prefixes": "New prefixes",
@@ -359,19 +356,6 @@ def build_frozen_operations(
     return ops
 
 
-def filter_frozen_ops_for_recon_ui(ops: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Drop UI-hidden sections (see ``RECON_UI_HIDDEN_SELECTION_KEYS``)."""
-    out: list[dict[str, Any]] = []
-    for o in ops:
-        if not isinstance(o, dict):
-            continue
-        sk = str(o.get("selection_key") or o.get("section") or "").strip()
-        if sk in RECON_UI_HIDDEN_SELECTION_KEYS:
-            continue
-        out.append(o)
-    return out
-
-
 def group_reconciliation_operation_tables(
     operations: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
@@ -562,11 +546,16 @@ def preview_reconciliation(
     digest = operations_digest(frozen)
     token = make_preview_token(drift_run_id=int(drift_run.pk), digest=digest)
     row_diffs = _row_diffs_vs_baseline(frozen, stable_auto)
-    row_diffs = [
-        d
-        for d in row_diffs
-        if str(d.get("section") or "").strip() not in RECON_UI_HIDDEN_SELECTION_KEYS
-    ]
+
+    counts: dict[str, int] = {}
+    for op in frozen:
+        a = op.get("action") or "unknown"
+        counts[a] = counts.get(a, 0) + 1
+
+    by_section: dict[str, int] = {}
+    for op in frozen:
+        sk = op.get("selection_key") or ""
+        by_section[sk] = by_section.get(sk, 0) + 1
 
     unknown_sections = sorted(
         {str(o.get("selection_key") or "") for o in frozen if o.get("action") == "unknown"}
@@ -579,7 +568,6 @@ def preview_reconciliation(
             + "."
         )
 
-    # Full frozen list still drives digest / preview token / persisted run; UI lists omit hidden sections.
     operations = [
         {
             "summary": o["summary"],
@@ -591,29 +579,18 @@ def preview_reconciliation(
             ),
         }
         for o in frozen
-        if str(o.get("selection_key") or "").strip() not in RECON_UI_HIDDEN_SELECTION_KEYS
     ]
     operation_tables = group_reconciliation_operation_tables(operations)
 
-    counts_visible: dict[str, int] = {}
-    for o in operations:
-        a = o.get("action") or "unknown"
-        counts_visible[a] = counts_visible.get(a, 0) + 1
-    by_section_visible: dict[str, int] = {}
-    for o in operations:
-        sk = str(o.get("section") or "").strip()
-        if sk:
-            by_section_visible[sk] = by_section_visible.get(sk, 0) + 1
-
     return {
         "drift_run_id": drift_run.pk,
-        "operation_count": len(operations),
+        "operation_count": len(frozen),
         "operations_digest": digest,
         "preview_ack_token": token,
         "operations": operations,
         "operation_tables": operation_tables,
-        "counts_by_action": counts_visible,
-        "counts_by_section": by_section_visible,
+        "counts_by_action": counts,
+        "counts_by_section": by_section,
         "warnings": warnings,
         "row_diffs": row_diffs,
     }
