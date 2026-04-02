@@ -707,6 +707,67 @@ def frozen_operations_apply_snapshots(frozen: list[dict[str, Any]]) -> list[dict
     return out
 
 
+def group_apply_snapshot_tables(
+    snapshots: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """
+    Group flat apply-snapshot rows (one dict per frozen op) into section tables like
+    ``group_reconciliation_operation_tables``: one row per operation, columns = attribute
+    names (union within the section), for compact viewing of large runs.
+    """
+    by_sk: dict[str, list[dict[str, Any]]] = {}
+    for row in snapshots:
+        if not isinstance(row, dict):
+            continue
+        sk = str(row.get("selection_key") or "").strip()
+        if not sk:
+            continue
+        by_sk.setdefault(sk, []).append(row)
+    tail = len(AUDIT_REPORT_APPLY_ORDER)
+
+    def rank(sk: str) -> tuple[int, str]:
+        return (_APPLY_ORDER_RANK.get(sk, tail + 1), sk)
+
+    tables: list[dict[str, Any]] = []
+    for sk in sorted(by_sk.keys(), key=rank):
+        group = by_sk[sk]
+        all_keys: set[str] = set()
+        for r in group:
+            attrs = r.get("attrs") or []
+            for item in attrs:
+                if isinstance(item, (list, tuple)) and item:
+                    all_keys.add(str(item[0]).strip())
+        headers = sorted(all_keys, key=lambda x: str(x).casefold())
+        display_rows: list[dict[str, Any]] = []
+        for r in group:
+            cells: dict[str, str] = {}
+            attrs = r.get("attrs") or []
+            for item in attrs:
+                if isinstance(item, (list, tuple)) and len(item) >= 2:
+                    k, v = str(item[0]).strip(), item[1]
+                    cells[k] = "" if v is None else str(v).strip()
+                elif isinstance(item, (list, tuple)) and len(item) == 1:
+                    cells[str(item[0]).strip()] = ""
+            display_rows.append(
+                {
+                    "action": r.get("action"),
+                    "summary": r.get("summary"),
+                    "row_key": r.get("row_key"),
+                    "cell_values": [cells.get(h, "").strip() for h in headers],
+                }
+            )
+        tables.append(
+            {
+                "section_key": sk,
+                "title": RECON_SECTION_TITLES.get(sk, sk),
+                "apply_order": _APPLY_ORDER_RANK.get(sk, tail + 1),
+                "headers": headers,
+                "rows": display_rows,
+            }
+        )
+    return tables
+
+
 def operations_digest(frozen_ops: list[dict[str, Any]]) -> str:
     blob = json.dumps(frozen_ops, sort_keys=True, default=str, ensure_ascii=False)
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()
@@ -811,6 +872,7 @@ def preview_reconciliation(
     ]
     operation_tables = group_reconciliation_operation_tables(operations)
     apply_snapshot_ops = frozen_operations_apply_snapshots(frozen)
+    apply_snapshot_tables = group_apply_snapshot_tables(apply_snapshot_ops)
 
     return {
         "drift_run_id": drift_run.pk,
@@ -820,6 +882,7 @@ def preview_reconciliation(
         "operations": operations,
         "operation_tables": operation_tables,
         "apply_snapshot_ops": apply_snapshot_ops,
+        "apply_snapshot_tables": apply_snapshot_tables,
         "counts_by_action": counts,
         "counts_by_section": by_section,
         "warnings": warnings,

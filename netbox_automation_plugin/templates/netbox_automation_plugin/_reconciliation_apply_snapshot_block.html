@@ -1,42 +1,45 @@
 {% load i18n %}
-{% if apply_snapshot_ops %}
+{% if apply_snapshot_tables %}
 <h5 class="text-body-secondary text-uppercase small mb-2 mt-4">{% trans "Apply payload (attributes passed to NetBox)" %}</h5>
 <p class="small text-body-secondary mb-3">
-  {% blocktrans trimmed %}Same order as apply. Each card lists column names and values actually handed to the apply step after scoping (recon-oriented columns plus workflow fields such as Proposed Action when set; empty and “—” placeholders removed). Compare these to the write-preview tables above to confirm what will reach NetBox.{% endblocktrans %}
+  {% blocktrans trimmed %}Same order as apply. Tables are grouped by audit section (like the write preview above). Each row is one frozen operation; columns are the attribute names and values actually handed to the apply step after scoping (recon-oriented columns plus workflow fields such as Proposed Action when set; empty and “—” placeholders removed). Scroll horizontally for many columns; scroll vertically inside each table for long runs.{% endblocktrans %}
 </p>
-{% for row in apply_snapshot_ops %}
-<div class="card mb-3 border-secondary border-opacity-25">
-  <div class="card-header py-2 small d-flex flex-wrap align-items-center gap-2">
-    <span class="badge text-bg-dark">{{ row.action|default:"—" }}</span>
-    <code class="text-muted small mb-0">{{ row.selection_key|default:"—" }}</code>
-    {% if row.row_key %}
-      <span class="text-muted font-monospace small text-truncate" style="max-width: 18rem;" title="{{ row.row_key }}">{{ row.row_key }}</span>
-    {% endif %}
-  </div>
-  <div class="card-body py-2">
-    <p class="small text-body-secondary mb-2">{{ row.summary|default:"—" }}</p>
-    {% if row.attrs %}
-    <div class="table-responsive">
-      <table class="table table-sm table-bordered mb-0 align-middle">
-        <thead class="table-light">
+{% for tbl in apply_snapshot_tables %}
+<div class="card mb-3">
+  <h5 class="card-header py-2 small d-flex flex-wrap align-items-center gap-2">
+    <span>{{ tbl.title }}</span>
+    <code class="text-muted small mb-0">{{ tbl.section_key }}</code>
+    <span class="badge text-bg-secondary">{% trans "Apply order" %} {{ tbl.apply_order }}</span>
+  </h5>
+  <div class="card-body p-0">
+    <div class="table-responsive border-top" style="max-height: 70vh; overflow: auto;">
+      <table class="table table-sm table-striped mb-0 align-middle">
+        <thead class="table-light" style="position: sticky; top: 0; z-index: 1;">
           <tr>
-            <th class="small" style="width: 32%;">{% trans "Attribute" %}</th>
-            <th class="small">{% trans "Value applied" %}</th>
+            <th class="text-nowrap small">#</th>
+            <th class="text-nowrap small">{% trans "Action" %}</th>
+            <th class="text-nowrap small">{% trans "Summary" %}</th>
+            <th class="text-nowrap small font-monospace">{% trans "Row key" %}</th>
+            {% for h in tbl.headers %}
+            <th class="small text-wrap" style="min-width: 5rem;">{{ h }}</th>
+            {% endfor %}
           </tr>
         </thead>
         <tbody>
-          {% for attr, val in row.attrs %}
+          {% for op in tbl.rows %}
           <tr>
-            <td class="small text-break font-monospace">{{ attr }}</td>
-            <td class="small text-break">{% if val %}{{ val }}{% else %}—{% endif %}</td>
+            <td class="text-muted small">{{ forloop.counter }}</td>
+            <td class="small text-nowrap">{{ op.action|default:"—" }}</td>
+            <td class="small">{{ op.summary|default:"—" }}</td>
+            <td class="small font-monospace text-muted text-break" style="max-width: 10rem;" title="{{ op.row_key|default:'' }}">{{ op.row_key|default:"—" }}</td>
+            {% for v in op.cell_values %}
+            <td class="small text-break">{% if v %}{{ v }}{% else %}—{% endif %}</td>
+            {% endfor %}
           </tr>
           {% endfor %}
         </tbody>
       </table>
     </div>
-    {% else %}
-    <p class="small text-muted mb-0">{% trans "No attributes after scoping (placeholders only or empty row)." %}</p>
-    {% endif %}
   </div>
 </div>
 {% endfor %}

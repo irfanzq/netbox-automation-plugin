@@ -24,6 +24,7 @@ from netbox_automation_plugin.workflows.maas_openstack_sync.history_models impor
 from .service import (
     frozen_operations_apply_snapshots,
     frozen_operations_for_display,
+    group_apply_snapshot_tables,
     group_reconciliation_operation_tables,
     RECONCILIATION_DISCARD_BLOCKED_STATUSES,
     apply_reconciliation_run,
@@ -209,6 +210,7 @@ class ReconciliationRunDetailView(LoginRequiredMixin, View):
         operation_tables = group_reconciliation_operation_tables(ops_for_tables)
         raw_frozen = run.frozen_operations if isinstance(run.frozen_operations, list) else []
         apply_snapshot_ops = frozen_operations_apply_snapshots(raw_frozen)
+        apply_snapshot_tables = group_apply_snapshot_tables(apply_snapshot_ops)
         return render(
             request,
             self.template_name,
@@ -217,6 +219,7 @@ class ReconciliationRunDetailView(LoginRequiredMixin, View):
                 "frozen_ops": frozen_ops,
                 "operation_tables": operation_tables,
                 "apply_snapshot_ops": apply_snapshot_ops,
+                "apply_snapshot_tables": apply_snapshot_tables,
                 "apply_results": run.apply_results if isinstance(run.apply_results, dict) else {},
                 "apply_url": reverse(
                     "plugins:netbox_automation_plugin:maas_openstack_reconciliation_apply",
@@ -339,6 +342,12 @@ class ReconciliationStagingView(LoginRequiredMixin, View):
             reverse("plugins:netbox_automation_plugin:maas_openstack_sync")
             + f"?drift_run_id={drift_run.pk}"
         )
+        apply_snapshot_ops = (
+            data.get("apply_snapshot_ops") if isinstance(data.get("apply_snapshot_ops"), list) else []
+        )
+        apply_snapshot_tables = data.get("apply_snapshot_tables")
+        if not isinstance(apply_snapshot_tables, list) or not apply_snapshot_tables:
+            apply_snapshot_tables = group_apply_snapshot_tables(apply_snapshot_ops)
         return render(
             request,
             self.template_name,
@@ -359,9 +368,8 @@ class ReconciliationStagingView(LoginRequiredMixin, View):
                 "operation_tables": data.get("operation_tables")
                 if isinstance(data.get("operation_tables"), list)
                 else [],
-                "apply_snapshot_ops": data.get("apply_snapshot_ops")
-                if isinstance(data.get("apply_snapshot_ops"), list)
-                else [],
+                "apply_snapshot_ops": apply_snapshot_ops,
+                "apply_snapshot_tables": apply_snapshot_tables,
                 "counts_by_action": data.get("counts_by_action")
                 if isinstance(data.get("counts_by_action"), dict)
                 else {},
@@ -450,6 +458,7 @@ class ReconciliationStagingView(LoginRequiredMixin, View):
             "operations": payload.get("operations") or [],
             "operation_tables": payload.get("operation_tables") or [],
             "apply_snapshot_ops": payload.get("apply_snapshot_ops") or [],
+            "apply_snapshot_tables": payload.get("apply_snapshot_tables") or [],
             "counts_by_action": payload.get("counts_by_action") or {},
             "counts_by_section": payload.get("counts_by_section") or {},
             "warnings": payload.get("warnings") or [],
