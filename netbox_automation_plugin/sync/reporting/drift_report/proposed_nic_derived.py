@@ -4,8 +4,9 @@ Heuristic NB proposed intf Label / Type for drift NIC tables (review defaults).
 Neighbor **switch** naming for heuristics follows the same authority as the audit row:
 OpenStack/Ironic runtime (``local_link`` / ``os_lldp``) first; MAAS commissioning LLDP
 switch name when OS does not supply one. MAAS VLAN name remains a further fallback for
-peer-style naming hints. The two table columns ``OS LLDP switch`` and ``MAAS LLDP switch``
-stay independent (OS vs MAAS sources); combined logic uses OS-then-MAAS only for
+peer-style naming hints. Drift tables list ``MAAS LLDP switch`` after other MAAS columns,
+then ``OS LLDP switch`` with OS runtime columns; both stay independent (OS vs MAAS sources);
+combined logic uses OS-then-MAAS only for
 derivations (label, mgmt/data hints, etc.).
 """
 

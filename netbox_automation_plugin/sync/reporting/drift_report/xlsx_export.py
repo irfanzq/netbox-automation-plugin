@@ -1,8 +1,9 @@
 """Excel export for the drift audit (openpyxl).
 
 Detail tables use the same ``HEADERS_*`` lists as ``format_html_proposed`` /
-``drift_overrides_apply`` (NIC/BMC blocks include OS + MAAS LLDP switch name columns). Rows are
-padded/truncated to header width so columns stay aligned with the HTML tables.
+``drift_overrides_apply``. BMC sheets omit the ``MAAS NIC model`` column (NIC sheets still include
+it). Rows are padded/truncated to header width; BMC rows that still carry a legacy extra cell after
+``MAAS link speed`` have that cell dropped so columns stay aligned.
 """
 
 from io import BytesIO
@@ -45,6 +46,24 @@ from netbox_automation_plugin.sync.reporting.drift_report.drift_overrides_apply 
 from netbox_automation_plugin.sync.reporting.drift_report.proposed_changes import (
     _proposed_changes_rows,
 )
+
+
+def _coerce_bmc_row_to_headers(headers: list[str], row: list | tuple) -> list:
+    """If a row has one extra value between MAAS link speed and MAAS LLDP switch, drop it (legacy MAAS NIC model)."""
+    rl = list(row) if isinstance(row, (list, tuple)) else [row]
+    n = len(headers)
+    if len(rl) != n + 1:
+        return rl
+    try:
+        i_speed = headers.index("MAAS link speed")
+        i_lldp = headers.index("MAAS LLDP switch")
+    except ValueError:
+        return rl
+    if i_lldp != i_speed + 1 or len(rl) <= i_speed + 1:
+        return rl
+    del rl[i_speed + 1]
+    return rl
+
 
 def build_drift_report_xlsx(
     maas_data,
@@ -357,8 +376,11 @@ def build_drift_report_xlsx(
         hdr_list = list(headers)
         _append_header(ws_prop, hdr_list)
         ncols = len(hdr_list)
+        bmc_sheet = "BMC / OOB" in title
         for row in rows:
             rl = list(row) if isinstance(row, (list, tuple)) else [row]
+            if bmc_sheet:
+                rl = _coerce_bmc_row_to_headers(hdr_list, rl)
             if len(rl) < ncols:
                 rl = rl + [""] * (ncols - len(rl))
             elif len(rl) > ncols:

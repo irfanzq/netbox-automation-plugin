@@ -9,16 +9,7 @@ from netbox_automation_plugin.sync.reporting.drift_report.proposed_nic_derived i
 
 
 def _bmc_drift_extra_columns(maas_machine: dict) -> dict[str, str]:
-    ex = bmc_row_proposed_defaults(maas_machine)
-    v = str(maas_machine.get("hardware_vendor") or "").strip()
-    p = str(maas_machine.get("hardware_product") or "").strip()
-    if v and p:
-        ex["maas_nic_model"] = f"{v[:32]} / {p[:64]}"
-    elif v:
-        ex["maas_nic_model"] = v[:96]
-    elif p:
-        ex["maas_nic_model"] = p[:96]
-    return ex
+    return bmc_row_proposed_defaults(maas_machine)
 
 # NetBox **port names** operators use for BMC/OOB (heuristic coverage); *-nic here is a label, not “host NIC”.
 _MGMT_INTERFACE_NAME_HINTS = frozenset({
@@ -287,13 +278,12 @@ def _build_proposed_mgmt_interface_rows(
                 maas_product,
                 maas_mac or "—",
                 bx["maas_link_speed_disp"],
-                bx["maas_nic_model"],
+                bx["maas_lldp_switch_disp"],
                 "—",
                 "—",
                 "—",
                 "—",
                 bx["os_lldp_switch_disp"],
-                bx["maas_lldp_switch_disp"],
                 bx["nb_proposed_intf_label"],
                 bx["nb_proposed_intf_type"],
                 maas_oob_new,
@@ -458,7 +448,7 @@ def _build_proposed_mgmt_interface_rows(
                     f"REPLACE_MAAS_BMC_IP_WITH_OS_BMC_IP={bmc or '—'} -> {bmc_effective or target_ip}",
                 )
 
-        # When NetBox OOB port has no MAC but MAAS (or MAAS hardware on OS-authority rows) has one, spell it out in Proposed action.
+        # When NetBox OOB port has no MAC but MAAS (or MAAS hardware on OS-authority rows) has one, spell it out in Proposed Action.
         mac_src = _normalize_mac(maas_mac) if maas_mac else ""
         nb_mac_empty = (not nb_mgmt_mac) or str(nb_mgmt_mac).strip() in ("", "—", "-", "None", "none")
         if (
@@ -481,13 +471,12 @@ def _build_proposed_mgmt_interface_rows(
             maas_product,
             maas_mac or "—",
             bx["maas_link_speed_disp"],
-            bx["maas_nic_model"],
+            bx["maas_lldp_switch_disp"],
             os_bmc_ip or "—",
             (os_drv or os_pif or "—"),
             os_vendor or "—",
             os_model,
             bx["os_lldp_switch_disp"],
-            bx["maas_lldp_switch_disp"],
             bx["nb_proposed_intf_label"],
             bx["nb_proposed_intf_type"],
             oob_port_hint,

@@ -21,7 +21,9 @@ from netbox_automation_plugin.workflows.maas_openstack_sync.history_models impor
     MAASOpenStackDriftRun,
 )
 from .service import (
+    filter_frozen_ops_for_recon_ui,
     frozen_operations_for_display,
+    group_reconciliation_operation_tables,
     RECONCILIATION_DISCARD_BLOCKED_STATUSES,
     apply_reconciliation_run,
     create_reconciliation_run,
@@ -175,14 +177,28 @@ class ReconciliationRunDetailView(LoginRequiredMixin, View):
             MAASOpenStackReconciliationRun.STATUS_APPLY_FAILED_PARTIAL,
             MAASOpenStackReconciliationRun.STATUS_APPLY_FAILED,
         }
+        frozen_ops = frozen_operations_for_display(
+            run.frozen_operations if isinstance(run.frozen_operations, list) else []
+        )
+        frozen_ops = filter_frozen_ops_for_recon_ui(frozen_ops)
+        ops_for_tables = [
+            {
+                "summary": o.get("summary"),
+                "action": o.get("action"),
+                "section": o.get("selection_key"),
+                "cells": o.get("cells") or {},
+            }
+            for o in frozen_ops
+            if isinstance(o, dict)
+        ]
+        operation_tables = group_reconciliation_operation_tables(ops_for_tables)
         return render(
             request,
             self.template_name,
             {
                 "run": run,
-                "frozen_ops": frozen_operations_for_display(
-                    run.frozen_operations if isinstance(run.frozen_operations, list) else []
-                ),
+                "frozen_ops": frozen_ops,
+                "operation_tables": operation_tables,
                 "apply_results": run.apply_results if isinstance(run.apply_results, dict) else {},
                 "apply_url": reverse(
                     "plugins:netbox_automation_plugin:maas_openstack_reconciliation_apply",
@@ -306,6 +322,7 @@ class ReconciliationStagingView(LoginRequiredMixin, View):
             {
                 "drift_run": drift_run,
                 "audit_back_url": audit_back_url,
+                "hide_reconciliation_runs_nav": bool(data.get("from_live_audit")),
                 "reconciliation_runs_url": reverse(
                     "plugins:netbox_automation_plugin:maas_openstack_reconciliation_runs",
                 ),
@@ -316,6 +333,9 @@ class ReconciliationStagingView(LoginRequiredMixin, View):
                 "operations_digest": data.get("operations_digest") or "",
                 "operation_count": data.get("operation_count") or 0,
                 "operations": data.get("operations") if isinstance(data.get("operations"), list) else [],
+                "operation_tables": data.get("operation_tables")
+                if isinstance(data.get("operation_tables"), list)
+                else [],
                 "counts_by_action": data.get("counts_by_action")
                 if isinstance(data.get("counts_by_action"), dict)
                 else {},
@@ -379,12 +399,14 @@ class ReconciliationStagingView(LoginRequiredMixin, View):
         posted_store = posted_overrides if isinstance(posted_overrides, dict) else {}
         request.session[MAAS_RECON_STAGING_SESSION_KEY] = {
             "drift_run_id": drift_run.pk,
+            "from_live_audit": True,
             "selected": selected,
             "posted_review_overrides": posted_store,
             "preview_ack_token": payload.get("preview_ack_token") or "",
             "operations_digest": payload.get("operations_digest") or "",
             "operation_count": payload.get("operation_count") or 0,
             "operations": payload.get("operations") or [],
+            "operation_tables": payload.get("operation_tables") or [],
             "counts_by_action": payload.get("counts_by_action") or {},
             "counts_by_section": payload.get("counts_by_section") or {},
             "warnings": payload.get("warnings") or [],

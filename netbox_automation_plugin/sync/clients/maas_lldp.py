@@ -1,5 +1,5 @@
 """
-MAAS commissioning LLDP from ``GET .../machines/{system_id}/op-details`` (BSON payload).
+MAAS commissioning LLDP from machine details (``?op=details`` BSON/JSON, or legacy ``op-details/``).
 
 Maps host interface name -> neighbor switch name + remote port (``lldpctl -f xml`` shape).
 """
@@ -19,11 +19,113 @@ def _strip_xml_ns(tag: str) -> str:
     return tag
 
 
+def _lldp_element_body(el: ET.Element) -> str:
+    """Text value for lldpctl chassis/port elements (usually in ``.text``)."""
+    t = (el.text or "").strip()
+    if t:
+        return t
+    for sub in el:
+        st = (sub.text or "").strip()
+        if st:
+            return st
+    return ""
+
+
+def _chassis_port_from_lldp_block_flat(block: ET.Element) -> tuple[str, str]:
+    """Flat TLVs: ``<chassis type="sysname">…</chassis>`` (older lldpctl)."""
+    chassis_pri = {"sysname": 0, "name": 1, "descr": 3, "local": 6, "mac": 9}
+    port_pri = {"ifname": 0, "descr": 1, "local": 2, "label": 3, "mac": 9}
+    chassis_opts: list[tuple[int, str]] = []
+    port_opts: list[tuple[int, str]] = []
+    for el in block.iter():
+        tag = _strip_xml_ns(el.tag)
+        if tag == "chassis":
+            typ = (el.get("type") or "").strip().lower()
+            body = _lldp_element_body(el)
+            if not body:
+                continue
+            chassis_opts.append((chassis_pri.get(typ, 4), body))
+        elif tag == "port":
+            typ = (el.get("type") or "").strip().lower()
+            body = _lldp_element_body(el)
+            if not body:
+                continue
+            port_opts.append((port_pri.get(typ, 5), body))
+    switch = ""
+    port = ""
+    if chassis_opts:
+        chassis_opts.sort(key=lambda x: x[0])
+        switch = chassis_opts[0][1][:200]
+    if port_opts:
+        port_opts.sort(key=lambda x: x[0])
+        port = port_opts[0][1][:200]
+    return switch, port
+
+
+def _chassis_port_from_lldp_block(block: ET.Element) -> tuple[str, str]:
+    """
+    Neighbor switch + port from one ``rid`` subtree (or whole interface).
+
+    Handles **nested** lldpctl (Arista/Cumulus, etc.): ``<chassis><name>SysName</name>``
+    and ``<port><id type="ifname">…</id></port>``. Falls back to flat TLVs if needed.
+    """
+    switch = ""
+    port = ""
+    for el in block.iter():
+        if _strip_xml_ns(el.tag) != "chassis":
+            continue
+        if not list(el):
+            continue
+        child_tags = {_strip_xml_ns(c.tag) for c in el}
+        if "name" not in child_tags and "id" not in child_tags:
+            continue
+        sysname = ""
+        mac = ""
+        for c in el:
+            ct = _strip_xml_ns(c.tag)
+            t = _lldp_element_body(c)
+            if not t:
+                continue
+            if ct == "name":
+                sysname = t
+            elif ct == "id" and (c.get("type") or "").strip().lower() == "mac":
+                mac = t
+        cand = sysname or mac
+        if cand:
+            switch = cand[:200]
+            break
+
+    for el in block.iter():
+        if _strip_xml_ns(el.tag) != "port":
+            continue
+        if not list(el):
+            continue
+        for c in el:
+            if _strip_xml_ns(c.tag) != "id":
+                continue
+            if (c.get("type") or "").strip().lower() != "ifname":
+                continue
+            t = _lldp_element_body(c)
+            if t:
+                port = t[:200]
+                break
+        if port:
+            break
+
+    flat_sw, flat_pt = _chassis_port_from_lldp_block_flat(block)
+    if not switch:
+        switch = flat_sw
+    if not port:
+        port = flat_pt
+    return switch, port
+
+
 def parse_lldpctl_xml_to_iface_index(xml_text: str) -> dict[str, dict[str, str]]:
     """
     Parse lldpctl XML: ``interface@name`` -> ``{switch, port}``.
 
-    Prefer chassis ``type=local`` for system name; port ``type=ifname`` for neighbor port.
+    Walks each interface subtree (including ``rid`` children) so nested chassis/port match
+    MAAS / modern lldpctl output.
     """
     raw = (xml_text or "").strip()
     if not raw or not raw.startswith("<"):
@@ -41,40 +143,16 @@ def parse_lldpctl_xml_to_iface_index(xml_text: str) -> dict[str, dict[str, str]]
     for iface in root.iter():
         if _strip_xml_ns(iface.tag) != "interface":
             continue
-        iname = (iface.get("name") or "").strip().lower()
+        iname = (iface.get("name") or iface.get("label") or "").strip().lower()
         if not iname:
             continue
-        switch = ""
-        port = ""
-        chassis_local = ""
-        chassis_other: list[str] = []
-        port_ifname = ""
-        for child in iface:
-            ct = _strip_xml_ns(child.tag)
-            if ct == "chassis":
-                typ = (child.get("type") or "").strip().lower()
-                body = (child.text or "").strip()
-                cid = (child.get("id") or "").strip().lower()
-                if typ == "local" and body:
-                    chassis_local = body
-                elif body and typ not in ("mac",):
-                    chassis_other.append(body)
-                elif typ == "mac" and cid == "local" and body:
-                    chassis_local = body
-            elif ct == "port":
-                typ = (child.get("type") or "").strip().lower()
-                body = (child.text or "").strip()
-                if typ == "ifname" and body:
-                    port_ifname = body
-                elif typ in ("local", "label") and body and not port_ifname:
-                    port_ifname = body
-        switch = chassis_local or ("; ".join(chassis_other) if chassis_other else "")
-        port = port_ifname
-        if switch or port:
-            out[iname] = {
-                "switch": switch[:200],
-                "port": port[:200],
-            }
+        rids = [c for c in iface if _strip_xml_ns(c.tag) == "rid"]
+        blocks: list[ET.Element] = rids if rids else [iface]
+        for block in blocks:
+            switch, port = _chassis_port_from_lldp_block(block)
+            if switch or port:
+                out[iname] = {"switch": switch[:200], "port": port[:200]}
+                break
     return out
 
 
@@ -118,6 +196,18 @@ def extract_lldp_xml_from_op_details(doc: dict[str, Any] | None) -> str:
     return str(raw)
 
 
+def _maas_op_details_urls(base: str, system_id: str) -> list[str]:
+    """
+    MAAS versions differ: some expose ``?op=details`` only; older docs mention ``op-details/``.
+    """
+    bid = system_id.strip()
+    return [
+        f"{base}/api/2.0/machines/{bid}/?op=details",
+        f"{base}/api/2.0/nodes/{bid}/?op=details",
+        f"{base}/api/2.0/machines/{bid}/op-details/",
+    ]
+
+
 def fetch_maas_op_details_lldp_xml(
     maas_base_url: str,
     api_key: str,
@@ -127,7 +217,10 @@ def fetch_maas_op_details_lldp_xml(
     timeout: int = 60,
 ) -> str:
     """
-    GET ``/api/2.0/machines/{system_id}/op-details/`` and return LLDP XML blob if present.
+    GET commissioning details (BSON or JSON) and return the ``lldp`` XML blob if present.
+
+    Tries, in order: ``machines/{id}/?op=details``, ``nodes/{id}/?op=details``,
+    ``machines/{id}/op-details/`` (legacy path on some installs).
     """
     if not maas_base_url or not api_key or not system_id:
         return ""
@@ -140,19 +233,33 @@ def fetch_maas_op_details_lldp_xml(
         from requests_oauthlib import OAuth1
     except ImportError:
         return ""
-    url = f"{base}/api/2.0/machines/{system_id}/op-details/"
     parts = str(api_key).split(":", 2)
     if len(parts) != 3:
         return ""
     ck, tk, ts = parts[0], parts[1], parts[2]
     auth = OAuth1(ck, "", tk, ts, signature_method="PLAINTEXT")
+    headers = {
+        "Accept": (
+            "application/bson, application/octet-stream, "
+            "application/json;q=0.3, */*;q=0.1"
+        ),
+    }
     try:
-        r = requests.get(url, auth=auth, verify=verify_tls, timeout=timeout)
-        if r.status_code != 200:
-            logger.debug("MAAS op-details %s HTTP %s", system_id, r.status_code)
-            return ""
-        doc = _decode_maas_op_details_payload(r.content)
-        return extract_lldp_xml_from_op_details(doc)
+        for url in _maas_op_details_urls(base, system_id):
+            r = requests.get(
+                url, auth=auth, verify=verify_tls, timeout=timeout, headers=headers
+            )
+            if r.status_code != 200:
+                logger.debug(
+                    "MAAS op-details %s %s HTTP %s", system_id, url, r.status_code
+                )
+                continue
+            doc = _decode_maas_op_details_payload(r.content)
+            if doc is None:
+                logger.debug("MAAS op-details %s %s decode failed", system_id, url)
+                continue
+            return extract_lldp_xml_from_op_details(doc)
+        return ""
     except Exception as e:
         logger.debug("MAAS op-details fetch %s: %s", system_id, e)
         return ""

@@ -1074,7 +1074,7 @@ def _proposed_changes_rows(
                     and any(x not in {"", "—"} for x in [os_mac, os_ip, os_vlan])
                 )
                 if os_has_runtime:
-                    # OS authority: Proposed properties reflect runtime only (MAAS columns still show MAAS).
+                    # OS authority: Proposed Action reflects runtime only (MAAS columns still show MAAS).
                     props = f"MAC {os_mac}; untagged VLAN {os_vlan}; IPs: {os_ip}"
                 from netbox_automation_plugin.sync.reporting.drift_report.proposed_nic_derived import (
                     derive_nic_proposed_columns,
@@ -1110,8 +1110,8 @@ def _proposed_changes_rows(
                         vlan,
                         ex["maas_link_speed_disp"],
                         ex["maas_nic_model"],
-                        ex["os_lldp_switch_disp"],
                         ex["maas_lldp_switch_disp"],
+                        ex["os_lldp_switch_disp"],
                         os_reg,
                         os_mac,
                         os_ip,
@@ -1171,12 +1171,6 @@ def _proposed_changes_rows(
             if mac_norm and "SET_NETBOX_OOB_MAC=" not in action:
                 action += f"; SET_NETBOX_OOB_MAC={mac_norm}"
             bx = bmc_row_proposed_defaults(m)
-            if maas_vendor not in ("—", "") and maas_product not in ("—", ""):
-                bx["maas_nic_model"] = f"{maas_vendor[:32]} / {maas_product[:64]}"
-            elif maas_vendor not in ("—", ""):
-                bx["maas_nic_model"] = maas_vendor[:96]
-            elif maas_product not in ("—", ""):
-                bx["maas_nic_model"] = maas_product[:96]
             out.append(
                 [
                     h,
@@ -1186,13 +1180,12 @@ def _proposed_changes_rows(
                     maas_product,
                     str(m.get("bmc_mac") or "—"),
                     bx["maas_link_speed_disp"],
-                    bx["maas_nic_model"],
+                    bx["maas_lldp_switch_disp"],
                     os_bmc_ip or "—",
                     os_mgmt_type or "—",
                     os_vendor,
                     os_model,
                     bx["os_lldp_switch_disp"],
-                    bx["maas_lldp_switch_disp"],
                     bx["nb_proposed_intf_label"],
                     bx["nb_proposed_intf_type"],
                     mgmt,

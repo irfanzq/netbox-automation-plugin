@@ -11,8 +11,10 @@
       <h5 class="card-header d-flex flex-wrap align-items-center justify-content-between gap-2">
         <span>{% trans "Branch reconciliation — preview" %} <span class="badge text-bg-secondary">{% trans "Drift" %} #{{ drift_run.pk }}</span></span>
         <div class="d-flex flex-wrap gap-1">
-          <a href="{{ audit_back_url }}" class="btn btn-outline-primary btn-sm js-drift-nav-loading">{% trans "Back to drift audit" %}</a>
+          <a href="{{ audit_back_url }}" class="btn btn-outline-primary btn-sm js-drift-nav-loading">{% trans "Back to drift audit view" %}</a>
+          {% if not hide_reconciliation_runs_nav %}
           <a href="{{ reconciliation_runs_url }}" class="btn btn-outline-secondary btn-sm js-drift-nav-loading">{% trans "All reconciliation runs" %}</a>
+          {% endif %}
         </div>
       </h5>
       <div class="card-body">
@@ -23,7 +25,7 @@
           {% endif %}
         </p>
         <p class="small text-body-secondary mb-0">
-          {% blocktrans trimmed %}Each operation’s expandable <strong>NetBox payload</strong> lists only audit columns that apply uses to write NetBox (not Risk or other read-only context). The same frozen payload is what apply runs against.{% endblocktrans %}
+          {% blocktrans trimmed %}Tables below follow the <strong>same order as the drift audit</strong> (e.g. new devices before new interfaces). Each column is a <strong>NetBox write preview</strong>: values that drive apply (typed fields and resolved MAC/VLAN/IP where applicable), not full MAAS/OS audit context. Apply still uses the full frozen row from the drift run.{% endblocktrans %}
         </p>
         <h6 class="text-body-secondary text-uppercase small mt-3">{% trans "Next steps" %}</h6>
         <ol class="small mb-4">
@@ -58,7 +60,7 @@
         {% if row_diffs %}
           <h6 class="text-body-secondary text-uppercase small mt-3">{% trans "Audit diff (auto-proposed vs your review)" %}</h6>
           <p class="small text-body-secondary mb-2">
-            {% blocktrans trimmed %}Only <strong>NetBox-oriented</strong> columns are compared. Each row appears only if at least one such column differs between the automatic proposal and your merged review (saved edits plus any unsent picker values). Rows you did not edit match the auto proposal and are omitted.{% endblocktrans %}
+            {% blocktrans trimmed %}The same <strong>NetBox write preview</strong> columns as the tables below are compared. A row appears only if at least one preview column differs between the automatic proposal and your merged review.{% endblocktrans %}
           </p>
           <div class="table-responsive border rounded mb-3">
             <table class="table table-sm mb-0">
@@ -97,7 +99,46 @@
         </div>
       </div>
     </div>
-    {% if operations %}
+    {% if operation_tables %}
+      <h5 class="text-body-secondary text-uppercase small mb-2">{% trans "NetBox write preview (by audit section, apply order)" %}</h5>
+      {% for tbl in operation_tables %}
+      <div class="card mb-3">
+        <h5 class="card-header py-2 small d-flex flex-wrap align-items-center gap-2">
+          <span>{{ tbl.title }}</span>
+          <code class="text-muted small mb-0">{{ tbl.section_key }}</code>
+          <span class="badge text-bg-secondary">{% trans "Apply order" %} {{ tbl.apply_order }}</span>
+        </h5>
+        <div class="card-body p-0">
+          <div class="table-responsive">
+            <table class="table table-sm table-striped mb-0 align-middle">
+              <thead class="table-light">
+                <tr>
+                  <th class="text-nowrap">#</th>
+                  <th class="text-nowrap">{% trans "Action" %}</th>
+                  <th class="text-nowrap">{% trans "Summary" %}</th>
+                  {% for h in tbl.headers %}
+                  <th class="small text-wrap" style="min-width: 6rem;">{{ h }}</th>
+                  {% endfor %}
+                </tr>
+              </thead>
+              <tbody>
+                {% for op in tbl.rows %}
+                <tr>
+                  <td class="text-muted">{{ forloop.counter }}</td>
+                  <td class="small text-nowrap">{{ op.action|default:"—" }}</td>
+                  <td class="small">{{ op.summary|default:"—" }}</td>
+                  {% for v in op.cell_values %}
+                  <td class="small text-break">{% if v %}{{ v }}{% else %}—{% endif %}</td>
+                  {% endfor %}
+                </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+      {% endfor %}
+    {% elif operations %}
       <div class="card">
         <h5 class="card-header">{% trans "Operations" %}</h5>
         <div class="card-body p-0">

@@ -166,7 +166,7 @@ def _nic_proposed_property_segment_ok(val: str | None) -> bool:
 
 def _parse_nic_proposed_properties_segments(raw: str) -> tuple[str | None, str | None, str | None]:
     """
-    ``Detail — new NICs`` / ``Proposed properties`` text, e.g.
+    ``Proposed Action`` text with MAC / untagged VLAN / IPs clauses, e.g.
     ``MAC c4:cb:e1:e5:93:be; untagged VLAN 2148; IPs: 10.25.56.154``.
     Missing clauses or ``—`` segments are handled by the caller.
     """
@@ -186,15 +186,81 @@ def _parse_nic_proposed_properties_segments(raw: str) -> tuple[str | None, str |
     return mac_val, vlan_val, ips_val
 
 
+def _cell_nic_proposed_body(cells: dict[str, str]) -> str:
+    """Single column name in drift/recon UI; frozen rows may still use legacy headers."""
+    return _cell(
+        cells,
+        "Proposed Action",
+        "Proposed action",
+        "Proposed properties",
+        "Proposed properties (from MAAS)",
+    )
+
+
+def _text_has_derivable_nic_clauses(raw: str) -> bool:
+    """True when text has at least one MAC / untagged VLAN / IPs clause with a real value (not workflow-only)."""
+    mac, vlan, ips = _parse_nic_proposed_properties_segments(raw)
+    return (
+        _nic_proposed_property_segment_ok(mac)
+        or _nic_proposed_property_segment_ok(vlan)
+        or _nic_proposed_property_segment_ok(ips)
+    )
+
+
+def _interface_mac_vlan_ip_from_cells(
+    cells: dict[str, str], *, include_nb_fallback: bool
+) -> tuple[str | None, int | None, str]:
+    """
+    Prefer structured clauses in ``Proposed Action`` when present; else MAAS/OS columns
+    (and NetBox columns when ``include_nb_fallback`` for NIC drift).
+    """
+    body = _cell_nic_proposed_body(cells)
+    p_mac = p_vlan = p_ips = None
+    if body and _text_has_derivable_nic_clauses(body):
+        p_mac, p_vlan, p_ips = _parse_nic_proposed_properties_segments(body)
+
+    mac = _normalize_mac(p_mac) if _nic_proposed_property_segment_ok(p_mac) else None
+    if not mac:
+        if include_nb_fallback:
+            mac = _normalize_mac(_cell(cells, "MAAS MAC", "OS MAC", "NB MAC"))
+        else:
+            mac = _normalize_mac(_cell(cells, "MAAS MAC", "OS MAC"))
+
+    vid: int | None = None
+    if _nic_proposed_property_segment_ok(p_vlan):
+        vid = _parse_vlan_vid(p_vlan)
+    if vid is None:
+        if include_nb_fallback:
+            vid = _parse_vlan_vid(_cell(cells, "MAAS VLAN", "OS runtime VLAN", "NB VLAN"))
+        else:
+            vid = _parse_vlan_vid(_cell(cells, "MAAS VLAN", "OS runtime VLAN"))
+
+    ip_blob = ""
+    if _nic_proposed_property_segment_ok(p_ips):
+        ip_blob = str(p_ips).strip()
+    if not ip_blob:
+        if include_nb_fallback:
+            ip_blob = _cell(cells, "MAAS IPs", "OS runtime IP", "NB IPs")
+        else:
+            ip_blob = _cell(cells, "MAAS IPs", "OS runtime IP")
+
+    return mac, vid, ip_blob
+
+
 NEW_NIC_RECON_PAYLOAD_HEADERS: tuple[str, ...] = (
     "Host",
     "NB Proposed intf Label",
     "NB Proposed intf Type",
     "Suggested NB name",
-    "Proposed properties",
+    "Proposed Action",
     "Parsed MAC",
     "Parsed untagged VLAN",
     "Parsed IPs",
+)
+
+# Selection keys for proposed-change "new interface" tables (frozen ops use minimal cells).
+NEW_NIC_SELECTION_KEYS: frozenset[str] = frozenset(
+    {"detail_new_nics", "detail_new_nics_os", "detail_new_nics_maas"}
 )
 
 
@@ -202,13 +268,23 @@ def new_nic_cells_for_reconciliation(full_cells: dict[str, str]) -> dict[str, st
     """
     Frozen reconciliation ops for new-NIC tables only carry these keys (plus parsed L2 fields).
 
-    ``apply_create_interface`` reads MAC/VLAN/IPs from ``Proposed properties`` (same parser);
+    ``apply_create_interface`` reads MAC/VLAN/IPs from ``Proposed Action`` when clauses are present;
     ``Parsed *`` keys are for preview/diff and interface description headlines.
     """
     out: dict[str, str] = {}
     for k in NEW_NIC_RECON_PAYLOAD_HEADERS[:5]:
-        out[k] = str(full_cells.get(k) or "").strip()
-    props = out["Proposed properties"]
+        if k == "Proposed Action":
+            v = (
+                full_cells.get("Proposed Action")
+                or full_cells.get("Proposed action")
+                or full_cells.get("Proposed properties")
+                or full_cells.get("Proposed properties (from MAAS)")
+                or ""
+            )
+            out[k] = str(v).strip()
+        else:
+            out[k] = str(full_cells.get(k) or "").strip()
+    props = out["Proposed Action"]
     p_mac, p_vlan, p_ips = _parse_nic_proposed_properties_segments(props)
     out["Parsed MAC"] = (p_mac or "").strip() if _nic_proposed_property_segment_ok(p_mac) else ""
     out["Parsed untagged VLAN"] = (p_vlan or "").strip() if _nic_proposed_property_segment_ok(p_vlan) else ""
@@ -233,268 +309,244 @@ def _norm_header(k: str) -> str:
     return str(k or "").strip().lower()
 
 
-# Reconciliation HTML preview: show only columns that apply_* reads for NetBox (not Risk, etc.).
-_RECON_PREVIEW_NO_FILTER: frozenset[str] = frozenset(
-    {"detail_new_nics", "detail_new_nics_os", "detail_new_nics_maas"}
-)
+def _nw_ordered(cells: dict[str, str], fields: tuple[str, ...]) -> dict[str, str]:
+    """Stable column order for recon preview; values from audit row via case-insensitive header match."""
+    return {f: _cell(cells, f) for f in fields}
 
-RECON_CELL_PREVIEW_KEYS_BY_SELECTION: dict[str, tuple[str, ...]] = {
-    "detail_placement_lifecycle_alignment": (
-        "Host",
-        "NetBox site",
-        "NetBox location",
-        "NB proposed device status",
-        "NB state (current)",
-        "Authority",
-    ),
-    "detail_new_prefixes": (
-        "CIDR",
-        "NB proposed VRF",
-        "NB proposed status",
-        "NB proposed role",
-        "NB Proposed Tenant",
-        "NB Proposed Scope",
-        "NB Proposed VLAN",
-        "NB Proposed Prefix description (editable)",
-        "OS region",
-        "OS Description",
-        "Project",
-        "Role reason",
-        "Authority",
-        "Proposed Action",
-    ),
-    "detail_new_ip_ranges": (
-        "Start address",
-        "End address",
-        "NB proposed status",
-        "NB proposed role",
-        "NB proposed VRF",
-        "NB Proposed Description",
-        "OS Pool Description",
-        "OS region",
-        "CIDR",
-        "Project",
-        "Authority",
-        "Proposed Action",
-    ),
-    "detail_new_fips": (
-        "Floating IP",
-        "NB proposed status",
-        "NB proposed role",
-        "NB proposed VRF",
-        "NB Proposed Tenant",
-        "Name",
-        "NAT inside IP (from OpenStack fixed IP)",
-        "OS region",
-        "Project",
-        "Proposed Action",
-    ),
-    "detail_existing_prefixes": (
-        "CIDR",
-        "NB proposed VRF",
-        "NB proposed status",
-        "NB proposed role",
-        "NB Proposed Tenant",
-        "NB Proposed Scope",
-        "NB Proposed VLAN",
-        "NB Proposed Prefix description (editable)",
-        "OS region",
-        "OS Description",
-        "Project",
-        "Drift summary",
-        "Role reason",
-        "Authority",
-        "Proposed Action",
-    ),
-    "detail_existing_fips": (
-        "Floating IP",
-        "NB proposed status",
-        "NB proposed role",
-        "NB proposed VRF",
-        "NB Proposed Tenant",
-        "Name",
-        "NAT inside IP (from OpenStack fixed IP)",
-        "NB current NAT inside",
-        "OS region",
-        "Project",
-        "Proposed Action",
-    ),
-    "detail_new_vms": (
-        "VM name",
-        "OS region",
-        "OS status",
-        "Project",
-        "Hypervisor hostname",
-        "NB proposed primary IP",
-        "NB proposed cluster",
-        "NB proposed site",
-        "NB Proposed Tenant",
-        "NB proposed VM status",
-        "NB proposed device (VM)",
-        "Authority",
-        "Proposed Action",
-    ),
-    "detail_existing_vms": (
-        "VM name",
-        "NetBox VM ID",
-        "OS region",
-        "OS status",
-        "Project",
-        "Hypervisor hostname",
-        "NB current vCPUs",
-        "NB current Memory MB",
-        "NB current Disk GB",
-        "NB current primary IP",
-        "NB current cluster",
-        "NB current device",
-        "NB current VM status",
-        "NB proposed primary IP",
-        "NB proposed cluster",
-        "NB proposed site",
-        "NB Proposed Tenant",
-        "NB proposed VM status",
-        "NB proposed device (VM)",
-        "Drift summary",
-        "Authority",
-        "Proposed Action",
-    ),
-    "detail_new_devices": (
-        "Hostname",
-        "NB proposed region",
-        "NB proposed site",
-        "NB proposed location",
-        "NB proposed role",
-        "NB proposed device type",
-        "NB proposed device status",
-        "Serial Number",
-        "NB proposed tag",
-        "NB proposed platform",
-        "NB proposed asset tag",
-        "Primary MAC (MAAS)",
-        "Primary MAC (OS)",
-        "OS region",
-        "MAAS fabric",
-        "Authority",
-        "Proposed Action",
-    ),
-    "detail_review_only_devices": (
-        "Hostname",
-        "NB proposed region",
-        "NB proposed site",
-        "NB proposed location",
-        "NB proposed role",
-        "NB proposed device type",
-        "NB proposed device status",
-        "Serial Number",
-        "NB proposed tag",
-        "NB proposed platform",
-        "NB proposed asset tag",
-        "Primary MAC (MAAS)",
-        "Primary MAC (OS)",
-        "OS region",
-        "MAAS fabric",
-        "Authority",
-        "Proposed Action",
-    ),
-    "detail_nic_drift_os": (
-        "Host",
-        "NB intf",
-        "MAAS intf",
-        "MAAS MAC",
-        "OS MAC",
-        "NB MAC",
-        "MAAS VLAN",
-        "OS runtime VLAN",
-        "NB VLAN",
-        "MAAS IPs",
-        "OS runtime IP",
-        "NB IPs",
-        "OS LLDP switch",
-        "MAAS LLDP switch",
-        "NB Proposed intf Label",
-        "NB Proposed intf Type",
-        "Proposed Action",
-    ),
-    "detail_nic_drift_maas": (
-        "Host",
-        "NB intf",
-        "MAAS intf",
-        "MAAS MAC",
-        "OS MAC",
-        "NB MAC",
-        "MAAS VLAN",
-        "OS runtime VLAN",
-        "NB VLAN",
-        "MAAS IPs",
-        "OS runtime IP",
-        "NB IPs",
-        "OS LLDP switch",
-        "MAAS LLDP switch",
-        "NB Proposed intf Label",
-        "NB Proposed intf Type",
-        "Proposed Action",
-    ),
-    "detail_bmc_new_devices": (
-        "Host",
-        "MAAS BMC IP",
-        "OS BMC IP",
-        "NB mgmt iface IP",
-        "MAAS BMC MAC",
-        "NB Proposed intf Label",
-        "NB Proposed intf Type",
-        "Suggested NB mgmt iface",
-        "OS mgmt type",
-        "MAAS power_type",
-        "MAAS link speed",
-        "OS LLDP switch",
-        "MAAS LLDP switch",
-        "MAAS NIC model",
-        "Proposed action",
-    ),
-    "detail_bmc_existing": (
-        "Host",
-        "MAAS BMC IP",
-        "OS BMC IP",
-        "NB mgmt iface IP",
-        "MAAS BMC MAC",
-        "NB OOB MAC",
-        "NB Proposed intf Label",
-        "NB Proposed intf Type",
-        "Suggested NB OOB Port",
-        "NetBox OOB",
-        "NB IP coverage",
-        "Actual NB Port Carrying BMC IP",
-        "OS mgmt type",
-        "MAAS power_type",
-        "MAAS link speed",
-        "OS LLDP switch",
-        "MAAS LLDP switch",
-        "MAAS NIC model",
-        "Proposed action",
-    ),
-    "detail_serial_review": (
-        "Host",
-        "MAAS Serial",
-        "NetBox Serial",
-        "Proposed Action",
-    ),
-}
+
+def _netbox_write_new_nic_preview(cells: dict[str, str]) -> dict[str, str]:
+    """Mirrors ``apply_create_interface`` MAC/VLAN/IP resolution (structured Proposed Action first)."""
+    mac, vid, ips = _interface_mac_vlan_ip_from_cells(cells, include_nb_fallback=False)
+    if_name = _cell(cells, "Suggested NB name", "MAAS intf")
+    return {
+        "Host": _cell(cells, "Host"),
+        "Interface name": if_name,
+        "NB site (device)": _cell(cells, "NB site"),
+        "NB location (device)": _cell(cells, "NB location"),
+        "NB Proposed intf Label": _cell(cells, "NB Proposed intf Label"),
+        "NB Proposed intf Type": _cell(cells, "NB Proposed intf Type"),
+        "Proposed Action": _cell_nic_proposed_body(cells),
+        "MAC (applied)": mac or "—",
+        "Untagged VLAN VID (applied)": str(vid) if vid else "—",
+        "IPs (applied)": ips or "—",
+    }
+
+
+def _netbox_write_nic_drift_preview(cells: dict[str, str]) -> dict[str, str]:
+    """Mirrors ``apply_update_interface`` (structured Proposed Action when present, else MAAS/OS/NB)."""
+    mac, vid, ip_blob = _interface_mac_vlan_ip_from_cells(cells, include_nb_fallback=True)
+    return {
+        "Host": _cell(cells, "Host"),
+        "NetBox interface": _cell(cells, "NB intf"),
+        "Proposed Action": _cell_nic_proposed_body(cells),
+        "MAC (applied)": mac or "—",
+        "Untagged VLAN VID (applied)": str(vid) if vid else "—",
+        "IPs (applied)": ip_blob or "—",
+        "NB Proposed intf Label": _cell(cells, "NB Proposed intf Label"),
+        "NB Proposed intf Type": _cell(cells, "NB Proposed intf Type"),
+    }
+
+
+def _netbox_write_bmc_preview(cells: dict[str, str], *, existing_oob: bool) -> dict[str, str]:
+    """Mirrors _bmc_apply: IP and interface name precedence."""
+    bmc_ip_maas = _cell(cells, "MAAS BMC IP")
+    bmc_ip_os = _cell(cells, "OS BMC IP")
+    bmc_ip_nb = _cell(cells, "NB mgmt iface IP")
+    bmc_ip = bmc_ip_maas or bmc_ip_os or bmc_ip_nb
+    mac = _normalize_mac(_cell(cells, "MAAS BMC MAC", "NB OOB MAC"))
+    if_name = _cell(
+        cells,
+        "Suggested NB OOB Port" if existing_oob else "Suggested NB mgmt iface",
+    )
+    out: dict[str, str] = {
+        "Host": _cell(cells, "Host"),
+        "BMC IP (applied)": bmc_ip or "—",
+        "BMC MAC (applied)": mac or "—",
+        "Interface name": if_name,
+        "NB Proposed intf Label": _cell(cells, "NB Proposed intf Label"),
+        "NB Proposed intf Type": _cell(cells, "NB Proposed intf Type"),
+    }
+    if existing_oob:
+        out["NetBox OOB"] = _cell(cells, "NetBox OOB")
+    return out
+
+
+def _netbox_write_ip_range_description(cells: dict[str, str]) -> str:
+    nb = _cell(cells, "NB Proposed Description")
+    if nb and nb not in ("—", "-"):
+        return nb
+    return _cell(cells, "OS Pool Description")
+
+
+def netbox_write_preview_cells(selection_key: str, cells: dict[str, str]) -> dict[str, str]:
+    """
+    Columns shown on reconciliation pages: values that drive NetBox writes (apply_*), not full audit.
+
+    Order matches table column order in the UI. Unknown sections return a passthrough of non-empty
+    cells (best effort).
+    """
+    sk = str(selection_key or "").strip()
+    c = cells or {}
+
+    if sk == "detail_placement_lifecycle_alignment":
+        return _nw_ordered(
+            c,
+            (
+                "Host",
+                "NetBox site",
+                "NetBox location",
+                "NB state (current)",
+                "NB proposed device status",
+                "NB proposed role",
+            ),
+        )
+    if sk in ("detail_new_devices", "detail_review_only_devices"):
+        return _nw_ordered(
+            c,
+            (
+                "Hostname",
+                "NB proposed region",
+                "NB proposed site",
+                "NB proposed location",
+                "NB proposed role",
+                "NB proposed device type",
+                "NB proposed device status",
+                "Serial Number",
+                "NB proposed tag",
+                "NB proposed platform",
+                "NB proposed asset tag",
+            ),
+        )
+    if sk == "detail_new_prefixes":
+        return _nw_ordered(
+            c,
+            (
+                "CIDR",
+                "NB proposed VRF",
+                "NB proposed status",
+                "NB proposed role",
+                "NB Proposed Tenant",
+                "NB Proposed Scope",
+                "NB Proposed VLAN",
+                "NB Proposed Prefix description (editable)",
+            ),
+        )
+    if sk == "detail_existing_prefixes":
+        return _nw_ordered(
+            c,
+            (
+                "NetBox prefix ID",
+                "CIDR",
+                "NB proposed VRF",
+                "NB proposed status",
+                "NB proposed role",
+                "NB Proposed Tenant",
+                "NB Proposed Scope",
+                "NB Proposed VLAN",
+                "NB Proposed Prefix description (editable)",
+            ),
+        )
+    if sk == "detail_new_ip_ranges":
+        d = _nw_ordered(
+            c,
+            (
+                "Start address",
+                "End address",
+                "NB proposed status",
+                "NB proposed role",
+                "NB proposed VRF",
+            ),
+        )
+        d["Description (applied)"] = _netbox_write_ip_range_description(c)
+        return d
+    if sk == "detail_new_fips":
+        return _nw_ordered(
+            c,
+            (
+                "Floating IP",
+                "NB proposed status",
+                "NB proposed role",
+                "NB proposed VRF",
+                "NB Proposed Tenant",
+                "Name",
+                "NAT inside IP (from OpenStack fixed IP)",
+            ),
+        )
+    if sk == "detail_existing_fips":
+        return _nw_ordered(
+            c,
+            (
+                "Floating IP",
+                "NB proposed status",
+                "NB proposed role",
+                "NB proposed VRF",
+                "NB Proposed Tenant",
+                "Name",
+                "NAT inside IP (from OpenStack fixed IP)",
+                "NB current NAT inside",
+            ),
+        )
+    if sk == "detail_new_vms":
+        return _nw_ordered(
+            c,
+            (
+                "VM name",
+                "NB proposed primary IP",
+                "NB proposed cluster",
+                "NB proposed site",
+                "NB Proposed Tenant",
+                "NB proposed VM status",
+                "NB proposed device (VM)",
+            ),
+        )
+    if sk == "detail_existing_vms":
+        return _nw_ordered(
+            c,
+            (
+                "VM name",
+                "NetBox VM ID",
+                "NB proposed primary IP",
+                "NB proposed cluster",
+                "NB proposed site",
+                "NB Proposed Tenant",
+                "NB proposed VM status",
+                "NB proposed device (VM)",
+            ),
+        )
+    if sk in NEW_NIC_SELECTION_KEYS:
+        return _netbox_write_new_nic_preview(c)
+    if sk in ("detail_nic_drift_os", "detail_nic_drift_maas"):
+        return _netbox_write_nic_drift_preview(c)
+    if sk == "detail_bmc_new_devices":
+        return _netbox_write_bmc_preview(c, existing_oob=False)
+    if sk == "detail_bmc_existing":
+        return _netbox_write_bmc_preview(c, existing_oob=True)
+    if sk == "detail_serial_review":
+        return _nw_ordered(
+            c,
+            (
+                "Host",
+                "MAAS Serial",
+                "NetBox Serial",
+            ),
+        )
+    out: dict[str, str] = {}
+    for k, v in c.items():
+        vv = "" if v is None else str(v).strip()
+        if vv and vv not in ("—", "-"):
+            out[str(k).strip()] = vv
+    return out
+
+
+def netbox_write_preview_fieldnames(selection_key: str) -> frozenset[str]:
+    """Headers used for recon preview and row-vs-baseline diff (same projection as apply intent)."""
+    sk = str(selection_key or "").strip()
+    return frozenset(netbox_write_preview_cells(sk, {}).keys())
 
 
 def recon_operation_display_cells(selection_key: str, cells: dict[str, str]) -> dict[str, str]:
-    """Subset of audit cells shown on the reconciliation preview (NetBox-oriented fields)."""
-    sk = str(selection_key or "").strip()
-    if sk in _RECON_PREVIEW_NO_FILTER:
-        return dict(cells)
-    want = RECON_CELL_PREVIEW_KEYS_BY_SELECTION.get(sk)
-    if not want:
-        return dict(cells)
-    by_lower = {_norm_header(k): (k, v) for k, v in cells.items()}
-    out: dict[str, str] = {}
-    for label in want:
-        pair = by_lower.get(_norm_header(label))
-        out[label] = str(pair[1]).strip() if pair else ""
-    return out
+    """NetBox write-oriented columns for reconciliation staging, run detail, and diffs."""
+    return netbox_write_preview_cells(selection_key, cells)
 
 
 def _audit_residual_text(cells: dict[str, str], consumed_lower: set[str]) -> str:
@@ -550,7 +602,7 @@ def _interface_audit_description(cells: dict[str, str], consumed_lower: set[str]
     """Headline columns plus residual lines for cell keys not in consumed_lower (exclude Proposed Action via that set)."""
     # Each tuple: display label first, then synonym header names to match in cells.
     headline_specs: tuple[tuple[str, ...], ...] = (
-        ("Proposed properties", "Proposed properties (from MAAS)"),
+        ("Proposed Action", "Proposed action", "Proposed properties", "Proposed properties (from MAAS)"),
         ("Suggested NB name", "MAAS intf"),
         ("Risk",),
         ("Authority",),
@@ -1949,22 +2001,7 @@ def apply_create_interface(op: dict[str, Any]) -> tuple[str, str]:
         return "skipped", reason
     host = _cell(cells, "Host")
     if_name = _cell(cells, "Suggested NB name", "MAAS intf")
-    p_mac, p_vlan, p_ips = _parse_nic_proposed_properties_segments(
-        _cell(cells, "Proposed properties", "Proposed properties (from MAAS)")
-    )
-    mac = _normalize_mac(p_mac) if _nic_proposed_property_segment_ok(p_mac) else None
-    if not mac:
-        mac = _normalize_mac(_cell(cells, "MAAS MAC", "OS MAC"))
-    vid: int | None = None
-    if _nic_proposed_property_segment_ok(p_vlan):
-        vid = _parse_vlan_vid(p_vlan)
-    if vid is None:
-        vid = _parse_vlan_vid(_cell(cells, "MAAS VLAN", "OS runtime VLAN"))
-    ip_blob = ""
-    if _nic_proposed_property_segment_ok(p_ips):
-        ip_blob = str(p_ips).strip()
-    if not ip_blob:
-        ip_blob = _cell(cells, "MAAS IPs", "OS runtime IP")
+    mac, vid, ip_blob = _interface_mac_vlan_ip_from_cells(cells, include_nb_fallback=False)
     site_hint = _cell(cells, "NB site")
     loc_hint = _cell(cells, "NB location")
     type_slug = _resolve_interface_type_slug(_cell(cells, "NB Proposed intf Type"))
@@ -1982,9 +2019,9 @@ def apply_create_interface(op: dict[str, Any]) -> tuple[str, str]:
         _norm_header("MAAS IPs"),
         _norm_header("OS runtime IP"),
         _norm_header("MAAS link speed"),
-        _norm_header("OS LLDP switch"),
-        _norm_header("MAAS LLDP switch"),
         _norm_header("MAAS NIC model"),
+        _norm_header("MAAS LLDP switch"),
+        _norm_header("OS LLDP switch"),
         _norm_header("NB Proposed intf Label"),
         _norm_header("NB Proposed intf Type"),
         _norm_header("Parsed MAC"),
@@ -1992,6 +2029,7 @@ def apply_create_interface(op: dict[str, Any]) -> tuple[str, str]:
         _norm_header("Parsed IPs"),
         _norm_header("Proposed properties"),
         _norm_header("Proposed properties (from MAAS)"),
+        _norm_header("Proposed action"),
         _norm_header("Proposed Action"),
     }
     if not host or not if_name:
@@ -2075,9 +2113,7 @@ def apply_update_interface(op: dict[str, Any]) -> tuple[str, str]:
     host = _cell(cells, "Host")
     nb_name = _cell(cells, "NB intf")
     ma_name = _cell(cells, "MAAS intf")
-    mac = _normalize_mac(_cell(cells, "MAAS MAC", "OS MAC", "NB MAC"))
-    vid = _parse_vlan_vid(_cell(cells, "MAAS VLAN", "OS runtime VLAN", "NB VLAN"))
-    ip_blob = _cell(cells, "MAAS IPs", "OS runtime IP", "NB IPs")
+    mac, vid, ip_blob = _interface_mac_vlan_ip_from_cells(cells, include_nb_fallback=True)
     type_slug = _resolve_interface_type_slug(_cell(cells, "NB Proposed intf Type"))
     role_label = _cell(cells, "NB Proposed intf Label")
     consumed_i = {
@@ -2094,12 +2130,15 @@ def apply_update_interface(op: dict[str, Any]) -> tuple[str, str]:
         _norm_header("OS runtime IP"),
         _norm_header("NB IPs"),
         _norm_header("MAAS link speed"),
-        _norm_header("OS LLDP switch"),
-        _norm_header("MAAS LLDP switch"),
         _norm_header("MAAS NIC model"),
+        _norm_header("MAAS LLDP switch"),
+        _norm_header("OS LLDP switch"),
         _norm_header("NB Proposed intf Label"),
         _norm_header("NB Proposed intf Type"),
         _norm_header("Proposed Action"),
+        _norm_header("Proposed action"),
+        _norm_header("Proposed properties"),
+        _norm_header("Proposed properties (from MAAS)"),
     }
     full_desc = _interface_audit_description(cells, consumed_i)
     if not host:
@@ -2174,9 +2213,8 @@ def _bmc_apply(op: dict[str, Any], *, existing_oob: bool) -> tuple[str, str]:
         _norm_header("OS mgmt type"),
         _norm_header("MAAS power_type"),
         _norm_header("MAAS link speed"),
-        _norm_header("OS LLDP switch"),
         _norm_header("MAAS LLDP switch"),
-        _norm_header("MAAS NIC model"),
+        _norm_header("OS LLDP switch"),
         _norm_header("NB Proposed intf Label"),
         _norm_header("NB Proposed intf Type"),
         _norm_header("Proposed Action"),

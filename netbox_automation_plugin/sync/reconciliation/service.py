@@ -1,14 +1,11 @@
 """Preview, signed acknowledgement, and frozen operations for branch reconciliation.
 
-Each frozen op carries ``cells``: header → string value sent to the recon preview/apply path.
+Each frozen op carries full audit ``cells`` for apply. The recon UI shows
+``netbox_write_preview_cells`` per section: NetBox-oriented columns only, in audit/apply order
+(see ``group_reconciliation_operation_tables`` and ``AUDIT_REPORT_APPLY_ORDER``).
 
-- ``detail_new_nics``, ``detail_new_nics_os``, ``detail_new_nics_maas``: minimal payload
-  only (see ``apply_cells.NEW_NIC_RECON_PAYLOAD_HEADERS``): Host, label,
-  interface type, suggested NetBox name, Proposed properties, plus Parsed MAC / Parsed
-  untagged VLAN / Parsed IPs extracted from Proposed properties for the preview.
-
-- All other ``SK_TO_ACTION`` sections: full audit table row (every column header for that
-  section).
+New-NIC sections store a minimal frozen row (``new_nic_cells_for_reconciliation``); preview
+still shows resolved MAC/VLAN/IP columns aligned with ``apply_create_interface``.
 """
 
 from __future__ import annotations
@@ -40,10 +37,11 @@ from .branch import (
     netbox_branch_exists,
 )
 from .apply_cells import (
-    NEW_NIC_RECON_PAYLOAD_HEADERS,
-    RECON_CELL_PREVIEW_KEYS_BY_SELECTION,
+    NEW_NIC_SELECTION_KEYS,
     SUPPORTED_APPLY_ACTIONS,
     apply_row_operation,
+    netbox_write_preview_cells,
+    netbox_write_preview_fieldnames,
     new_nic_cells_for_reconciliation,
     recon_operation_display_cells,
 )
@@ -103,10 +101,30 @@ AUDIT_REPORT_APPLY_ORDER: tuple[str, ...] = (
 
 _APPLY_ORDER_RANK: dict[str, int] = {sk: i for i, sk in enumerate(AUDIT_REPORT_APPLY_ORDER)}
 
-# New-NIC drift tables: frozen op["cells"] is minimal (not the full HTML row).
-NEW_NIC_SELECTION_KEYS: frozenset[str] = frozenset(
-    {"detail_new_nics", "detail_new_nics_os", "detail_new_nics_maas"}
-)
+# Human titles for reconciliation tables (same order as AUDIT_REPORT_APPLY_ORDER).
+# Hidden from staging + run-detail operation tables and counts; still in frozen_operations / digest / apply.
+RECON_UI_HIDDEN_SELECTION_KEYS: frozenset[str] = frozenset({"detail_placement_lifecycle_alignment"})
+
+RECON_SECTION_TITLES: dict[str, str] = {
+    "detail_placement_lifecycle_alignment": "Placement / lifecycle alignment",
+    "detail_new_devices": "New devices",
+    "detail_review_only_devices": "Review-only devices",
+    "detail_new_prefixes": "New prefixes",
+    "detail_existing_prefixes": "Existing prefixes",
+    "detail_new_ip_ranges": "New IP ranges",
+    "detail_new_fips": "New floating IPs",
+    "detail_existing_fips": "Existing floating IPs",
+    "detail_new_vms": "New VMs",
+    "detail_existing_vms": "Existing VMs",
+    "detail_new_nics": "New interfaces",
+    "detail_new_nics_os": "New interfaces (OS authority)",
+    "detail_new_nics_maas": "New interfaces (MAAS authority)",
+    "detail_nic_drift_os": "Interface drift (OS authority)",
+    "detail_nic_drift_maas": "Interface drift (MAAS authority)",
+    "detail_bmc_new_devices": "BMC / mgmt (new devices)",
+    "detail_bmc_existing": "BMC / OOB (existing devices)",
+    "detail_serial_review": "Serial number review",
+}
 
 # When selection_key is missing from SK_TO_ACTION (e.g. stale plugin HTML), infer from row metadata.
 _PROP_LIST_KEY_FALLBACK_ACTION: dict[str, str] = {
@@ -213,7 +231,9 @@ def _operation_summary(meta: dict[str, Any]) -> str:
         if not ips:
             ips = (cells.get("MAAS IPs") or cells.get("OS runtime IP") or "").strip()
         props = (
-            cells.get("Proposed properties")
+            cells.get("Proposed Action")
+            or cells.get("Proposed action")
+            or cells.get("Proposed properties")
             or cells.get("Proposed properties (from MAAS)")
             or ""
         ).strip()
@@ -339,21 +359,71 @@ def build_frozen_operations(
     return ops
 
 
-def _audit_diff_header_allowlist(msk: str) -> frozenset[str] | None:
-    """Limit audit diff to NetBox-oriented columns (same as recon operation preview)."""
-    if msk in NEW_NIC_SELECTION_KEYS:
-        return frozenset(NEW_NIC_RECON_PAYLOAD_HEADERS)
-    tup = RECON_CELL_PREVIEW_KEYS_BY_SELECTION.get(msk)
-    if tup:
-        return frozenset(tup)
-    return None
+def filter_frozen_ops_for_recon_ui(ops: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Drop UI-hidden sections (see ``RECON_UI_HIDDEN_SELECTION_KEYS``)."""
+    out: list[dict[str, Any]] = []
+    for o in ops:
+        if not isinstance(o, dict):
+            continue
+        sk = str(o.get("selection_key") or o.get("section") or "").strip()
+        if sk in RECON_UI_HIDDEN_SELECTION_KEYS:
+            continue
+        out.append(o)
+    return out
+
+
+def group_reconciliation_operation_tables(
+    operations: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """
+    Group flat preview ops into tables ordered like the drift audit HTML / apply order.
+
+    Each operation dict should have ``section`` (or ``selection_key``), ``action``, ``summary``, ``cells``.
+    """
+    by_sk: dict[str, list[dict[str, Any]]] = {}
+    for op in operations:
+        if not isinstance(op, dict):
+            continue
+        sk = str(op.get("section") or op.get("selection_key") or "").strip()
+        if not sk:
+            continue
+        by_sk.setdefault(sk, []).append(op)
+    tail = len(AUDIT_REPORT_APPLY_ORDER)
+
+    def rank(sk: str) -> tuple[int, str]:
+        return (_APPLY_ORDER_RANK.get(sk, tail + 1), sk)
+
+    tables: list[dict[str, Any]] = []
+    for sk in sorted(by_sk.keys(), key=rank):
+        rows = by_sk[sk]
+        headers: list[str] = []
+        if rows and isinstance(rows[0].get("cells"), dict):
+            headers = list(rows[0]["cells"].keys())
+        display_rows: list[dict[str, Any]] = []
+        for op in rows:
+            if not isinstance(op, dict):
+                continue
+            o2 = dict(op)
+            c = o2.get("cells") if isinstance(o2.get("cells"), dict) else {}
+            o2["cell_values"] = [str(c.get(h, "")).strip() for h in headers]
+            display_rows.append(o2)
+        tables.append(
+            {
+                "section_key": sk,
+                "title": RECON_SECTION_TITLES.get(sk, sk),
+                "apply_order": _APPLY_ORDER_RANK.get(sk, tail + 1),
+                "headers": headers,
+                "rows": display_rows,
+            }
+        )
+    return tables
 
 
 def _row_diffs_vs_baseline(
     frozen: list[dict[str, Any]],
     stable_baseline: dict[tuple[str, int], dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    """Per selected row: cells after review vs auto-proposed snapshot (no overrides)."""
+    """Per selected row: NetBox write preview after review vs auto-proposed snapshot (no overrides)."""
     out: list[dict[str, Any]] = []
     for op in frozen:
         msk = str(op.get("selection_key") or "")
@@ -361,20 +431,22 @@ def _row_diffs_vs_baseline(
         ri = int(op["row_index"]) if op.get("row_index") is not None else 0
         bmeta = stable_baseline.get((safe_m, ri))
         cells_a = dict(op.get("cells") or {})
-        allow = _audit_diff_header_allowlist(msk)
+        if msk in NEW_NIC_SELECTION_KEYS:
+            cells_a = new_nic_cells_for_reconciliation(cells_a)
+        proj_a = netbox_write_preview_cells(msk, cells_a)
+        fieldnames = sorted(netbox_write_preview_fieldnames(msk))
+        if not fieldnames:
+            fieldnames = sorted(proj_a.keys())
         if not bmeta:
-            headers = list(cells_a.keys())
-            if allow is not None:
-                headers = [h for h in headers if h in allow]
-            if headers:
+            if any(str(proj_a.get(h, "")).strip() for h in fieldnames):
                 out.append(
                     {
                         "summary": op.get("summary"),
                         "section": msk,
                         "action": op.get("action"),
                         "changes": [
-                            {"header": h, "before": "", "after": cells_a.get(h, "")}
-                            for h in headers
+                            {"header": h, "before": "", "after": str(proj_a.get(h, "")).strip()}
+                            for h in fieldnames
                         ],
                     }
                 )
@@ -382,10 +454,13 @@ def _row_diffs_vs_baseline(
         cells_b = _cells_dict(bmeta["headers"], bmeta["row"])
         if msk in NEW_NIC_SELECTION_KEYS:
             cells_b = new_nic_cells_for_reconciliation(cells_b)
-        keys = sorted(set(cells_b.keys()) | set(cells_a.keys()))
-        if allow is not None:
-            keys = [h for h in keys if h in allow]
-        changed = [h for h in keys if cells_b.get(h, "") != cells_a.get(h, "")]
+        proj_b = netbox_write_preview_cells(msk, cells_b)
+        fieldnames_cmp = sorted(set(proj_a.keys()) | set(proj_b.keys()))
+        changed = [
+            h
+            for h in fieldnames_cmp
+            if str(proj_b.get(h, "")).strip() != str(proj_a.get(h, "")).strip()
+        ]
         if changed:
             out.append(
                 {
@@ -395,8 +470,8 @@ def _row_diffs_vs_baseline(
                     "changes": [
                         {
                             "header": h,
-                            "before": cells_b.get(h, ""),
-                            "after": cells_a.get(h, ""),
+                            "before": str(proj_b.get(h, "")).strip(),
+                            "after": str(proj_a.get(h, "")).strip(),
                         }
                         for h in changed
                     ],
@@ -487,16 +562,11 @@ def preview_reconciliation(
     digest = operations_digest(frozen)
     token = make_preview_token(drift_run_id=int(drift_run.pk), digest=digest)
     row_diffs = _row_diffs_vs_baseline(frozen, stable_auto)
-
-    counts: dict[str, int] = {}
-    for op in frozen:
-        a = op.get("action") or "unknown"
-        counts[a] = counts.get(a, 0) + 1
-
-    by_section: dict[str, int] = {}
-    for op in frozen:
-        sk = op.get("selection_key") or ""
-        by_section[sk] = by_section.get(sk, 0) + 1
+    row_diffs = [
+        d
+        for d in row_diffs
+        if str(d.get("section") or "").strip() not in RECON_UI_HIDDEN_SELECTION_KEYS
+    ]
 
     unknown_sections = sorted(
         {str(o.get("selection_key") or "") for o in frozen if o.get("action") == "unknown"}
@@ -509,25 +579,41 @@ def preview_reconciliation(
             + "."
         )
 
+    # Full frozen list still drives digest / preview token / persisted run; UI lists omit hidden sections.
+    operations = [
+        {
+            "summary": o["summary"],
+            "action": o["action"],
+            "section": o["selection_key"],
+            "cells": recon_operation_display_cells(
+                str(o.get("selection_key") or ""),
+                dict(o.get("cells") or {}),
+            ),
+        }
+        for o in frozen
+        if str(o.get("selection_key") or "").strip() not in RECON_UI_HIDDEN_SELECTION_KEYS
+    ]
+    operation_tables = group_reconciliation_operation_tables(operations)
+
+    counts_visible: dict[str, int] = {}
+    for o in operations:
+        a = o.get("action") or "unknown"
+        counts_visible[a] = counts_visible.get(a, 0) + 1
+    by_section_visible: dict[str, int] = {}
+    for o in operations:
+        sk = str(o.get("section") or "").strip()
+        if sk:
+            by_section_visible[sk] = by_section_visible.get(sk, 0) + 1
+
     return {
         "drift_run_id": drift_run.pk,
-        "operation_count": len(frozen),
+        "operation_count": len(operations),
         "operations_digest": digest,
         "preview_ack_token": token,
-        "operations": [
-            {
-                "summary": o["summary"],
-                "action": o["action"],
-                "section": o["selection_key"],
-                "cells": recon_operation_display_cells(
-                    str(o.get("selection_key") or ""),
-                    dict(o.get("cells") or {}),
-                ),
-            }
-            for o in frozen
-        ],
-        "counts_by_action": counts,
-        "counts_by_section": by_section,
+        "operations": operations,
+        "operation_tables": operation_tables,
+        "counts_by_action": counts_visible,
+        "counts_by_section": by_section_visible,
         "warnings": warnings,
         "row_diffs": row_diffs,
     }
