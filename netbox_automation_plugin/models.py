@@ -209,9 +209,8 @@ class VLANDeploymentJob(NetBoxModel):
         verbose_name = 'VLAN Deployment Job'
         verbose_name_plural = 'VLAN Deployment Jobs'
         indexes = [
-            models.Index(fields=['-created']),
-            models.Index(fields=['job_type', 'status']),
-            models.Index(fields=['created_by']),
+            models.Index(fields=['-created'], name='netbox_auto_created_idx'),
+            models.Index(fields=['job_type', 'status'], name='na_vlan_job_type_stat_idx'),
         ]
     
     def __str__(self):
@@ -274,9 +273,9 @@ class MAASOpenStackDriftRun(NetBoxModel):
         verbose_name = "MAAS/OpenStack Drift Run"
         verbose_name_plural = "MAAS/OpenStack Drift Runs"
         indexes = [
-            models.Index(fields=["-created"]),
-            models.Index(fields=["status", "-created"]),
-            models.Index(fields=["created_by", "-created"]),
+            models.Index(fields=["-created"], name="netbox_auto_drift_created_idx"),
+            models.Index(fields=["status", "-created"], name="na_drift_stat_created_idx"),
+            models.Index(fields=["created_by", "-created"], name="na_drift_user_created_idx"),
         ]
 
     def __str__(self):
