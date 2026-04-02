@@ -181,8 +181,8 @@ def _operation_summary(meta: dict[str, Any]) -> str:
         return f"Prefix: {cidr} (VRF {vrf})"
     if sk == "detail_existing_prefixes":
         cidr = cells.get("CIDR") or "—"
-        pid = cells.get("NetBox prefix ID") or "—"
-        return f"Prefix update: id {pid} {cidr}"
+        vrf = cells.get("NB proposed VRF") or "—"
+        return f"Prefix update: {cidr} (VRF {vrf})"
     if sk == "detail_new_ip_ranges":
         s = cells.get("Start address") or "—"
         e = cells.get("End address") or "—"

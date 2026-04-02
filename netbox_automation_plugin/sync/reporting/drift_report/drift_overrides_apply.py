@@ -86,7 +86,6 @@ HEADERS_DETAIL_NEW_FIPS: list[str] = [
 ]
 
 HEADERS_DETAIL_EXISTING_PREFIXES: list[str] = [
-    "NetBox prefix ID",
     "OS region",
     "CIDR",
     "OS Description",

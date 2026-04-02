@@ -290,7 +290,6 @@ RECON_CELL_PREVIEW_KEYS_BY_SELECTION: dict[str, tuple[str, ...]] = {
         "Proposed Action",
     ),
     "detail_existing_prefixes": (
-        "NetBox prefix ID",
         "CIDR",
         "NB proposed VRF",
         "NB proposed status",

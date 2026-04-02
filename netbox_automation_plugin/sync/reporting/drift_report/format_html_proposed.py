@@ -162,7 +162,7 @@ def emit_proposed_change_tables(e, prop):
         e.subtitle("Detail — existing prefixes")
         e.paragraph(
             "Subnet already has an exact matching NetBox Prefix, but OpenStack-derived VRF, status, role, "
-            "tenant, or description does not match. Apply uses NetBox prefix ID plus proposed columns "
+            "tenant, or description does not match. Apply matches the Prefix by CIDR and NB proposed VRF "
             "(same handler as new prefixes)."
         )
         e.spacer()

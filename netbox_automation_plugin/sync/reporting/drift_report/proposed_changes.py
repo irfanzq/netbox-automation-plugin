@@ -1427,7 +1427,6 @@ def _proposed_changes_rows(
                 continue
             drift_summary = "; ".join(drift_parts)
             update_prefixes.append([
-                str(p.pk),
                 g.get("os_region") or "—",
                 cidr,
                 os_desc,
