@@ -1,0 +1,83 @@
+{% extends 'base/layout.html' %}
+{% load i18n %}
+
+{% block title %}{% trans "Reconciliation preview" %}{% endblock %}
+
+{% block content %}
+<div class="row">
+  <div class="col-md-8 col-lg-6">
+    <div class="card">
+      <div class="card-header">
+        <h5 class="mb-0">{% trans "Opening reconciliation preview…" %}</h5>
+      </div>
+      <div class="card-body">
+        <p class="small text-body-secondary mb-3" id="maas-recon-draft-status">
+          {% trans "Loading your row selection from this browser, then continuing." %}
+        </p>
+        <form id="maas-recon-draft-post-form" method="post" action="{{ stage_post_url }}" class="d-none">
+          {% csrf_token %}
+          <input type="hidden" name="drift_run_id" value="{{ drift_run_id }}" />
+          <input type="hidden" name="selected_json" id="maas-recon-draft-selected-json" value="{}" />
+          <input type="hidden" name="drift_review_overrides_json" id="maas-recon-draft-overrides-json" value="" />
+        </form>
+        <p class="small mb-0 d-none text-danger" id="maas-recon-draft-error"></p>
+        <a href="{{ audit_back_url }}" class="btn btn-outline-secondary btn-sm d-none mt-2" id="maas-recon-draft-back">{% trans "Back to drift audit" %}</a>
+      </div>
+    </div>
+  </div>
+</div>
+<script>
+(function () {
+  var runId = {{ drift_run_id|default:"null" }};
+  var key = runId != null ? "maasReconStageDraft_" + runId : "";
+  var form = document.getElementById("maas-recon-draft-post-form");
+  var selEl = document.getElementById("maas-recon-draft-selected-json");
+  var ovEl = document.getElementById("maas-recon-draft-overrides-json");
+  var errEl = document.getElementById("maas-recon-draft-error");
+  var backEl = document.getElementById("maas-recon-draft-back");
+  var statusEl = document.getElementById("maas-recon-draft-status");
+  if (!form || !selEl || !ovEl || !key) {
+    return;
+  }
+  function fail(msg) {
+    if (statusEl) statusEl.classList.add("d-none");
+    if (errEl) {
+      errEl.textContent = msg;
+      errEl.classList.remove("d-none");
+    }
+    if (backEl) backEl.classList.remove("d-none");
+  }
+  var raw;
+  try {
+    raw = localStorage.getItem(key);
+  } catch (e) {
+    fail("{% filter escapejs %}{% trans "Could not read saved selection from this browser (storage blocked?)." %}{% endfilter %}");
+    return;
+  }
+  if (!raw || !raw.trim()) {
+    fail("{% filter escapejs %}{% trans "No saved row selection found. Return to the drift audit, tick Include on at least one row, then use “Open reconciliation preview in new tab” again." %}{% endfilter %}");
+    return;
+  }
+  var draft;
+  try {
+    draft = JSON.parse(raw);
+  } catch (e) {
+    fail("{% filter escapejs %}{% trans "Saved selection data is invalid. Refresh the drift audit page and try again." %}{% endfilter %}");
+    return;
+  }
+  var selected = draft && draft.selected;
+  if (!selected || typeof selected !== "object" || !Object.keys(selected).length) {
+    fail("{% filter escapejs %}{% trans "No rows were included. On the drift audit, select at least one row (Include), then open this link again." %}{% endfilter %}");
+    return;
+  }
+  selEl.value = JSON.stringify(selected);
+  var ov = draft.overrides;
+  if (ov && typeof ov === "object" && Object.keys(ov).length) {
+    ovEl.value = JSON.stringify(ov);
+  } else {
+    ovEl.value = "";
+  }
+  form.submit();
+})();
+</script>
+{% endblock %}

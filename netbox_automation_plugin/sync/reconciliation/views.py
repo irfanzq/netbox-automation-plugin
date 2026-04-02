@@ -327,6 +327,32 @@ class ReconciliationStagingView(LoginRequiredMixin, View):
     template_name = "netbox_automation_plugin/maas_openstack_reconciliation_staging.html"
 
     def get(self, request):
+        # Lets operators open "reconciliation preview" in a new tab from the drift audit: audit page
+        # writes selection + overrides to localStorage; this GET renders a page that POSTs to ``post``.
+        if request.GET.get("from_local_draft") == "1":
+            raw_id = request.GET.get("drift_run_id")
+            try:
+                drift_run_id = int(raw_id)
+            except (TypeError, ValueError):
+                messages.error(request, _("Invalid drift run."))
+                return redirect("plugins:netbox_automation_plugin:maas_openstack_sync")
+            get_object_or_404(MAASOpenStackDriftRun, pk=drift_run_id)
+            audit_back = (
+                reverse("plugins:netbox_automation_plugin:maas_openstack_sync")
+                + f"?drift_run_id={drift_run_id}"
+            )
+            return render(
+                request,
+                "netbox_automation_plugin/maas_openstack_reconciliation_stage_local_draft.html",
+                {
+                    "drift_run_id": drift_run_id,
+                    "stage_post_url": reverse(
+                        "plugins:netbox_automation_plugin:maas_openstack_reconciliation_stage",
+                    ),
+                    "audit_back_url": audit_back,
+                },
+            )
+
         data = request.session.get(MAAS_RECON_STAGING_SESSION_KEY)
         if not isinstance(data, dict) or "drift_run_id" not in data:
             messages.warning(

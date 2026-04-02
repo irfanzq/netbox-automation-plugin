@@ -560,6 +560,12 @@
                       <input type="hidden" name="drift_review_overrides_json" id="maas-recon-overrides-json" value="" />
                       <button type="submit" class="btn btn-primary btn-sm" id="maas-recon-stage-submit">{% trans "Continue to reconciliation preview" %}</button>
                     </form>
+                    <a href="{% url 'plugins:netbox_automation_plugin:maas_openstack_reconciliation_stage' %}?from_local_draft=1&amp;drift_run_id={{ audit_run_id }}"
+                       class="btn btn-outline-primary btn-sm"
+                       id="maas-recon-open-new-tab-link"
+                       target="_blank"
+                       rel="noopener noreferrer"
+                       title="{% trans 'Right-click or middle-click to open in another tab while keeping this audit open. Selection is synced from Include checkboxes and table edits.' %}">{% trans "Open preview in new tab" %}</a>
                   {% endif %}
                 </div>
               </div>
@@ -579,7 +585,7 @@
                 </details>
               {% endif %}
               {% if audit_run_id and report_drift_markup == "html" %}
-                <p class="small text-body-secondary mt-2 mb-0">{% blocktrans trimmed %}Reconciliation uses the same saved data as modified Excel: if you edited NetBox pickers, we save those edits when you continue (or use <strong>Save edits</strong> first). Then the next page shows operations and a diff against the automatic proposal.{% endblocktrans %}</p>
+                <p class="small text-body-secondary mt-2 mb-0">{% blocktrans trimmed %}Reconciliation uses the same saved data as modified Excel: if you edited NetBox pickers, we save those edits when you continue (or use <strong>Save edits</strong> first). Then the next page shows operations and a diff against the automatic proposal. Use <strong>Open preview in new tab</strong> to compare this audit side-by-side (same Include rows and current table edits).{% endblocktrans %}</p>
               {% endif %}
               <p class="small text-muted mt-2 mb-0">{% trans "Excel can be opened in Microsoft Excel or Google Sheets." %}</p>
             </div>
@@ -719,6 +725,9 @@
             (function() {
               var form = document.getElementById("maas-recon-stage-form");
               if (!form) return;
+              var auditRunId = {{ audit_run_id }};
+              var draftStorageKey = "maasReconStageDraft_" + auditRunId;
+              var draftSyncTimer = null;
               function collectSelected() {
                 var selected = {};
                 document.querySelectorAll(".drift-selectable-table tbody .drift-include-row:checked").forEach(function(cb) {
@@ -737,6 +746,51 @@
                 });
                 return selected;
               }
+              function collectOverridesSafe() {
+                try {
+                  return typeof window.DriftReviewCollectOverrides === "function"
+                    ? window.DriftReviewCollectOverrides() : {};
+                } catch (e) {
+                  return {};
+                }
+              }
+              function syncStageDraftToLocalStorage() {
+                try {
+                  var payload = {
+                    selected: collectSelected(),
+                    overrides: collectOverridesSafe() || {}
+                  };
+                  localStorage.setItem(draftStorageKey, JSON.stringify(payload));
+                } catch (ignore) {}
+              }
+              function scheduleDraftSync() {
+                if (draftSyncTimer) clearTimeout(draftSyncTimer);
+                draftSyncTimer = setTimeout(function() {
+                  draftSyncTimer = null;
+                  syncStageDraftToLocalStorage();
+                }, 120);
+              }
+              document.addEventListener("change", function(ev) {
+                var t = ev.target;
+                if (!(t instanceof Element)) return;
+                if (t.matches(".drift-include-row, .drift-include-toggle-all")) {
+                  scheduleDraftSync();
+                }
+              });
+              document.addEventListener("click", function(ev) {
+                var t = ev.target;
+                if (!(t instanceof Element)) return;
+                if (t.closest(".drift-select-all-btn, .drift-clear-all-btn")) {
+                  scheduleDraftSync();
+                }
+              });
+              var newTabLink = document.getElementById("maas-recon-open-new-tab-link");
+              if (newTabLink) {
+                ["pointerdown", "contextmenu", "focus"].forEach(function(evtName) {
+                  newTabLink.addEventListener(evtName, syncStageDraftToLocalStorage);
+                });
+              }
+              syncStageDraftToLocalStorage();
               var stagingWaitMsg = "{% filter escapejs %}{% trans "Building reconciliation preview…" %}{% endfilter %}";
               form.addEventListener("submit", function(ev) {
                 ev.preventDefault();
@@ -755,15 +809,6 @@
                 var ovEl = document.getElementById("maas-recon-overrides-json");
                 var saveUrl = (window._driftXlsxUiConfig && window._driftXlsxUiConfig.saveReviewUrl) || "";
                 var dirty = window.__driftReviewDirty === true;
-
-                function collectOverridesSafe() {
-                  try {
-                    return typeof window.DriftReviewCollectOverrides === "function"
-                      ? window.DriftReviewCollectOverrides() : {};
-                  } catch (e) {
-                    return {};
-                  }
-                }
 
                 function stagingCsrf() {
                   var a = document.querySelector("#drift-review-csrf-anchor input[name=csrfmiddlewaretoken]");
