@@ -360,9 +360,9 @@ class MAASOpenStackReconciliationRun(NetBoxModel):
         verbose_name = "MAAS/OpenStack branch reconciliation run"
         verbose_name_plural = "MAAS/OpenStack branch reconciliation runs"
         indexes = [
-            models.Index(fields=["-created"]),
-            models.Index(fields=["status", "-created"]),
-            models.Index(fields=["drift_run", "-created"]),
+            models.Index(fields=["-created"], name="netbox_auto_recon_created_idx"),
+            models.Index(fields=["status", "-created"], name="netbox_auto_recon_stat_crt_idx"),
+            models.Index(fields=["drift_run", "-created"], name="netbox_auto_rcn_drift_c_idx"),
         ]
 
     def __str__(self):
