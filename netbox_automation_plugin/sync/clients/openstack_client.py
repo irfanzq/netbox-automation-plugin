@@ -21,6 +21,18 @@ _PROJECT_ID_RE = re.compile(
     r"[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$"
 )
 
+# When connection scope is the built-in ``admin`` project, drift / NetBox VM tenant columns
+# use this display name instead (operator default).
+DRIFT_TENANT_LABEL_REPLACING_ADMIN = "WhiteFiber"
+
+
+def _tenant_display_label_for_drift(project_label: str) -> str:
+    """Map connection-scoped project label for drift tables (Nova instances, etc.)."""
+    s = (project_label or "").strip()
+    if s.lower() == "admin":
+        return DRIFT_TENANT_LABEL_REPLACING_ADMIN
+    return s
+
 
 def fetch_openstack_data(config: dict):
     """
@@ -574,7 +586,7 @@ def _collect_compute_instances(
             row = _server_dict_for_audit(srv)
             if not row.get("instance_id") or not row.get("name"):
                 continue
-            row["project_name"] = project_label if force_project_label_display else project_label
+            row["project_name"] = _tenant_display_label_for_drift(project_label)
             if hv_map:
                 row["hypervisor_hostname"] = _resolve_compute_host_to_hostname(
                     row.get("hypervisor_hostname") or "", hv_map

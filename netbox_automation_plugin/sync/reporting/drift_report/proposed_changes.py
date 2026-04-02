@@ -35,9 +35,20 @@ from netbox_automation_plugin.sync.reporting.drift_report.proposed_lldp_tables i
 from netbox_automation_plugin.sync.reporting.drift_report.proposed_nic_helpers import (
     _build_add_nb_interface_rows,
 )
+from netbox_automation_plugin.sync.clients.openstack_client import (
+    DRIFT_TENANT_LABEL_REPLACING_ADMIN,
+)
 from netbox_automation_plugin.sync.reconciliation.audit_detail import (
     openstack_floating_ips_nat_inside_drift,
 )
+
+
+def _vm_project_label_for_proposals(inst: dict) -> str:
+    """OpenStack project column for VM drift rows; map admin scope to operator default tenant."""
+    raw = str(inst.get("project_name") or inst.get("project_id") or "-").strip()
+    if raw.lower() == "admin":
+        return DRIFT_TENANT_LABEL_REPLACING_ADMIN
+    return raw if raw else "-"
 
 
 def _friendly_neutron_owners_line(owners: str) -> str:
@@ -1067,7 +1078,7 @@ def _proposed_changes_rows(
                     props = f"MAC {os_mac}; untagged VLAN {os_vlan}; IPs: {os_ip}"
                 from netbox_automation_plugin.sync.reporting.drift_report.proposed_nic_derived import (
                     derive_nic_proposed_columns,
-                    format_os_switch_cell,
+                    parse_os_lldp_structured,
                 )
 
                 vn = str(r.get("vlan_name") or "").strip()
@@ -1075,14 +1086,16 @@ def _proposed_changes_rows(
                     vv = r.get("vlan")
                     if isinstance(vv, dict):
                         vn = str(vv.get("name") or "").strip()
+                os_parts = parse_os_lldp_structured(osr)
                 audit_like = {
                     "maas_mac": mac,
                     "maas_link_speed": r.get("link_speed") or r.get("speed"),
                     "maas_nic_vendor": str(r.get("vendor") or ""),
                     "maas_nic_product": str(r.get("product") or ""),
                     "maas_vlan_name": vn,
-                    "os_switch_info": format_os_switch_cell(osr),
-                    "os_link_speed_raw": osr.get("link_speed") or osr.get("os_link_speed"),
+                    "os_lldp_switch": os_parts.get("switch") or "—",
+                    "maas_lldp_switch": (str(r.get("maas_lldp_switch") or "").strip() or "—"),
+                    "os_switch_info": os_parts.get("switch") or "—",
                 }
                 ex = derive_nic_proposed_columns(
                     h, audit_like, bmc_mac=_norm_mac_local(str(m.get("bmc_mac") or ""))
@@ -1097,8 +1110,8 @@ def _proposed_changes_rows(
                         vlan,
                         ex["maas_link_speed_disp"],
                         ex["maas_nic_model"],
-                        ex["os_link_speed_disp"],
-                        ex["os_switch_disp"],
+                        ex["os_lldp_switch_disp"],
+                        ex["maas_lldp_switch_disp"],
                         os_reg,
                         os_mac,
                         os_ip,
@@ -1178,8 +1191,8 @@ def _proposed_changes_rows(
                     os_mgmt_type or "—",
                     os_vendor,
                     os_model,
-                    bx["os_link_speed_disp"],
-                    bx["os_switch_disp"],
+                    bx["os_lldp_switch_disp"],
+                    bx["maas_lldp_switch_disp"],
                     bx["nb_proposed_intf_label"],
                     bx["nb_proposed_intf_type"],
                     mgmt,
@@ -1538,7 +1551,7 @@ def _proposed_changes_rows(
             if not iname:
                 continue
             os_reg = str(inst.get("os_region") or openstack_data.get("openstack_region_name") or "—")[:48]
-            proj = str(inst.get("project_name") or inst.get("project_id") or "-")
+            proj = _vm_project_label_for_proposals(inst)
             hv = str(inst.get("hypervisor_hostname") or "").strip() or "—"
             # Column "NB proposed device (VM)" is always the Nova instance name (same as VM name).
             # Hypervisor hostname column holds the compute host; apply tries that name if no Device matches the VM name.

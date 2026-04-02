@@ -1,8 +1,12 @@
 """
 Heuristic NB proposed intf Label / Type for drift NIC tables (review defaults).
 
-Sources: MAAS link_speed, vendor, product, vlan name; OpenStack runtime link_speed;
-local_link.switch_info; host/BMC MAC correlation. Operators override via drift pickers.
+Neighbor **switch** naming for heuristics follows the same authority as the audit row:
+OpenStack/Ironic runtime (``local_link`` / ``os_lldp``) first; MAAS commissioning LLDP
+switch name when OS does not supply one. MAAS VLAN name remains a further fallback for
+peer-style naming hints. The two table columns ``OS LLDP switch`` and ``MAAS LLDP switch``
+stay independent (OS vs MAAS sources); combined logic uses OS-then-MAAS only for
+derivations (label, mgmt/data hints, etc.).
 """
 
 from __future__ import annotations
@@ -10,8 +14,9 @@ from __future__ import annotations
 import re
 from typing import Any
 
-# Authority column (0-based): Host → MAAS → OS → NB → Authority → action/risk.
-NIC_DRIFT_AUTHORITY_COL_INDEX = 19
+# Authority column (0-based): Host → … → Authority → …
+# Must match HEADERS_DETAIL_NEW_NICS / HEADERS_DETAIL_NIC_DRIFT "Authority" position.
+NIC_DRIFT_AUTHORITY_COL_INDEX = 20
 NIC_NEW_AUTHORITY_COL_INDEX = 20
 
 # Drift picker + default suggestions must match these strings exactly.
@@ -46,16 +51,56 @@ def _compact_alnum(s: str) -> str:
     return "".join(c for c in (s or "").lower() if c.isalnum())
 
 
-def format_os_switch_cell(os_row: dict | None) -> str:
-    if not os_row:
-        return "—"
+def _switch_info_display_name(raw: str) -> str:
+    """
+    Strip Ironic/Neutron type label before the first colon (e.g. genericswitch:b1-r2-mgmt-3
+    -> b1-r2-mgmt-3). Matches proposed_lldp_tables._fields_from_local_link switch name parsing.
+    """
+    s = (raw or "").strip()
+    if not s:
+        return ""
+    if ":" in s:
+        _, _, rest = s.partition(":")
+        rest = rest.strip()
+        if rest:
+            return rest
+    return s
+
+
+def parse_os_lldp_structured(os_row: dict | None) -> dict[str, str]:
+    """
+    OS runtime row -> clean neighbor switch name and remote port (no decorative text).
+
+    ``local_link.switch_info`` may combine type prefix with hostname; ``port_id`` is the
+    Neighbor port id when Ironic exposes it. ``os_lldp`` string may contain ``port …`` segments.
+    """
+    out = {"switch": "", "port": ""}
+    if not os_row or not isinstance(os_row, dict):
+        return out
     ll = os_row.get("local_link")
     if isinstance(ll, dict):
         si = str(ll.get("switch_info") or "").strip()
         if si:
-            return si[:160]
-    osl = str(os_row.get("os_lldp") or "").strip()
-    return osl[:160] if osl else "—"
+            out["switch"] = _switch_info_display_name(si)[:200]
+        pid = str(ll.get("port_id") or ll.get("switch_port_id") or "").strip()
+        if pid:
+            out["port"] = pid[:200]
+    if not out["port"]:
+        osl = str(os_row.get("os_lldp") or "").strip()
+        if osl:
+            for segment in osl.split(" · "):
+                seg = segment.strip()
+                low = seg.lower()
+                if low.startswith("port "):
+                    out["port"] = seg[5:].strip()[:200]
+                    break
+    return out
+
+
+def format_os_switch_cell(os_row: dict | None) -> str:
+    """Backward-compatible single cell: neighbor switch name only (no port suffix)."""
+    sw = parse_os_lldp_structured(os_row).get("switch") or ""
+    return sw[:160] if sw else "—"
 
 
 def _switch_info_hints(switch_text: str) -> tuple[bool, bool]:
@@ -69,6 +114,44 @@ def _switch_info_hints(switch_text: str) -> tuple[bool, bool]:
     )
     data = any(x in t for x in ("-data", "data-", "_data", "-leaf", "leaf-", "dataleaf"))
     return mgmt, data
+
+
+def _effective_peer_switch_name(audit_row: dict) -> str:
+    """
+    Single switch name for NB proposed intf Label and related heuristics.
+
+    OpenStack runtime is authoritative: use ``os_lldp_switch`` / ``os_switch_info`` when
+    present. MAAS ``maas_lldp_switch`` is the fallback when OS has no neighbor name.
+    (Does not merge strings; first non-empty wins.)
+    """
+    for k in ("os_lldp_switch", "os_switch_info", "maas_lldp_switch"):
+        v = str(audit_row.get(k) or "").strip()
+        if v and v != "—":
+            return v
+    return ""
+
+
+def _peer_label_haystack(switch_txt: str, vlan_name: str) -> str:
+    """Prefer resolved switch text; fall back to MAAS VLAN name when switch is unknown."""
+    sw = (switch_txt or "").strip()
+    if sw and sw != "—":
+        return sw.lower()
+    return (vlan_name or "").strip().lower()
+
+
+def _label_data_gpu_from_peer_naming(haystack: str) -> str | None:
+    """
+    If peer naming contains ``data`` → Data; if ``leaf`` without ``data`` → GPU.
+    Otherwise None (caller uses speed / product heuristics).
+    """
+    h = (haystack or "").strip().lower()
+    if not h:
+        return None
+    if "data" in h:
+        return "Data"
+    if "leaf" in h:
+        return "GPU"
+    return None
 
 
 def _maas_nic_model(vendor: str, product: str) -> str:
@@ -190,6 +273,11 @@ def _suggest_type_slug(
     return ""
 
 
+def _disp(v: str) -> str:
+    s = (v or "").strip()
+    return s if s else "—"
+
+
 def derive_nic_proposed_columns(
     hostname: str,
     audit_row: dict,
@@ -201,28 +289,34 @@ def derive_nic_proposed_columns(
     product = str(audit_row.get("maas_nic_product") or "")
     vendor = str(audit_row.get("maas_nic_vendor") or "")
     vlan_name = str(audit_row.get("maas_vlan_name") or "").lower()
-    switch_txt = str(audit_row.get("os_switch_info") or "")
     ls_raw = audit_row.get("maas_link_speed")
     ls = _link_speed_int(ls_raw)
     mac = _norm_mac(str(audit_row.get("maas_mac") or ""))
 
+    # Table cells: OS vs MAAS sources shown separately.
+    os_sw = _disp(str(audit_row.get("os_lldp_switch") or "").strip() or audit_row.get("os_switch_info") or "")
+    maas_sw = _disp(str(audit_row.get("maas_lldp_switch") or ""))
+
     maas_link_disp = format_link_speed_display(ls_raw)
-    os_ls_raw = audit_row.get("os_link_speed_raw")
-    os_link_disp = format_link_speed_display(os_ls_raw) if os_ls_raw not in (None, "") else "—"
-    os_sw = switch_txt if switch_txt.strip() else "—"
     nic_model = _maas_nic_model(vendor, product)
 
     pl = product.lower()
     gpu_product = "gpu" in pl or "nvidia" in pl and "t4" in pl or "a100" in pl or "h100" in pl
     gpu_host = "gpu" in hn
 
-    mgmt_sw, data_sw = _switch_info_hints(os_sw)
+    # Label / mgmt-data heuristics: OS neighbor name first, else MAAS LLDP switch.
+    peer_switch = _effective_peer_switch_name(audit_row)
+    mgmt_sw, data_sw = _switch_info_hints(peer_switch)
 
     label = ""
     if bmc_mac and mac and _norm_mac(bmc_mac) == mac:
         label = "BMC"
     elif mgmt_sw or "management" in vlan_name:
         label = "Management"
+    elif (peer_lbl := _label_data_gpu_from_peer_naming(
+        _peer_label_haystack(peer_switch, vlan_name)
+    )):
+        label = peer_lbl
     elif data_sw:
         if (gpu_product or gpu_host) and ls is not None and ls >= 100_000:
             label = "GPU"
@@ -242,7 +336,8 @@ def derive_nic_proposed_columns(
 
     return {
         "maas_link_speed_disp": maas_link_disp,
-        "os_link_speed_disp": os_link_disp,
+        "os_lldp_switch_disp": os_sw,
+        "maas_lldp_switch_disp": maas_sw,
         "os_switch_disp": os_sw,
         "maas_nic_model": nic_model,
         "nb_proposed_intf_label": label,
@@ -254,7 +349,8 @@ def bmc_row_proposed_defaults(machine: dict | None) -> dict[str, str]:
     """Defaults for BMC / OOB tables; MAAS link speed from any host NIC when present."""
     return {
         "maas_link_speed_disp": maas_machine_best_link_speed_display(machine),
-        "os_link_speed_disp": "—",
+        "os_lldp_switch_disp": "—",
+        "maas_lldp_switch_disp": "—",
         "os_switch_disp": "—",
         "maas_nic_model": "—",
         "nb_proposed_intf_label": "BMC",

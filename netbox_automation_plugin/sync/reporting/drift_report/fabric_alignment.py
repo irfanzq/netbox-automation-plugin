@@ -106,6 +106,11 @@ def _alignment_review_rows(matched_rows):
         if not align:
             continue
         joined = _dedupe_note_parts("; ".join(align))
+        if str(r.get("os_authority") or "") == "openstack_runtime":
+            # OS authority: hide MAAS lifecycle→NB slug suffixes from alignment text.
+            joined = re.sub(r"\s*\|\s*MAAS→NB:\s*\S+", "", joined or "").strip()
+            joined = re.sub(r"\s*;\s*;+", "; ", joined)
+            joined = joined.strip(" ;")
         out.append(
             [
                 r.get("hostname") or "",

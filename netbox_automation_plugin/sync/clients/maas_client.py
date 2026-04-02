@@ -1089,6 +1089,44 @@ def hostname_short(name):
     return str(name).split(".", 1)[0].strip()
 
 
+def _enrich_machines_lldp_op_details(
+    machines: list,
+    maas_url: str,
+    maas_api_key: str,
+    verify_tls: bool,
+) -> None:
+    """Attach ``maas_lldp_switch`` / ``maas_lldp_port`` from commissioning op-details LLDP XML."""
+    from netbox_automation_plugin.sync.clients.maas_lldp import (
+        enrich_interface_dicts_with_maas_lldp,
+        lldp_by_iface_name_for_machine,
+    )
+
+    if not machines or not maas_url or not maas_api_key:
+        return
+
+    def _one(m: dict) -> None:
+        sid = (m.get("system_id") or "").strip()
+        ifaces = m.get("interfaces") or []
+        if not sid or not ifaces:
+            return
+        try:
+            by_name = lldp_by_iface_name_for_machine(
+                maas_url, maas_api_key, sid, verify_tls=verify_tls
+            )
+            enrich_interface_dicts_with_maas_lldp(ifaces, by_name)
+        except Exception:
+            logger.debug("MAAS LLDP enrich failed for %s", sid, exc_info=True)
+
+    max_w = min(24, max(4, len(machines)))
+    with ThreadPoolExecutor(max_workers=max_w) as ex:
+        futs = [ex.submit(_one, m) for m in machines if isinstance(m, dict)]
+        for fut in as_completed(futs):
+            try:
+                fut.result()
+            except Exception:
+                pass
+
+
 async def fetch_maas_data(maas_url: str, maas_api_key: str, maas_insecure: bool):
     """
     Fetch machines, zones, and pools from MAAS. Returns a dict with:
@@ -1257,6 +1295,13 @@ async def fetch_maas_data(maas_url: str, maas_api_key: str, maas_insecure: bool)
                 "hardware_vendor": str(hardware_vendor).strip(),
                 "hardware_product": str(hardware_product).strip(),
             })
+        await asyncio.to_thread(
+            _enrich_machines_lldp_op_details,
+            result["machines"],
+            maas_url,
+            maas_api_key,
+            not maas_insecure,
+        )
         _enrich_machines_fabric_rest(
             result["machines"], maas_url, maas_api_key, not maas_insecure, fabric_catalog
         )

@@ -148,7 +148,7 @@ def emit_drift_counts_and_alignment(
                 "NB state (current)",
                 "NB proposed device status",
                 "Authority",
-                "Alignment issues",
+                "Proposed Action",
             ],
             align_rows,
             dynamic_columns=True,

@@ -118,9 +118,15 @@ def _maas_iface_row_fabric(m: dict, mi: dict) -> str:
 
 
 def _nic_audit_sidecar(mi: dict, os_row: dict | None, *, host_bmc_mac: str) -> dict:
-    """MAAS/OpenStack fields joined onto interface audit rows for drift NIC tables."""
+    """
+    MAAS/OpenStack fields joined onto interface audit rows for drift NIC tables.
+
+    ``os_lldp_switch`` and ``maas_lldp_switch`` are stored separately; NB proposed intf
+    Label / heuristics combine them as OS-first, MAAS-fallback (see
+    ``proposed_nic_derived._effective_peer_switch_name``).
+    """
     from netbox_automation_plugin.sync.reporting.drift_report.proposed_nic_derived import (
-        format_os_switch_cell,
+        parse_os_lldp_structured,
     )
 
     vn = str(mi.get("vlan_name") or "").strip()
@@ -131,11 +137,9 @@ def _nic_audit_sidecar(mi: dict, os_row: dict | None, *, host_bmc_mac: str) -> d
     ls = mi.get("link_speed")
     if ls in (None, ""):
         ls = mi.get("speed")
-    osl = ""
-    if os_row:
-        osl = os_row.get("link_speed")
-        if osl in (None, ""):
-            osl = os_row.get("os_link_speed")
+    os_parts = parse_os_lldp_structured(os_row)
+    os_sw = (os_parts.get("switch") or "").strip()
+    maas_sw = str(mi.get("maas_lldp_switch") or "").strip()
     return {
         "maas_link_speed": ls if ls not in (None, "") else "",
         "maas_nic_vendor": str(mi.get("vendor") or "").strip(),
@@ -143,8 +147,9 @@ def _nic_audit_sidecar(mi: dict, os_row: dict | None, *, host_bmc_mac: str) -> d
         "maas_vlan_name": vn,
         "maas_mtu": mi.get("mtu") if mi.get("mtu") not in (None, "") else mi.get("mtu_size"),
         "maas_effective_mtu": mi.get("effective_mtu"),
-        "os_switch_info": format_os_switch_cell(os_row),
-        "os_link_speed_raw": osl if osl not in (None, "") else "",
+        "os_lldp_switch": os_sw or "—",
+        "maas_lldp_switch": maas_sw or "—",
+        "os_switch_info": os_sw or "—",
         "host_bmc_mac": host_bmc_mac or "",
     }
 
@@ -641,15 +646,10 @@ def build_maas_netbox_matched_rows(
             if os_maint and "maintenance" not in nb_st:
                 hints.append("OS maintenance / NB not maintenance — consider maintenance")
             elif os_prov == "active" and os_instance_uuid and "staged" in nb_st:
-                hints.append(
-                    "OS active+instance / NB staged — consider active"
-                    + _maas_nb_alignment_suffix(m)
-                )
+                # OS authority: do not append MAAS→NB mapping (misleading when OpenStack is authoritative).
+                hints.append("OS active+instance / NB staged — consider active")
             elif os_prov in {"available", "clean failed"} and "active" in nb_st:
-                hints.append(
-                    f"OS {os_prov} / NB active — review lifecycle"
-                    + _maas_nb_alignment_suffix(m)
-                )
+                hints.append(f"OS {os_prov} / NB active — review lifecycle")
         if not nb.get("serial"):
             hints.append("NB serial empty — compare with MAAS inventory")
         maas_bmc = (m.get("bmc_ip") or "").strip()

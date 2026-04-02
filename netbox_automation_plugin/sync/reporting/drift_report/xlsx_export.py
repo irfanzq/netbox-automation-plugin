@@ -1,4 +1,9 @@
-"""Excel export for the drift audit (openpyxl)."""
+"""Excel export for the drift audit (openpyxl).
+
+Detail tables use the same ``HEADERS_*`` lists as ``format_html_proposed`` /
+``drift_overrides_apply`` (NIC/BMC blocks include OS + MAAS LLDP switch name columns). Rows are
+padded/truncated to header width so columns stay aligned with the HTML tables.
+"""
 
 from io import BytesIO
 
@@ -30,6 +35,7 @@ from netbox_automation_plugin.sync.reporting.drift_report.drift_overrides_apply 
     HEADERS_DETAIL_NEW_PREFIXES,
     HEADERS_DETAIL_NEW_VMS,
     HEADERS_DETAIL_NIC_DRIFT,
+    HEADERS_PLACEMENT_ALIGNMENT,
     HEADERS_SERIAL_REVIEW,
     merge_drift_review_overrides,
     normalize_drift_review_overrides,
@@ -272,26 +278,16 @@ def build_drift_report_xlsx(
         r_al = ws_sum.max_row + 1
         ws_sum.append(["Detail — placement & lifecycle alignment", ""])
         ws_sum.cell(row=r_al, column=1).font = header_font
-        _append_header(
-            ws_sum,
-            [
-                "Host",
-                "MAAS fabric",
-                "MAAS state",
-                "OS region",
-                "OS provision",
-                "OS power",
-                "OS maintenance",
-                "NetBox site",
-                "NetBox location",
-                "NB state (current)",
-                "NB proposed device status",
-                "Authority",
-                "Alignment issues",
-            ],
-        )
+        _ph = list(HEADERS_PLACEMENT_ALIGNMENT)
+        _append_header(ws_sum, _ph)
+        _pn = len(_ph)
         for row in align_rows_x:
-            ws_sum.append(row)
+            rl = list(row) if isinstance(row, (list, tuple)) else [row]
+            if len(rl) < _pn:
+                rl = rl + [""] * (_pn - len(rl))
+            elif len(rl) > _pn:
+                rl = rl[:_pn]
+            ws_sum.append(rl)
         ws_sum.append([])
 
     ws_sum.append([])
@@ -358,9 +354,16 @@ def build_drift_report_xlsx(
         ws_prop.cell(row=ws_prop.max_row, column=1).font = header_font
         if note:
             ws_prop.append([note])
-        _append_header(ws_prop, headers)
+        hdr_list = list(headers)
+        _append_header(ws_prop, hdr_list)
+        ncols = len(hdr_list)
         for row in rows:
-            ws_prop.append(list(row))
+            rl = list(row) if isinstance(row, (list, tuple)) else [row]
+            if len(rl) < ncols:
+                rl = rl + [""] * (ncols - len(rl))
+            elif len(rl) > ncols:
+                rl = rl[:ncols]
+            ws_prop.append(rl)
 
     _append_block(
         "A) New devices",

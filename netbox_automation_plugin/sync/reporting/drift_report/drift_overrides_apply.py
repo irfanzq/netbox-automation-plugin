@@ -192,7 +192,7 @@ HEADERS_PLACEMENT_ALIGNMENT: list[str] = [
     "NB state (current)",
     "NB proposed device status",
     "Authority",
-    "Alignment issues",
+    "Proposed Action",
 ]
 
 HEADERS_DETAIL_NEW_NICS: list[str] = [
@@ -204,8 +204,8 @@ HEADERS_DETAIL_NEW_NICS: list[str] = [
     "MAAS VLAN",
     "MAAS link speed",
     "MAAS NIC model",
-    "OS link speed",
-    "OS LLDP / switch_info",
+    "OS LLDP switch",
+    "MAAS LLDP switch",
     "OS region",
     "OS MAC",
     "OS runtime IP",
@@ -229,8 +229,8 @@ HEADERS_DETAIL_NIC_DRIFT: list[str] = [
     "MAAS VLAN",
     "MAAS link speed",
     "MAAS NIC model",
-    "OS link speed",
-    "OS LLDP / switch_info",
+    "OS LLDP switch",
+    "MAAS LLDP switch",
     "OS region",
     "OS MAC",
     "OS runtime IP",
@@ -262,8 +262,8 @@ HEADERS_BMC_NEW_DEVICES: list[str] = [
     "OS mgmt type",
     "OS vendor",
     "OS model",
-    "OS link speed",
-    "OS LLDP / switch_info",
+    "OS LLDP switch",
+    "MAAS LLDP switch",
     "NB Proposed intf Label",
     "NB Proposed intf Type",
     "Suggested NB mgmt iface",
@@ -286,8 +286,8 @@ HEADERS_BMC_EXISTING: list[str] = [
     "OS mgmt type",
     "OS vendor",
     "OS model",
-    "OS link speed",
-    "OS LLDP / switch_info",
+    "OS LLDP switch",
+    "MAAS LLDP switch",
     "NB Proposed intf Label",
     "NB Proposed intf Type",
     "Suggested NB OOB Port",
@@ -388,7 +388,15 @@ def _remap_legacy_truncated_nb_placement_headers(
         return
     target = "NB proposed device status"
     for cmap in sec.values():
-        if not isinstance(cmap, dict) or len(cmap) != 1:
+        if not isinstance(cmap, dict):
+            continue
+        for legacy_key, cur in (
+            ("Alignment issues", "Proposed Action"),
+            ("NB Proposed Actions", "Proposed Action"),
+        ):
+            if legacy_key in cmap and cur not in cmap:
+                cmap[cur] = cmap.pop(legacy_key)
+        if len(cmap) != 1:
             continue
         if "NB" not in cmap or target in cmap:
             continue
