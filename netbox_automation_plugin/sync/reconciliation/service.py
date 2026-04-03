@@ -395,19 +395,14 @@ def _validate_new_nic_requires_selected_new_devices(
                 uniq.append(h)
         hosts_per_table[tbl] = sorted(uniq, key=str.lower)
 
+    dev1 = _AUDIT_DETAIL_TABLE_TITLE["detail_new_devices"]
+    dev2 = _AUDIT_DETAIL_TABLE_TITLE["detail_review_only_devices"]
     lines = [
-        _(
-            "For hosts that appear only under “Detail — new devices” or "
-            "“Detail — MAAS-only hosts (manual review required)”, each selected new interface "
-            "row must have Include enabled on the device row for the same hostname."
-        ),
-        _("Hosts that already exist in NetBox only need interface rows selected."),
+        _("Include the device row for the same hostname—not only new interfaces."),
+        _("Device sections: %(d1)s or %(d2)s.") % {"d1": dev1, "d2": dev2},
+        _("Hosts already modeled in NetBox: interface rows only."),
         "",
-        _("Enable Include on the matching device row (same hostname) in one of:"),
-        _AUDIT_DETAIL_TABLE_TITLE["detail_new_devices"],
-        _AUDIT_DETAIL_TABLE_TITLE["detail_review_only_devices"],
-        "",
-        _("New interface row(s) were selected under these tables without that device row:"),
+        _("Interfaces included without matching device row:"),
     ]
     for tbl in sorted(hosts_per_table.keys(), key=str.lower):
         lines.append(tbl)

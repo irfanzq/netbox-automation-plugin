@@ -1,5 +1,10 @@
 """Apply frozen reconciliation rows using scoped audit cells.
 
+NetBox-oriented fields shown on the recon page are defined in
+:mod:`netbox_write_projection` (:func:`netbox_write_projection_cells`). Preview delegates
+there; apply handlers should read those same projected strings where possible so UI and
+writes stay aligned.
+
 ``apply_row_operation`` narrows each row to reconciliation-preview source columns (plus
 workflow fields: Proposed Action, Status, Risk, Authority) and drops empty / em-dash
 placeholders so handlers only see values that would appear on the recon page (Proposed
@@ -18,6 +23,10 @@ from functools import lru_cache
 from typing import Any
 
 from django.utils.text import slugify
+
+from netbox_automation_plugin.sync.reconciliation.netbox_write_projection import (
+    netbox_write_projection_for_op,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -378,249 +387,37 @@ def _split_ip_candidates(blob: str) -> list[str]:
 
 
 _DRIFT_AUDIT_MARKER = "\n=== Drift reconciliation (full row) ===\n"
+# Legacy prefix apply embedded a row snapshot after this marker in Prefix.description.
+_LEGACY_PREFIX_DRIFT_ROW_MARKER = "--- Drift row (reconciliation) ---"
+
+
+def strip_prefix_description_audit_suffix(raw: str | None) -> str:
+    """Strip reconciliation audit tails from Prefix.description or editable drift cells."""
+    t = (raw or "").strip()
+    if not t:
+        return ""
+    if _LEGACY_PREFIX_DRIFT_ROW_MARKER in t:
+        t = t.split(_LEGACY_PREFIX_DRIFT_ROW_MARKER)[0].rstrip()
+    m = _DRIFT_AUDIT_MARKER.strip()
+    if m in t:
+        t = t.split(m)[0].rstrip()
+    return t.strip()
 
 
 def _norm_header(k: str) -> str:
     return str(k or "").strip().lower()
 
 
-def _nw_ordered(cells: dict[str, str], fields: tuple[str, ...]) -> dict[str, str]:
-    """Stable column order for recon preview; values from audit row via case-insensitive header match."""
-    return {f: _cell(cells, f) for f in fields}
-
-
-def _netbox_write_new_nic_preview(cells: dict[str, str]) -> dict[str, str]:
-    """Interface create preview: Interface fields plus parent Device.site / Device.location; IPs are ``IPAddress.address`` rows with assigned_object set."""
-    mac, vid, ips = _interface_mac_vlan_ip_from_cells(cells, include_nb_fallback=False)
-    if_name = _cell(cells, "Suggested NB name", "MAAS intf")
-    return {
-        "device": _cell(cells, "Host"),
-        "name": if_name,
-        "type": _cell(cells, "NB Proposed intf Type"),
-        "mac_address": mac or "—",
-        "untagged_vlan": str(vid) if vid else "—",
-        "tags": _cell(cells, "NB Proposed intf Label"),
-        "device.site": _cell(cells, "NB site"),
-        "device.location": _cell(cells, "NB location"),
-        "IPAddress.address": ips or "—",
-    }
-
-
-def _netbox_write_nic_drift_preview(cells: dict[str, str]) -> dict[str, str]:
-    """Interface update preview (NIC drift)."""
-    mac, vid, ip_blob = _interface_mac_vlan_ip_from_cells(cells, include_nb_fallback=True)
-    return {
-        "device": _cell(cells, "Host"),
-        "name": _cell(cells, "NB intf"),
-        "type": _cell(cells, "NB Proposed intf Type"),
-        "mac_address": mac or "—",
-        "untagged_vlan": str(vid) if vid else "—",
-        "tags": _cell(cells, "NB Proposed intf Label"),
-        "IPAddress.address": ip_blob or "—",
-    }
-
-
-def _netbox_write_bmc_preview(cells: dict[str, str], *, existing_oob: bool) -> dict[str, str]:
-    """Mirrors _bmc_apply: IP and interface name precedence."""
-    bmc_ip_maas = _cell(cells, "MAAS BMC IP")
-    bmc_ip_os = _cell(cells, "OS BMC IP")
-    bmc_ip_nb = _cell(cells, "NB mgmt iface IP")
-    bmc_ip = bmc_ip_maas or bmc_ip_os or bmc_ip_nb
-    mac = _normalize_mac(_cell(cells, "MAAS BMC MAC", "NB OOB MAC"))
-    if_name = _cell(
-        cells,
-        "Suggested NB OOB Port" if existing_oob else "Suggested NB mgmt iface",
-    )
-    out: dict[str, str] = {
-        "device": _cell(cells, "Host"),
-        "name": if_name,
-        "mac_address": mac or "—",
-        "type": _cell(cells, "NB Proposed intf Type"),
-        "tags": _cell(cells, "NB Proposed intf Label"),
-        "IPAddress.address": bmc_ip or "—",
-    }
-    if existing_oob:
-        out["description"] = _cell(cells, "NetBox OOB")
-    return out
-
-
-def _device_netbox_write_preview(cells: dict[str, str]) -> dict[str, str]:
-    """Device preview: ``dcim.Device`` fields; region is applied on ``dcim.Site.region`` (not a Device column)."""
-    serial = _cell(cells, "Serial Number", "MAAS Serial")
-    platform_src = _cell(cells, "NB proposed platform", "OS provision", "OS release")
-    return {
-        "name": _cell(cells, "Hostname", "Host"),
-        "site": _cell(cells, "NB proposed site", "NetBox site"),
-        "site.region": _cell(cells, "NB proposed region"),
-        "location": _cell(cells, "NB proposed location", "NetBox location"),
-        "role": _cell(cells, "NB proposed role"),
-        "device_type": _cell(cells, "NB proposed device type"),
-        "status": _cell(cells, "NB proposed device status", "NB state (current)"),
-        "serial": serial,
-        "platform": platform_src,
-        "tags": _cell(cells, "NB proposed tag", "Suggested NetBox tags", "NetBox tags"),
-    }
-
-
-def _preview_prefix_site_name(cells: dict[str, str]) -> str:
-    """Same name-based match as ``_try_set_prefix_site_from_cells`` (OS region → Site)."""
-    reg = _cell(cells, "OS region")
-    if not _meaningful_cell_val(reg):
-        return ""
-    try:
-        from dcim.models import Site
-
-        site = _resolve_by_name(Site, reg)
-        return site.name if site is not None else ""
-    except Exception:
-        return ""
-
-
-def _vm_primary_ip4_ip6_cells(cells: dict[str, str]) -> tuple[str, str]:
-    pri = (_cell(cells, "NB proposed primary IP") or "").strip()
-    if not pri or pri in ("—", "-"):
-        return "", ""
-    try:
-        host = pri.split("/", 1)[0].strip()
-        ver = ipaddress.ip_address(host).version
-    except ValueError:
-        return pri, ""
-    if ver == 4:
-        return pri, ""
-    return "", pri
-
-
-def _netbox_write_ip_range_description(cells: dict[str, str]) -> str:
-    nb = _cell(cells, "NB Proposed Description")
-    if nb and nb not in ("—", "-"):
-        return nb
-    return _cell(cells, "OS Pool Description")
-
-
 def netbox_write_preview_cells(selection_key: str, cells: dict[str, str]) -> dict[str, str]:
     """
-    Reconciliation / branch preview: column keys match NetBox ORM / related targets the apply step
-    writes (``site.region``, ``device.site``, ``IPAddress.address`` for IPAM rows, etc.); values are
-    derived from audit cells the same way as apply (e.g. full Prefix/FIP ``description`` text).
+    Reconciliation / branch preview: delegates to :mod:`netbox_write_projection` (single source
+    of truth). Column keys and values are unchanged from the historical implementation.
     """
-    sk = str(selection_key or "").strip()
-    c = cells or {}
+    from netbox_automation_plugin.sync.reconciliation.netbox_write_projection import (
+        netbox_write_projection_cells,
+    )
 
-    if sk == "detail_placement_lifecycle_alignment":
-        return {
-            "name": _cell(c, "Host", "Hostname"),
-            "site": _cell(c, "NetBox site"),
-            "location": _cell(c, "NetBox location"),
-            "status": _cell(c, "NB proposed device status"),
-        }
-    if sk in ("detail_new_devices", "detail_review_only_devices"):
-        return _device_netbox_write_preview(c)
-    if sk == "detail_new_prefixes":
-        pd = _prefix_description_max_len()
-        return {
-            "prefix": _cell(c, "CIDR"),
-            "vrf": _cell(c, "NB proposed VRF"),
-            "site": _preview_prefix_site_name(c),
-            "status": _cell(c, "NB proposed status"),
-            "role": _cell(c, "NB proposed role"),
-            "tenant": _cell(c, "NB Proposed Tenant"),
-            "scope": _cell(c, "NB Proposed Scope"),
-            "vlan": _cell(c, "NB Proposed VLAN"),
-            "description": _prefix_description_from_cells(c, max_len=pd),
-        }
-    if sk == "detail_existing_prefixes":
-        pd = _prefix_description_max_len()
-        return {
-            "id": _cell(c, "NetBox prefix ID"),
-            "prefix": _cell(c, "CIDR"),
-            "vrf": _cell(c, "NB proposed VRF"),
-            "site": _preview_prefix_site_name(c),
-            "status": _cell(c, "NB proposed status"),
-            "role": _cell(c, "NB proposed role"),
-            "tenant": _cell(c, "NB Proposed Tenant"),
-            "scope": _cell(c, "NB Proposed Scope"),
-            "vlan": _cell(c, "NB Proposed VLAN"),
-            "description": _prefix_description_from_cells(c, max_len=pd),
-        }
-    if sk == "detail_new_ip_ranges":
-        return {
-            "start_address": _cell(c, "Start address"),
-            "end_address": _cell(c, "End address"),
-            "status": _cell(c, "NB proposed status"),
-            "role": _cell(c, "NB proposed role"),
-            "vrf": _cell(c, "NB proposed VRF"),
-            "description": _netbox_write_ip_range_description(c),
-        }
-    if sk == "detail_new_fips":
-        fd = _ip_address_description_max_len()
-        return {
-            "address": _cell(c, "Floating IP"),
-            "status": _cell(c, "NB proposed status"),
-            "role": _cell(c, "NB proposed role"),
-            "vrf": _cell(c, "NB proposed VRF"),
-            "tenant": _cell(c, "NB Proposed Tenant"),
-            "nat_inside": _cell(c, "NAT inside IP (from OpenStack fixed IP)"),
-            "description": _fip_description_from_cells(c, max_len=fd),
-        }
-    if sk == "detail_existing_fips":
-        fd = _ip_address_description_max_len()
-        return {
-            "address": _cell(c, "Floating IP"),
-            "status": _cell(c, "NB proposed status"),
-            "role": _cell(c, "NB proposed role"),
-            "vrf": _cell(c, "NB proposed VRF"),
-            "tenant": _cell(c, "NB Proposed Tenant"),
-            "nat_inside": _cell(c, "NAT inside IP (from OpenStack fixed IP)"),
-            "description": _fip_description_from_cells(c, max_len=fd),
-        }
-    if sk == "detail_new_vms":
-        p4, p6 = _vm_primary_ip4_ip6_cells(c)
-        return {
-            "name": _cell(c, "VM name"),
-            "primary_ip4": p4,
-            "primary_ip6": p6,
-            "cluster": _cell(c, "NB proposed cluster"),
-            "site": _cell(c, "NB proposed site"),
-            "tenant": _cell(c, "NB Proposed Tenant"),
-            "status": _cell(c, "NB proposed VM status"),
-            "device": _cell(
-                c, "NB proposed device (VM)", "NB proposed device (hypervisor)", "Hypervisor hostname"
-            ),
-        }
-    if sk == "detail_existing_vms":
-        p4, p6 = _vm_primary_ip4_ip6_cells(c)
-        return {
-            "id": _cell(c, "NetBox VM ID"),
-            "name": _cell(c, "VM name"),
-            "primary_ip4": p4,
-            "primary_ip6": p6,
-            "cluster": _cell(c, "NB proposed cluster"),
-            "site": _cell(c, "NB proposed site"),
-            "tenant": _cell(c, "NB Proposed Tenant"),
-            "status": _cell(c, "NB proposed VM status"),
-            "device": _cell(
-                c, "NB proposed device (VM)", "NB proposed device (hypervisor)", "Hypervisor hostname"
-            ),
-        }
-    if sk in NEW_NIC_SELECTION_KEYS:
-        return _netbox_write_new_nic_preview(c)
-    if sk in ("detail_nic_drift_os", "detail_nic_drift_maas"):
-        return _netbox_write_nic_drift_preview(c)
-    if sk == "detail_bmc_new_devices":
-        return _netbox_write_bmc_preview(c, existing_oob=False)
-    if sk == "detail_bmc_existing":
-        return _netbox_write_bmc_preview(c, existing_oob=True)
-    if sk == "detail_serial_review":
-        return {
-            "name": _cell(c, "Host", "Hostname"),
-            "serial": _cell(c, "MAAS Serial", "NetBox Serial", "Serial Number"),
-        }
-    out: dict[str, str] = {}
-    for k, v in c.items():
-        vv = "" if v is None else str(v).strip()
-        if vv and vv not in ("—", "-"):
-            out[str(k).strip()] = vv
-    return out
+    return netbox_write_projection_cells(selection_key, cells)
 
 
 def netbox_write_preview_ordered_fieldnames(selection_key: str) -> tuple[str, ...]:
@@ -946,60 +743,14 @@ def _prefix_description_max_len() -> int:
     return int(ml) if ml else 4000
 
 
-def _prefix_drift_snapshot_lines(
-    cells: dict[str, str], *, skip_headers: frozenset[str] | None = None
-) -> list[str]:
-    skip = skip_headers or frozenset()
-    lines: list[str] = []
-    for h in _NEW_PREFIX_DRIFT_SNAPSHOT_HEADERS:
-        if h in skip:
-            continue
-        v = _cell(cells, h)
-        if not _meaningful_cell_val(v):
-            continue
-        lines.append(f"{h}: {v}")
-    return lines
-
-
 def _prefix_description_from_cells(cells: dict[str, str], *, max_len: int) -> str:
-    """
-    Operator-facing text first (editable column), then a fixed-order snapshot of the rest
-    of the drift row so every column is persisted on the Prefix record.
-    """
-    editable = (_cell(cells, "NB Proposed Prefix description (editable)") or "").strip()
-    skip_editable = frozenset({"NB Proposed Prefix description (editable)"})
-    snap_lines = _prefix_drift_snapshot_lines(cells, skip_headers=skip_editable)
-    if snap_lines:
-        block = "\n".join(snap_lines)
-        if editable:
-            body = f"{editable}\n\n--- Drift row (reconciliation) ---\n{block}".strip()
-        else:
-            body = f"--- Drift row (reconciliation) ---\n{block}".strip()
-    else:
-        body = editable
-    if max_len and len(body) > max_len:
-        return body[: max_len - 3] + "..."
-    return body
-
-
-def _try_set_prefix_site_from_cells(prefix_obj: Any, cells: dict[str, str]) -> bool:
-    """If Prefix has site and OS region matches a NetBox Site name, set site."""
-    if not hasattr(prefix_obj, "site_id"):
-        return False
-    try:
-        from dcim.models import Site
-    except Exception:
-        return False
-    reg = _cell(cells, "OS region")
-    if not _meaningful_cell_val(reg):
-        return False
-    site = _resolve_by_name(Site, reg)
-    if site is None:
-        return False
-    if getattr(prefix_obj, "site_id", None) != site.pk:
-        prefix_obj.site = site
-        return True
-    return False
+    """NetBox Prefix.description: operator-editable column only (drift lives in typed fields / CF)."""
+    editable = strip_prefix_description_audit_suffix(
+        _cell(cells, "NB Proposed Prefix description (editable)")
+    )
+    if max_len and len(editable) > max_len:
+        return editable[: max_len - 3] + "..."
+    return editable
 
 
 def apply_create_prefix(op: dict[str, Any]) -> tuple[str, str]:
@@ -1008,41 +759,16 @@ def apply_create_prefix(op: dict[str, Any]) -> tuple[str, str]:
     cells = op.get("cells") or {}
     if (reason := skip_reason_from_row_guides(cells)) is not None:
         return "skipped", reason
-    cidr = _cell(cells, "CIDR")
-    vrf_name = _cell(cells, "NB proposed VRF")
-    status_name = _cell(cells, "NB proposed status")
-    role_name = _cell(cells, "NB proposed role")
-    tenant_name = _cell(cells, "NB Proposed Tenant")
-    scope_name = _cell(cells, "NB Proposed Scope")
-    vlan_name = _cell(cells, "NB Proposed VLAN")
-    dmax = _prefix_description_max_len()
-    full_descr = _prefix_description_from_cells(cells, max_len=dmax)
-    # All drift table headers consumed so residual audit is not merged into Prefix.description
-    # (full row is embedded via _prefix_description_from_cells + typed fields + optional CF).
-    consumed = {
-        _norm_header("NetBox prefix ID"),
-        _norm_header("NB current VRF"),
-        _norm_header("NB current status"),
-        _norm_header("NB current role"),
-        _norm_header("NB current tenant"),
-        _norm_header("NB current description"),
-        _norm_header("Drift summary"),
-        _norm_header("OS region"),
-        _norm_header("CIDR"),
-        _norm_header("OS Description"),
-        _norm_header("Project"),
-        _norm_header("NB Proposed Prefix description (editable)"),
-        _norm_header("NB Proposed Tenant"),
-        _norm_header("NB Proposed Scope"),
-        _norm_header("NB Proposed VLAN"),
-        _norm_header("NB proposed role"),
-        _norm_header("NB proposed status"),
-        _norm_header("NB proposed VRF"),
-        _norm_header("Role reason"),
-        _norm_header("Authority"),
-        # Proposed Action: routing hint for apply; not a NetBox field — consume for residual merge only.
-        _norm_header("Proposed Action"),
-    }
+    proj = netbox_write_projection_for_op(op)
+    cidr = (proj.get("prefix") or "").strip()
+    vrf_name = (proj.get("vrf") or "").strip()
+    status_name = (proj.get("status") or "").strip()
+    role_name = (proj.get("role") or "").strip()
+    tenant_name = (proj.get("tenant") or "").strip()
+    scope_name = (proj.get("scope") or "").strip()
+    vlan_name = (proj.get("vlan") or "").strip()
+    full_descr = (proj.get("description") or "").strip()
+    # Drift columns map to typed fields / CF; description is editable column only (no audit dump).
     if not cidr:
         return "skipped", "skipped_prerequisite_missing"
     vrf = _resolve_by_name(VRF, vrf_name) if vrf_name else None
@@ -1110,8 +836,6 @@ def apply_create_prefix(op: dict[str, Any]) -> tuple[str, str]:
         if vlan_obj is not None and hasattr(existing, "vlan_id") and existing.vlan_id != vlan_obj.pk:
             existing.vlan = vlan_obj
             changed = True
-        if _try_set_prefix_site_from_cells(existing, cells):
-            changed = True
         if hasattr(existing, "description"):
             if (existing.description or "").strip() != full_descr.strip():
                 existing.description = full_descr
@@ -1119,10 +843,7 @@ def apply_create_prefix(op: dict[str, Any]) -> tuple[str, str]:
         cf_ch, _ = _merge_prefix_row_into_custom_fields(existing, cells)
         if cf_ch:
             changed = True
-        merge_ch = _merge_audit_residual_onto_object(
-            existing, cells, consumed, attr_names=("description",), max_len=max(dmax, 8000)
-        )
-        if changed or merge_ch:
+        if changed:
             existing.save()
             return "updated", "ok_updated"
         return "skipped", "skipped_already_desired"
@@ -1139,15 +860,10 @@ def apply_create_prefix(op: dict[str, Any]) -> tuple[str, str]:
         obj.scope = scope_obj
     if vlan_obj is not None and hasattr(obj, "vlan"):
         obj.vlan = vlan_obj
-    _try_set_prefix_site_from_cells(obj, cells)
     if hasattr(obj, "description"):
         obj.description = full_descr
     _merge_prefix_row_into_custom_fields(obj, cells)
     obj.save()
-    if _merge_audit_residual_onto_object(
-        obj, cells, consumed, attr_names=("description",), max_len=max(dmax, 8000)
-    ):
-        obj.save()
     return "created", "ok_created"
 
 
@@ -1157,12 +873,13 @@ def apply_create_ip_range(op: dict[str, Any]) -> tuple[str, str]:
     cells = op.get("cells") or {}
     if (reason := skip_reason_from_row_guides(cells)) is not None:
         return "skipped", reason
-    start_addr = _cell(cells, "Start address")
-    end_addr = _cell(cells, "End address")
-    status_name = _cell(cells, "NB proposed status")
-    role_name = _cell(cells, "NB proposed role")
-    vrf_name = _cell(cells, "NB proposed VRF")
-    descr = _cell(cells, "NB Proposed Description", "OS Pool Description")
+    proj = netbox_write_projection_for_op(op)
+    start_addr = (proj.get("start_address") or "").strip()
+    end_addr = (proj.get("end_address") or "").strip()
+    status_name = (proj.get("status") or "").strip()
+    role_name = (proj.get("role") or "").strip()
+    vrf_name = (proj.get("vrf") or "").strip()
+    descr = (proj.get("description") or "").strip()
     if status_name in {"—", "-"}:
         status_name = ""
     if role_name in {"—", "-"}:
@@ -1385,13 +1102,14 @@ def apply_create_floating_ip(op: dict[str, Any]) -> tuple[str, str]:
     cells = op.get("cells") or {}
     if (reason := skip_reason_from_row_guides(cells)) is not None:
         return "skipped", reason
-    raw_ip = _cell(cells, "Floating IP")
-    status_name = _cell(cells, "NB proposed status")
-    vrf_name = _cell(cells, "NB proposed VRF")
-    role_name = _cell(cells, "NB proposed role")
-    tenant_name = _cell(cells, "NB Proposed Tenant")
+    proj = netbox_write_projection_for_op(op)
+    raw_ip = (proj.get("address") or "").strip()
+    status_name = (proj.get("status") or "").strip()
+    vrf_name = (proj.get("vrf") or "").strip()
+    role_name = (proj.get("role") or "").strip()
+    tenant_name = (proj.get("tenant") or "").strip()
+    full_descr = (proj.get("description") or "").strip()
     dmax = _ip_address_description_max_len()
-    full_descr = _fip_description_from_cells(cells, max_len=dmax)
     consumed = {
         _norm_header("NB current NAT inside"),
         _norm_header("OS region"),
@@ -1547,8 +1265,9 @@ def apply_create_openstack_vm(op: dict[str, Any]) -> tuple[str, str]:
     cells = op.get("cells") or {}
     if (reason := skip_reason_from_row_guides(cells)) is not None:
         return "skipped", reason
-    name = _cell(cells, "VM name")
-    cluster_name = _cell(cells, "NB proposed cluster")
+    proj = netbox_write_projection_for_op(op)
+    name = (proj.get("name") or "").strip()
+    cluster_name = (proj.get("cluster") or "").strip()
     if not name or not cluster_name or cluster_name in {"—", "-"}:
         return "skipped", "skipped_prerequisite_missing"
     cluster = Cluster.objects.filter(name=cluster_name).first()
@@ -1575,30 +1294,25 @@ def apply_create_openstack_vm(op: dict[str, Any]) -> tuple[str, str]:
     }
 
     vm = VirtualMachine(name=name, cluster=cluster)
-    site_name = _cell(cells, "NB proposed site")
+    site_name = (proj.get("site") or "").strip()
     if site_name and site_name not in {"—", "-"}:
         site = _resolve_by_name(Site, site_name)
         if site is not None and hasattr(vm, "site_id"):
             vm.site = site
-    tenant_name = _cell(cells, "NB Proposed Tenant")
+    tenant_name = (proj.get("tenant") or "").strip()
     if tenant_name and tenant_name not in {"—", "-"}:
         tenant = _resolve_by_name(Tenant, tenant_name)
         if tenant is not None and hasattr(vm, "tenant_id"):
             vm.tenant = tenant
-    status_name = _cell(cells, "NB proposed VM status")
+    status_name = (proj.get("status") or "").strip()
     if status_name and status_name not in {"—", "-"}:
         val = _pick_choice_value(vm._meta.get_field("status"), status_name)
         if val is not None:
             vm.status = val
     dev = None
-    for nm in (
-        _cell(cells, "NB proposed device (VM)", "NB proposed device (hypervisor)"),
-        _cell(cells, "Hypervisor hostname"),
-    ):
-        if nm and nm not in {"—", "-"}:
-            dev = Device.objects.filter(name=nm).first()
-            if dev is not None:
-                break
+    device_cell = (proj.get("device") or "").strip()
+    if device_cell and device_cell not in {"—", "-"}:
+        dev = Device.objects.filter(name=device_cell).first()
     if dev is not None and hasattr(vm, "device_id"):
         vm.device = dev
 
@@ -1624,7 +1338,8 @@ def apply_update_openstack_vm(op: dict[str, Any]) -> tuple[str, str]:
     cells = op.get("cells") or {}
     if (reason := skip_reason_from_row_guides(cells)) is not None:
         return "skipped", reason
-    pk_raw = _cell(cells, "NetBox VM ID")
+    proj = netbox_write_projection_for_op(op)
+    pk_raw = (proj.get("id") or "").strip()
     if not pk_raw or not str(pk_raw).strip().isdigit():
         return "skipped", "skipped_prerequisite_missing"
     vm = VirtualMachine.objects.filter(pk=int(str(pk_raw).strip())).select_related(
@@ -1663,39 +1378,34 @@ def apply_update_openstack_vm(op: dict[str, Any]) -> tuple[str, str]:
     changed = False
     if _apply_vm_primary_ip_from_cell(vm, cells):
         changed = True
-    cluster_name = _cell(cells, "NB proposed cluster")
+    cluster_name = (proj.get("cluster") or "").strip()
     if cluster_name and cluster_name not in {"—", "-"}:
         cl = Cluster.objects.filter(name=cluster_name).first()
         if cl is not None and vm.cluster_id != cl.pk:
             vm.cluster = cl
             changed = True
-    site_name = _cell(cells, "NB proposed site")
+    site_name = (proj.get("site") or "").strip()
     if site_name and site_name not in {"—", "-"} and hasattr(vm, "site_id"):
         site = _resolve_by_name(Site, site_name)
         if site is not None and getattr(vm, "site_id", None) != site.pk:
             vm.site = site
             changed = True
-    tenant_name = _cell(cells, "NB Proposed Tenant")
+    tenant_name = (proj.get("tenant") or "").strip()
     if tenant_name and tenant_name not in {"—", "-"}:
         tenant = _resolve_by_name(Tenant, tenant_name)
         if tenant is not None and getattr(vm, "tenant_id", None) != tenant.pk:
             vm.tenant = tenant
             changed = True
-    status_name = _cell(cells, "NB proposed VM status")
+    status_name = (proj.get("status") or "").strip()
     if status_name and status_name not in {"—", "-"}:
         val = _pick_choice_value(vm._meta.get_field("status"), status_name)
         if val is not None and vm.status != val:
             vm.status = val
             changed = True
     dev = None
-    for nm in (
-        _cell(cells, "NB proposed device (VM)", "NB proposed device (hypervisor)"),
-        _cell(cells, "Hypervisor hostname"),
-    ):
-        if nm and nm not in {"—", "-"}:
-            dev = Device.objects.filter(name=nm).first()
-            if dev is not None:
-                break
+    device_cell = (proj.get("device") or "").strip()
+    if device_cell and device_cell not in {"—", "-"}:
+        dev = Device.objects.filter(name=device_cell).first()
     if dev is not None and hasattr(vm, "device_id"):
         if getattr(vm, "device_id", None) != dev.pk:
             vm.device = dev
@@ -1878,8 +1588,9 @@ def apply_serial_review(op: dict[str, Any]) -> tuple[str, str]:
     cells = op.get("cells") or {}
     if (reason := skip_reason_from_row_guides(cells)) is not None:
         return "skipped", reason
-    host = _cell(cells, "Hostname", "Host")
-    serial = _cell(cells, "MAAS Serial") or _cell(cells, "NetBox Serial")
+    proj = netbox_write_projection_for_op(op)
+    host = (proj.get("name") or "").strip()
+    serial = (proj.get("serial") or "").strip()
     consumed_sr = {
         _norm_header("Hostname"),
         _norm_header("Host"),
@@ -2341,9 +2052,21 @@ def _netbox_preview_source_header_norms(selection_key: str) -> frozenset[str] | 
             )
             | _header_norms(*(h for h, _ in _NEW_DEVICE_DRIFT_TO_CF_KEYS))
         )
-    if sk in ("detail_new_prefixes", "detail_existing_prefixes"):
+    if sk == "detail_new_prefixes":
         return _header_norms(
             "NetBox prefix ID",
+            "CIDR",
+            "NB proposed VRF",
+            "NB proposed status",
+            "NB proposed role",
+            "NB Proposed Tenant",
+            "NB Proposed Scope",
+            "NB Proposed VLAN",
+            "NB Proposed Prefix description (editable)",
+        ) | _header_norms(*_NEW_PREFIX_DRIFT_SNAPSHOT_HEADERS)
+    if sk == "detail_existing_prefixes":
+        # No NetBox prefix ID in drift rows; match apply path uses CIDR + VRF only.
+        return _header_norms(
             "CIDR",
             "NB proposed VRF",
             "NB proposed status",

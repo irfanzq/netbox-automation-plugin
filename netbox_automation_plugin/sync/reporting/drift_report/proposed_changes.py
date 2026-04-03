@@ -42,6 +42,9 @@ from netbox_automation_plugin.sync.clients.openstack_client import (
 from netbox_automation_plugin.sync.reconciliation.audit_detail import (
     openstack_floating_ips_nat_inside_drift,
 )
+from netbox_automation_plugin.sync.reconciliation.apply_cells import (
+    strip_prefix_description_audit_suffix,
+)
 
 
 def _vm_project_label_for_proposals(inst: dict) -> str:
@@ -58,12 +61,12 @@ def _friendly_neutron_owners_line(owners: str) -> str:
     if not o or o == "-":
         return ""
     labels = {
-        "compute:nova": "VM NICs (Nova)",
-        "network:dhcp": "DHCP",
-        "network:router_interface": "router link ports",
-        "network:router_gateway": "internet gateway ports",
-        "network:floatingip": "floating IP ports",
-        "baremetal:none": "bare metal (Ironic)",
+        "compute:nova": "tenant VM network interfaces (Nova—one port per VM NIC)",
+        "network:dhcp": "DHCP / network-node ports (not tenant VMs)",
+        "network:router_interface": "router-to-subnet links (L3, not tenant VMs)",
+        "network:router_gateway": "external / gateway router ports",
+        "network:floatingip": "floating IP attachment ports",
+        "baremetal:none": "bare metal (Ironic) ports",
     }
     pieces = []
     for part in [p.strip() for p in o.split(",") if p.strip()][:3]:
@@ -79,7 +82,11 @@ def _friendly_neutron_owners_line(owners: str) -> str:
         pieces.append(f"{label} ×{n}")
     if not pieces:
         return ""
-    return "Port mix: " + ", ".join(pieces) + "."
+    return (
+        "Attachment breakdown (what those OpenStack ports represent): "
+        + ", ".join(pieces)
+        + "."
+    )
 
 
 def _first_meaningful_text(*vals: Any) -> str:
@@ -91,12 +98,18 @@ def _first_meaningful_text(*vals: Any) -> str:
 
 
 def _friendly_prefix_role_summary(bucket: str, confidence: str, ports_total: int, owners: str) -> str:
-    """Short, non-technical explanation for the proposed prefix role (HTML/XLSX)."""
+    """Short, operator-friendly explanation for the proposed prefix role (HTML/XLSX)."""
     btxt = {
-        "vm": "This looks like a normal tenant VM network.",
+        "vm": (
+            "This looks like a tenant VM network: most attachments should be ordinary project VMs "
+            "(Nova), not only routers or built-in network services."
+        ),
         "public": "This looks like a public or provider-external network.",
         "storage": "This looks storage-heavy (many storage-style instance names).",
-        "admin": "This looks like an internal or admin-style network (DHCP/routers/services, not mainly VMs).",
+        "admin": (
+            "This looks like an internal or admin-style network: many attachments are "
+            "DHCP agents, routers, or other platform services—not mainly tenant VM NICs."
+        ),
     }.get((bucket or "").lower(), "Subnet type could not be summarized.")
 
     ctx = {
@@ -106,9 +119,16 @@ def _friendly_prefix_role_summary(bucket: str, confidence: str, ports_total: int
     }.get((confidence or "low").strip().lower(), "Certainty is limited.")
 
     if ports_total <= 0:
-        port_bit = "No Neutron ports were counted for this subnet in the scan."
+        port_bit = (
+            "No OpenStack port attachments were visible for this subnet in this scan "
+            "(unused subnet, API gap, or limited visibility)."
+        )
     else:
-        port_bit = f"We counted {ports_total} Neutron port(s) on this subnet."
+        port_bit = (
+            f"We counted {ports_total} OpenStack port attachment(s) on this subnet. "
+            "In OpenStack these are Neutron ports—typically one per VM network interface, "
+            "router leg, DHCP agent, or similar—not 'physical ports' on a switch."
+        )
 
     extra = _friendly_neutron_owners_line(owners)
     return " ".join(x for x in (btxt, ctx, port_bit, extra) if x).strip()
@@ -1598,7 +1618,7 @@ def _proposed_changes_rows(
             cur_tenant = "—"
             if hasattr(p, "tenant_id") and getattr(p, "tenant_id", None) and getattr(p, "tenant", None):
                 cur_tenant = (p.tenant.name or "—").strip() or "—"
-            cur_desc = ((p.description or "").strip())[:200]
+            cur_desc = strip_prefix_description_audit_suffix(p.description or "")[:200]
             drift_parts: list[str] = []
             if cur_vrf != vrf_name:
                 drift_parts.append(f"VRF {cur_vrf!r} → {vrf_name!r}")
