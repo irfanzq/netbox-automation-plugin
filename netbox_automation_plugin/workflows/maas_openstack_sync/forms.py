@@ -26,7 +26,10 @@ class MAASOpenStackSyncForm(forms.Form):
                 "tabindex": "-1",
             }
         ),
-        help_text=_("Optional. Limit the drift report to selected NetBox sites."),
+        help_text=_(
+            "Optional. Choose “All sites (no filter)” for a full audit, or pick specific sites. "
+            "Leaving the field empty also runs a full audit."
+        ),
     )
 
     locations = forms.MultipleChoiceField(
@@ -41,12 +44,14 @@ class MAASOpenStackSyncForm(forms.Form):
             }
         ),
         help_text=_(
-            "Optional. Limit the drift report to selected NetBox locations; "
-            "OpenStack sections use the same location-based scope."
+            "Optional. Choose “All locations (no filter)” for a full audit, or pick specific locations; "
+            "OpenStack sections use the same location-based scope. Empty means no location filter."
         ),
     )
 
     def __init__(self, *args, site_choices=None, location_choices=None, **kwargs):
         super().__init__(*args, **kwargs)
-        self.fields["sites"].choices = [("__all__", _("Select all sites"))] + (site_choices or [])
-        self.fields["locations"].choices = [("__all__", _("Select all locations"))] + (location_choices or [])
+        self.fields["sites"].choices = [("__all__", _("All sites (no filter)"))] + (site_choices or [])
+        self.fields["locations"].choices = [
+            ("__all__", _("All locations (no filter)"))
+        ] + (location_choices or [])

@@ -314,19 +314,20 @@
                     })[0];
                     if (!o) return;
                     if (val === "__all__") {
-                      Array.prototype.forEach.call(sel.options, function(x) {
-                        x.selected = cb.checked;
-                      });
+                      if (cb.checked) {
+                        Array.prototype.forEach.call(sel.options, function(x) {
+                          x.selected = x.value === "__all__";
+                        });
+                      } else {
+                        o.selected = false;
+                      }
                     } else {
+                      o.selected = cb.checked;
                       var allO = Array.prototype.slice.call(sel.options).filter(function(x) {
                         return x.value === "__all__";
                       })[0];
-                      o.selected = cb.checked;
-                      if (allO) {
-                        var everyNonAllSelected = Array.prototype.every.call(sel.options, function(x) {
-                          return x.value === "__all__" || x.selected;
-                        });
-                        allO.selected = everyNonAllSelected;
+                      if (allO && cb.checked) {
+                        allO.selected = false;
                       }
                     }
                     syncCheckboxesFromSelect();

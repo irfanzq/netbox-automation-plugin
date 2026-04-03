@@ -1020,34 +1020,9 @@ def _ip_address_description_max_len() -> int:
     return int(ml) if ml else 4000
 
 
-def _fip_drift_snapshot_lines(
-    cells: dict[str, str], *, skip_headers: frozenset[str] | None = None
-) -> list[str]:
-    skip = skip_headers or frozenset()
-    lines: list[str] = []
-    for h in _NEW_FIP_DRIFT_SNAPSHOT_HEADERS:
-        if h in skip:
-            continue
-        v = _cell(cells, h)
-        if not _meaningful_cell_val(v):
-            continue
-        lines.append(f"{h}: {v}")
-    return lines
-
-
 def _fip_description_from_cells(cells: dict[str, str], *, max_len: int) -> str:
-    """Name column as description headline only (not written to IPAddress.dns_name)."""
-    name_head = (_cell(cells, "Name") or "").strip()
-    skip_name = frozenset({"Name"})
-    snap_lines = _fip_drift_snapshot_lines(cells, skip_headers=skip_name)
-    if snap_lines:
-        block = "\n".join(snap_lines)
-        if name_head:
-            body = f"{name_head}\n\n--- Drift row (reconciliation) ---\n{block}".strip()
-        else:
-            body = f"--- Drift row (reconciliation) ---\n{block}".strip()
-    else:
-        body = name_head
+    """NetBox IPAddress.description: mirror the drift report Name column only (typed fields hold the rest)."""
+    body = (_cell(cells, "Name") or "").strip()
     if max_len and len(body) > max_len:
         return body[: max_len - 3] + "..."
     return body
