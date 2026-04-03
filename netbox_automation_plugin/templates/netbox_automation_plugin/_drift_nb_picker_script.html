@@ -165,7 +165,8 @@
     var filtered = filterList(list, q);
     var opts = menu.querySelector(".drift-nb-pick-options");
     if (!opts) return;
-    opts.style.maxHeight = kind === "vm_cluster" ? "min(50vh, 22rem)" : "7.5rem";
+    opts.style.maxHeight =
+      kind === "vm_cluster" || kind === "platform" ? "min(50vh, 22rem)" : "7.5rem";
     opts.innerHTML = "";
     filtered.forEach(function(name) {
       var b = document.createElement("button");

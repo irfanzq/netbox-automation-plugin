@@ -10,9 +10,10 @@ from django.contrib.auth.mixins import LoginRequiredMixin
 from django.http import JsonResponse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import NoReverseMatch, reverse
-from django.utils.html import format_html, linebreaks
-from django.utils.translation import gettext, gettext_lazy as _
 from django.utils.decorators import method_decorator
+from django.utils.html import escape
+from django.utils.safestring import mark_safe
+from django.utils.translation import gettext_lazy as _
 from django.views import View
 from django.views.decorators.cache import never_cache
 
@@ -36,6 +37,23 @@ from .service import (
 logger = logging.getLogger(__name__)
 
 MAAS_RECON_STAGING_SESSION_KEY = "maas_recon_staging_v1"
+
+
+def _reconciliation_toast_error(title: str, detail: str):
+    """
+    NetBox renders django messages in toasts via ``{{ message }}`` without ``linebreaksbr``,
+    so plain newlines collapse. Build safe HTML with explicit ``<br>`` and escaped text.
+
+    Wrap in ``alert-danger`` so the blocker / failure reads as a red banner inside the toast.
+    """
+    t = escape(str(title))
+    br_detail = "<br>".join(escape(line) for line in str(detail).split("\n"))
+    return mark_safe(
+        '<div class="alert alert-danger border-danger mb-0 py-2 px-3 text-start" role="alert">'
+        f'<div class="fw-semibold mb-1">{t}</div>'
+        f'<div class="small text-break reconciliation-msg-detail">{br_detail}</div>'
+        "</div>"
+    )
 
 
 def _netbox_branching_branch_url(*, branch_pk: int | None) -> str | None:
@@ -450,24 +468,14 @@ class ReconciliationStagingView(LoginRequiredMixin, View):
         except ValueError as e:
             messages.error(
                 request,
-                format_html(
-                    '<span class="fw-semibold d-block mb-1">{}</span>'
-                    '<div class="text-body text-start small reconciliation-msg-detail">{}</div>',
-                    gettext("Reconciliation preview blocked"),
-                    linebreaks(str(e)),
-                ),
+                _reconciliation_toast_error(_("Reconciliation preview blocked"), str(e)),
             )
             return redirect(back)
         except Exception as e:
             logger.exception("Reconciliation staging preview failed for drift run %s", drift_run_id)
             messages.error(
                 request,
-                format_html(
-                    '<span class="fw-semibold d-block mb-1">{}</span>'
-                    '<div class="text-body text-start small reconciliation-msg-detail">{}</div>',
-                    gettext("Reconciliation preview failed"),
-                    linebreaks(str(e)),
-                ),
+                _reconciliation_toast_error(_("Reconciliation preview failed"), str(e)),
             )
             return redirect(back)
 

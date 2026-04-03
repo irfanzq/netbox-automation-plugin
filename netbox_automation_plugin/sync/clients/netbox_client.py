@@ -14,7 +14,7 @@ def fetch_netbox_data_local():
     Read sites and devices from this NetBox via Django ORM (like vlan_deployment).
 
     Returns: devices [{name, id, site_slug}], sites [{name, slug, region_name, region_slug}],
-    locations [{site_slug, name}], device_types [...], device_roles [...], error.
+    locations [{site_slug, name}], device_types [...], device_roles [...], platforms [{name, slug}], error.
     """
     result = {
         "devices": [],
@@ -25,6 +25,7 @@ def fetch_netbox_data_local():
         "device_roles": [],
         "prefix_roles": [],
         "vrfs": [],
+        "platforms": [],
         "error": None,
     }
     try:
@@ -89,6 +90,18 @@ def fetch_netbox_data_local():
                 "slug": (getattr(role, "slug", None) or "").strip(),
                 "name": (getattr(role, "name", None) or "").strip(),
             })
+        try:
+            from dcim.models import Platform
+
+            for p in Platform.objects.only("name", "slug").order_by("name").iterator():
+                nm = (p.name or "").strip()
+                if nm:
+                    result["platforms"].append({
+                        "name": nm,
+                        "slug": (getattr(p, "slug", None) or "").strip(),
+                    })
+        except Exception:
+            result["platforms"] = []
         # Prefix roles differ by NetBox version/model location.
         prefix_roles = []
         try:

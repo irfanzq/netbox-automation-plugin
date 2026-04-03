@@ -1,4 +1,5 @@
 """Proposed change buckets (NIC drift, new devices, prefixes, etc.)."""
+import re
 from typing import Any
 
 from netbox_automation_plugin.sync.reporting.drift_report.bmc_oob import (
@@ -125,18 +126,199 @@ def _openstack_ironic_bmc_row(openstack_data, hostname: str) -> dict | None:
     return None
 
 
-def _audit_nb_proposed_platform_asset(
-    m: dict,
-    serial: str,
-    osr: dict | None,
-) -> tuple[str, str]:
-    """
-    NetBox-oriented strings for new-device audit columns, from MAAS machine + optional Ironic row.
+# Ubuntu/Debian codenames → alternate tokens that often appear in NetBox Platform names
+# (e.g. MAAS "ubuntu jammy" ↔ NetBox "Ubuntu 22.04 Jammy Jellyfish").
+_PLATFORM_SYNONYM_GROUPS: dict[str, frozenset[str]] = {
+    "jammy": frozenset({"jammy", "22.04", "jellyfish"}),
+    "noble": frozenset({"noble", "24.04", "numbat"}),
+    "focal": frozenset({"focal", "20.04", "fossa"}),
+    "bionic": frozenset({"bionic", "18.04", "beaver"}),
+    "mantic": frozenset({"mantic", "23.10"}),
+    "lunar": frozenset({"lunar", "23.04"}),
+    "kinetic": frozenset({"kinetic", "22.10"}),
+    "impish": frozenset({"impish", "21.10"}),
+    "hirsute": frozenset({"hirsute", "21.04"}),
+    "groovy": frozenset({"groovy", "20.10"}),
+    "eoan": frozenset({"eoan", "19.10"}),
+    "disco": frozenset({"disco", "19.04"}),
+    "cosmic": frozenset({"cosmic", "18.10"}),
+    "xenial": frozenset({"xenial", "16.04"}),
+    "bookworm": frozenset({"bookworm", "debian", "12"}),
+    "bullseye": frozenset({"bullseye", "11"}),
+    "buster": frozenset({"buster", "10"}),
+    "trixie": frozenset({"trixie", "13"}),
+}
 
-    *platform*: MAAS ``osystem`` + ``distro_series`` when set; else Ironic ``instance_info.image_source``
-    tail or ``resource_class`` hint.
-    *asset_tag*: MAAS ``hardware_uuid``, else Ironic ``instance_uuid`` / ``node_uuid``, else
-    ``system_id``, else hardware serial as last resort.
+
+def _netbox_platform_display_names(netbox_data: dict | None) -> list[str]:
+    if not netbox_data:
+        return []
+    out: list[str] = []
+    for row in netbox_data.get("platforms") or []:
+        if not isinstance(row, dict):
+            continue
+        n = (row.get("name") or "").strip()
+        if n:
+            out.append(n)
+    return out
+
+
+def _platform_word_groups_from_hint(hint_lower: str) -> list[frozenset[str]] | None:
+    words = [w for w in re.findall(r"[a-z0-9]+", hint_lower) if len(w) >= 3]
+    if not words:
+        words = [w for w in re.findall(r"[a-z0-9]+", hint_lower) if len(w) >= 2]
+    if not words:
+        return None
+    groups: list[frozenset[str]] = []
+    for w in words:
+        groups.append(_PLATFORM_SYNONYM_GROUPS.get(w, frozenset({w})))
+    return groups
+
+
+def _platform_satisfies_word_groups(name_lower: str, groups: list[frozenset[str]]) -> bool:
+    for g in groups:
+        if not any(alt in name_lower for alt in g):
+            return False
+    return True
+
+
+def _match_netbox_platform_display_name(raw_hint: str, platform_names: list[str]) -> str | None:
+    """
+    Map a MAAS/Ironic-style hint to an existing NetBox ``Platform.name`` when unambiguous enough.
+    Prefer exact / substring matches, then require each significant hint word (with codename
+    synonyms) to appear in the platform name; choose the longest matching name.
+    """
+    raw = (raw_hint or "").strip()
+    if not raw:
+        return None
+    names = [n for n in platform_names if (n or "").strip()]
+    if not names:
+        return None
+    hn = " ".join(raw.lower().split())
+    by_lower = {n.lower(): n for n in names}
+    if hn in by_lower:
+        return by_lower[hn]
+    subs: list[str] = []
+    for n in names:
+        nl = n.lower()
+        if hn in nl or nl in hn:
+            subs.append(n)
+    if subs:
+        return max(subs, key=len)
+    groups = _platform_word_groups_from_hint(hn)
+    if not groups:
+        return None
+    candidates = [
+        n for n in names if _platform_satisfies_word_groups(n.lower(), groups)
+    ]
+    if not candidates:
+        return None
+    return max(candidates, key=len)
+
+
+# Canonical OS labels when NetBox has no matching ``Platform`` row (operators can add Platform
+# objects later; picker still works). Keys are MAAS ``distro_series`` / codename tokens.
+_UBUNTU_CODENAME_CANONICAL_FALLBACK: dict[str, str] = {
+    "noble": "Ubuntu 24.04 Noble Numbat",
+    "jammy": "Ubuntu 22.04 Jammy Jellyfish",
+    "focal": "Ubuntu 20.04 Focal Fossa",
+    "bionic": "Ubuntu 18.04 Bionic Beaver",
+    "xenial": "Ubuntu 16.04 Xenial Xerus",
+    "mantic": "Ubuntu 23.10 Mantic Minotaur",
+    "lunar": "Ubuntu 23.04 Lunar Lobster",
+    "kinetic": "Ubuntu 22.10 Kinetic Kudu",
+    "impish": "Ubuntu 21.10 Impish Indri",
+    "hirsute": "Ubuntu 21.04 Hirsute Hippo",
+    "groovy": "Ubuntu 20.10 Groovy Gorilla",
+    "eoan": "Ubuntu 19.10 Eoan Ermine",
+    "disco": "Ubuntu 19.04 Disco Dingo",
+    "cosmic": "Ubuntu 18.10 Cosmic Cuttlefish",
+}
+
+_DEBIAN_CODENAME_CANONICAL_FALLBACK: dict[str, str] = {
+    "trixie": "Debian 13 Trixie",
+    "bookworm": "Debian 12 Bookworm",
+    "bullseye": "Debian 11 Bullseye",
+    "buster": "Debian 10 Buster",
+    "sid": "Debian sid (unstable)",
+}
+
+# Do not treat MAAS ``osystem`` as Ubuntu when these are set (avoid jammy-like false positives).
+_NON_UBUNTU_OSYSTEM_FOR_CODENAME: frozenset[str] = frozenset({
+    "debian",
+    "vyos",
+    "centos",
+    "rhel",
+    "rocky",
+    "almalinux",
+    "windows",
+    "esxi",
+    "xenserver",
+})
+
+
+def _maas_is_ubuntu_family(m: dict, platform_s: str) -> bool:
+    osl = str(m.get("osystem") or "").strip().lower()
+    ps = (platform_s or "").lower()
+    if osl == "ubuntu":
+        return True
+    if "ubuntu" in ps:
+        return True
+    ds = str(m.get("distro_series") or "").strip().lower()
+    if ds in _UBUNTU_CODENAME_CANONICAL_FALLBACK:
+        return osl not in _NON_UBUNTU_OSYSTEM_FOR_CODENAME
+    return False
+
+
+def _maas_is_debian_family(m: dict, platform_s: str) -> bool:
+    osl = str(m.get("osystem") or "").strip().lower()
+    if osl == "ubuntu" or osl in frozenset({"vyos", "esxi", "windows", "xenserver"}):
+        return False
+    if osl == "debian":
+        return True
+    if "debian" in (platform_s or "").lower():
+        return True
+    ds = str(m.get("distro_series") or "").strip().lower()
+    return ds in _DEBIAN_CODENAME_CANONICAL_FALLBACK and osl not in _NON_UBUNTU_OSYSTEM_FOR_CODENAME
+
+
+def _canonical_platform_fallback_label(m: dict, platform_s: str) -> str | None:
+    """
+    Known Ubuntu/Debian codenames → fixed display string when NetBox did not resolve a name.
+    """
+    ps = (platform_s or "").strip().lower()
+    ds = str(m.get("distro_series") or "").strip().lower()
+    blob = " ".join(x for x in (ps, ds) if x).strip()
+
+    if _maas_is_ubuntu_family(m, platform_s):
+        if ds in _UBUNTU_CODENAME_CANONICAL_FALLBACK:
+            return _UBUNTU_CODENAME_CANONICAL_FALLBACK[ds]
+        for code in sorted(_UBUNTU_CODENAME_CANONICAL_FALLBACK, key=len, reverse=True):
+            if re.search(rf"\b{re.escape(code)}\b", blob):
+                return _UBUNTU_CODENAME_CANONICAL_FALLBACK[code]
+
+    if _maas_is_debian_family(m, platform_s):
+        if ds in _DEBIAN_CODENAME_CANONICAL_FALLBACK:
+            return _DEBIAN_CODENAME_CANONICAL_FALLBACK[ds]
+        for code in sorted(_DEBIAN_CODENAME_CANONICAL_FALLBACK, key=len, reverse=True):
+            if re.search(rf"\b{re.escape(code)}\b", blob):
+                return _DEBIAN_CODENAME_CANONICAL_FALLBACK[code]
+
+    return None
+
+
+def _audit_nb_proposed_platform(
+    m: dict,
+    osr: dict | None,
+    netbox_data: dict | None = None,
+) -> str:
+    """
+    Default text for **NB proposed platform** on new-device rows (picker can replace with a
+    NetBox ``dcim.Platform`` name). From MAAS ``osystem`` + ``distro_series``, else Ironic hints.
+
+    Resolution order: (1) matching **NetBox** ``Platform.name`` from ``netbox_data`` when present;
+    (2) built-in **canonical** Ubuntu/Debian labels for known codenames when NetBox does not match;
+    (3) raw MAAS/Ironic string.
     """
     dash = "—"
     osl = str(m.get("osystem") or "").strip()
@@ -155,17 +337,13 @@ def _audit_nb_proposed_platform_asset(
         elif rc:
             platform_s = f"resource_class={rc}"[:160]
     if not platform_s:
-        platform_s = dash
-
-    hwu = str(m.get("hardware_uuid") or "").strip()
-    sysid = str(m.get("system_id") or "").strip()
-    inst = str((osr or {}).get("instance_uuid") or "").strip()
-    node_uuid = str((osr or {}).get("node_uuid") or "").strip()
-    asset = hwu or inst or node_uuid or sysid or dash
-    ser = str(serial or "").strip()
-    if asset == dash and ser and ser not in ("—", "-"):
-        asset = ser[:64]
-    return platform_s, asset
+        return dash
+    nb_names = _netbox_platform_display_names(netbox_data)
+    matched = _match_netbox_platform_display_name(platform_s, nb_names)
+    if matched:
+        return matched
+    fb = _canonical_platform_fallback_label(m, platform_s)
+    return fb if fb else platform_s
 
 
 def _os_host_authority_map(openstack_data) -> dict[str, bool]:
@@ -1038,14 +1216,6 @@ def _proposed_changes_rows(
                 return vrf
         return "Global"
 
-    def _primary_mac_from_maas(ifaces):
-        rows = [r for r in (ifaces or []) if str(r.get("mac") or "").strip()]
-        if not rows:
-            return "—"
-        with_ip = [r for r in rows if r.get("ips")]
-        pick = with_ip[0] if with_ip else rows[0]
-        return str(pick.get("mac") or "—")
-
     def _norm_mac_local(mac: str) -> str:
         s = (mac or "").strip().lower().replace("-", ":")
         parts = [p for p in s.split(":") if p]
@@ -1255,33 +1425,6 @@ def _proposed_changes_rows(
         m = by_h.get(h, {})
         ifaces = m.get("interfaces") or []
         nic_count = sum(1 for r in ifaces if str(r.get("mac") or "").strip())
-        primary_mac = _primary_mac_from_maas(ifaces)
-        hn = (h or "").strip().lower()
-        primary_mac_os = "—"
-        pmn = (
-            _norm_mac_local(primary_mac)
-            if str(primary_mac).strip() not in {"", "—", "-"}
-            else ""
-        )
-        if pmn and hn:
-            hit = os_runtime_idx.get((hn, pmn))
-            if hit:
-                primary_mac_os = (
-                    str(hit.get("os_mac") or hit.get("mac") or "—").strip() or "—"
-                )
-        if str(primary_mac_os).strip() in {"", "—", "-"} and hn and openstack_data and not (
-            openstack_data.get("error")
-        ):
-            for nic in openstack_data.get("runtime_nics") or []:
-                if (nic.get("hostname") or "").strip().lower() != hn:
-                    continue
-                om = str(nic.get("os_mac") or nic.get("mac") or "").strip()
-                if om and om not in {"—", "-"}:
-                    primary_mac_os = om
-                    break
-        bmc_ip = str(m.get("bmc_ip") or "—")
-        power_type = str(m.get("power_type") or "—")
-        bmc_present = "Yes" if (bmc_ip not in {"", "—"} or power_type not in {"", "—"}) else "No"
         nb_region, nb_site, nb_loc = _netbox_placement_from_maas_machine(
             m, netbox_data, _fabric_site_map, _pool_site_map
         )
@@ -1306,7 +1449,7 @@ def _proposed_changes_rows(
             proposed_tag = "review-only"
         nb_prop_state = proposed_netbox_status_for_new_maas_machine(m, osr)
         serial = str(m.get("serial") or "—")
-        nb_prop_platform, nb_prop_asset = _audit_nb_proposed_platform_asset(m, serial, osr)
+        nb_prop_platform = _audit_nb_proposed_platform(m, osr, netbox_data)
         action = (
             "CREATE_NETBOX_DEVICE_AND_PORTS"
             if is_candidate
@@ -1317,15 +1460,10 @@ def _proposed_changes_rows(
             maas_fabric_disp,
             str(m.get("status_name", "-")),
             serial,
-            power_type,
-            bmc_present,
-            str(nic_count),
-            primary_mac,
             os_reg,
             os_prov,
             os_pow,
             os_maint,
-            primary_mac_os,
             nb_region,
             nb_site,
             nb_loc,
@@ -1334,7 +1472,6 @@ def _proposed_changes_rows(
             nb_prop_state,
             proposed_tag,
             nb_prop_platform,
-            nb_prop_asset,
             authority_badge,
             action,
         ]

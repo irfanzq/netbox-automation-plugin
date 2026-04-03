@@ -21,6 +21,7 @@ from typing import Any
 from django.core import signing
 from django.db import transaction
 from django.utils import timezone
+from django.utils.translation import gettext as _
 
 from netbox_automation_plugin.models import MAASOpenStackReconciliationRun
 from netbox_automation_plugin.sync.reporting.drift_report.render_tables import (
@@ -149,12 +150,11 @@ SK_TO_ACTION = {
     "detail_placement_lifecycle_alignment": "placement_alignment",
 }
 
-# Drift audit HTML order: format_html_drift (placement) → format_html_proposed top-to-bottom.
-# Ensures e.g. new devices run before new NICs (interfaces need a Device), BMC after NIC tables, etc.
+# Drift audit HTML order: format_html_drift (placement) → format_html_proposed top-to-bottom
+# (prefix/IPAM/VM detail sections, then Detail — new devices / MAAS-only review, then B) NICs/BMC).
+# Apply still creates Devices before Interfaces: device selection_keys have lower rank than NIC keys.
 AUDIT_REPORT_APPLY_ORDER: tuple[str, ...] = (
     "detail_placement_lifecycle_alignment",
-    "detail_new_devices",
-    "detail_review_only_devices",
     "detail_new_prefixes",
     "detail_existing_prefixes",
     "detail_new_ip_ranges",
@@ -162,6 +162,8 @@ AUDIT_REPORT_APPLY_ORDER: tuple[str, ...] = (
     "detail_existing_fips",
     "detail_new_vms",
     "detail_existing_vms",
+    "detail_new_devices",
+    "detail_review_only_devices",
     "detail_new_nics",
     "detail_new_nics_os",
     "detail_new_nics_maas",
@@ -197,7 +199,7 @@ _ACTION_APPLY_PHASE: dict[str, int] = {
 RECON_SECTION_TITLES: dict[str, str] = {
     "detail_placement_lifecycle_alignment": "Detail — placement & lifecycle alignment",
     "detail_new_devices": "New devices",
-    "detail_review_only_devices": "Review-only devices",
+    "detail_review_only_devices": "MAAS only hosts",
     "detail_new_prefixes": "New prefixes",
     "detail_existing_prefixes": "Existing prefixes",
     "detail_new_ip_ranges": "New IP ranges",
@@ -283,6 +285,16 @@ def _norm_host_key(host: str) -> str:
     return str(host or "").strip().casefold()
 
 
+# Section titles must match format_html_proposed.py (drift audit UI).
+_AUDIT_DETAIL_TABLE_TITLE: dict[str, str] = {
+    "detail_new_devices": "Detail — new devices",
+    "detail_review_only_devices": "Detail — MAAS-only hosts (manual review required)",
+    "detail_new_nics": "Detail — new NICs",
+    "detail_new_nics_os": "Detail — new NICs (OS authority)",
+    "detail_new_nics_maas": "Detail — new NICs (MAAS authority)",
+}
+
+
 def _maas_only_device_report_hostnames(row_index: dict[str, dict[str, Any]]) -> set[str]:
     """
     Hostnames that appear on **Detail — new devices** or **Detail — review-only devices**
@@ -314,6 +326,7 @@ def _validate_new_nic_requires_selected_new_devices(
     """
     allowed = all_registered_selection_keys()
     nic_host_by_norm: dict[str, str] = {}
+    nic_tables_by_host: dict[str, set[str]] = {}
     new_device_hosts_nf: set[str] = set()
     _device_sk = frozenset({"detail_new_devices", "detail_review_only_devices"})
 
@@ -346,6 +359,8 @@ def _validate_new_nic_requires_selected_new_devices(
                 if h:
                     nk = _norm_host_key(h)
                     nic_host_by_norm.setdefault(nk, h)
+                    ttitle = _AUDIT_DETAIL_TABLE_TITLE.get(canon, canon)
+                    nic_tables_by_host.setdefault(nk, set()).add(ttitle)
             if canon in _device_sk:
                 h = (cells.get("Hostname") or "").strip()
                 if h:
@@ -354,28 +369,50 @@ def _validate_new_nic_requires_selected_new_devices(
     if not nic_host_by_norm:
         return
     maas_only_hosts = _maas_only_device_report_hostnames(row_index)
-    missing_labels = sorted(
-        {
-            nic_host_by_norm[k]
+    missing_norm_keys = sorted(
+        (
+            k
             for k in nic_host_by_norm
             if k in maas_only_hosts and k not in new_device_hosts_nf
-        },
-        key=str.lower,
+        ),
+        key=lambda k: nic_host_by_norm[k].lower(),
     )
-    if not missing_labels:
+    if not missing_norm_keys:
         return
+
+    hosts_per_table: dict[str, list[str]] = {}
+    for nk in missing_norm_keys:
+        host_label = nic_host_by_norm[nk]
+        tables = nic_tables_by_host.get(nk) or {_AUDIT_DETAIL_TABLE_TITLE["detail_new_nics"]}
+        for tbl in tables:
+            hosts_per_table.setdefault(tbl, []).append(host_label)
+    for tbl, hosts in hosts_per_table.items():
+        seen: set[str] = set()
+        uniq: list[str] = []
+        for h in hosts:
+            if h not in seen:
+                seen.add(h)
+                uniq.append(h)
+        hosts_per_table[tbl] = sorted(uniq, key=str.lower)
+
     lines = [
-        "For MAAS-only hosts (listed under New devices or MAAS-only manual review), new "
-        "interface rows need a matching device row selected for the same hostname.",
-        "Hosts that already exist in NetBox only need interface rows.",
+        _(
+            "For hosts that appear only under “Detail — new devices” or "
+            "“Detail — MAAS-only hosts (manual review required)”, each selected new interface "
+            "row must have Include enabled on the device row for the same hostname."
+        ),
+        _("Hosts that already exist in NetBox only need interface rows selected."),
         "",
-        "Each line below is a hostname that has new interface(s) selected but no matching "
-        "device row included (unchecked or never selected). Fix by selecting Include on that "
-        "host's device row in New devices or MAAS-only manual review, or deselect the new "
-        "interface row(s) for that host.",
+        _("Enable Include on the matching device row (same hostname) in one of:"),
+        _AUDIT_DETAIL_TABLE_TITLE["detail_new_devices"],
+        _AUDIT_DETAIL_TABLE_TITLE["detail_review_only_devices"],
         "",
+        _("New interface row(s) were selected under these tables without that device row:"),
     ]
-    lines.extend(f"• {h}" for h in missing_labels)
+    for tbl in sorted(hosts_per_table.keys(), key=str.lower):
+        lines.append(tbl)
+        for h in hosts_per_table[tbl]:
+            lines.append(f"  {h}")
     raise ValueError("\n".join(lines))
 
 

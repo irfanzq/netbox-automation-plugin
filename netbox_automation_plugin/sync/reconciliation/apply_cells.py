@@ -448,9 +448,6 @@ def _device_netbox_write_preview(cells: dict[str, str]) -> dict[str, str]:
     """Device preview: ``dcim.Device`` fields; region is applied on ``dcim.Site.region`` (not a Device column)."""
     serial = _cell(cells, "Serial Number", "MAAS Serial")
     platform_src = _cell(cells, "NB proposed platform", "OS provision", "OS release")
-    asset = _cell(cells, "NB proposed asset tag", "Asset tag")
-    if (not asset or asset in ("—", "-")) and serial and serial not in ("—", "-"):
-        asset = serial
     return {
         "name": _cell(cells, "Hostname", "Host"),
         "site": _cell(cells, "NB proposed site", "NetBox site"),
@@ -461,7 +458,6 @@ def _device_netbox_write_preview(cells: dict[str, str]) -> dict[str, str]:
         "status": _cell(cells, "NB proposed device status", "NB state (current)"),
         "serial": serial,
         "platform": platform_src,
-        "asset_tag": asset,
         "tags": _cell(cells, "NB proposed tag", "Suggested NetBox tags", "NetBox tags"),
     }
 
@@ -794,9 +790,6 @@ _NEW_DEVICE_DRIFT_TO_CF_KEYS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("OS maintenance", ("os_maintenance", "drift_os_maintenance")),
     ("MAAS fabric", ("maas_fabric", "drift_maas_fabric")),
     ("MAAS status", ("maas_status", "drift_maas_status")),
-    ("Power type", ("power_type", "maas_power_type", "drift_power_type")),
-    ("BMC present", ("bmc_present", "drift_bmc_present")),
-    ("NIC count", ("nic_count", "drift_nic_count")),
     ("Authority", ("drift_authority", "authority")),
 )
 
@@ -1737,12 +1730,6 @@ def _apply_device_core(cells: dict[str, str], *, create_if_missing: bool) -> tup
         platform_name = ""
     else:
         platform_name = _pn
-    asset_raw = _cell(cells, "NB proposed asset tag", "Asset tag")
-    if (not asset_raw or str(asset_raw).strip() in ("—", "-")) and serial and serial not in (
-        "—",
-        "-",
-    ):
-        asset_raw = serial
     platform_obj = _resolve_by_name(Platform, platform_name) if platform_name else None
     consumed_d = {
         _norm_header("Hostname"),
@@ -1761,16 +1748,11 @@ def _apply_device_core(cells: dict[str, str], *, create_if_missing: bool) -> tup
         _norm_header("NB proposed tag"),
         _norm_header("Suggested NetBox tags"),
         _norm_header("NetBox tags"),
-        # Shown on drift device rows only; interface MACs are applied from NIC drift rows.
-        _norm_header("Primary MAC (MAAS)"),
-        _norm_header("Primary MAC (OS)"),
         _norm_header("NB proposed platform"),
         _norm_header("OS provision"),
         _norm_header("OS release"),
         _norm_header("MAAS OS"),
         _norm_header("OS"),
-        _norm_header("NB proposed asset tag"),
-        _norm_header("Asset tag"),
         _norm_header("Proposed Action"),
     }
     if not hostname:
@@ -1800,11 +1782,6 @@ def _apply_device_core(cells: dict[str, str], *, create_if_missing: bool) -> tup
             dev.serial = serial[:50]
         if platform_obj is not None and hasattr(dev, "platform"):
             dev.platform = platform_obj
-        if asset_raw and hasattr(dev, "asset_tag"):
-            alen = Device._meta.get_field("asset_tag").max_length
-            tag_s = str(asset_raw).strip()[: int(alen)]
-            if tag_s:
-                dev.asset_tag = tag_s
         dev.save()
         _sync_site_region(dev.site, region_name)
         tags_applied = False
@@ -1840,12 +1817,6 @@ def _apply_device_core(cells: dict[str, str], *, create_if_missing: bool) -> tup
     if platform_obj is not None and hasattr(existing, "platform_id"):
         if existing.platform_id != platform_obj.pk:
             existing.platform = platform_obj
-            changed = True
-    if asset_raw and hasattr(existing, "asset_tag"):
-        alen = existing._meta.get_field("asset_tag").max_length
-        tag_s = str(asset_raw).strip()[: int(alen)]
-        if tag_s and (existing.asset_tag or "") != tag_s:
-            existing.asset_tag = tag_s
             changed = True
     if tag_cell:
         if _merge_device_tags(existing, tag_cell):
@@ -2365,12 +2336,8 @@ def _netbox_preview_source_header_norms(selection_key: str) -> frozenset[str] | 
                 "OS release",
                 "MAAS OS",
                 "OS",
-                "NB proposed asset tag",
-                "Asset tag",
                 "NetBox site",
                 "NetBox location",
-                "Primary MAC (MAAS)",
-                "Primary MAC (OS)",
             )
             | _header_norms(*(h for h, _ in _NEW_DEVICE_DRIFT_TO_CF_KEYS))
         )

@@ -25,7 +25,7 @@
           {% endif %}
         </p>
         <p class="small text-body-secondary mb-0">
-          {% blocktrans trimmed %}Tables below follow the <strong>same order as the drift audit</strong> (e.g. new devices before new interfaces). Each column is a <strong>NetBox write preview</strong>: values that drive apply (typed fields and resolved MAC/VLAN/IP where applicable), not full MAAS/OS audit context. The <strong>Apply payload</strong> section further down lists each operation’s attribute/value pairs exactly as passed into apply after scoping, so you can match preview tables to what NetBox will see.{% endblocktrans %}
+          {% blocktrans trimmed %}Tables below follow the <strong>same order as the drift audit</strong>: IPAM/VM-style sections first, then new-device and MAAS-only review tables, then new interfaces and NIC drift (device rows still apply before their interfaces). Each column is a <strong>NetBox write preview</strong>: values that drive apply (typed fields and resolved MAC/VLAN/IP where applicable), not full MAAS/OS audit context. The <strong>Apply payload</strong> section further down lists each operation’s attribute/value pairs exactly as passed into apply after scoping, so you can match preview tables to what NetBox will see.{% endblocktrans %}
         </p>
         <h6 class="text-body-secondary text-uppercase small mt-3">{% trans "Next steps" %}</h6>
         <ol class="small mb-4">

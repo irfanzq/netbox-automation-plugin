@@ -71,6 +71,7 @@ def build_drift_nb_picker_catalog(*, user=None) -> dict[str, list[str]]:
         "tenant": [],
         "vlan": [],
         "device_type": [],
+        "platform": [],
         "device_role": [],
         "device_status": [],
         "prefix_status": [],
@@ -203,6 +204,13 @@ def build_drift_nb_picker_catalog(*, user=None) -> dict[str, list[str]]:
         out["device_type"] = sorted(set(out["device_type"]))
     except Exception as e:
         logger.debug("drift picker device_type: %s", e)
+
+    try:
+        from dcim.models import Platform
+
+        out["platform"] = _picker_field_values_main_branch(Platform, "name", user, restrict_view=True)
+    except Exception as e:
+        logger.debug("drift picker platform: %s", e)
 
     try:
         from dcim.models import DeviceRole

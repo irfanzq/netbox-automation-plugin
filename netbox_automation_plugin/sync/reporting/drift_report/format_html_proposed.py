@@ -29,6 +29,7 @@ _PROPOSED_NB_PICK_DEVICE = {
     "NB proposed device type": "device_type",
     "NB proposed role": "device_role",
     "NB proposed device status": "device_status",
+    "NB proposed platform": "platform",
 }
 _PROPOSED_NB_PICK_PREFIX = {
     "NB Proposed Tenant": "tenant",
@@ -110,32 +111,6 @@ def emit_proposed_change_tables(e, prop):
         wrap_max_width=None,
         selectable=False,
     )
-    if prop["add_devices"]:
-        e.spacer()
-        e.subtitle("Detail — new devices")
-        e.spacer()
-        e.table(
-            list(HEADERS_DETAIL_NEW_DEVICES),
-            prop["add_devices"],
-            dynamic_columns=True,
-            wrap_max_width=None,
-            selectable=True,
-            selection_key="detail_new_devices",
-            proposed_pick_columns=_PROPOSED_NB_PICK_DEVICE,
-        )
-    if prop.get("add_devices_review_only"):
-        e.spacer()
-        e.subtitle("Detail — MAAS-only hosts (manual review required)")
-        e.spacer()
-        e.table(
-            list(HEADERS_DETAIL_NEW_DEVICES),
-            prop["add_devices_review_only"],
-            dynamic_columns=True,
-            wrap_max_width=None,
-            selectable=True,
-            selection_key="detail_review_only_devices",
-            proposed_pick_columns=_PROPOSED_NB_PICK_DEVICE,
-        )
     if prop["add_prefixes"]:
         e.spacer()
         e.subtitle("Detail — new prefixes")
@@ -259,6 +234,33 @@ def emit_proposed_change_tables(e, prop):
             selectable=True,
             selection_key="detail_existing_vms",
             proposed_pick_columns=_PROPOSED_NB_PICK_VM,
+        )
+
+    if prop["add_devices"]:
+        e.spacer()
+        e.subtitle("Detail — new devices")
+        e.spacer()
+        e.table(
+            list(HEADERS_DETAIL_NEW_DEVICES),
+            prop["add_devices"],
+            dynamic_columns=True,
+            wrap_max_width=None,
+            selectable=True,
+            selection_key="detail_new_devices",
+            proposed_pick_columns=_PROPOSED_NB_PICK_DEVICE,
+        )
+    if prop.get("add_devices_review_only"):
+        e.spacer()
+        e.subtitle("Detail — MAAS-only hosts (manual review required)")
+        e.spacer()
+        e.table(
+            list(HEADERS_DETAIL_NEW_DEVICES),
+            prop["add_devices_review_only"],
+            dynamic_columns=True,
+            wrap_max_width=None,
+            selectable=True,
+            selection_key="detail_review_only_devices",
+            proposed_pick_columns=_PROPOSED_NB_PICK_DEVICE,
         )
 
     e.spacer()

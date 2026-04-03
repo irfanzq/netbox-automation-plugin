@@ -7,11 +7,18 @@
 <div class="row">
   <div class="col-md-8 col-lg-6">
     <div class="card">
-      <div class="card-header">
-        <h5 class="mb-0">{% trans "Opening reconciliation preview…" %}</h5>
+      <div class="card-header d-flex align-items-center flex-wrap gap-2" id="maas-recon-draft-card-head">
+        <div class="spinner-border spinner-border-sm text-primary" role="status" id="maas-recon-draft-spinner-head" aria-hidden="true"></div>
+        <h5 class="mb-0 flex-grow-1" id="maas-recon-draft-title-loading">{% trans "Opening reconciliation preview…" %}</h5>
+        <h5 class="mb-0 flex-grow-1 text-danger d-none" id="maas-recon-draft-title-error" aria-hidden="true">{% trans "Preview could not be opened" %}</h5>
+        <span class="badge text-bg-primary" id="maas-recon-draft-loading-badge">{% trans "Loading" %}</span>
       </div>
-      <div class="card-body">
-        <p class="small text-body-secondary mb-3" id="maas-recon-draft-status">
+      <div class="card-body" id="maas-recon-draft-card-body">
+        <div class="text-center py-2 mb-3" id="maas-recon-draft-loading-visual" aria-busy="true">
+          <div class="spinner-border text-primary mb-3" role="status" style="width: 3rem; height: 3rem;" id="maas-recon-draft-spinner-lg" aria-hidden="true"></div>
+          <p class="visually-hidden" id="maas-recon-draft-aria-loading">{% trans "Loading. Please wait." %}</p>
+        </div>
+        <p class="small text-body-secondary mb-3 text-center" id="maas-recon-draft-status" aria-live="polite">
           {% trans "Loading your row selection from this browser, then continuing." %}
         </p>
         <form id="maas-recon-draft-post-form" method="post" action="{{ stage_post_url }}" class="d-none">
@@ -36,10 +43,34 @@
   var errEl = document.getElementById("maas-recon-draft-error");
   var backEl = document.getElementById("maas-recon-draft-back");
   var statusEl = document.getElementById("maas-recon-draft-status");
+  var spinHead = document.getElementById("maas-recon-draft-spinner-head");
+  var spinLg = document.getElementById("maas-recon-draft-spinner-lg");
+  var loadVisual = document.getElementById("maas-recon-draft-loading-visual");
+  var loadBadge = document.getElementById("maas-recon-draft-loading-badge");
+  var titleLoad = document.getElementById("maas-recon-draft-title-loading");
+  var titleErr = document.getElementById("maas-recon-draft-title-error");
   if (!form || !selEl || !ovEl || !key) {
     return;
   }
+  function hideLoadingChrome() {
+    if (spinHead) spinHead.classList.add("d-none");
+    if (spinLg) spinLg.classList.add("d-none");
+    if (loadVisual) {
+      loadVisual.classList.add("d-none");
+      loadVisual.setAttribute("aria-busy", "false");
+    }
+    if (loadBadge) loadBadge.classList.add("d-none");
+    if (titleLoad) {
+      titleLoad.classList.add("d-none");
+      titleLoad.setAttribute("aria-hidden", "true");
+    }
+    if (titleErr) {
+      titleErr.classList.remove("d-none");
+      titleErr.setAttribute("aria-hidden", "false");
+    }
+  }
   function fail(msg) {
+    hideLoadingChrome();
     if (statusEl) statusEl.classList.add("d-none");
     if (errEl) {
       errEl.textContent = msg;
@@ -76,6 +107,9 @@
     ovEl.value = JSON.stringify(ov);
   } else {
     ovEl.value = "";
+  }
+  if (statusEl) {
+    statusEl.textContent = "{% filter escapejs %}{% trans "Submitting selection to the server…" %}{% endfilter %}";
   }
   form.submit();
 })();
