@@ -119,6 +119,7 @@ HEADERS_DETAIL_EXISTING_FIPS: list[str] = [
 ]
 
 # Column groups: Host | (MAAS — none for VMs) | OS | NB | Authority | Proposed Action
+# Row builders: proposed_changes add_openstack_vms / update_openstack_vms append order must match.
 HEADERS_DETAIL_NEW_VMS: list[str] = [
     "VM name",
     "OS region",
@@ -135,6 +136,7 @@ HEADERS_DETAIL_NEW_VMS: list[str] = [
     "Proposed Action",
 ]
 
+# Row builders: proposed_changes update_openstack_vms append order must match.
 HEADERS_DETAIL_EXISTING_VMS: list[str] = [
     "VM name",
     "NetBox VM ID",

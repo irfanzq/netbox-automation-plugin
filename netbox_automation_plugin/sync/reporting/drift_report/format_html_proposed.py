@@ -207,7 +207,12 @@ def emit_proposed_change_tables(e, prop):
             "Requires an existing Cluster (NB proposed cluster). NB proposed device (VM) is always the "
             "Nova instance name (same as VM name). Hypervisor hostname shows Nova's compute host for "
             "reference. Apply links a NetBox Device by that VM name first, then by hypervisor hostname "
-            "if no Device matches the VM name."
+            "if no Device matches the VM name. "
+            "If the VM has a custom field whose key is one of "
+            "<code>nova_compute_host</code>, <code>openstack_hypervisor_hostname</code>, "
+            "<code>hypervisor_hostname</code>, or <code>os_hypervisor_host</code>, apply copies "
+            "<strong>Hypervisor hostname</strong> there so the compute host stays visible even when "
+            "the linked Device is the instance name."
         )
         e.spacer()
         e.table(
@@ -223,7 +228,11 @@ def emit_proposed_change_tables(e, prop):
         e.spacer()
         e.subtitle("Detail — existing VMs")
         e.paragraph(
-            "Virtual Machine name matches OpenStack; NetBox fields below differ from Nova where noted in Drift summary."
+            "Virtual Machine name matches OpenStack; NetBox fields below differ from Nova where noted in Drift summary. "
+            "Optional VM custom fields "
+            "<code>nova_compute_host</code>, <code>openstack_hypervisor_hostname</code>, "
+            "<code>hypervisor_hostname</code>, or <code>os_hypervisor_host</code> receive "
+            "<strong>Hypervisor hostname</strong> on apply."
         )
         e.spacer()
         e.table(

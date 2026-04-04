@@ -4,9 +4,14 @@ This module defines the only mapping from drift/recon ``cells`` to the NetBox-or
 key/value dict shown on the reconciliation run page. ``apply_cells.netbox_write_preview_cells``
 delegates here so column order and values stay stable.
 
-Apply handlers should take string inputs from :func:`netbox_write_projection_cells` where
-possible (using the same scoped ``cells`` dict as ``apply_row_operation``) so backend
-writes stay aligned with the preview.
+Apply handlers should read typed writes from :func:`netbox_write_projection_for_op` / 
+``netbox_write_projection_cells`` (same ``cells`` as ``apply_row_operation``) so the
+reconciliation preview and NetBox mutations stay aligned.
+
+**OpenStack VM rows** (``detail_new_vms`` / ``detail_existing_vms``): apply uses projection
+keys ``name``, ``id`` (existing only), ``primary_ip4``, ``primary_ip6``, ``cluster``, ``site``,
+``tenant``, ``status``, ``device``, and ``nova_compute_host`` (VM custom field when defined
+in NetBox; see ``apply_cells._VM_PROJECTION_CF_KEYS``).
 
 Imports from ``apply_cells`` are deferred inside functions to avoid import cycles while
 ``apply_cells`` is still loading.
@@ -28,8 +33,8 @@ def netbox_write_projection_cells(selection_key: str, cells: dict[str, str] | No
     """
     NetBox-style attribute dict for one recon row (preview = apply contract for listed keys).
 
-    Keys and value derivation match the historical ``netbox_write_preview_cells`` behavior
-    exactly so the recon UI does not change.
+    Keys are NetBox-oriented (core field names and custom-field keys used on apply).
+    Order is stable: new keys are appended so existing preview columns keep their positions.
     """
     ac = _ac()
     _cell = ac._cell
@@ -199,6 +204,7 @@ def netbox_write_projection_cells(selection_key: str, cells: dict[str, str] | No
             "device": _cell(
                 c, "NB proposed device (VM)", "NB proposed device (hypervisor)", "Hypervisor hostname"
             ),
+            "nova_compute_host": _cell(c, "Hypervisor hostname"),
         }
     if sk == "detail_existing_vms":
         p4, p6 = _vm_primary_ip4_ip6_cells(c)
@@ -214,6 +220,7 @@ def netbox_write_projection_cells(selection_key: str, cells: dict[str, str] | No
             "device": _cell(
                 c, "NB proposed device (VM)", "NB proposed device (hypervisor)", "Hypervisor hostname"
             ),
+            "nova_compute_host": _cell(c, "Hypervisor hostname"),
         }
     if sk in NEW_NIC_SELECTION_KEYS:
         return _netbox_write_new_nic_preview(c)

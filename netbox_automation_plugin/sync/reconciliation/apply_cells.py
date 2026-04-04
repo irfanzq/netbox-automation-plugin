@@ -970,6 +970,71 @@ _NEW_FIP_DRIFT_TO_CF_KEYS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("NAT inside IP (from OpenStack fixed IP)", ("nat_inside_hint", "fixed_ip", "openstack_fixed_ip")),
 )
 
+# VM custom fields: projection key -> NetBox custom_field keys (single source with preview + apply).
+_VM_PROJECTION_CF_KEYS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    (
+        "nova_compute_host",
+        (
+            "nova_compute_host",
+            "openstack_hypervisor_hostname",
+            "hypervisor_hostname",
+            "os_hypervisor_host",
+        ),
+    ),
+)
+# When projection omits a value, fall back to this drift header (same cells as op).
+_VM_CF_DRIFT_FALLBACK: dict[str, str] = {
+    "nova_compute_host": "Hypervisor hostname",
+}
+
+
+@lru_cache(maxsize=1)
+def _vm_custom_field_keys_cached() -> frozenset[str]:
+    try:
+        from extras.models import CustomField
+        from virtualization.models import VirtualMachine
+    except Exception:
+        return frozenset()
+    keys: set[str] = set()
+    for cf in CustomField.objects.iterator():
+        if not _custom_field_targets_model(cf, VirtualMachine):
+            continue
+        k = getattr(cf, "key", None)
+        if k:
+            keys.add(str(k))
+    return frozenset(keys)
+
+
+def _merge_vm_row_into_custom_fields(
+    vm: Any, cells: dict[str, str], proj: dict[str, str]
+) -> tuple[bool, set[str]]:
+    """Write VM custom fields from ``proj`` (preferred) with drift fallback; keys from ``_VM_PROJECTION_CF_KEYS``."""
+    valid = _vm_custom_field_keys_cached()
+    if not valid or not hasattr(vm, "custom_field_data"):
+        return False, set()
+    data = dict(vm.custom_field_data or {})
+    changed = False
+    applied_proj_keys: set[str] = set()
+    for proj_key, slug_opts in _VM_PROJECTION_CF_KEYS:
+        val = (proj.get(proj_key) or "").strip()
+        if not _meaningful_cell_val(val):
+            fb = _VM_CF_DRIFT_FALLBACK.get(proj_key)
+            if fb:
+                val = _cell(cells, fb)
+        if not _meaningful_cell_val(val):
+            continue
+        for slug in slug_opts:
+            if slug not in valid:
+                continue
+            if data.get(slug) != val:
+                data[slug] = val
+                changed = True
+            applied_proj_keys.add(proj_key)
+            break
+    if changed:
+        vm.custom_field_data = data
+    return changed, applied_proj_keys
+
 
 @lru_cache(maxsize=1)
 def _ip_address_custom_field_keys_cached() -> frozenset[str]:
@@ -1205,9 +1270,8 @@ def _resolve_ipaddress_for_vm_primary(raw: str):
         return None
 
 
-def _apply_vm_primary_ip_from_cell(vm, cells: dict[str, str]) -> bool:
-    pri = _cell(cells, "NB proposed primary IP")
-    ip_obj = _resolve_ipaddress_for_vm_primary(pri)
+def _apply_vm_primary_ip_link(vm, raw: str) -> bool:
+    ip_obj = _resolve_ipaddress_for_vm_primary(raw)
     if ip_obj is None:
         return False
     try:
@@ -1226,6 +1290,27 @@ def _apply_vm_primary_ip_from_cell(vm, cells: dict[str, str]) -> bool:
         if getattr(vm, "primary_ip6_id", None) != ip_obj.pk:
             vm.primary_ip6 = ip_obj
             changed = True
+    return changed
+
+
+def _apply_vm_primary_ip_from_cell(vm, cells: dict[str, str]) -> bool:
+    pri = _cell(cells, "NB proposed primary IP")
+    return _apply_vm_primary_ip_link(vm, pri)
+
+
+def _apply_vm_primary_ip_from_projection(
+    vm, proj: dict[str, str], cells: dict[str, str]
+) -> bool:
+    """Set primary_ip4/6 from projection; if both empty, fall back to NB proposed primary IP cell."""
+    changed = False
+    for k in ("primary_ip4", "primary_ip6"):
+        raw = (proj.get(k) or "").strip()
+        if _meaningful_cell_val(raw) and _apply_vm_primary_ip_link(vm, raw):
+            changed = True
+    if not any(
+        _meaningful_cell_val((proj.get(x) or "").strip()) for x in ("primary_ip4", "primary_ip6")
+    ):
+        return _apply_vm_primary_ip_from_cell(vm, cells)
     return changed
 
 
@@ -1292,11 +1377,12 @@ def apply_create_openstack_vm(op: dict[str, Any]) -> tuple[str, str]:
         vm.device = dev
 
     vm.save()
-    pri_ch = _apply_vm_primary_ip_from_cell(vm, cells)
+    pri_ch = _apply_vm_primary_ip_from_projection(vm, proj, cells)
+    vm_cf_ch, _ = _merge_vm_row_into_custom_fields(vm, cells, proj)
     merge_ch = _merge_audit_residual_onto_object(
         vm, cells, consumed, attr_names=("comments", "description"), max_len=8000
     )
-    if pri_ch or merge_ch:
+    if pri_ch or merge_ch or vm_cf_ch:
         _netbox_changelog_snapshot(vm)
         vm.save()
     return "created", "ok_created"
@@ -1351,7 +1437,7 @@ def apply_update_openstack_vm(op: dict[str, Any]) -> tuple[str, str]:
     }
 
     changed = False
-    if _apply_vm_primary_ip_from_cell(vm, cells):
+    if _apply_vm_primary_ip_from_projection(vm, proj, cells):
         changed = True
     cluster_name = (proj.get("cluster") or "").strip()
     if cluster_name and cluster_name not in {"—", "-"}:
@@ -1386,6 +1472,9 @@ def apply_update_openstack_vm(op: dict[str, Any]) -> tuple[str, str]:
             vm.device = dev
             changed = True
 
+    vm_cf_ch, _ = _merge_vm_row_into_custom_fields(vm, cells, proj)
+    if vm_cf_ch:
+        changed = True
     merge_ch = _merge_audit_residual_onto_object(
         vm, cells, consumed, attr_names=("comments", "description"), max_len=8000
     )

@@ -1770,6 +1770,7 @@ def _proposed_changes_rows(
             if nb_site in {"—", ""}:
                 nb_site = _suggest_netbox_site_name_from_os_region(os_reg)
             if vm is None:
+                # Columns must stay aligned with drift_overrides_apply.HEADERS_DETAIL_NEW_VMS (drift + recon cells).
                 add_openstack_vms.append([
                     iname,
                     os_reg,
@@ -1818,6 +1819,7 @@ def _proposed_changes_rows(
                         drift_vm.append("primary_ip")
                 if not drift_vm:
                     continue
+                # Columns must stay aligned with drift_overrides_apply.HEADERS_DETAIL_EXISTING_VMS.
                 update_openstack_vms.append([
                     iname,
                     str(vm.pk),
