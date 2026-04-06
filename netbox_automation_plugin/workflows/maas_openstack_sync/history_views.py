@@ -22,6 +22,8 @@ from .drift_snapshot_export import (
     build_drift_report_xlsx_from_snapshot_payload,
     format_drift_report_from_snapshot_payload,
 )
+from netbox_automation_plugin.models import MAASOpenStackReconciliationRun
+
 from .history_models import MAASOpenStackDriftRun
 from .netbox_scope_choices import list_site_location_choices
 from .tables import MAASOpenStackDriftRunTable
@@ -235,6 +237,12 @@ class MAASOpenStackSyncRunDetailView(LoginRequiredMixin, View):
             if not drift_view_modified:
                 want_modified = False
 
+        reconciliation_runs = list(
+            MAASOpenStackReconciliationRun.objects.filter(drift_run_id=run.id)
+            .order_by("-created")
+            .only("pk", "status", "branch_name", "created")[:25]
+        )
+
         return render(
             request,
             self.template_name,
@@ -256,6 +264,7 @@ class MAASOpenStackSyncRunDetailView(LoginRequiredMixin, View):
                 + f"?{_drift_modified_xlsx_query_string(run)}",
                 "drift_view_modified_query_string": _drift_review_saved_query_string(run),
                 "drift_download_xlsx_modified_post_url": "",
+                "reconciliation_runs": reconciliation_runs,
             },
         )
 

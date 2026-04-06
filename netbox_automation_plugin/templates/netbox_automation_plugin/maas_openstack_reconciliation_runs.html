@@ -10,9 +10,12 @@
     <div class="card">
       <h5 class="card-header d-flex flex-wrap align-items-center justify-content-between gap-2">
         <span>{% trans "MAAS / OpenStack — branch reconciliation runs" %}</span>
-        <a href="{% url 'plugins:netbox_automation_plugin:maas_openstack_sync' %}" class="btn btn-outline-secondary btn-sm js-drift-nav-loading">
-          {% trans "Drift audit" %}
-        </a>
+        <div class="d-flex flex-wrap gap-1 align-items-center">
+          <span class="text-body-secondary small d-none d-md-inline">{% trans "Each row opens the NetBox write preview for that reconciliation." %}</span>
+          <a href="{% url 'plugins:netbox_automation_plugin:maas_openstack_sync' %}" class="btn btn-outline-secondary btn-sm js-drift-nav-loading">
+            {% trans "Drift audit" %}
+          </a>
+        </div>
       </h5>
       <div class="card-body p-0">
         {% if runs %}
@@ -22,7 +25,7 @@
                 <tr>
                   <th>{% trans "ID" %}</th>
                   <th>{% trans "Status" %}</th>
-                  <th>{% trans "Drift run" %}</th>
+                  <th>{% trans "Source audit" %}</th>
                   <th>{% trans "Branch" %}</th>
                   <th>{% trans "Ops" %}</th>
                   <th>{% trans "Created" %}</th>

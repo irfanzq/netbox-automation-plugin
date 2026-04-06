@@ -57,6 +57,7 @@ from .merge import (
     effective_review_norm_for_run,
     merged_proposed_from_drift_run,
 )
+from .netbox_write_projection import netbox_write_projection_for_op
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +65,43 @@ PREVIEW_TOKEN_SALT = "netbox_automation_plugin.ma_openstack_recon.preview.v1"
 
 # Cap stored exception text for JSON / UI (full trace still in server logs).
 _APPLY_EXCEPTION_MESSAGE_MAX = 4000
+# Shorter cap for apply-handler prerequisite / validation detail (skip reasons).
+_APPLY_SKIP_REASON_DETAIL_MAX = 2000
+# Cap NetBox write preview string per apply row (matches recon preview projection).
+_WRITE_PREVIEW_MAX = 4000
+
+
+def _apply_result_write_preview(op: dict[str, Any]) -> str:
+    """Human-readable NetBox-oriented fields for apply logs (same projection as recon tables)."""
+    sk = str(op.get("selection_key") or "").strip()
+    raw = op.get("cells")
+    cells: dict[str, str] = {}
+    if isinstance(raw, dict):
+        cells = {str(k): "" if v is None else str(v) for k, v in raw.items()}
+    if sk in NEW_NIC_SELECTION_KEYS:
+        cells = new_nic_cells_for_reconciliation(cells)
+    try:
+        proj = netbox_write_projection_for_op({"selection_key": sk, "cells": cells})
+    except Exception:
+        logger.debug("apply row write_preview projection failed", exc_info=True)
+        return ""
+    parts: list[str] = []
+    for k, v in proj.items():
+        vv = (v or "").strip()
+        if not vv or vv in ("—", "-"):
+            continue
+        parts.append(f"{k}={vv}")
+    s = "; ".join(parts)
+    if len(s) > _WRITE_PREVIEW_MAX:
+        return s[: _WRITE_PREVIEW_MAX - 3] + "..."
+    return s
+
+
+def _finalize_apply_row(op: dict[str, Any], result: dict[str, Any]) -> dict[str, Any]:
+    wp = _apply_result_write_preview(op)
+    if wp:
+        result["write_preview"] = wp
+    return result
 
 
 def _apply_result_row_shell(op: dict[str, Any]) -> dict[str, Any]:
@@ -95,7 +133,7 @@ def _failed_apply_row(op: dict[str, Any], exc: Exception) -> dict[str, Any]:
     result["exception_type"] = et
     result["exception_message"] = em
     result["reason_detail"] = _truncate_exc_message(f"{et}: {em}", max_len=_APPLY_EXCEPTION_MESSAGE_MAX + 64)
-    return result
+    return _finalize_apply_row(op, result)
 
 
 def _execute_branch_apply(op: dict[str, Any]) -> dict[str, Any]:
@@ -105,11 +143,15 @@ def _execute_branch_apply(op: dict[str, Any]) -> dict[str, Any]:
     if action not in SUPPORTED_APPLY_ACTIONS:
         result["status"] = "failed"
         result["reason"] = "failed_not_implemented"
-        return result
-    st, reason = apply_row_operation(op)
+        return _finalize_apply_row(op, result)
+    st, reason, skip_detail = apply_row_operation(op)
     result["status"] = st
     result["reason"] = reason
-    return result
+    if skip_detail:
+        result["reason_detail"] = _truncate_exc_message(
+            skip_detail, max_len=_APPLY_SKIP_REASON_DETAIL_MAX
+        )
+    return _finalize_apply_row(op, result)
 
 
 def _first_failed_exception_snapshot(rows: list[dict[str, Any]]) -> dict[str, Any] | None:
@@ -1018,10 +1060,10 @@ def _apply_result_from_operation(op: dict[str, Any], *, branch_context_ready: bo
     result["reason"] = "failed_not_implemented"
     if not branch_context_ready:
         result["reason"] = "failed_branch_context_unavailable"
-        return result
+        return _finalize_apply_row(op, result)
     if action in SUPPORTED_APPLY_ACTIONS:
         try:
-            st, reason = apply_row_operation(op)
+            st, reason, skip_detail = apply_row_operation(op)
         except Exception as exc:
             logger.exception(
                 "Reconciliation apply exception (no per-row savepoint): row_key=%s action=%s",
@@ -1031,8 +1073,12 @@ def _apply_result_from_operation(op: dict[str, Any], *, branch_context_ready: bo
             return _failed_apply_row(op, exc)
         result["status"] = st
         result["reason"] = reason
-        return result
-    return result
+        if skip_detail:
+            result["reason_detail"] = _truncate_exc_message(
+                skip_detail, max_len=_APPLY_SKIP_REASON_DETAIL_MAX
+            )
+        return _finalize_apply_row(op, result)
+    return _finalize_apply_row(op, result)
 
 
 def apply_reconciliation_run(

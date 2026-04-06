@@ -122,6 +122,27 @@
       </div>
     </div>
 
+    {% if reconciliation_runs %}
+    <div class="card mb-3 border-primary">
+      <div class="card-header">
+        <h5 class="mb-0">{% trans "Branch reconciliation from this audit" %}</h5>
+      </div>
+      <div class="card-body py-2 small">
+        <p class="text-body-secondary mb-2">
+          {% blocktrans trimmed %}These links open the reconciliation run page (NetBox write preview and apply results). The report below is the drift audit HTML, not the reconciliation layout.{% endblocktrans %}
+        </p>
+        <ul class="list-unstyled mb-0">
+          {% for rr in reconciliation_runs %}
+          <li class="mb-1">
+            <a href="{% url 'plugins:netbox_automation_plugin:maas_openstack_reconciliation_detail' rr.pk %}" class="fw-semibold">{% trans "Reconciliation" %} #{{ rr.pk }}</a>
+            <span class="text-muted"> — <span class="badge text-bg-secondary">{{ rr.get_status_display }}</span>{% if rr.branch_name %} · <span class="text-monospace">{{ rr.branch_name }}</span>{% endif %} · {{ rr.created }}</span>
+          </li>
+          {% endfor %}
+        </ul>
+      </div>
+    </div>
+    {% endif %}
+
     <div class="card mb-3">
       <div class="card-header">
         <h5 class="mb-0">

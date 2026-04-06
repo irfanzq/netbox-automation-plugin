@@ -12,7 +12,7 @@
         <div class="d-flex flex-wrap gap-1">
           <a href="{% url 'plugins:netbox_automation_plugin:maas_openstack_reconciliation_runs' %}" class="btn btn-outline-secondary btn-sm">{% trans "All runs" %}</a>
           {% if run.drift_run_id %}
-            <a href="{% url 'plugins:netbox_automation_plugin:maas_openstack_sync_run_detail' run.drift_run_id %}" class="btn btn-outline-secondary btn-sm">{% trans "Drift run" %} #{{ run.drift_run_id }}</a>
+            <a href="{% url 'plugins:netbox_automation_plugin:maas_openstack_sync_run_detail' run.drift_run_id %}" class="btn btn-outline-secondary btn-sm" title="{% trans 'Large HTML drift audit for this run; reconciliation preview is on this page below.' %}">{% trans "Source drift audit" %} #{{ run.drift_run_id }}</a>
           {% endif %}
         </div>
       </h5>
@@ -175,7 +175,8 @@
                   <th>{% trans "Section" %}</th>
                   <th>{% trans "Action" %}</th>
                   <th>{% trans "Summary" %}</th>
-                  <th>{% trans "Exception / detail" %}</th>
+                  <th>{% trans "NetBox write (preview)" %}</th>
+                  <th>{% trans "Detail (exceptions, skip reasons)" %}</th>
                 </tr>
               </thead>
               <tbody>
@@ -186,6 +187,7 @@
                     <td class="small text-monospace">{{ row.selection_key|default:"—" }}</td>
                     <td class="small">{{ row.action|default:"—" }}</td>
                     <td class="small">{{ row.summary|default:"—" }}</td>
+                    <td class="small text-break font-monospace" style="min-width: 14rem; max-width: 36rem;">{% if row.write_preview %}{{ row.write_preview }}{% else %}—{% endif %}</td>
                     <td class="small text-break font-monospace">
                       {% if row.reason_detail %}
                         {{ row.reason_detail }}

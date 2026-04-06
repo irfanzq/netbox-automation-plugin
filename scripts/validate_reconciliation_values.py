@@ -119,7 +119,7 @@ def _validate_run(run_id: int, *, verbose: bool = False) -> dict[str, Any]:
             # Run real apply logic with forced rollback (no persistent writes).
             try:
                 with transaction.atomic():
-                    status, reason = apply_row_operation(op)
+                    status, reason, _skip_detail = apply_row_operation(op)
                     transaction.set_rollback(True)
             except Exception as e:
                 status = "failed_exception"
