@@ -133,6 +133,10 @@ def emit_drift_counts_and_alignment(
     if align_rows:
         e.spacer()
         e.subtitle("Detail — placement & lifecycle alignment")
+        e.paragraph(
+            "**Proposed Action** uses ``SET_NETBOX_WORKFLOW=PLACEMENT_DEVICE_ALIGNMENT`` plus the audit hint text "
+            "so it stays consistent with other drift tables (no automatic apply from this column)."
+        )
         e.spacer()
         e.table(
             [

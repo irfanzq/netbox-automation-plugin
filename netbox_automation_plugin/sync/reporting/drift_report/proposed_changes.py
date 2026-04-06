@@ -33,6 +33,17 @@ from netbox_automation_plugin.sync.reporting.drift_report.proposed_nic_drift imp
 from netbox_automation_plugin.sync.reporting.drift_report.proposed_lldp_tables import (
     build_lldp_drift_rows,
 )
+from netbox_automation_plugin.sync.reporting.drift_report.proposed_action_format import (
+    SET_NETBOX_ACTION_CREATE_DEVICE,
+    SET_NETBOX_ACTION_CREATE_FIP,
+    SET_NETBOX_ACTION_CREATE_PREFIX,
+    SET_NETBOX_ACTION_CREATE_VM,
+    SET_NETBOX_ACTION_REVIEW_DEVICE,
+    SET_NETBOX_ACTION_UPDATE_FIP_NAT,
+    SET_NETBOX_ACTION_UPDATE_PREFIX,
+    SET_NETBOX_ACTION_UPDATE_VM,
+    format_set_netbox_nic_directives,
+)
 from netbox_automation_plugin.sync.reporting.drift_report.proposed_nic_helpers import (
     _build_add_nb_interface_rows,
 )
@@ -1289,7 +1300,7 @@ def _proposed_changes_rows(
                     if maas_if != "—"
                     else f"maas-nic-{mac.replace(':', '')[-6:]}"
                 )
-                props = f"MAC {mac}; untagged VLAN {vlan}; IPs: {ips}"
+                props = format_set_netbox_nic_directives(mac=mac, vlan=vlan, ips=ips)
                 osr = os_runtime_idx.get(((h or "").strip().lower(), _norm_mac_local(mac))) or {}
                 os_reg = str(
                     osr.get("os_region") or (openstack_data or {}).get("openstack_region_name") or "—"
@@ -1308,7 +1319,7 @@ def _proposed_changes_rows(
                 )
                 if os_has_runtime:
                     # OS authority: Proposed Action reflects runtime only (MAAS columns still show MAAS).
-                    props = f"MAC {os_mac}; untagged VLAN {os_vlan}; IPs: {os_ip}"
+                    props = format_set_netbox_nic_directives(mac=os_mac, vlan=os_vlan, ips=os_ip)
                 from netbox_automation_plugin.sync.reporting.drift_report.proposed_nic_derived import (
                     derive_nic_proposed_columns,
                     parse_os_lldp_structured,
@@ -1395,7 +1406,7 @@ def _proposed_changes_rows(
             authority_badge = "[OS]" if has_os_data else "[MAAS]"
             mgmt = os_mgmt if bool(osr) else maas_mgmt
             target_ip = os_bmc_ip if has_os_data and os_bmc_ip else bmc_ip
-            action_parts = [f"CREATE_NETBOX_OOB_IFACE={mgmt or 'mgmt0'}"]
+            action_parts = [f"SET_NETBOX_OOB_CREATE_IFACE={mgmt or 'mgmt0'}"]
             if target_ip:
                 action_parts.append(f"SET_NETBOX_OOB_IP={target_ip}")
             action = "; ".join(action_parts)
@@ -1471,9 +1482,7 @@ def _proposed_changes_rows(
         serial = str(m.get("serial") or "—")
         nb_prop_platform = _audit_nb_proposed_platform(m, osr, netbox_data)
         action = (
-            "CREATE_NETBOX_DEVICE_AND_PORTS"
-            if is_candidate
-            else "REVIEW_ONLY_NOT_SAFE_CANDIDATE"
+            SET_NETBOX_ACTION_CREATE_DEVICE if is_candidate else SET_NETBOX_ACTION_REVIEW_DEVICE
         )
         row = [
             h,
@@ -1535,7 +1544,7 @@ def _proposed_changes_rows(
             vrf_name,
             role_reason,
             "[OS]",
-            "CREATE_NETBOX_PREFIX_FROM_OS",
+            SET_NETBOX_ACTION_CREATE_PREFIX,
         ])
 
     add_fips = []
@@ -1562,7 +1571,7 @@ def _proposed_changes_rows(
             nb_status,
             "VIP",
             nb_vrf,
-            "CREATE_NETBOX_IPADDRESS_FROM_OS_FIP",
+            SET_NETBOX_ACTION_CREATE_FIP,
         ])
 
     update_prefixes: list[list] = []
@@ -1655,7 +1664,7 @@ def _proposed_changes_rows(
                 drift_summary,
                 role_reason,
                 "[OS]",
-                "UPDATE_NETBOX_PREFIX_FROM_OS",
+                SET_NETBOX_ACTION_UPDATE_PREFIX,
             ])
 
     update_fips: list[list] = []
@@ -1688,7 +1697,7 @@ def _proposed_changes_rows(
             nb_status,
             "VIP",
             nb_vrf,
-            "UPDATE_NETBOX_IPADDRESS_NAT_FROM_OS_FIP",
+            SET_NETBOX_ACTION_UPDATE_FIP_NAT,
         ])
 
     add_openstack_vms: list[list] = []
@@ -1784,7 +1793,7 @@ def _proposed_changes_rows(
                     nb_vm_status,
                     prop_dev if prop_dev not in {"—", ""} else "—",
                     "[OS]",
-                    "CREATE_NETBOX_VM_FROM_OPENSTACK",
+                    SET_NETBOX_ACTION_CREATE_VM,
                 ])
             else:
                 cur_vc = str(vm.vcpus) if vm.vcpus is not None else "—"
@@ -1842,7 +1851,7 @@ def _proposed_changes_rows(
                     prop_dev if prop_dev not in {"—", ""} else "—",
                     ", ".join(drift_vm),
                     "[OS]",
-                    "UPDATE_NETBOX_VM_FROM_OPENSTACK",
+                    SET_NETBOX_ACTION_UPDATE_VM,
                 ])
 
     # Temporarily disabled per operator request: do not emit allocation-pool IPRange proposals.

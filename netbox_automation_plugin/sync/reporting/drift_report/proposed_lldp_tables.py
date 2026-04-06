@@ -4,6 +4,10 @@ from __future__ import annotations
 
 import re
 
+from netbox_automation_plugin.sync.reporting.drift_report.proposed_action_format import (
+    prefix_lldp_proposed_action,
+)
+
 _OS_LLDP_SWITCH_MAC_RE = re.compile(r"\bswitch\s+([0-9a-fA-F:.-]+)", re.I)
 _OS_LLDP_PORT_RE = re.compile(r"\bport\s+([^·|]+)", re.I)
 
@@ -384,12 +388,22 @@ def build_lldp_drift_rows(
                 os_port,
                 nb_port_disp,
                 nb_port_status,
-                action_new,
+                prefix_lldp_proposed_action(action_new),
             ])
             continue
 
         if _norm_peer(nb_peer) != _norm_peer(os_lldp):
             snippet = os_lldp[:180] + ("…" if len(os_lldp) > 180 else "")
+            _lldp_up_detail = (
+                "Align NetBox peer/cable with OS-discovered switch/port (OpenStack): "
+                f"«{os_switch}» port «{os_port}»"
+                + (
+                    f" (NetBox port «{nb_port_disp}», {nb_port_status})"
+                    if nb_port_disp != "—"
+                    else f" ({nb_port_status})"
+                )
+                + f"; raw «{snippet}»"
+            )
             lldp_update.append([
                 host,
                 maas_int,
@@ -405,16 +419,7 @@ def build_lldp_drift_rows(
                 nb_peer,
                 nb_port_disp,
                 nb_port_status,
-                (
-                    "Align NetBox peer/cable with OS-discovered switch/port (OpenStack): "
-                    f"«{os_switch}» port «{os_port}»"
-                    + (
-                        f" (NetBox port «{nb_port_disp}», {nb_port_status})"
-                        if nb_port_disp != "—"
-                        else f" ({nb_port_status})"
-                    )
-                    + f"; raw «{snippet}»"
-                ),
+                prefix_lldp_proposed_action(_lldp_up_detail),
             ])
 
     lldp_new.sort(key=lambda row: ((row[0] or "").lower(), row[3] or ""))

@@ -1,5 +1,9 @@
 """NIC drift and serial-review rows for proposed-change buckets."""
 
+from netbox_automation_plugin.sync.reporting.drift_report.proposed_action_format import (
+    SET_NETBOX_ACTION_REVIEW_PORT_ALIGNMENT,
+    SET_NETBOX_ACTION_SERIAL_REVIEW,
+)
 from netbox_automation_plugin.sync.reporting.drift_report.proposed_nic_derived import (
     derive_nic_proposed_columns,
 )
@@ -72,7 +76,7 @@ def _build_update_nic_rows(interface_audit):
 
             if not statuses:
                 statuses.append(st)
-                actions.append("REVIEW_PORT_ALIGNMENT")
+                actions.append(SET_NETBOX_ACTION_REVIEW_PORT_ALIGNMENT)
 
             status_cell = ", ".join(dict.fromkeys(statuses))
             if _drift_table_status_is_ok_only(status_cell):
@@ -117,7 +121,7 @@ def _build_review_serial_rows(matched_rows):
                 r.get("hostname", ""),
                 str(r.get("maas_serial", "")),
                 str(r.get("netbox_serial", "")),
-                "Manual validation",
+                SET_NETBOX_ACTION_SERIAL_REVIEW,
                 "High",
             ])
     return review_serial

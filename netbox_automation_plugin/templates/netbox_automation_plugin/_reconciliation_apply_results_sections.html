@@ -72,15 +72,6 @@
       </div>
     </div>
   </div>
-  <div class="card mb-3 border-info">
-    <h5 class="card-header">{% trans "Apply log (plain text)" %}</h5>
-    <div class="card-body p-0">
-      <pre class="small mb-0 p-3 bg-body-secondary text-break font-monospace" style="max-height: 50vh; overflow: auto;">{% for row in apply_results.rows %}[{{ row.status|default:"?" }}] section={{ row.selection_key|default:"" }} action={{ row.action|default:"" }} row_key={{ row.row_key|default:"" }}
-  reason={{ row.reason|default:"" }}{% if row.reason_detail %} | {{ row.reason_detail }}{% elif row.exception_message %} | {{ row.exception_type }}: {{ row.exception_message }}{% endif %}
-  netbox_fields={{ row.write_preview|default:"—" }}
-{% endfor %}</pre>
-    </div>
-  </div>
 {% elif not apply_results.summary %}
   <div class="alert alert-secondary mb-0">{% trans "No apply has been recorded for this run yet. Use Apply on the reconciliation run page; you will be redirected here when apply finishes." %}</div>
 {% endif %}

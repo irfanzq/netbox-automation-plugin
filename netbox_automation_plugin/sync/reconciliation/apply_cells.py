@@ -183,6 +183,98 @@ def _resolve_by_name(model, name: str):
     return None
 
 
+def _resolve_device_type(raw: str | None) -> Any:
+    """
+    Resolve ``DeviceType`` from drift / recon cells.
+
+    The audit UI often shows ``"{manufacturer} {model}"`` (e.g. "Dell PowerEdge R660") while
+    NetBox stores ``model`` (e.g. "PowerEdge R660") on ``DeviceType`` with a separate
+    ``manufacturer`` FK—plain ``model__iexact`` on the full string therefore misses.
+    """
+    from dcim.models import DeviceType, Manufacturer
+
+    s = str(raw or "").strip()
+    if not s or s in ("—", "-"):
+        return None
+    dt = _resolve_by_name(DeviceType, s)
+    if dt is not None:
+        return dt
+    qmod = DeviceType.objects.filter(model__iexact=s)
+    n = qmod.count()
+    if n == 1:
+        return qmod.first()
+    parts = s.split()
+    if len(parts) >= 2:
+        mfr_key, rest = parts[0], " ".join(parts[1:])
+        hit = DeviceType.objects.filter(
+            manufacturer__name__iexact=mfr_key,
+            model__iexact=rest,
+        ).first()
+        if hit is not None:
+            return hit
+        mfr = Manufacturer.objects.filter(name__iexact=mfr_key).first()
+        if mfr is None:
+            mslug = slugify(mfr_key)[:50]
+            mfr = Manufacturer.objects.filter(slug__iexact=mslug).first() if mslug else None
+        if mfr is not None:
+            hit = DeviceType.objects.filter(manufacturer=mfr, model__iexact=rest).first()
+            if hit is not None:
+                return hit
+    s_low = s.lower()
+    tail_guesses: list[str] = []
+    if len(parts) >= 2:
+        tail_guesses.append(parts[-1])
+    tail_guesses.append(s)
+    seen: set[str] = set()
+    for tail in tail_guesses:
+        t = tail.strip()
+        if len(t) < 2 or t.lower() in seen:
+            continue
+        seen.add(t.lower())
+        qs = DeviceType.objects.select_related("manufacturer").filter(model__iexact=t)
+        if qs.count() > 40:
+            qs = DeviceType.objects.select_related("manufacturer").filter(model__istartswith=t)[:50]
+        for cand in qs:
+            if f"{cand.manufacturer.name} {cand.model}".strip().lower() == s_low:
+                return cand
+    return None
+
+
+def _resolve_tenant(raw: str | None) -> Any:
+    """
+    Resolve ``Tenant`` from drift / recon cells.
+
+    Audit columns may use hyphenated or project-specific labels (e.g. ``whitefiber-internal``)
+    while NetBox stores a shorter ``name`` (e.g. ``whitefiber``). Try slug and a unique
+    prefix before the first hyphen when the full string does not match.
+    """
+    from tenancy.models import Tenant
+
+    s = str(raw or "").strip()
+    if not s or s in ("—", "-"):
+        return None
+    t = _resolve_by_name(Tenant, s)
+    if t is not None:
+        return t
+    slug = slugify(s)
+    if slug:
+        t = Tenant.objects.filter(slug__iexact=slug).first()
+        if t is not None:
+            return t
+    if "-" in s:
+        head = s.split("-", 1)[0].strip()
+        if head and head.lower() != s.lower():
+            q = Tenant.objects.filter(name__iexact=head)
+            if q.count() == 1:
+                return q.first()
+            hs = slugify(head)
+            if hs:
+                q2 = Tenant.objects.filter(slug__iexact=hs)
+                if q2.count() == 1:
+                    return q2.first()
+    return None
+
+
 def _normalize_ip_for_netbox(raw_ip: str) -> str:
     s = str(raw_ip or "").strip()
     if not s:
@@ -208,9 +300,10 @@ def _parse_vlan_vid(raw: str) -> int | None:
 
 
 def _normalize_mac(raw: str) -> str | None:
-    s = str(raw or "").strip().upper().replace("-", ":")
-    if not s:
+    s = str(raw or "").strip().upper()
+    if not s or s in ("—", "-"):
         return None
+    s = s.replace("-", ":")
     parts = [p for p in s.split(":") if p]
     if len(parts) == 6 and all(len(p) == 2 for p in parts):
         try:
@@ -218,6 +311,14 @@ def _normalize_mac(raw: str) -> str | None:
         except ValueError:
             return None
         return ":".join(parts)
+    # Cisco-style aabb.cc00.dd11 or bare 12 hex nibbles (MAAS / switch exports).
+    dotless = s.replace(".", "").replace(":", "")
+    if len(dotless) == 12:
+        try:
+            int(dotless, 16)
+        except ValueError:
+            return None
+        return ":".join(dotless[i : i + 2] for i in range(0, 12, 2))
     return None
 
 
@@ -285,6 +386,62 @@ def _cell_nic_proposed_body(cells: dict[str, str]) -> str:
     )
 
 
+def _set_netbox_mac_directive_present(body: str) -> bool:
+    return bool(re.search(r"\bSET_NETBOX_MAC\s*=", body or "", flags=re.IGNORECASE))
+
+
+def _set_netbox_vlan_directive_present(body: str) -> bool:
+    return bool(re.search(r"\bSET_NETBOX_UNTAGGED_VLAN\s*=", body or "", flags=re.IGNORECASE))
+
+
+def _set_netbox_ip_directive_present(body: str) -> bool:
+    return bool(re.search(r"\bSET_NETBOX_IP\s*=", body or "", flags=re.IGNORECASE))
+
+
+def _nic_use_inventory_column_fallbacks(
+    body: str,
+    p_mac: str | None,
+    p_vlan: str | None,
+    p_ips: str | None,
+    s_mac: str | None,
+    s_vlan: str | None,
+    s_ips: str | None,
+) -> tuple[bool, bool, bool]:
+    """
+    Whether MAAS/OS/NB (and Parsed *) columns may supply MAC / VLAN / IP for apply.
+
+    **SET_NETBOX_ mode:** A field uses inventory columns only if that keyword appears
+    (``SET_NETBOX_MAC``, ``SET_NETBOX_UNTAGGED_VLAN``, ``SET_NETBOX_IP``)—exactly the
+    knobs listed in Proposed Action. Human ``MAC`` / ``untagged VLAN`` / ``IPs:`` text
+    does not enable column fallback in that mode.
+
+    **Human-clause-only mode:** Column fallback is limited to columns matching clauses
+    present in the text. Empty or non-clause Proposed Action keeps legacy behavior
+    (all column fallbacks).
+    """
+    b = (body or "").strip()
+    set_nb = bool(re.search(r"\bSET_NETBOX_", b, re.IGNORECASE))
+    if set_nb:
+        return (
+            _set_netbox_mac_directive_present(b),
+            _set_netbox_vlan_directive_present(b),
+            _set_netbox_ip_directive_present(b),
+        )
+
+    any_human = (
+        _nic_proposed_property_segment_ok(p_mac)
+        or _nic_proposed_property_segment_ok(p_vlan)
+        or _nic_proposed_property_segment_ok(p_ips)
+    )
+    if b and any_human:
+        return (
+            _nic_proposed_property_segment_ok(p_mac),
+            _nic_proposed_property_segment_ok(p_vlan),
+            _nic_proposed_property_segment_ok(p_ips),
+        )
+    return True, True, True
+
+
 def _text_has_derivable_nic_clauses(raw: str) -> bool:
     """True when Proposed Action carries human-readable or SET_NETBOX_* NIC intent."""
     mac, vlan, ips = _parse_nic_proposed_properties_segments(raw)
@@ -308,50 +465,151 @@ def _interface_mac_vlan_ip_from_cells(
     cells: dict[str, str], *, include_nb_fallback: bool
 ) -> tuple[str | None, int | None, str]:
     """
-    Per field: human-readable ``MAC`` / ``untagged VLAN`` / ``IPs:`` clauses in Proposed Action,
-    then ``SET_NETBOX_MAC`` / ``SET_NETBOX_UNTAGGED_VLAN`` / ``SET_NETBOX_IP`` directives,
-    then MAAS/OS (and NetBox when ``include_nb_fallback`` for NIC drift).
+    Resolve MAC, untagged VLAN id, and IP blob for interface apply.
+
+    * **Any** ``SET_NETBOX_`` in Proposed Action → **strict directive mode**: values come
+      only from ``SET_NETBOX_MAC`` / ``SET_NETBOX_UNTAGGED_VLAN`` / ``SET_NETBOX_IP``
+      (human ``MAC …`` / ``untagged VLAN …`` / ``IPs:`` clauses are ignored). Inventory
+      columns fill a field only when that field’s ``SET_NETBOX_*`` keyword is present
+      (e.g. ``SET_NETBOX_UNTAGGED_VLAN=1; SET_NETBOX_IP=172.17.0.6`` → VLAN + IP only).
+    * Otherwise → human clauses first, then optional ``SET_NETBOX_*``, then columns as
+      documented in ``_nic_use_inventory_column_fallbacks``.
     """
     body = _cell_nic_proposed_body(cells)
     p_mac, p_vlan, p_ips = _parse_nic_proposed_properties_segments(body)
     s_mac, s_vlan, s_ips = _parse_set_netbox_interface_directives(body)
+    use_mac_cols, use_vlan_cols, use_ip_cols = _nic_use_inventory_column_fallbacks(
+        body, p_mac, p_vlan, p_ips, s_mac, s_vlan, s_ips
+    )
+    set_nb = bool(re.search(r"\bSET_NETBOX_", body, re.IGNORECASE))
 
-    mac = _normalize_mac(p_mac) if _nic_proposed_property_segment_ok(p_mac) else None
-    if mac is None and _nic_proposed_property_segment_ok(s_mac):
-        mac = _normalize_mac(s_mac)
-    if mac is None:
-        if include_nb_fallback:
-            mac = _normalize_mac(_cell(cells, "MAAS MAC", "OS MAC", "NB MAC"))
-        else:
-            mac = _normalize_mac(_cell(cells, "MAAS MAC", "OS MAC"))
+    if set_nb:
+        mac = _normalize_mac(s_mac) if _nic_proposed_property_segment_ok(s_mac) else None
+        if mac is None and use_mac_cols:
+            if include_nb_fallback:
+                mac = _normalize_mac(
+                    _cell(cells, "MAAS MAC", "OS MAC", "NB MAC", "Parsed MAC")
+                )
+            else:
+                mac = _normalize_mac(_cell(cells, "MAAS MAC", "OS MAC", "Parsed MAC"))
 
-    vid: int | None = None
-    if _nic_proposed_property_segment_ok(p_vlan):
-        vid = _parse_vlan_vid(p_vlan)
-    if vid is None and s_vlan:
-        vid = _parse_vlan_vid(s_vlan)
-    if vid is None:
-        if include_nb_fallback:
-            vid = _parse_vlan_vid(_cell(cells, "MAAS VLAN", "OS runtime VLAN", "NB VLAN"))
-        else:
-            vid = _parse_vlan_vid(_cell(cells, "MAAS VLAN", "OS runtime VLAN"))
+        vid: int | None = None
+        if s_vlan:
+            vid = _parse_vlan_vid(s_vlan)
+        if vid is None and use_vlan_cols:
+            if include_nb_fallback:
+                vid = _parse_vlan_vid(
+                    _cell(cells, "MAAS VLAN", "OS runtime VLAN", "NB VLAN", "Parsed untagged VLAN")
+                )
+            else:
+                vid = _parse_vlan_vid(
+                    _cell(cells, "MAAS VLAN", "OS runtime VLAN", "Parsed untagged VLAN")
+                )
 
-    ip_blob = ""
-    if _nic_proposed_property_segment_ok(p_ips):
-        ip_blob = str(p_ips).strip()
-    if not ip_blob and _nic_proposed_property_segment_ok(s_ips):
-        ip_blob = str(s_ips).strip()
-    if not ip_blob:
-        if include_nb_fallback:
-            ip_blob = _cell(cells, "MAAS IPs", "OS runtime IP", "NB IPs")
-        else:
-            ip_blob = _cell(cells, "MAAS IPs", "OS runtime IP")
+        ip_blob = ""
+        if _nic_proposed_property_segment_ok(s_ips):
+            ip_blob = str(s_ips).strip()
+        if not ip_blob and use_ip_cols:
+            if include_nb_fallback:
+                ip_blob = _cell(cells, "MAAS IPs", "OS runtime IP", "NB IPs", "Parsed IPs")
+            else:
+                ip_blob = _cell(cells, "MAAS IPs", "OS runtime IP", "Parsed IPs")
+    else:
+        mac = _normalize_mac(p_mac) if _nic_proposed_property_segment_ok(p_mac) else None
+        if mac is None and _nic_proposed_property_segment_ok(s_mac):
+            mac = _normalize_mac(s_mac)
+        if mac is None and use_mac_cols:
+            if include_nb_fallback:
+                mac = _normalize_mac(
+                    _cell(cells, "MAAS MAC", "OS MAC", "NB MAC", "Parsed MAC")
+                )
+            else:
+                mac = _normalize_mac(_cell(cells, "MAAS MAC", "OS MAC", "Parsed MAC"))
+
+        vid = None
+        if _nic_proposed_property_segment_ok(p_vlan):
+            vid = _parse_vlan_vid(p_vlan)
+        if vid is None and s_vlan:
+            vid = _parse_vlan_vid(s_vlan)
+        if vid is None and use_vlan_cols:
+            if include_nb_fallback:
+                vid = _parse_vlan_vid(
+                    _cell(cells, "MAAS VLAN", "OS runtime VLAN", "NB VLAN", "Parsed untagged VLAN")
+                )
+            else:
+                vid = _parse_vlan_vid(
+                    _cell(cells, "MAAS VLAN", "OS runtime VLAN", "Parsed untagged VLAN")
+                )
+
+        ip_blob = ""
+        if _nic_proposed_property_segment_ok(p_ips):
+            ip_blob = str(p_ips).strip()
+        if not ip_blob and _nic_proposed_property_segment_ok(s_ips):
+            ip_blob = str(s_ips).strip()
+        if not ip_blob and use_ip_cols:
+            if include_nb_fallback:
+                ip_blob = _cell(cells, "MAAS IPs", "OS runtime IP", "NB IPs", "Parsed IPs")
+            else:
+                ip_blob = _cell(cells, "MAAS IPs", "OS runtime IP", "Parsed IPs")
 
     ip_blob = str(ip_blob or "").strip()
     if ip_blob in ("—", "-"):
         ip_blob = ""
 
     return mac, vid, ip_blob
+
+
+def _nic_mac_intent_raw(cells: dict[str, str], *, include_nb_fallback: bool) -> str | None:
+    """
+    Raw MAC string the row is asking to apply (before normalization).
+
+    Used to avoid ``skipped_already_desired`` when the operator clearly set a MAC in
+    Proposed Action or MAAS/OS/NB columns but the value is not a valid Ethernet MAC.
+    """
+    body = _cell_nic_proposed_body(cells)
+    p_mac, p_vlan, p_ips = _parse_nic_proposed_properties_segments(body)
+    s_mac, s_vlan, s_ips = _parse_set_netbox_interface_directives(body)
+    use_mac_cols, _, _ = _nic_use_inventory_column_fallbacks(
+        body, p_mac, p_vlan, p_ips, s_mac, s_vlan, s_ips
+    )
+    set_nb = bool(re.search(r"\bSET_NETBOX_", body, re.IGNORECASE))
+    if set_nb:
+        if _nic_proposed_property_segment_ok(s_mac):
+            return str(s_mac).strip()
+        if not use_mac_cols:
+            return None
+    else:
+        if _nic_proposed_property_segment_ok(p_mac):
+            return str(p_mac).strip()
+        if _nic_proposed_property_segment_ok(s_mac):
+            return str(s_mac).strip()
+        if not use_mac_cols:
+            return None
+    cols = (
+        _cell(cells, "MAAS MAC", "OS MAC", "NB MAC", "Parsed MAC")
+        if include_nb_fallback
+        else _cell(cells, "MAAS MAC", "OS MAC", "Parsed MAC")
+    )
+    return str(cols).strip() if _nic_proposed_property_segment_ok(cols) else None
+
+
+def _nic_ip_blob_parse_stats(ip_blob: str) -> tuple[bool, bool]:
+    """
+    Whether the blob had IP tokens and whether at least one token is a valid NetBox address.
+
+    No database access (safe before creating an interface row).
+    """
+    tokens = _split_ip_candidates(ip_blob)
+    if not tokens:
+        return False, False
+    ok = False
+    for raw in tokens:
+        try:
+            _normalize_ip_for_netbox(raw.split()[0])
+            ok = True
+        except Exception:
+            continue
+    return True, ok
 
 
 NEW_NIC_RECON_PAYLOAD_HEADERS: tuple[str, ...] = (
@@ -1020,7 +1278,7 @@ def apply_create_prefix(op: dict[str, Any]) -> tuple[str, str]:
         try:
             from tenancy.models import Tenant
 
-            tenant = _resolve_by_name(Tenant, tenant_name)
+            tenant = _resolve_tenant(tenant_name)
         except Exception:
             tenant = None
         if tenant is None:
@@ -1562,7 +1820,7 @@ def apply_create_floating_ip(op: dict[str, Any]) -> tuple[str, str]:
         try:
             from tenancy.models import Tenant
 
-            tenant_obj = _resolve_by_name(Tenant, tenant_name)
+            tenant_obj = _resolve_tenant(tenant_name)
         except Exception:
             tenant_obj = None
         if tenant_obj is None:
@@ -1733,7 +1991,7 @@ def _openstack_vm_apply_site_tenant_status_device_stepwise(vm: Any, proj: dict[s
             vm.save()
     tenant_name = (proj.get("tenant") or "").strip()
     if tenant_name and tenant_name not in {"—", "-"}:
-        tenant = _resolve_by_name(Tenant, tenant_name)
+        tenant = _resolve_tenant(tenant_name)
         if tenant is not None and hasattr(vm, "tenant_id") and getattr(vm, "tenant_id", None) != tenant.pk:
             _netbox_changelog_snapshot(vm)
             vm.tenant = tenant
@@ -1902,7 +2160,7 @@ def apply_update_openstack_vm(op: dict[str, Any]) -> tuple[str, str]:
             changed = True
     tenant_name = (proj.get("tenant") or "").strip()
     if tenant_name and tenant_name not in {"—", "-"}:
-        tenant = _resolve_by_name(Tenant, tenant_name)
+        tenant = _resolve_tenant(tenant_name)
         if tenant is not None and getattr(vm, "tenant_id", None) != tenant.pk:
             _netbox_changelog_snapshot(vm)
             vm.tenant = tenant
@@ -1989,7 +2247,7 @@ def _apply_device_core(cells: dict[str, str], *, create_if_missing: bool) -> tup
         return _skip_missing_prereq("Device hostname empty (Hostname / Host after scoping).")
     site = _resolve_by_name(Site, site_name) if site_name else None
     role = _resolve_by_name(DeviceRole, role_name) if role_name else None
-    dtype = _resolve_by_name(DeviceType, dtype_name) if dtype_name else None
+    dtype = _resolve_device_type(dtype_name) if dtype_name else None
     location = None
     if location_name:
         location = _resolve_by_name(Location, location_name)
@@ -2189,11 +2447,113 @@ def _sync_site_region(site_obj, region_name: str) -> tuple[bool, bool]:
 
 
 def _resolve_vlan_for_device(device, vid: int):
+    """
+    Resolve a VLAN instance for ``device`` + numeric VID.
+
+    NetBox often scopes VLANs via VLAN groups (location/site/region) without setting
+    ``VLAN.site``. Matching only ``site_id`` + ``vid`` misses those rows, so apply would
+    skip the untagged VLAN while still reporting ``skipped_already_desired``.
+    """
+    from django.contrib.contenttypes.models import ContentType
     from ipam.models import VLAN
 
-    if not device.site_id:
+    if device is None or vid is None:
         return None
-    return VLAN.objects.filter(site_id=device.site_id, vid=vid).first()
+    try:
+        vid_i = int(vid)
+    except (TypeError, ValueError):
+        return None
+
+    if device.site_id:
+        hit = VLAN.objects.filter(site_id=device.site_id, vid=vid_i).first()
+        if hit is not None:
+            return hit
+        site = getattr(device, "site", None)
+        if site is not None:
+            try:
+                site_qs = VLAN.objects.get_for_site(site)
+                hit = site_qs.filter(vid=vid_i).first()
+                if hit is not None:
+                    return hit
+            except Exception:
+                pass
+
+    loc = getattr(device, "location", None)
+    if loc is not None:
+        try:
+            ct_loc = ContentType.objects.get_by_natural_key("dcim", "location")
+            anc_ids = list(loc.get_ancestors(include_self=True).values_list("id", flat=True))
+            hit = VLAN.objects.filter(
+                group__scope_type=ct_loc,
+                group__scope_id__in=anc_ids,
+                vid=vid_i,
+            ).first()
+            if hit is not None:
+                return hit
+        except Exception:
+            pass
+        if getattr(loc, "site_id", None):
+            hit = VLAN.objects.filter(site_id=loc.site_id, vid=vid_i).first()
+            if hit is not None:
+                return hit
+            try:
+                from dcim.models import Site
+
+                s = Site.objects.filter(pk=loc.site_id).first()
+                if s is not None:
+                    site_qs = VLAN.objects.get_for_site(s)
+                    hit = site_qs.filter(vid=vid_i).first()
+                    if hit is not None:
+                        return hit
+            except Exception:
+                pass
+
+    dup = list(VLAN.objects.filter(vid=vid_i)[:2])
+    if len(dup) == 1:
+        return dup[0]
+    if len(dup) > 1 and device.site_id:
+        hit = VLAN.objects.filter(vid=vid_i, site_id=device.site_id).first()
+        if hit is not None:
+            return hit
+    return None
+
+
+def _reuse_iface_untagged_vlan_if_vid_matches(iface: Any, vid: int) -> Any | None:
+    """When resolution fails, still accept the interface's current untagged VLAN if its VID matches."""
+    from ipam.models import VLAN
+
+    uid = getattr(iface, "untagged_vlan_id", None)
+    if not uid:
+        return None
+    cur = VLAN.objects.filter(pk=uid).first()
+    if cur is None or getattr(cur, "vid", None) != vid:
+        return None
+    return cur
+
+
+def _resolve_untagged_vlan_for_apply(device: Any, iface: Any | None, vid: int | None) -> Any | None:
+    """
+    Resolve VLAN for interface apply. Returns None when no VID requested.
+    Raises skip tuple via caller when VID requested but cannot be applied.
+    """
+    if vid is None:
+        return None
+    try:
+        vid_i = int(vid)
+    except (TypeError, ValueError):
+        return None
+    u = _resolve_vlan_for_device(device, vid_i)
+    if u is None and iface is not None:
+        u = _reuse_iface_untagged_vlan_if_vid_matches(iface, vid_i)
+    return u
+
+
+def _skip_untagged_vlan_unresolved(host: str, vid: int) -> tuple[str, str, str]:
+    return _skip_missing_prereq(
+        f'Cannot set untagged VLAN VID {vid} on device "{host}": no VLAN row matches this '
+        f"device site/location in NetBox (VLAN groups / get_for_site), or VID {vid} is ambiguous. "
+        f"Create or scope a VLAN with VID {vid} for this site, then re-run apply."
+    )
 
 
 def _resolve_vlan_for_prefix_scope(vlan_name: str, scope_obj) -> Any | None:
@@ -2267,15 +2627,25 @@ def _vrf_for_ip_from_row_cells(cells: dict[str, str] | None) -> Any:
     return _resolve_by_name(VRF, raw)
 
 
-def _assign_ips_to_interface(iface, ip_blob: str, vrf) -> bool:
+def _assign_ips_to_interface(iface, ip_blob: str, vrf) -> tuple[bool, bool, bool]:
+    """
+    Apply IP blob to interface.
+
+    Returns ``(changed, row_had_ip_tokens, any_address_parse_ok)``. When the row lists IP
+    text but nothing parses, callers must not report ``skipped_already_desired``.
+    """
     from ipam.models import IPAddress
 
+    tokens = _split_ip_candidates(ip_blob)
+    row_had_ip_tokens = len(tokens) > 0
     changed = False
-    for raw in _split_ip_candidates(ip_blob):
+    any_parse_ok = False
+    for raw in tokens:
         try:
             addr = _normalize_ip_for_netbox(raw.split()[0])
         except Exception:
             continue
+        any_parse_ok = True
         existing = IPAddress.objects.filter(address=addr, vrf=vrf).first()
         if existing is None:
             # Two-phase: create address+VRF first, then snapshot + assign to interface so branch
@@ -2335,7 +2705,7 @@ def _assign_ips_to_interface(iface, ip_blob: str, vrf) -> bool:
                     existing.interface = iface
                 existing.save()
                 changed = True
-    return changed
+    return changed, row_had_ip_tokens, any_parse_ok
 
 
 def apply_create_interface(op: dict[str, Any]) -> tuple[str, str]:
@@ -2355,6 +2725,13 @@ def apply_create_interface(op: dict[str, Any]) -> tuple[str, str]:
         return _skip_missing_prereq(
             "Missing Host or interface name (Suggested NB name / MAAS intf) for create_interface."
         )
+    mac_intent = _nic_mac_intent_raw(cells, include_nb_fallback=False)
+    if mac_intent and not mac:
+        mac_tail = "…" if len(mac_intent) > 80 else ""
+        return _skip_missing_prereq(
+            f'Cannot apply MAC for device "{host}" interface "{if_name}": '
+            f"value is not a valid Ethernet MAC ({mac_intent[:80]!r}{mac_tail})."
+        )
     dev = Device.objects.filter(name=host).first()
     if not dev:
         return _skip_missing_prereq(
@@ -2373,8 +2750,21 @@ def apply_create_interface(op: dict[str, Any]) -> tuple[str, str]:
             dev.location = loc_obj
             dev.save()
     iface = Interface.objects.filter(device=dev, name=if_name).first()
-    untagged = _resolve_vlan_for_device(dev, vid) if vid else None
+    untagged = _resolve_untagged_vlan_for_apply(dev, iface, vid)
+    if vid is not None and untagged is None:
+        try:
+            vnum = int(vid)
+        except (TypeError, ValueError):
+            return _skip_missing_prereq(f"Invalid VLAN id in row for device {host!r}.")
+        return _skip_untagged_vlan_unresolved(host, vnum)
     if_desc = _interface_description_from_cells(cells)
+    if iface is None and ip_blob:
+        ip_tok, ip_parse = _nic_ip_blob_parse_stats(ip_blob)
+        if ip_tok and not ip_parse:
+            return _skip_missing_prereq(
+                f'Cannot apply IP address(es) for device "{host}" interface "{if_name}": '
+                f"no valid IP parsed from row (MAAS IPs / OS runtime IP / Proposed Action)."
+            )
     if iface is None:
         # Minimal create row, then one batched save for type/MAC/VLAN/description so branch
         # Diff shows all scalar deltas together (multiple saves in one tx often collapse in UI).
@@ -2403,8 +2793,15 @@ def apply_create_interface(op: dict[str, Any]) -> tuple[str, str]:
     if _interface_apply_role_tag_changelog(iface, role_label):
         changed = True
     ip_vrf = _vrf_for_ip_from_row_cells(cells)
-    if ip_blob and _assign_ips_to_interface(iface, ip_blob, ip_vrf):
-        changed = True
+    if ip_blob:
+        ip_ch, ip_tok, ip_parse = _assign_ips_to_interface(iface, ip_blob, ip_vrf)
+        if ip_tok and not ip_parse:
+            return _skip_missing_prereq(
+                f'Cannot apply IP address(es) for device "{host}" interface "{if_name}": '
+                f"no valid IP parsed from row (MAAS IPs / OS runtime IP / Proposed Action)."
+            )
+        if ip_ch:
+            changed = True
     if changed:
         return "updated", "ok_updated"
     return "skipped", "skipped_already_desired"
@@ -2424,6 +2821,13 @@ def apply_update_interface(op: dict[str, Any]) -> tuple[str, str]:
     role_label = _cell(cells, "NB Proposed intf Label")
     if not host:
         return _skip_missing_prereq("NIC drift row missing Host.")
+    mac_intent = _nic_mac_intent_raw(cells, include_nb_fallback=True)
+    if mac_intent and not mac:
+        mac_tail = "…" if len(mac_intent) > 80 else ""
+        return _skip_missing_prereq(
+            f'Cannot apply MAC for NIC drift row (device "{host}"): '
+            f"value is not a valid Ethernet MAC ({mac_intent[:80]!r}{mac_tail})."
+        )
     dev = Device.objects.filter(name=host).first()
     if not dev:
         return _skip_missing_prereq(f'Device "{host}" not found in NetBox.')
@@ -2436,7 +2840,13 @@ def apply_update_interface(op: dict[str, Any]) -> tuple[str, str]:
         return _skip_missing_prereq(
             f'No interface on device "{host}" matching NB intf "{nb_name}" or MAAS intf "{ma_name}".'
         )
-    untagged = _resolve_vlan_for_device(dev, vid) if vid else None
+    untagged = _resolve_untagged_vlan_for_apply(dev, iface, vid)
+    if vid is not None and untagged is None:
+        try:
+            vnum = int(vid)
+        except (TypeError, ValueError):
+            return _skip_missing_prereq(f"Invalid VLAN id in row for device {host!r}.")
+        return _skip_untagged_vlan_unresolved(host, vnum)
     if_desc = _interface_description_from_cells(cells)
     changed = _interface_scrub_audit_description_stepwise(iface)
     changed |= _interface_apply_physical_fields_batched(
@@ -2449,7 +2859,13 @@ def apply_update_interface(op: dict[str, Any]) -> tuple[str, str]:
     if _interface_apply_role_tag_changelog(iface, role_label):
         changed = True
     ip_vrf = _vrf_for_ip_from_row_cells(cells)
-    if ip_blob and _assign_ips_to_interface(iface, ip_blob, ip_vrf):
+    ip_ch, ip_tok, ip_parse = _assign_ips_to_interface(iface, ip_blob or "", ip_vrf)
+    if ip_tok and not ip_parse:
+        return _skip_missing_prereq(
+            f'Cannot apply IP address(es) for device "{host}" (NIC drift): '
+            f"no valid IP parsed from row (MAAS IPs / OS runtime IP / NB IPs / Proposed Action)."
+        )
+    if ip_ch:
         changed = True
     if changed:
         return "updated", "ok_updated"
@@ -2517,7 +2933,7 @@ def _bmc_apply(op: dict[str, Any], *, existing_oob: bool) -> tuple[str, str]:
             _normalize_ip_for_netbox(raw.split()[0])
     except Exception:
         return "failed", "failed_validation_bad_ip"
-    ip_changed = _assign_ips_to_interface(iface, combined_blob, ip_vrf)
+    ip_changed, _, _ = _assign_ips_to_interface(iface, combined_blob, ip_vrf)
     desc_changed = False
     if not created and _scrub_interface_drift_audit_description(iface):
         desc_changed = True
@@ -2736,6 +3152,9 @@ def _netbox_preview_source_header_norms(selection_key: str) -> frozenset[str] | 
             "MAAS IPs",
             "OS runtime IP",
             "NB IPs",
+            "Parsed MAC",
+            "Parsed untagged VLAN",
+            "Parsed IPs",
         )
     if sk == "detail_bmc_new_devices":
         return _header_norms(

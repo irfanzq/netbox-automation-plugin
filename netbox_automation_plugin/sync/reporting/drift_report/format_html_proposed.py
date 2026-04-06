@@ -62,7 +62,11 @@ def emit_proposed_change_tables(e, prop):
     e.spacer()
     e.banner("PROPOSED CHANGES", "-")
     e.paragraph(
-        "Read-only. Possible NetBox updates from OpenStack runtime (authoritative when present) with MAAS fallback where OpenStack data is missing."
+        "Read-only. Possible NetBox updates from OpenStack runtime (authoritative when present) with MAAS fallback where OpenStack data is missing. "
+        "The **Proposed Action** column uses a ``SET_NETBOX_*`` vocabulary: interface rows use "
+        "``SET_NETBOX_MAC`` / ``SET_NETBOX_UNTAGGED_VLAN`` / ``SET_NETBOX_IP``; workflow rows use "
+        "``SET_NETBOX_ACTION=…`` or ``SET_NETBOX_WORKFLOW=…`` (reconciliation matches rows by table "
+        "selection key, not by parsing these tokens)."
     )
     e.spacer()
 
