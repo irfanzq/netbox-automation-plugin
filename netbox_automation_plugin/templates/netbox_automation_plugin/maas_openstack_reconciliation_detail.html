@@ -12,7 +12,7 @@
         <div class="d-flex flex-wrap gap-1">
           <a href="{% url 'plugins:netbox_automation_plugin:maas_openstack_reconciliation_runs' %}" class="btn btn-outline-secondary btn-sm">{% trans "All runs" %}</a>
           {% if run.drift_run_id %}
-            <a href="{% url 'plugins:netbox_automation_plugin:maas_openstack_sync_run_detail' run.drift_run_id %}" class="btn btn-outline-secondary btn-sm" title="{% trans 'Large HTML drift audit for this run; reconciliation preview is on this page below.' %}">{% trans "Source drift audit" %} #{{ run.drift_run_id }}</a>
+            <a href="{% url 'plugins:netbox_automation_plugin:maas_openstack_sync_run_detail' run.drift_run_id %}?audit=1" class="btn btn-outline-secondary btn-sm" title="{% trans 'Full INVENTORY and proposed-changes HTML for this audit run.' %}">{% trans "Source drift audit" %} #{{ run.drift_run_id }}</a>
           {% endif %}
         </div>
       </h5>
@@ -36,6 +36,9 @@
             <dd class="col-sm-9 text-danger text-break">{{ run.error_message }}</dd>
           {% endif %}
         </dl>
+        <p class="text-body-secondary small mb-0 mt-2">
+          {% blocktrans trimmed %}NetBox Branching’s branch changelog lists field deltas, not every attribute on every touched object; the tables below are the full write preview for this run.{% endblocktrans %}
+        </p>
       </div>
     </div>
 

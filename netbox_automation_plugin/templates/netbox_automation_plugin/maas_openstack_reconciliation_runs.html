@@ -41,7 +41,7 @@
                     <td><span class="badge text-bg-secondary">{{ r.get_status_display }}</span></td>
                     <td>
                       {% if r.drift_run_id %}
-                        <a href="{% url 'plugins:netbox_automation_plugin:maas_openstack_sync_run_detail' r.drift_run_id %}">{{ r.drift_run_id }}</a>
+                        <a href="{% url 'plugins:netbox_automation_plugin:maas_openstack_sync_run_detail' r.drift_run_id %}?audit=1">{{ r.drift_run_id }}</a>
                       {% else %}—{% endif %}
                     </td>
                     <td class="text-monospace small">{{ r.branch_name|default:"—" }}</td>

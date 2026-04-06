@@ -78,8 +78,12 @@ class NetBoxAutomationPluginConfig(PluginConfig):
         from netbox_automation_plugin.integrations.netbox_branching_router_patch import (
             apply_branch_router_objectchange_write_patch,
         )
+        from netbox_automation_plugin.integrations.branching_diff_object_column_patch import (
+            apply_branching_diff_object_column_patch,
+        )
 
         apply_branch_router_objectchange_write_patch()
+        apply_branching_diff_object_column_patch()
 
 
 config = NetBoxAutomationPluginConfig

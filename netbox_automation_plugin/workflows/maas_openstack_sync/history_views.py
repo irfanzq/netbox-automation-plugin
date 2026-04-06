@@ -5,7 +5,7 @@ from datetime import date, timedelta
 from django.contrib.auth.mixins import LoginRequiredMixin
 from django.db.models import Q
 from django.http import HttpResponse, JsonResponse
-from django.shortcuts import get_object_or_404, render
+from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
 from django.utils import timezone
 from django.views import View
@@ -242,6 +242,17 @@ class MAASOpenStackSyncRunDetailView(LoginRequiredMixin, View):
             .order_by("-created")
             .only("pk", "status", "branch_name", "created")[:25]
         )
+
+        audit_only = (request.GET.get("audit") or "").strip().lower() in (
+            "1",
+            "true",
+            "yes",
+        )
+        if reconciliation_runs and not want_modified and not audit_only:
+            return redirect(
+                "plugins:netbox_automation_plugin:maas_openstack_reconciliation_detail",
+                pk=reconciliation_runs[0].pk,
+            )
 
         return render(
             request,

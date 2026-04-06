@@ -129,7 +129,7 @@
       </div>
       <div class="card-body py-2 small">
         <p class="text-body-secondary mb-2">
-          {% blocktrans trimmed %}These links open the reconciliation run page (NetBox write preview and apply results). The report below is the drift audit HTML, not the reconciliation layout.{% endblocktrans %}
+          {% blocktrans trimmed %}Use the links below for the reconciliation page (NetBox write preview and apply results). From drift history, this drift run redirects to the newest reconciliation unless you append ?audit=1 or use View modified. The large report card is the saved drift audit HTML.{% endblocktrans %}
         </p>
         <ul class="list-unstyled mb-0">
           {% for rr in reconciliation_runs %}
