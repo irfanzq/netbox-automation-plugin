@@ -1,0 +1,86 @@
+{% load i18n %}
+{% if apply_results.summary %}
+  <div class="card mb-3">
+    <h5 class="card-header">{% trans "Latest apply summary" %}</h5>
+    <div class="card-body py-2">
+      <div class="row g-2 small">
+        <div class="col-md-2"><strong>{% trans "Attempted" %}:</strong> {{ apply_results.summary.attempted|default:0 }}</div>
+        <div class="col-md-2"><strong>{% trans "Created" %}:</strong> {{ apply_results.summary.created|default:0 }}</div>
+        <div class="col-md-2"><strong>{% trans "Updated" %}:</strong> {{ apply_results.summary.updated|default:0 }}</div>
+        <div class="col-md-2"><strong>{% trans "Skipped" %}:</strong> {{ apply_results.summary.skipped|default:0 }}</div>
+        <div class="col-md-2"><strong>{% trans "Failed" %}:</strong> {{ apply_results.summary.failed|default:0 }}</div>
+        <div class="col-md-2"><strong>{% trans "Retry only" %}:</strong> {{ apply_results.retry_failed_only|yesno:"yes,no" }}</div>
+      </div>
+      {% if apply_results.summary.first_failed_exception %}
+        <div class="alert alert-warning small mb-0 mt-3">
+          <strong>{% trans "First exception (per-row savepoints isolate later rows)" %}</strong>
+          <div class="mt-1 font-monospace">
+            {{ apply_results.summary.first_failed_exception.exception_type|default:"—" }}:
+            {{ apply_results.summary.first_failed_exception.exception_message|default:"—" }}
+          </div>
+          <div class="text-body-secondary mt-1">
+            {{ apply_results.summary.first_failed_exception.summary|default:"" }}
+            <span class="text-muted">({{ apply_results.summary.first_failed_exception.selection_key|default:"—" }})</span>
+          </div>
+        </div>
+      {% endif %}
+    </div>
+  </div>
+{% endif %}
+
+{% if apply_results.rows %}
+  <div class="card mb-3">
+    <h5 class="card-header">{% trans "Apply row results" %}</h5>
+    <div class="card-body p-0">
+      <div class="table-responsive">
+        <table class="table table-sm table-striped mb-0">
+          <thead>
+            <tr>
+              <th>{% trans "Status" %}</th>
+              <th>{% trans "Reason" %}</th>
+              <th>{% trans "Row key" %}</th>
+              <th>{% trans "Section" %}</th>
+              <th>{% trans "Action" %}</th>
+              <th>{% trans "Summary" %}</th>
+              <th>{% trans "NetBox write (preview)" %}</th>
+              <th>{% trans "Detail (exceptions, skip reasons)" %}</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for row in apply_results.rows %}
+              <tr>
+                <td class="small"><span class="badge text-bg-secondary">{{ row.status|default:"—" }}</span></td>
+                <td class="small text-monospace">{{ row.reason|default:"—" }}</td>
+                <td class="small text-monospace text-break">{{ row.row_key|default:"—" }}</td>
+                <td class="small text-monospace">{{ row.selection_key|default:"—" }}</td>
+                <td class="small">{{ row.action|default:"—" }}</td>
+                <td class="small">{{ row.summary|default:"—" }}</td>
+                <td class="small text-break font-monospace" style="min-width: 14rem; max-width: 36rem;">{% if row.write_preview %}{{ row.write_preview }}{% else %}—{% endif %}</td>
+                <td class="small text-break font-monospace">
+                  {% if row.reason_detail %}
+                    {{ row.reason_detail }}
+                  {% elif row.exception_type or row.exception_message %}
+                    {{ row.exception_type|default:"" }}{% if row.exception_type and row.exception_message %}: {% endif %}{{ row.exception_message|default:"" }}
+                  {% else %}
+                    —
+                  {% endif %}
+                </td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+  <div class="card mb-3 border-info">
+    <h5 class="card-header">{% trans "Apply log (plain text)" %}</h5>
+    <div class="card-body p-0">
+      <pre class="small mb-0 p-3 bg-body-secondary text-break font-monospace" style="max-height: 50vh; overflow: auto;">{% for row in apply_results.rows %}[{{ row.status|default:"?" }}] section={{ row.selection_key|default:"" }} action={{ row.action|default:"" }} row_key={{ row.row_key|default:"" }}
+  reason={{ row.reason|default:"" }}{% if row.reason_detail %} | {{ row.reason_detail }}{% elif row.exception_message %} | {{ row.exception_type }}: {{ row.exception_message }}{% endif %}
+  netbox_fields={{ row.write_preview|default:"—" }}
+{% endfor %}</pre>
+    </div>
+  </div>
+{% elif not apply_results.summary %}
+  <div class="alert alert-secondary mb-0">{% trans "No apply has been recorded for this run yet. Use Apply on the reconciliation run page; you will be redirected here when apply finishes." %}</div>
+{% endif %}

@@ -31,6 +31,8 @@ from netbox_automation_plugin.sync.reconciliation.netbox_write_projection import
 logger = logging.getLogger(__name__)
 
 _VID_FROM_PARENS_RE = re.compile(r"\((\d+)\)\s*$")
+# Log once per model if snapshot() is missing (branch Diff will lack field deltas).
+_SNAPSHOT_MISSING_LOGGED: set[str] = set()
 
 # Actions with real NetBox writers (extend as handlers are filled in).
 SUPPORTED_APPLY_ACTIONS: frozenset[str] = frozenset(
@@ -115,14 +117,24 @@ def _netbox_changelog_snapshot(instance: Any) -> None:
     MAC/VLAN/IP-style fields look missing while tags still appear.
 
     For **creates**, a single ``save()`` with every field often yields a branch row with an
-    empty Difference column; prefer a minimal first ``save()``, then **separate**
-    ``snapshot()`` + ``save()`` cycles per field or small group (prefix/device/interface/VM
-    apply paths use stepwise updates) so netbox-branching lists each attribute in the diff.
+    empty Difference column; prefer a minimal first ``save()``, then follow-up updates.
+
+    Interface **scalar** fields (MAC, untagged VLAN, type, description) are applied in **one**
+    ``snapshot()`` + ``save()`` per reconciliation row so branch Diff shows every changed
+    field in one delta; multiple Interface saves in the same DB transaction are often
+    collapsed in the Diff UI to a single sparse row (e.g. tags only).
 
     Ref: https://github.com/netboxlabs/netbox-branching/discussions/51
     """
     fn = getattr(instance, "snapshot", None)
     if not callable(fn):
+        key = type(instance).__name__
+        if key not in _SNAPSHOT_MISSING_LOGGED:
+            _SNAPSHOT_MISSING_LOGGED.add(key)
+            logger.warning(
+                "NetBox change logging: %s has no snapshot(); branch Diff may omit field deltas for plugin ORM writes.",
+                key,
+            )
         return
     try:
         fn()
@@ -491,31 +503,94 @@ def _interface_scrub_audit_description_stepwise(iface: Any) -> bool:
     return True
 
 
-def _interface_apply_physical_fields_stepwise(
+def _interface_description_max_len() -> int:
+    try:
+        from dcim.models import Interface
+
+        f = Interface._meta.get_field("description")
+        ml = getattr(f, "max_length", None)
+        return int(ml) if ml else 200
+    except Exception:
+        return 200
+
+
+def _interface_description_from_cells(cells: dict[str, str]) -> str:
+    return (
+        _cell(
+            cells,
+            "Description",
+            "NB proposed description",
+            "NB intf description",
+            "Interface description",
+        )
+        or ""
+    ).strip()
+
+
+def _interface_refresh_safe(iface: Any) -> None:
+    try:
+        iface.refresh_from_db()
+    except Exception:
+        logger.debug(
+            "interface refresh_from_db failed (pk=%s)",
+            getattr(iface, "pk", None),
+            exc_info=True,
+        )
+
+
+def _interface_apply_physical_fields_batched(
     iface: Any,
     *,
     mac: str,
     untagged: Any,
     type_slug: Any,
+    description: str = "",
 ) -> bool:
-    """MAC, untagged VLAN, and type each get their own netbox-branching delta when changed."""
-    any_save = False
+    """
+    One ``snapshot()`` + one ``save()`` for MAC, untagged VLAN, type, and description.
+
+    Several netbox-branching Diff UIs collapse multiple Interface saves that occur in the
+    same database transaction into a single row, often showing only the last mutation (e.g.
+    tags). Batching scalar fields yields one ObjectChange that includes every changed core
+    field, aligned with recon apply lines (MAC / VLAN / type / description).
+    """
+    _interface_refresh_safe(iface)
+    _netbox_changelog_snapshot(iface)
+    changed = False
     if mac and str(iface.mac_address or "").upper() != mac.upper():
-        _netbox_changelog_snapshot(iface)
         iface.mac_address = mac
-        iface.save()
-        any_save = True
+        changed = True
     if untagged is not None and iface.untagged_vlan_id != untagged.pk:
-        _netbox_changelog_snapshot(iface)
         iface.untagged_vlan = untagged
-        iface.save()
-        any_save = True
+        changed = True
     if type_slug is not None and getattr(iface, "type", None) != type_slug:
-        _netbox_changelog_snapshot(iface)
         iface.type = type_slug
+        changed = True
+    ds = (description or "").strip()
+    if ds and hasattr(iface, "description"):
+        ml = _interface_description_max_len()
+        if len(ds) > ml:
+            ds = ds[: max(ml - 3, 0)] + "..."
+        cur = (getattr(iface, "description", None) or "").strip()
+        if cur != ds:
+            iface.description = ds
+            changed = True
+    if changed:
         iface.save()
-        any_save = True
-    return any_save
+    return changed
+
+
+def _interface_apply_role_tag_changelog(iface: Any, role_label: str | None) -> bool:
+    """``snapshot()`` before M2M tag add, then ``save()`` so branch Diff records tag deltas."""
+    rl = str(role_label or "").strip()
+    if not rl or not hasattr(iface, "tags"):
+        return False
+    _interface_refresh_safe(iface)
+    _netbox_changelog_snapshot(iface)
+    if not _merge_interface_role_tag(iface, rl):
+        return False
+    iface.save()
+    return True
 
 
 def _merge_audit_residual_onto_object(
@@ -998,28 +1073,48 @@ def apply_create_prefix(op: dict[str, Any]) -> tuple[str, str]:
         obj.save()
     except Exception:
         logger.debug(
-            "Prefix two-phase create fell back to single save (prefix=%s)",
+            "Prefix two-phase create: initial minimal save failed; retry minimal then stepwise or single save (prefix=%s)",
             cidr,
             exc_info=True,
         )
         pfx = Prefix(prefix=cidr, vrf=vrf)
-        if status_name:
-            val = _pick_choice_value(pfx._meta.get_field("status"), status_name)
-            if val is not None:
-                pfx.status = val
-        if role is not None:
-            pfx.role = role
-        if tenant is not None and hasattr(pfx, "tenant"):
-            pfx.tenant = tenant
-        if scope_obj is not None and hasattr(pfx, "scope"):
-            pfx.scope = scope_obj
-        if vlan_obj is not None and hasattr(pfx, "vlan"):
-            pfx.vlan = vlan_obj
-        if hasattr(pfx, "description"):
-            pfx.description = full_descr
-        _merge_prefix_row_into_custom_fields(pfx, cells)
-        pfx.save()
-        # Rare path: one-shot create; branch diff may stay thin vs stepwise minimal+field saves.
+        try:
+            pfx.save()
+        except Exception:
+            logger.debug(
+                "Prefix minimal save failed again; single create with all fields (prefix=%s)",
+                cidr,
+                exc_info=True,
+            )
+            pfx = Prefix(prefix=cidr, vrf=vrf)
+            if status_name:
+                val = _pick_choice_value(pfx._meta.get_field("status"), status_name)
+                if val is not None:
+                    pfx.status = val
+            if role is not None:
+                pfx.role = role
+            if tenant is not None and hasattr(pfx, "tenant"):
+                pfx.tenant = tenant
+            if scope_obj is not None and hasattr(pfx, "scope"):
+                pfx.scope = scope_obj
+            if vlan_obj is not None and hasattr(pfx, "vlan"):
+                pfx.vlan = vlan_obj
+            if hasattr(pfx, "description"):
+                pfx.description = full_descr
+            _merge_prefix_row_into_custom_fields(pfx, cells)
+            pfx.save()
+            return "created", "ok_created"
+        _prefix_apply_row_stepwise_changelog(
+            pfx,
+            vrf=None,
+            status_name=status_name,
+            role=role,
+            tenant=tenant,
+            scope_obj=scope_obj,
+            vlan_obj=vlan_obj,
+            full_descr=full_descr,
+            cells=cells,
+        )
         return "created", "ok_created"
 
     _prefix_apply_row_stepwise_changelog(
@@ -1109,23 +1204,48 @@ def apply_create_ip_range(op: dict[str, Any]) -> tuple[str, str]:
         obj.save()
     except Exception:
         logger.debug(
-            "IPRange two-phase create fell back to single save (%s–%s)",
+            "IPRange two-phase create: initial minimal save failed; retry minimal then field saves or single save (%s–%s)",
             start_addr,
             end_addr,
             exc_info=True,
         )
         rng = IPRange(start_address=start_addr, end_address=end_addr, vrf=vrf)
+        try:
+            rng.save()
+        except Exception:
+            logger.debug(
+                "IPRange minimal save failed again; single create with all fields (%s–%s)",
+                start_addr,
+                end_addr,
+                exc_info=True,
+            )
+            rng = IPRange(start_address=start_addr, end_address=end_addr, vrf=vrf)
+            if status_name:
+                val = _pick_choice_value(rng._meta.get_field("status"), status_name)
+                if val is not None:
+                    rng.status = val
+            if role is not None and hasattr(rng, "role"):
+                rng.role = role
+            if descr and hasattr(rng, "description"):
+                rng.description = descr[:2000]
+            rng.save()
+            return "created", "ok_created"
+        _netbox_changelog_snapshot(rng)
+        phase2_fb = False
         if status_name:
             val = _pick_choice_value(rng._meta.get_field("status"), status_name)
             if val is not None:
                 rng.status = val
+                phase2_fb = True
         if role is not None and hasattr(rng, "role"):
             rng.role = role
+            phase2_fb = True
         if descr and hasattr(rng, "description"):
             rng.description = descr[:2000]
-        rng.save()
-        _netbox_changelog_snapshot(rng)
+            phase2_fb = True
         if _merge_audit_residual_onto_object(rng, cells, consumed, attr_names=("description",), max_len=4000):
+            phase2_fb = True
+        if phase2_fb:
             rng.save()
         return "created", "ok_created"
 
@@ -1469,29 +1589,50 @@ def apply_create_floating_ip(op: dict[str, Any]) -> tuple[str, str]:
         ip_obj.save()
     except Exception:
         logger.debug(
-            "Floating IP two-phase create fell back to single save (address=%s)",
+            "Floating IP two-phase create: initial minimal save failed; retry minimal then stepwise or single save (address=%s)",
             address,
             exc_info=True,
         )
         ip_fb = IPAddress(address=address, vrf=vrf)
-        if status_name:
-            val = _pick_choice_value(ip_fb._meta.get_field("status"), status_name)
-            if val is not None:
-                ip_fb.status = val
-        if role_obj is not None and hasattr(ip_fb, "role"):
-            ip_fb.role = role_obj
-        if tenant_obj is not None and hasattr(ip_fb, "tenant"):
-            ip_fb.tenant = tenant_obj
-        if hasattr(ip_fb, "description"):
-            ip_fb.description = full_descr
-        _apply_fip_nat_inside(ip_fb, cells, vrf)
-        _merge_ip_address_row_into_custom_fields(ip_fb, cells)
-        ip_fb.save()
-        _netbox_changelog_snapshot(ip_fb)
-        if _merge_audit_residual_onto_object(
-            ip_fb, cells, consumed, attr_names=("description",), max_len=max(dmax, 8000)
-        ):
+        try:
             ip_fb.save()
+        except Exception:
+            logger.debug(
+                "Floating IP minimal save failed again; single create with all fields (address=%s)",
+                address,
+                exc_info=True,
+            )
+            ip_fb = IPAddress(address=address, vrf=vrf)
+            if status_name:
+                val = _pick_choice_value(ip_fb._meta.get_field("status"), status_name)
+                if val is not None:
+                    ip_fb.status = val
+            if role_obj is not None and hasattr(ip_fb, "role"):
+                ip_fb.role = role_obj
+            if tenant_obj is not None and hasattr(ip_fb, "tenant"):
+                ip_fb.tenant = tenant_obj
+            if hasattr(ip_fb, "description"):
+                ip_fb.description = full_descr
+            _apply_fip_nat_inside(ip_fb, cells, vrf)
+            _merge_ip_address_row_into_custom_fields(ip_fb, cells)
+            ip_fb.save()
+            if _merge_audit_residual_onto_object(
+                ip_fb, cells, consumed, attr_names=("description",), max_len=max(dmax, 8000)
+            ):
+                ip_fb.save()
+            return "created", "ok_created"
+        _floating_ip_apply_row_stepwise(
+            ip_fb,
+            status_name=status_name,
+            role_obj=role_obj,
+            tenant_obj=tenant_obj,
+            full_descr=full_descr,
+            cells=cells,
+            vrf=vrf,
+        )
+        _merge_audit_residual_onto_object(
+            ip_fb, cells, consumed, attr_names=("description",), max_len=max(dmax, 8000)
+        )
         return "created", "ok_created"
 
     _floating_ip_apply_row_stepwise(
@@ -2144,11 +2285,28 @@ def _assign_ips_to_interface(iface, ip_blob: str, vrf) -> bool:
                 ip_obj.save()
             except Exception:
                 logger.debug(
-                    "IPAddress two-phase create fell back to single save (address=%s)",
+                    "IPAddress two-phase create: initial minimal save failed; retry minimal then assign or single save (address=%s)",
                     addr,
                     exc_info=True,
                 )
                 ip_fb = IPAddress(address=addr, vrf=vrf)
+                try:
+                    ip_fb.save()
+                except Exception:
+                    logger.debug(
+                        "IPAddress minimal save failed again; single create+assign (address=%s)",
+                        addr,
+                        exc_info=True,
+                    )
+                    ip_fb2 = IPAddress(address=addr, vrf=vrf)
+                    if hasattr(ip_fb2, "assigned_object"):
+                        ip_fb2.assigned_object = iface
+                    elif hasattr(ip_fb2, "interface"):
+                        ip_fb2.interface = iface
+                    ip_fb2.save()
+                    changed = True
+                    continue
+                _netbox_changelog_snapshot(ip_fb)
                 if hasattr(ip_fb, "assigned_object"):
                     ip_fb.assigned_object = iface
                 elif hasattr(ip_fb, "interface"):
@@ -2216,37 +2374,33 @@ def apply_create_interface(op: dict[str, Any]) -> tuple[str, str]:
             dev.save()
     iface = Interface.objects.filter(device=dev, name=if_name).first()
     untagged = _resolve_vlan_for_device(dev, vid) if vid else None
+    if_desc = _interface_description_from_cells(cells)
     if iface is None:
-        # Structural create first; MAC/VLAN/type each get their own branching delta when changed.
-        iface = Interface(
-            device=dev,
-            name=if_name,
-            type=type_slug if type_slug is not None else _iface_type_default(),
-        )
+        # Minimal create row, then one batched save for type/MAC/VLAN/description so branch
+        # Diff shows all scalar deltas together (multiple saves in one tx often collapse in UI).
+        iface = Interface(device=dev, name=if_name, type=_iface_type_default())
         iface.save()
-        _interface_apply_physical_fields_stepwise(
-            iface, mac=mac or "", untagged=untagged, type_slug=type_slug
+        _interface_apply_physical_fields_batched(
+            iface,
+            mac=mac or "",
+            untagged=untagged,
+            type_slug=type_slug,
+            description=if_desc,
         )
-        tag_ch = False
-        if role_label and hasattr(iface, "tags"):
-            tag_ch = _merge_interface_role_tag(iface, role_label)
-        if tag_ch:
-            _netbox_changelog_snapshot(iface)
-            iface.save()
+        _interface_apply_role_tag_changelog(iface, role_label)
         ip_vrf = _vrf_for_ip_from_row_cells(cells)
         if ip_blob:
             _assign_ips_to_interface(iface, ip_blob, ip_vrf)
         return "created", "ok_created"
     changed = _interface_scrub_audit_description_stepwise(iface)
-    changed |= _interface_apply_physical_fields_stepwise(
-        iface, mac=mac or "", untagged=untagged, type_slug=type_slug
+    changed |= _interface_apply_physical_fields_batched(
+        iface,
+        mac=mac or "",
+        untagged=untagged,
+        type_slug=type_slug,
+        description=if_desc,
     )
-    tag_ch = False
-    if role_label and hasattr(iface, "tags"):
-        tag_ch = _merge_interface_role_tag(iface, role_label)
-    if tag_ch:
-        _netbox_changelog_snapshot(iface)
-        iface.save()
+    if _interface_apply_role_tag_changelog(iface, role_label):
         changed = True
     ip_vrf = _vrf_for_ip_from_row_cells(cells)
     if ip_blob and _assign_ips_to_interface(iface, ip_blob, ip_vrf):
@@ -2283,16 +2437,16 @@ def apply_update_interface(op: dict[str, Any]) -> tuple[str, str]:
             f'No interface on device "{host}" matching NB intf "{nb_name}" or MAAS intf "{ma_name}".'
         )
     untagged = _resolve_vlan_for_device(dev, vid) if vid else None
+    if_desc = _interface_description_from_cells(cells)
     changed = _interface_scrub_audit_description_stepwise(iface)
-    changed |= _interface_apply_physical_fields_stepwise(
-        iface, mac=mac or "", untagged=untagged, type_slug=type_slug
+    changed |= _interface_apply_physical_fields_batched(
+        iface,
+        mac=mac or "",
+        untagged=untagged,
+        type_slug=type_slug,
+        description=if_desc,
     )
-    tag_ch = False
-    if role_label and hasattr(iface, "tags"):
-        tag_ch = _merge_interface_role_tag(iface, role_label)
-    if tag_ch:
-        _netbox_changelog_snapshot(iface)
-        iface.save()
+    if _interface_apply_role_tag_changelog(iface, role_label):
         changed = True
     ip_vrf = _vrf_for_ip_from_row_cells(cells)
     if ip_blob and _assign_ips_to_interface(iface, ip_blob, ip_vrf):
@@ -2334,29 +2488,25 @@ def _bmc_apply(op: dict[str, Any], *, existing_oob: bool) -> tuple[str, str]:
         return _skip_missing_prereq(f'Device "{host}" not found in NetBox.')
     iface = Interface.objects.filter(device=dev, name=if_name).first()
     if iface is None:
-        iface = Interface(
-            device=dev,
-            name=if_name,
-            type=type_slug if type_slug is not None else _iface_type_default(),
-        )
+        iface = Interface(device=dev, name=if_name, type=_iface_type_default())
         iface.save()
-        _netbox_changelog_snapshot(iface)
-        if bmc_mac:
-            iface.mac_address = bmc_mac
-            iface.save()
+        _interface_apply_physical_fields_batched(
+            iface,
+            mac=bmc_mac or "",
+            untagged=None,
+            type_slug=type_slug,
+            description="",
+        )
         created = True
     else:
         created = False
-        _netbox_changelog_snapshot(iface)
-        ch = False
-        if bmc_mac and str(iface.mac_address or "").upper() != bmc_mac.upper():
-            iface.mac_address = bmc_mac
-            ch = True
-        if type_slug is not None and getattr(iface, "type", None) != type_slug:
-            iface.type = type_slug
-            ch = True
-        if ch:
-            iface.save()
+        _interface_apply_physical_fields_batched(
+            iface,
+            mac=bmc_mac or "",
+            untagged=None,
+            type_slug=type_slug,
+            description="",
+        )
     ip_vrf = _vrf_for_ip_from_row_cells(cells)
     combined_blob = (
         " ".join(x for x in (bmc_ip_maas, bmc_ip_os, bmc_ip_nb) if (x or "").strip())
@@ -2371,12 +2521,7 @@ def _bmc_apply(op: dict[str, Any], *, existing_oob: bool) -> tuple[str, str]:
     desc_changed = False
     if not created and _scrub_interface_drift_audit_description(iface):
         desc_changed = True
-    tag_ch = False
-    if role_label and hasattr(iface, "tags"):
-        tag_ch = _merge_interface_role_tag(iface, role_label)
-    if tag_ch:
-        _netbox_changelog_snapshot(iface)
-        iface.save()
+    tag_ch = _interface_apply_role_tag_changelog(iface, role_label)
     if desc_changed:
         _netbox_changelog_snapshot(iface)
         iface.save()

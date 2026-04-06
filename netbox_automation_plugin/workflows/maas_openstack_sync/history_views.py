@@ -3,7 +3,7 @@ import logging
 from datetime import date, timedelta
 
 from django.contrib.auth.mixins import LoginRequiredMixin
-from django.db.models import Q
+from django.db.models import OuterRef, Q, Subquery
 from django.http import HttpResponse, JsonResponse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
@@ -158,6 +158,13 @@ class MAASOpenStackSyncRunsView(LoginRequiredMixin, View):
             selected_location_key_set,
             location_meta,
         )
+        # Newest reconciliation per drift run — drives history links (Reconciliation vs saved audit).
+        _rcn_sq = (
+            MAASOpenStackReconciliationRun.objects.filter(drift_run_id=OuterRef("pk"))
+            .order_by("-created")
+            .values("pk")[:1]
+        )
+        runs = runs.annotate(latest_reconciliation_pk=Subquery(_rcn_sq))
 
         table = MAASOpenStackDriftRunTable(runs, orderable=True)
         RequestConfig(request, paginate={"per_page": 25}).configure(table)
@@ -243,12 +250,15 @@ class MAASOpenStackSyncRunDetailView(LoginRequiredMixin, View):
             .only("pk", "status", "branch_name", "created")[:25]
         )
 
+        # Open saved drift HTML only when explicitly requesting the audit trail (?audit=1).
+        # Do not block redirect for ?view=modified — that was breaking history "View modified"
+        # (users stayed on the giant HTML page instead of reconciliation).
         audit_only = (request.GET.get("audit") or "").strip().lower() in (
             "1",
             "true",
             "yes",
         )
-        if reconciliation_runs and not want_modified and not audit_only:
+        if reconciliation_runs and not audit_only:
             return redirect(
                 "plugins:netbox_automation_plugin:maas_openstack_reconciliation_detail",
                 pk=reconciliation_runs[0].pk,

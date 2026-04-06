@@ -81,12 +81,20 @@ def netbox_write_projection_cells(selection_key: str, cells: dict[str, str] | No
     def _netbox_write_new_nic_preview(cc: dict[str, str]) -> dict[str, str]:
         mac, vid, ips = ac._interface_mac_vlan_ip_from_cells(cc, include_nb_fallback=False)
         if_name = _cell(cc, "Suggested NB name", "MAAS intf")
+        if_desc = _cell(
+            cc,
+            "Description",
+            "NB proposed description",
+            "NB intf description",
+            "Interface description",
+        )
         return {
             "device": _cell(cc, "Host"),
             "name": if_name,
             "type": _cell(cc, "NB Proposed intf Type"),
             "mac_address": mac or "—",
             "untagged_vlan": str(vid) if vid else "—",
+            "description": if_desc or "—",
             "tags": _cell(cc, "NB Proposed intf Label"),
             "device.site": _cell(cc, "NB site"),
             "device.location": _cell(cc, "NB location"),
@@ -95,12 +103,20 @@ def netbox_write_projection_cells(selection_key: str, cells: dict[str, str] | No
 
     def _netbox_write_nic_drift_preview(cc: dict[str, str]) -> dict[str, str]:
         mac, vid, ip_blob = ac._interface_mac_vlan_ip_from_cells(cc, include_nb_fallback=True)
+        if_desc = _cell(
+            cc,
+            "Description",
+            "NB proposed description",
+            "NB intf description",
+            "Interface description",
+        )
         return {
             "device": _cell(cc, "Host"),
             "name": _cell(cc, "NB intf"),
             "type": _cell(cc, "NB Proposed intf Type"),
             "mac_address": mac or "—",
             "untagged_vlan": str(vid) if vid else "—",
+            "description": if_desc or "—",
             "tags": _cell(cc, "NB Proposed intf Label"),
             "IPAddress.address": ip_blob or "—",
         }

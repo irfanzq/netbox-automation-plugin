@@ -1,0 +1,36 @@
+{% extends 'base/layout.html' %}
+{% load i18n %}
+
+{% block title %}{% trans "Apply results" %} — {% trans "Reconciliation run" %} #{{ run.pk }}{% endblock %}
+
+{% block content %}
+<div class="row">
+  <div class="col">
+    <div class="card mb-3">
+      <h5 class="card-header d-flex flex-wrap align-items-center justify-content-between gap-2">
+        <span>{% trans "Apply results" %} <span class="badge text-bg-secondary">#{{ run.pk }}</span></span>
+        <div class="d-flex flex-wrap gap-1">
+          <a href="{% url 'plugins:netbox_automation_plugin:maas_openstack_reconciliation_runs' %}" class="btn btn-outline-secondary btn-sm">{% trans "All runs" %}</a>
+          {% if run.drift_run_id %}
+            <a href="{% url 'plugins:netbox_automation_plugin:maas_openstack_sync_run_detail' run.drift_run_id %}?audit=1" class="btn btn-outline-secondary btn-sm">{% trans "Source drift audit" %} #{{ run.drift_run_id }}</a>
+          {% endif %}
+        </div>
+      </h5>
+      <div class="card-body py-2">
+        <p class="small text-body-secondary mb-0">
+          {% trans "Status" %}: <span class="badge text-bg-primary">{{ run.get_status_display }}</span>
+          {% if branching_branch_url %}
+            <a class="btn btn-outline-secondary btn-sm ms-2 align-baseline" href="{{ branching_branch_url }}">{% trans "Open branch page" %}</a>
+          {% endif %}
+        </p>
+      </div>
+    </div>
+
+    {% include "netbox_automation_plugin/_reconciliation_page_nav.html" %}
+    {% include "netbox_automation_plugin/_reconciliation_lifecycle_card.html" %}
+    {% include "netbox_automation_plugin/_reconciliation_apply_results_sections.html" %}
+  </div>
+</div>
+<form id="recon-csrf-anchor" class="d-none">{% csrf_token %}</form>
+{% include "netbox_automation_plugin/_reconciliation_lifecycle_script.html" %}
+{% endblock %}

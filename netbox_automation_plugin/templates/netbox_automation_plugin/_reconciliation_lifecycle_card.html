@@ -1,0 +1,17 @@
+{% load i18n %}
+<div class="card mb-3">
+  <h5 class="card-header">{% trans "Lifecycle" %}</h5>
+  <div class="card-body">
+    <p class="text-body-secondary small mb-2">
+      {% blocktrans trimmed %}Apply writes frozen operations into the branch schema only. Discard abandons the run and deletes the NetBox branch when possible; it does not undo individual rows inside an existing branch. Merge to main uses NetBox Branching (not wired here yet).{% endblocktrans %}
+    </p>
+    <div class="d-flex flex-wrap gap-1 align-items-center">
+      <button type="button" class="btn btn-primary btn-sm js-recon-apply js-recon-lifecycle-btn" data-initial-disabled="{% if not can_apply %}true{% else %}false{% endif %}" {% if not can_apply %}disabled{% endif %}>{% trans "Apply selected changes to branch" %}</button>
+      <button type="button" class="btn btn-outline-primary btn-sm js-recon-retry js-recon-lifecycle-btn" data-initial-disabled="{% if not can_retry_failed %}true{% else %}false{% endif %}" {% if not can_retry_failed %}disabled{% endif %}>{% trans "Re-apply failed items" %}</button>
+      <button type="button" class="btn btn-outline-secondary btn-sm" disabled title="{% trans 'Not implemented yet' %}">{% trans "Run validation" %}</button>
+      <button type="button" class="btn btn-outline-secondary btn-sm" disabled title="{% trans 'Not implemented yet' %}">{% trans "Merge to main" %}</button>
+      <button type="button" class="btn btn-outline-danger btn-sm js-recon-discard js-recon-lifecycle-btn" data-initial-disabled="{% if not can_discard %}true{% else %}false{% endif %}" {% if not can_discard %}disabled{% endif %} title="{% trans 'Deletes the branch record in NetBox when possible' %}">{% trans "Discard run" %}</button>
+    </div>
+    <div id="reconApplyMsg" class="small mt-2 text-body-secondary"></div>
+  </div>
+</div>

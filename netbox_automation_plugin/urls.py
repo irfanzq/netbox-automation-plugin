@@ -15,6 +15,7 @@ from .workflows.maas_openstack_sync.history_views import (
     MAASOpenStackSyncRunSaveReviewView,
 )
 from .sync.reconciliation.views import (
+    ReconciliationApplyResultsView,
     ReconciliationApplyView,
     ReconciliationCreateView,
     ReconciliationDiscardView,
@@ -113,6 +114,11 @@ urlpatterns = [
         "maas-openstack-sync/reconciliation/runs/<int:run_id>/",
         ReconciliationRunDetailView.as_view(),
         name="maas_openstack_reconciliation_detail",
+    ),
+    path(
+        "maas-openstack-sync/reconciliation/runs/<int:run_id>/apply-results/",
+        ReconciliationApplyResultsView.as_view(),
+        name="maas_openstack_reconciliation_apply_results",
     ),
     path(
         "maas-openstack-sync/reconciliation/stage/",

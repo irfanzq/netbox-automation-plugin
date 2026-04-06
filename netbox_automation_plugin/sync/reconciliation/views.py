@@ -39,6 +39,53 @@ logger = logging.getLogger(__name__)
 MAAS_RECON_STAGING_SESSION_KEY = "maas_recon_staging_v1"
 
 
+def _reconciliation_run_page_context(
+    run: MAASOpenStackReconciliationRun,
+    *,
+    nav_active: str,
+) -> dict[str, object]:
+    """Shared URLs, flags, and apply_results for reconciliation detail + apply-results pages."""
+    blocked_discard = RECONCILIATION_DISCARD_BLOCKED_STATUSES
+    apply_ok = {
+        MAASOpenStackReconciliationRun.STATUS_BRANCH_CREATED,
+        MAASOpenStackReconciliationRun.STATUS_APPLY_FAILED_PARTIAL,
+        MAASOpenStackReconciliationRun.STATUS_APPLY_FAILED,
+    }
+    apply_results: dict = run.apply_results if isinstance(run.apply_results, dict) else {}
+    detail_url = reverse(
+        "plugins:netbox_automation_plugin:maas_openstack_reconciliation_detail",
+        args=[run.pk],
+    )
+    apply_results_url = reverse(
+        "plugins:netbox_automation_plugin:maas_openstack_reconciliation_apply_results",
+        args=[run.pk],
+    )
+    return {
+        "run": run,
+        "apply_results": apply_results,
+        "apply_url": reverse(
+            "plugins:netbox_automation_plugin:maas_openstack_reconciliation_apply",
+            args=[run.pk],
+        ),
+        "retry_failed_url": reverse(
+            "plugins:netbox_automation_plugin:maas_openstack_reconciliation_retry_failed",
+            args=[run.pk],
+        ),
+        "discard_url": reverse(
+            "plugins:netbox_automation_plugin:maas_openstack_reconciliation_discard",
+            args=[run.pk],
+        ),
+        "recon_detail_url": detail_url,
+        "apply_results_url": apply_results_url,
+        "branching_branch_url": _netbox_branching_branch_url(branch_pk=run.branch_id),
+        "can_discard": run.status not in blocked_discard,
+        "can_apply": run.status in apply_ok,
+        "can_retry_failed": run.status in apply_ok
+        and run.status != MAASOpenStackReconciliationRun.STATUS_BRANCH_CREATED,
+        "nav_active": nav_active,
+    }
+
+
 def _reconciliation_toast_error(title: str, detail: str):
     """
     NetBox renders django messages in toasts via ``{{ message }}`` without ``linebreaksbr``,
@@ -206,12 +253,6 @@ class ReconciliationRunDetailView(LoginRequiredMixin, View):
             MAASOpenStackReconciliationRun.objects.select_related("drift_run", "created_by"),
             pk=run_id,
         )
-        blocked_discard = RECONCILIATION_DISCARD_BLOCKED_STATUSES
-        apply_ok = {
-            MAASOpenStackReconciliationRun.STATUS_BRANCH_CREATED,
-            MAASOpenStackReconciliationRun.STATUS_APPLY_FAILED_PARTIAL,
-            MAASOpenStackReconciliationRun.STATUS_APPLY_FAILED,
-        }
         raw_frozen_list = run.frozen_operations if isinstance(run.frozen_operations, list) else []
         frozen_ops = frozen_operations_for_display(raw_frozen_list)
         ops_for_tables = [
@@ -228,36 +269,29 @@ class ReconciliationRunDetailView(LoginRequiredMixin, View):
         operation_tables = group_reconciliation_operation_tables(ops_for_tables)
         apply_snapshot_ops = frozen_operations_apply_snapshots(raw_frozen_list)
         apply_snapshot_tables = group_apply_snapshot_tables(apply_snapshot_ops)
-        return render(
-            request,
-            self.template_name,
+        ctx = _reconciliation_run_page_context(run, nav_active="detail")
+        ctx.update(
             {
-                "run": run,
                 "frozen_ops": frozen_ops,
                 "operation_tables": operation_tables,
                 "apply_snapshot_ops": apply_snapshot_ops,
                 "apply_snapshot_tables": apply_snapshot_tables,
-                "apply_results": run.apply_results if isinstance(run.apply_results, dict) else {},
-                "apply_url": reverse(
-                    "plugins:netbox_automation_plugin:maas_openstack_reconciliation_apply",
-                    args=[run.pk],
-                ),
-                "retry_failed_url": reverse(
-                    "plugins:netbox_automation_plugin:maas_openstack_reconciliation_retry_failed",
-                    args=[run.pk],
-                ),
-                "discard_url": reverse(
-                    "plugins:netbox_automation_plugin:maas_openstack_reconciliation_discard",
-                    args=[run.pk],
-                ),
-                "branching_branch_url": _netbox_branching_branch_url(branch_pk=run.branch_id),
-                "can_discard": run.status not in blocked_discard,
-                "can_apply": run.status in apply_ok,
-                "can_retry_failed": run.status in apply_ok
-                and run.status
-                != MAASOpenStackReconciliationRun.STATUS_BRANCH_CREATED,
-            },
+            }
         )
+        return render(request, self.template_name, ctx)
+
+
+@method_decorator(never_cache, name="dispatch")
+class ReconciliationApplyResultsView(LoginRequiredMixin, View):
+    template_name = "netbox_automation_plugin/maas_openstack_reconciliation_apply_results.html"
+
+    def get(self, request, run_id: int):
+        run = get_object_or_404(
+            MAASOpenStackReconciliationRun.objects.select_related("drift_run", "created_by"),
+            pk=run_id,
+        )
+        ctx = _reconciliation_run_page_context(run, nav_active="apply_results")
+        return render(request, self.template_name, ctx)
 
 
 @method_decorator(never_cache, name="dispatch")
@@ -273,11 +307,16 @@ class ReconciliationApplyView(LoginRequiredMixin, View):
         except Exception as e:
             logger.exception("Reconciliation apply failed for run %s", run_id)
             return JsonResponse({"ok": False, "error": str(e)}, status=500)
+        apply_results_url = reverse(
+            "plugins:netbox_automation_plugin:maas_openstack_reconciliation_apply_results",
+            args=[run.pk],
+        )
         payload = {
             "ok": True,
             "run_id": run.pk,
             "status": run.status,
             "apply_results": run.apply_results if isinstance(run.apply_results, dict) else {},
+            "redirect_url": apply_results_url,
         }
         bu = _netbox_branching_branch_url(branch_pk=run.branch_id)
         if bu:
@@ -298,11 +337,16 @@ class ReconciliationRetryFailedView(LoginRequiredMixin, View):
         except Exception as e:
             logger.exception("Reconciliation retry-failed failed for run %s", run_id)
             return JsonResponse({"ok": False, "error": str(e)}, status=500)
+        apply_results_url = reverse(
+            "plugins:netbox_automation_plugin:maas_openstack_reconciliation_apply_results",
+            args=[run.pk],
+        )
         payload = {
             "ok": True,
             "run_id": run.pk,
             "status": run.status,
             "apply_results": run.apply_results if isinstance(run.apply_results, dict) else {},
+            "redirect_url": apply_results_url,
         }
         bu = _netbox_branching_branch_url(branch_pk=run.branch_id)
         if bu:
@@ -323,12 +367,17 @@ class ReconciliationDiscardView(LoginRequiredMixin, View):
         except Exception as e:
             logger.exception("Reconciliation discard failed for run %s", run_id)
             return JsonResponse({"ok": False, "error": str(e)}, status=500)
+        detail_url = reverse(
+            "plugins:netbox_automation_plugin:maas_openstack_reconciliation_detail",
+            args=[run.pk],
+        )
         return JsonResponse(
             {
                 "ok": True,
                 "run_id": run.pk,
                 "status": run.status,
                 "apply_results": run.apply_results if isinstance(run.apply_results, dict) else {},
+                "redirect_url": detail_url,
             }
         )
 

@@ -1,0 +1,139 @@
+{% load i18n %}
+<script>
+  (function() {
+    function csrfToken() {
+      var el = document.querySelector("#recon-csrf-anchor input[name=csrfmiddlewaretoken]");
+      return el ? el.value : "";
+    }
+    var loadingBtnHtml = '<span class="spinner-border spinner-border-sm me-1" role="status" aria-hidden="true"></span>{% filter escapejs %}{% trans "Working…" %}{% endfilter %}';
+    function lifecycleButtons() {
+      return document.querySelectorAll(".js-recon-lifecycle-btn");
+    }
+    function setLifecycleBusy(busy, activeBtn) {
+      if (busy) {
+        lifecycleButtons().forEach(function(b) {
+          b.disabled = true;
+          if (activeBtn && b === activeBtn) {
+            b.dataset.reconSavedHtml = b.innerHTML;
+            b.innerHTML = loadingBtnHtml;
+          }
+        });
+      } else {
+        lifecycleButtons().forEach(function(b2) {
+          if (b2.dataset.reconSavedHtml) {
+            b2.innerHTML = b2.dataset.reconSavedHtml;
+            delete b2.dataset.reconSavedHtml;
+          }
+          b2.disabled = b2.getAttribute("data-initial-disabled") === "true";
+        });
+      }
+    }
+    function postAction(url, btn, opts) {
+      opts = opts || {};
+      if (!url || !btn) return;
+      var msg = document.getElementById("reconApplyMsg");
+      var willNavigate = false;
+      if (msg) msg.textContent = "";
+      setLifecycleBusy(true, btn);
+      fetch(url, {
+        method: "POST",
+        credentials: "same-origin",
+        headers: {
+          "Content-Type": "application/json",
+          "X-CSRFToken": csrfToken()
+        },
+        body: "{}"
+      }).then(function(r) {
+        return r.json().then(function(j) { return { ok: r.ok, body: j }; });
+      }).then(function(res) {
+        if (res.ok && res.body && res.body.ok) {
+          willNavigate = true;
+          if (opts.openBranchPageRefresh && res.body.branching_branch_url) {
+            var base = res.body.branching_branch_url;
+            var sep = base.indexOf("?") >= 0 ? "&" : "?";
+            try {
+              window.open(base + sep + "_nap_branch_refresh=" + Date.now(), "_blank", "noopener");
+            } catch (e) {}
+          }
+          var dest = res.body.redirect_url || opts.fallbackRedirect || "";
+          if (dest) {
+            var applyResultsNewTab = dest.indexOf("/apply-results/") !== -1;
+            if (applyResultsNewTab) {
+              var w = null;
+              try {
+                w = window.open(dest, "_blank", "noopener");
+              } catch (e2) {}
+              if (w && !w.closed) {
+                if (msg) msg.textContent = "{% filter escapejs %}{% trans "Apply finished. Results opened in a new tab." %}{% endfilter %}";
+                willNavigate = false;
+                setLifecycleBusy(false, null);
+              } else {
+                if (msg) msg.textContent = "{% filter escapejs %}{% trans "Opening results…" %}{% endfilter %}";
+                window.location.href = dest;
+              }
+            } else {
+              if (msg) msg.textContent = "{% filter escapejs %}{% trans "Opening results…" %}{% endfilter %}";
+              window.location.href = dest;
+            }
+          } else {
+            if (msg) msg.textContent = "{% filter escapejs %}{% trans "Action complete. Refreshing…" %}{% endfilter %}";
+            window.location.reload();
+          }
+          return;
+        }
+        if (msg) msg.textContent = (res.body && res.body.error) ? res.body.error : "{% filter escapejs %}{% trans "Request failed." %}{% endfilter %}";
+      }).catch(function(err) {
+        if (msg) msg.textContent = String(err);
+      }).finally(function() {
+        if (willNavigate) return;
+        setLifecycleBusy(false, null);
+      });
+    }
+    document.querySelectorAll(".js-recon-page-link").forEach(function(a) {
+      a.addEventListener("click", function(ev) {
+        if (a.classList.contains("disabled")) {
+          ev.preventDefault();
+          return;
+        }
+        var href = a.getAttribute("href");
+        if (!href || href === "#") return;
+        var label = a.getAttribute("data-loading-label") || a.textContent.trim();
+        var spin = '<span class="spinner-border spinner-border-sm me-1" role="status" aria-hidden="true"></span>' + label;
+        if (a.getAttribute("target") === "_blank") {
+          var origHtml = a.innerHTML;
+          a.classList.add("disabled");
+          a.innerHTML = spin;
+          window.setTimeout(function() {
+            a.innerHTML = origHtml;
+            a.classList.remove("disabled");
+          }, 600);
+          return;
+        }
+        a.classList.add("disabled");
+        a.innerHTML = spin;
+      });
+    });
+    var applyBtn = document.querySelector(".js-recon-apply");
+    var retryBtn = document.querySelector(".js-recon-retry");
+    var applyResultsUrl = "{{ apply_results_url|escapejs }}";
+    if (applyBtn) {
+      applyBtn.addEventListener("click", function() {
+        postAction("{{ apply_url|escapejs }}", applyBtn, { openBranchPageRefresh: true, fallbackRedirect: applyResultsUrl });
+      });
+    }
+    if (retryBtn) {
+      retryBtn.addEventListener("click", function() {
+        postAction("{{ retry_failed_url|escapejs }}", retryBtn, { openBranchPageRefresh: true, fallbackRedirect: applyResultsUrl });
+      });
+    }
+    var discardBtn = document.querySelector(".js-recon-discard");
+    if (discardBtn) {
+      discardBtn.addEventListener("click", function() {
+        if (!confirm("{% trans 'Discard this run and delete its NetBox branch when possible? This cannot be undone.' %}")) {
+          return;
+        }
+        postAction("{{ discard_url|escapejs }}", discardBtn, { fallbackRedirect: "{{ recon_detail_url|escapejs }}" });
+      });
+    }
+  })();
+</script>

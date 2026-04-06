@@ -111,9 +111,59 @@ class MAASOpenStackDriftRunTable(tables.Table):
         has_review = bool((record.report_drift_modified_html or "").strip()) or bool(
             normalize_drift_review_overrides(record.drift_review_overrides)
         )
-        modified_view_url = f"{view_url}?{_history_modified_view_query(record)}"
+        rpk = getattr(record, "latest_reconciliation_pk", None)
+        if rpk:
+            recon_url = reverse(
+                "plugins:netbox_automation_plugin:maas_openstack_reconciliation_detail",
+                args=[rpk],
+            )
+            saved_audit_url = f"{view_url}?audit=1"
+            modified_view_url = f"{view_url}?audit=1&{_history_modified_view_query(record)}"
+            primary_url = recon_url
+            primary_label = _("Reconciliation")
+            secondary_url = saved_audit_url
+            secondary_label = _("Saved audit (HTML)")
+        else:
+            saved_audit_url = view_url
+            modified_view_url = f"{view_url}?{_history_modified_view_query(record)}"
+            primary_url = view_url
+            primary_label = _("View report")
+            secondary_url = modified_view_url
+            secondary_label = _("View modified")
         badge_link = "badge text-decoration-none fw-normal py-2 px-2"
         if has_review:
+            if rpk:
+                return format_html(
+                    '<div class="d-flex flex-column gap-2 align-items-start">'
+                    '<span class="badge text-bg-light text-dark border" title="{}">{}</span>'
+                    '<div class="d-flex flex-wrap gap-1 align-items-center">'
+                    '<a href="{}" class="{} text-bg-primary js-drift-nav-loading">{}</a>'
+                    '<a href="{}" class="{} text-bg-secondary js-drift-nav-loading">{}</a>'
+                    '<a href="{}" class="{} text-bg-info js-drift-nav-loading">{}</a>'
+                    '<a href="{}" class="{} text-bg-success js-drift-xlsx-get" data-download-name="drift-report-run-{}.xlsx">{}</a>'
+                    '<a href="{}" class="{} text-bg-secondary js-drift-xlsx-get" data-download-name="drift-report-run-{}-modified.xlsx">{}</a>'
+                    "</div>"
+                    "</div>",
+                    _("Saved NB proposed edits for this run."),
+                    _("Edits saved"),
+                    primary_url,
+                    badge_link,
+                    primary_label,
+                    secondary_url,
+                    badge_link,
+                    secondary_label,
+                    modified_view_url,
+                    badge_link,
+                    _("View modified"),
+                    download_url,
+                    badge_link,
+                    record.id,
+                    _("Download Excel"),
+                    download_mod_url,
+                    badge_link,
+                    record.id,
+                    _("Download modified Excel"),
+                )
             return format_html(
                 '<div class="d-flex flex-column gap-2 align-items-start">'
                 '<span class="badge text-bg-light text-dark border" title="{}">{}</span>'
@@ -126,12 +176,12 @@ class MAASOpenStackDriftRunTable(tables.Table):
                 "</div>",
                 _("Saved NB proposed edits for this run."),
                 _("Edits saved"),
-                view_url,
+                primary_url,
                 badge_link,
-                _("View report"),
-                modified_view_url,
+                primary_label,
+                secondary_url,
                 badge_link,
-                _("View modified"),
+                secondary_label,
                 download_url,
                 badge_link,
                 record.id,
@@ -141,13 +191,28 @@ class MAASOpenStackDriftRunTable(tables.Table):
                 record.id,
                 _("Download modified Excel"),
             )
+        if rpk:
+            return format_html(
+                '<div class="d-flex flex-wrap gap-2 align-items-center">'
+                '<a href="{}" class="btn btn-outline-primary btn-sm py-0 px-2 js-drift-nav-loading">{}</a>'
+                '<a href="{}" class="btn btn-outline-secondary btn-sm py-0 px-2 js-drift-nav-loading">{}</a>'
+                '<a href="{}" class="btn btn-outline-success btn-sm py-0 px-2 js-drift-xlsx-get" data-download-name="drift-report-run-{}.xlsx">{}</a>'
+                "</div>",
+                primary_url,
+                primary_label,
+                saved_audit_url,
+                _("Saved audit (HTML)"),
+                download_url,
+                record.id,
+                _("Download Excel"),
+            )
         return format_html(
             '<div class="d-flex flex-wrap gap-2 align-items-center">'
             '<a href="{}" class="btn btn-outline-primary btn-sm py-0 px-2 js-drift-nav-loading">{}</a>'
             '<a href="{}" class="btn btn-outline-success btn-sm py-0 px-2 js-drift-xlsx-get" data-download-name="drift-report-run-{}.xlsx">{}</a>'
             "</div>",
-            view_url,
-            _("View report"),
+            primary_url,
+            primary_label,
             download_url,
             record.id,
             _("Download Excel"),
