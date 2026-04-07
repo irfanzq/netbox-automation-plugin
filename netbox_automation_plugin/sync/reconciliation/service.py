@@ -64,7 +64,10 @@ from .merge import (
     effective_review_norm_for_run,
     merged_proposed_from_drift_run,
 )
-from .netbox_write_projection import netbox_write_projection_for_op
+from .netbox_write_projection import (
+    netbox_write_projection_for_op,
+    netbox_write_preview_table_headers,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -573,16 +576,19 @@ def group_reconciliation_operation_tables(
     tables: list[dict[str, Any]] = []
     for sk in sorted(by_sk.keys(), key=rank):
         rows = by_sk[sk]
-        headers = list(netbox_write_preview_ordered_fieldnames(sk))
         display_rows: list[dict[str, Any]] = []
+        projections: list[dict[str, str]] = []
         for op in rows:
             if not isinstance(op, dict):
                 continue
             o2 = dict(op)
             c = o2.get("cells") if isinstance(o2.get("cells"), dict) else {}
             proj = netbox_write_preview_cells(sk, c)
-            o2["cell_values"] = [str(proj.get(h, "")).strip() for h in headers]
+            projections.append(proj)
             display_rows.append(o2)
+        headers = list(netbox_write_preview_table_headers(sk, projections))
+        for o2, proj in zip(display_rows, projections):
+            o2["cell_values"] = [str(proj.get(h, "")).strip() for h in headers]
         tables.append(
             {
                 "section_key": sk,

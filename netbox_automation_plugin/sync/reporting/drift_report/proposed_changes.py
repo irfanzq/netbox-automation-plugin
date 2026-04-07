@@ -13,6 +13,9 @@ from netbox_automation_plugin.sync.reporting.drift_report.device_types import (
     _match_netbox_role_from_hostname,
     _resolve_device_type_display,
 )
+from netbox_automation_plugin.sync.reporting.drift_report.drift_nb_picker_catalog import (
+    DRIFT_NB_PROPOSED_TENANT_DEFAULT,
+)
 from netbox_automation_plugin.sync.reporting.drift_report.new_device_policy import (
     _new_device_candidate_policy,
     _new_device_fabric_display,
@@ -53,23 +56,12 @@ from netbox_automation_plugin.sync.reporting.drift_report.maas_vlan_display impo
 from netbox_automation_plugin.sync.reporting.drift_report.proposed_nic_helpers import (
     _build_add_nb_interface_rows,
 )
-from netbox_automation_plugin.sync.clients.openstack_client import (
-    DRIFT_TENANT_LABEL_REPLACING_ADMIN,
-)
 from netbox_automation_plugin.sync.reconciliation.audit_detail import (
     openstack_floating_ips_nat_inside_drift,
 )
 from netbox_automation_plugin.sync.reconciliation.apply_cells import (
     strip_prefix_description_audit_suffix,
 )
-
-
-def _vm_project_label_for_proposals(inst: dict) -> str:
-    """OpenStack project column for VM drift rows; map admin scope to operator default tenant."""
-    raw = str(inst.get("project_name") or inst.get("project_id") or "-").strip()
-    if raw.lower() == "admin":
-        return DRIFT_TENANT_LABEL_REPLACING_ADMIN
-    return raw if raw else "-"
 
 
 def _friendly_neutron_owners_line(owners: str) -> str:
@@ -568,6 +560,46 @@ def _proposed_changes_rows(
         if parent_names:
             return sorted(set(parent_names))[0]
         return "—"
+
+    def _default_proposed_cluster_for_nb_site(site_display_name: str) -> str:
+        """
+        Pick a NetBox Cluster only when clusters are explicitly scoped to the resolved **Site**
+        (``Cluster.site``). Prefer a name containing ``infra``, else first by name.
+
+        No guessing by name/substring: if the site has no linked clusters, returns ``""`` (cell ``—``);
+        reconciliation preview requires **NB proposed cluster** from the audit picker.
+        """
+
+        def _prefer_infra_then_alpha(candidates: list[str]) -> str:
+            uniq = sorted({(x or "").strip() for x in candidates} - {""})
+            if not uniq:
+                return ""
+            infra = sorted(n for n in uniq if "infra" in n.lower())
+            return infra[0] if infra else uniq[0]
+
+        sn = (site_display_name or "").strip()
+        if not sn or sn in {"—", "-"}:
+            return ""
+        try:
+            from dcim.models import Site
+            from virtualization.models import Cluster
+        except Exception:
+            return ""
+        site = Site.objects.filter(name__iexact=sn).first()
+        if site is None:
+            slugish = sn.lower().replace(" ", "-")
+            site = Site.objects.filter(slug__iexact=slugish).first()
+        if site is None:
+            return ""
+        try:
+            qs = Cluster.objects.filter(site_id=site.pk)
+        except Exception:
+            try:
+                qs = Cluster.objects.filter(site=site)
+            except Exception:
+                return ""
+        names = list({(n or "").strip() for n in qs.values_list("name", flat=True)} - {""})
+        return _prefer_infra_then_alpha(names)
 
     def _suggest_vlan_from_os_segmentation_id(seg_id: Any) -> str:
         s = str(seg_id or "").strip()
@@ -1528,21 +1560,15 @@ def _proposed_changes_rows(
         vrf_name = _suggest_vrf_for_prefix_gap(g, selected_locations)
         # Match CLI: `openstack subnet list` Name column (Neutron subnet name), not network name.
         os_desc = _first_meaningful_text(g.get("subnet_name"), g.get("network_name"))
-        tenant_name = str(
-            g.get("project_owner_name")
-            or g.get("project_name")
-            or g.get("project_id")
-            or "-"
-        )
         nb_scope = _suggest_scope_location_from_os_region(g.get("os_region") or "")
         nb_vlan = _suggest_vlan_from_os_segmentation_id(g.get("provider_segmentation_id"))
         add_prefixes.append([
             g.get("os_region") or "—",
             g.get("cidr", ""),
             os_desc,
-            g.get("project_name", "-"),
+            "—",
             os_desc,
-            tenant_name,
+            DRIFT_NB_PROPOSED_TENANT_DEFAULT,
             nb_scope,
             nb_vlan,
             role_name,
@@ -1560,11 +1586,6 @@ def _proposed_changes_rows(
             g.get("floating_subnet_name"),
             g.get("floating_network_name"),
         )
-        tenant_name = _first_meaningful_text(
-            g.get("project_owner_name"),
-            g.get("project_name"),
-            g.get("project_id"),
-        )
         nb_vrf = _suggest_vrf_for_floating_ip_gap(g)
         nb_status = "active" if str(g.get("port_id") or "").strip() else "reserved"
         add_fips.append([
@@ -1572,8 +1593,8 @@ def _proposed_changes_rows(
             fip,
             fip_name,
             g.get("fixed_ip_address", "-"),
-            g.get("project_name") or g.get("project_id") or "-",
-            tenant_name,
+            "—",
+            DRIFT_NB_PROPOSED_TENANT_DEFAULT,
             nb_status,
             "VIP",
             nb_vrf,
@@ -1654,14 +1675,14 @@ def _proposed_changes_rows(
                 g.get("os_region") or "—",
                 cidr,
                 os_desc,
-                g.get("project_name", "-"),
+                "—",
                 cur_vrf,
                 cur_status or "—",
                 cur_role or "—",
                 cur_tenant,
                 cur_desc or "—",
                 os_desc,
-                tenant_name,
+                DRIFT_NB_PROPOSED_TENANT_DEFAULT,
                 nb_scope,
                 nb_vlan,
                 role_name,
@@ -1685,11 +1706,6 @@ def _proposed_changes_rows(
             d.get("floating_subnet_name"),
             d.get("floating_network_name"),
         )
-        tenant_name = _first_meaningful_text(
-            d.get("project_owner_name"),
-            d.get("project_name"),
-            d.get("project_id"),
-        )
         nb_vrf = _suggest_vrf_for_floating_ip_gap(d)
         nb_status = "active" if str(d.get("port_id") or "").strip() else "reserved"
         update_fips.append([
@@ -1698,8 +1714,8 @@ def _proposed_changes_rows(
             fip,
             fip_name,
             d.get("fixed_ip_address", "-"),
-            d.get("project_name") or d.get("project_id") or "-",
-            tenant_name,
+            "—",
+            DRIFT_NB_PROPOSED_TENANT_DEFAULT,
             nb_status,
             "VIP",
             nb_vrf,
@@ -1762,15 +1778,12 @@ def _proposed_changes_rows(
             if not iname:
                 continue
             os_reg = str(inst.get("os_region") or openstack_data.get("openstack_region_name") or "—")[:48]
-            proj = _vm_project_label_for_proposals(inst)
             hv = str(inst.get("hypervisor_hostname") or "").strip() or "—"
             # Column "NB proposed device (VM)" is always the Nova instance name (same as VM name).
             # Hypervisor hostname column holds the compute host; apply tries that name if no Device matches the VM name.
             prop_dev = iname
             os_st = str(inst.get("status") or "").strip() or "—"
             nb_vm_status = _os_vm_status_nb_slug(os_st)
-            reg_token = os_reg.replace(",", " ").strip().split()[0] if os_reg.strip() else ""
-            prop_cluster = f"{reg_token}-openstack" if reg_token and reg_token not in {"—", "-"} else "openstack"
             os_pri = str(inst.get("os_primary_ip") or "").strip()
             prop_pri = os_pri if os_pri else "—"
             try:
@@ -1784,18 +1797,20 @@ def _proposed_changes_rows(
                 nb_site = (vm.site.name or "").strip() or "—"
             if nb_site in {"—", ""}:
                 nb_site = _suggest_netbox_site_name_from_os_region(os_reg)
+            prop_cluster = _default_proposed_cluster_for_nb_site(nb_site)
+            prop_cluster_cell = prop_cluster if prop_cluster else "—"
             if vm is None:
                 # Columns must stay aligned with drift_overrides_apply.HEADERS_DETAIL_NEW_VMS (drift + recon cells).
                 add_openstack_vms.append([
                     iname,
                     os_reg,
                     os_st,
-                    proj,
+                    "—",
                     hv,
                     prop_pri,
-                    prop_cluster,
+                    prop_cluster_cell,
                     nb_site if nb_site not in {"—", ""} else "—",
-                    proj if proj not in {"-", "—"} else "—",
+                    DRIFT_NB_PROPOSED_TENANT_DEFAULT,
                     nb_vm_status,
                     prop_dev if prop_dev not in {"—", ""} else "—",
                     "[OS]",
@@ -1827,7 +1842,7 @@ def _proposed_changes_rows(
                         drift_vm.append("device")
                 if str(vm.status).lower() != nb_vm_status.lower():
                     drift_vm.append("status")
-                if prop_cluster and cur_cl != prop_cluster:
+                if prop_cluster and prop_cluster not in {"—", "-"} and cur_cl != prop_cluster:
                     drift_vm.append("cluster")
                 if os_pri_host:
                     if not cur_nb_host or os_pri_host != cur_nb_host:
@@ -1840,7 +1855,7 @@ def _proposed_changes_rows(
                     str(vm.pk),
                     os_reg,
                     os_st,
-                    proj,
+                    "—",
                     hv,
                     cur_vc,
                     cur_mm,
@@ -1850,9 +1865,9 @@ def _proposed_changes_rows(
                     cur_dev,
                     cur_vm_st,
                     prop_pri,
-                    prop_cluster,
+                    prop_cluster_cell,
                     nb_site if nb_site not in {"—", ""} else "—",
-                    proj if proj not in {"-", "—"} else "—",
+                    DRIFT_NB_PROPOSED_TENANT_DEFAULT,
                     nb_vm_status,
                     prop_dev if prop_dev not in {"—", ""} else "—",
                     ", ".join(drift_vm),

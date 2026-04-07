@@ -90,6 +90,24 @@
     });
   }
 
+  function getTenantPickerAllowSet() {
+    if (!window.__driftTenantPickerAllowSet) {
+      var o = {};
+      var arr = (window.DriftNbPickerChoices && window.DriftNbPickerChoices.tenant) || [];
+      arr.forEach(function(x) {
+        o[String(x)] = true;
+      });
+      window.__driftTenantPickerAllowSet = o;
+    }
+    return window.__driftTenantPickerAllowSet;
+  }
+
+  function isAllowedDriftTenantCellValue(t) {
+    var s = (t || "").replace(/\s+/g, " ").trim();
+    if (!s || s === "—" || s === "-") return true;
+    return !!getTenantPickerAllowSet()[s];
+  }
+
   function getMenu(wrap) {
     if (!wrap.__driftMenuEl) {
       wrap.__driftMenuEl = wrap.querySelector(".drift-nb-pick-menu");
@@ -154,10 +172,18 @@
         base = byScope[scopeName];
       }
     }
-    var list = base.slice();
-    var cur = visiblePlain(wrap.querySelector(".drift-nb-pick-visible"));
-    if (cur && cur !== "—" && list.indexOf(cur) < 0) {
-      list.unshift(cur);
+    var list;
+    if (kind === "tenant") {
+      list = base.slice();
+      if (list.indexOf("—") < 0) {
+        list.unshift("—");
+      }
+    } else {
+      list = base.slice();
+      var cur0 = visiblePlain(wrap.querySelector(".drift-nb-pick-visible"));
+      if (cur0 && cur0 !== "—" && list.indexOf(cur0) < 0) {
+        list.unshift(cur0);
+      }
     }
     var menu = getMenu(wrap);
     var qel = menu.querySelector(".drift-nb-pick-q");
@@ -262,6 +288,11 @@
       if (!sk || ri === null || !ch) return;
       var vis = wrap.querySelector(".drift-nb-pick-visible");
       var t = vis ? vis.textContent.replace(/\s+/g, " ").trim() : "";
+      var kind = wrap.getAttribute("data-nb-pick-kind") || "";
+      if (kind === "tenant" && t && !isAllowedDriftTenantCellValue(t)) {
+        t = "";
+        if (vis) vis.textContent = "—";
+      }
       if (t === "—") t = "";
       if (!out[sk]) out[sk] = {};
       if (!out[sk][ri]) out[sk][ri] = {};
@@ -281,6 +312,16 @@
   };
 
   function captureDriftReviewBaselines() {
+    document.querySelectorAll('.drift-nb-pick[data-nb-pick-kind="tenant"][data-drift-sel-key]').forEach(
+      function(wrap) {
+        var vis = wrap.querySelector(".drift-nb-pick-visible");
+        if (!vis) return;
+        var t = visiblePlain(vis);
+        if (t && !isAllowedDriftTenantCellValue(t)) {
+          vis.textContent = "—";
+        }
+      }
+    );
     document.querySelectorAll(".drift-nb-pick[data-drift-sel-key]").forEach(function(wrap) {
       var vis = wrap.querySelector(".drift-nb-pick-visible");
       if (!vis || wrap.__driftBaselineCaptured) return;

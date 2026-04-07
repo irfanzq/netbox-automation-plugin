@@ -16,8 +16,8 @@ keys ``name``, ``id`` (existing only), ``primary_ip4``, ``primary_ip6``, ``clust
 in NetBox; see ``apply_cells._VM_PROJECTION_CF_KEYS``).
 
 **Proposed missing VLANs** (``detail_proposed_missing_vlans``): projection keys ``vid``,
-``vlan_group``, ``site``, ``location``, ``name``, ``tenant``, ``status`` — same cells contract as
-``apply_create_vlan``.
+``vlan_group``, ``site``, ``location``, ``name``, ``tenant`` (optional when empty or ``—``),
+``status`` — same cells contract as ``apply_create_vlan``.
 
 Imports from ``apply_cells`` are deferred inside functions to avoid import cycles while
 ``apply_cells`` is still loading.
@@ -27,6 +27,112 @@ from __future__ import annotations
 
 import ipaddress
 from typing import Any
+
+from netbox_automation_plugin.sync.reporting.drift_report.drift_nb_picker_catalog import (
+    coerce_nb_proposed_tenant_cell,
+)
+
+# Full projection key order (includes optional ``tenant``) for recon tables when some rows omit tenant.
+_NETBOX_PREVIEW_FULL_KEY_ORDER: dict[str, tuple[str, ...]] = {
+    "detail_new_prefixes": (
+        "prefix",
+        "vrf",
+        "status",
+        "role",
+        "tenant",
+        "scope",
+        "vlan",
+        "description",
+    ),
+    "detail_existing_prefixes": (
+        "prefix",
+        "vrf",
+        "status",
+        "role",
+        "tenant",
+        "scope",
+        "vlan",
+        "description",
+    ),
+    "detail_new_fips": (
+        "address",
+        "status",
+        "role",
+        "vrf",
+        "tenant",
+        "nat_inside",
+        "description",
+    ),
+    "detail_existing_fips": (
+        "address",
+        "status",
+        "role",
+        "vrf",
+        "tenant",
+        "nat_inside",
+        "description",
+    ),
+    "detail_new_vms": (
+        "name",
+        "primary_ip4",
+        "primary_ip6",
+        "cluster",
+        "site",
+        "tenant",
+        "status",
+        "device",
+        "nova_compute_host",
+    ),
+    "detail_existing_vms": (
+        "id",
+        "name",
+        "primary_ip4",
+        "primary_ip6",
+        "cluster",
+        "site",
+        "tenant",
+        "status",
+        "device",
+        "nova_compute_host",
+    ),
+    "detail_proposed_missing_vlans": (
+        "vid",
+        "vlan_group",
+        "site",
+        "location",
+        "name",
+        "tenant",
+        "status",
+    ),
+}
+
+
+def _drop_empty_tenant(d: dict[str, str]) -> dict[str, str]:
+    """Omit ``tenant`` from preview/projection when unset so recon UI and payloads stay lean."""
+    out = dict(d)
+    if not (out.get("tenant") or "").strip():
+        out.pop("tenant", None)
+    return out
+
+
+def netbox_write_preview_table_headers(
+    selection_key: str, projections: list[dict[str, str]]
+) -> tuple[str, ...]:
+    """
+    Headers for one reconciliation section table: stable order, ``tenant`` only if present on ≥1 row.
+    """
+    sk = str(selection_key or "").strip()
+    if not projections:
+        ac = _ac()
+        return tuple(ac.netbox_write_preview_ordered_fieldnames(sk))
+    union: set[str] = set()
+    for p in projections:
+        union |= set(p.keys())
+    canon = _NETBOX_PREVIEW_FULL_KEY_ORDER.get(sk)
+    if canon:
+        return tuple(k for k in canon if k in union)
+    ac = _ac()
+    return tuple(k for k in ac.netbox_write_preview_ordered_fieldnames(sk) if k in union)
 
 
 def _ac():
@@ -160,28 +266,32 @@ def netbox_write_projection_cells(selection_key: str, cells: dict[str, str] | No
         return _device_netbox_write_preview(c)
     if sk == "detail_new_prefixes":
         pd = ac._prefix_description_max_len()
-        return {
-            "prefix": _cell(c, "CIDR"),
-            "vrf": _cell(c, "NB proposed VRF"),
-            "status": _cell(c, "NB proposed status"),
-            "role": _cell(c, "NB proposed role"),
-            "tenant": _cell(c, "NB Proposed Tenant"),
-            "scope": _cell(c, "NB Proposed Scope"),
-            "vlan": _cell(c, "NB Proposed VLAN"),
-            "description": ac._prefix_description_from_cells(c, max_len=pd),
-        }
+        return _drop_empty_tenant(
+            {
+                "prefix": _cell(c, "CIDR"),
+                "vrf": _cell(c, "NB proposed VRF"),
+                "status": _cell(c, "NB proposed status"),
+                "role": _cell(c, "NB proposed role"),
+                "tenant": coerce_nb_proposed_tenant_cell(_cell(c, "NB Proposed Tenant")),
+                "scope": _cell(c, "NB Proposed Scope"),
+                "vlan": _cell(c, "NB Proposed VLAN"),
+                "description": ac._prefix_description_from_cells(c, max_len=pd),
+            }
+        )
     if sk == "detail_existing_prefixes":
         pd = ac._prefix_description_max_len()
-        return {
-            "prefix": _cell(c, "CIDR"),
-            "vrf": _cell(c, "NB proposed VRF"),
-            "status": _cell(c, "NB proposed status"),
-            "role": _cell(c, "NB proposed role"),
-            "tenant": _cell(c, "NB Proposed Tenant"),
-            "scope": _cell(c, "NB Proposed Scope"),
-            "vlan": _cell(c, "NB Proposed VLAN"),
-            "description": ac._prefix_description_from_cells(c, max_len=pd),
-        }
+        return _drop_empty_tenant(
+            {
+                "prefix": _cell(c, "CIDR"),
+                "vrf": _cell(c, "NB proposed VRF"),
+                "status": _cell(c, "NB proposed status"),
+                "role": _cell(c, "NB proposed role"),
+                "tenant": coerce_nb_proposed_tenant_cell(_cell(c, "NB Proposed Tenant")),
+                "scope": _cell(c, "NB Proposed Scope"),
+                "vlan": _cell(c, "NB Proposed VLAN"),
+                "description": ac._prefix_description_from_cells(c, max_len=pd),
+            }
+        )
     if sk == "detail_new_ip_ranges":
         return {
             "start_address": _cell(c, "Start address"),
@@ -193,57 +303,65 @@ def netbox_write_projection_cells(selection_key: str, cells: dict[str, str] | No
         }
     if sk == "detail_new_fips":
         fd = ac._ip_address_description_max_len()
-        return {
-            "address": _cell(c, "Floating IP"),
-            "status": _cell(c, "NB proposed status"),
-            "role": _cell(c, "NB proposed role"),
-            "vrf": _cell(c, "NB proposed VRF"),
-            "tenant": _cell(c, "NB Proposed Tenant"),
-            "nat_inside": _cell(c, "NAT inside IP (from OpenStack fixed IP)"),
-            "description": ac._fip_description_from_cells(c, max_len=fd),
-        }
+        return _drop_empty_tenant(
+            {
+                "address": _cell(c, "Floating IP"),
+                "status": _cell(c, "NB proposed status"),
+                "role": _cell(c, "NB proposed role"),
+                "vrf": _cell(c, "NB proposed VRF"),
+                "tenant": coerce_nb_proposed_tenant_cell(_cell(c, "NB Proposed Tenant")),
+                "nat_inside": _cell(c, "NAT inside IP (from OpenStack fixed IP)"),
+                "description": ac._fip_description_from_cells(c, max_len=fd),
+            }
+        )
     if sk == "detail_existing_fips":
         fd = ac._ip_address_description_max_len()
-        return {
-            "address": _cell(c, "Floating IP"),
-            "status": _cell(c, "NB proposed status"),
-            "role": _cell(c, "NB proposed role"),
-            "vrf": _cell(c, "NB proposed VRF"),
-            "tenant": _cell(c, "NB Proposed Tenant"),
-            "nat_inside": _cell(c, "NAT inside IP (from OpenStack fixed IP)"),
-            "description": ac._fip_description_from_cells(c, max_len=fd),
-        }
+        return _drop_empty_tenant(
+            {
+                "address": _cell(c, "Floating IP"),
+                "status": _cell(c, "NB proposed status"),
+                "role": _cell(c, "NB proposed role"),
+                "vrf": _cell(c, "NB proposed VRF"),
+                "tenant": coerce_nb_proposed_tenant_cell(_cell(c, "NB Proposed Tenant")),
+                "nat_inside": _cell(c, "NAT inside IP (from OpenStack fixed IP)"),
+                "description": ac._fip_description_from_cells(c, max_len=fd),
+            }
+        )
     if sk == "detail_new_vms":
         p4, p6 = _vm_primary_ip4_ip6_cells(c)
-        return {
-            "name": _cell(c, "VM name"),
-            "primary_ip4": p4,
-            "primary_ip6": p6,
-            "cluster": _cell(c, "NB proposed cluster"),
-            "site": _cell(c, "NB proposed site"),
-            "tenant": _cell(c, "NB Proposed Tenant"),
-            "status": _cell(c, "NB proposed VM status"),
-            "device": _cell(
-                c, "NB proposed device (VM)", "NB proposed device (hypervisor)", "Hypervisor hostname"
-            ),
-            "nova_compute_host": _cell(c, "Hypervisor hostname"),
-        }
+        return _drop_empty_tenant(
+            {
+                "name": _cell(c, "VM name"),
+                "primary_ip4": p4,
+                "primary_ip6": p6,
+                "cluster": _cell(c, "NB proposed cluster"),
+                "site": _cell(c, "NB proposed site"),
+                "tenant": coerce_nb_proposed_tenant_cell(_cell(c, "NB Proposed Tenant")),
+                "status": _cell(c, "NB proposed VM status"),
+                "device": _cell(
+                    c, "NB proposed device (VM)", "NB proposed device (hypervisor)", "Hypervisor hostname"
+                ),
+                "nova_compute_host": _cell(c, "Hypervisor hostname"),
+            }
+        )
     if sk == "detail_existing_vms":
         p4, p6 = _vm_primary_ip4_ip6_cells(c)
-        return {
-            "id": _cell(c, "NetBox VM ID"),
-            "name": _cell(c, "VM name"),
-            "primary_ip4": p4,
-            "primary_ip6": p6,
-            "cluster": _cell(c, "NB proposed cluster"),
-            "site": _cell(c, "NB proposed site"),
-            "tenant": _cell(c, "NB Proposed Tenant"),
-            "status": _cell(c, "NB proposed VM status"),
-            "device": _cell(
-                c, "NB proposed device (VM)", "NB proposed device (hypervisor)", "Hypervisor hostname"
-            ),
-            "nova_compute_host": _cell(c, "Hypervisor hostname"),
-        }
+        return _drop_empty_tenant(
+            {
+                "id": _cell(c, "NetBox VM ID"),
+                "name": _cell(c, "VM name"),
+                "primary_ip4": p4,
+                "primary_ip6": p6,
+                "cluster": _cell(c, "NB proposed cluster"),
+                "site": _cell(c, "NB proposed site"),
+                "tenant": coerce_nb_proposed_tenant_cell(_cell(c, "NB Proposed Tenant")),
+                "status": _cell(c, "NB proposed VM status"),
+                "device": _cell(
+                    c, "NB proposed device (VM)", "NB proposed device (hypervisor)", "Hypervisor hostname"
+                ),
+                "nova_compute_host": _cell(c, "Hypervisor hostname"),
+            }
+        )
     if sk in NEW_NIC_SELECTION_KEYS:
         return _netbox_write_new_nic_preview(c)
     if sk in ("detail_nic_drift_os", "detail_nic_drift_maas"):
@@ -253,15 +371,17 @@ def netbox_write_projection_cells(selection_key: str, cells: dict[str, str] | No
     if sk == "detail_bmc_existing":
         return _netbox_write_bmc_preview(c, existing_oob=True)
     if sk == "detail_proposed_missing_vlans":
-        return {
-            "vid": _cell(c, "NB Proposed VLAN ID", "Target VID"),
-            "vlan_group": _cell(c, "NB proposed VLAN group"),
-            "site": _cell(c, "NB site"),
-            "location": _cell(c, "NB location"),
-            "name": _cell(c, "NB proposed VLAN name (editable)", "NB proposed VLAN name"),
-            "tenant": _cell(c, "NB Proposed Tenant"),
-            "status": _cell(c, "NB proposed status"),
-        }
+        return _drop_empty_tenant(
+            {
+                "vid": _cell(c, "NB Proposed VLAN ID", "Target VID"),
+                "vlan_group": _cell(c, "NB proposed VLAN group"),
+                "site": _cell(c, "NB site"),
+                "location": _cell(c, "NB location"),
+                "name": _cell(c, "NB proposed VLAN name (editable)", "NB proposed VLAN name"),
+                "tenant": coerce_nb_proposed_tenant_cell(_cell(c, "NB Proposed Tenant")),
+                "status": _cell(c, "NB proposed status"),
+            }
+        )
     if sk == "detail_serial_review":
         return {
             "name": _cell(c, "Host", "Hostname"),

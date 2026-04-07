@@ -6,9 +6,9 @@ there; apply handlers should read those same projected strings where possible so
 writes stay aligned.
 
 ``apply_row_operation`` narrows each row to reconciliation-preview source columns (plus
-workflow fields: Proposed Action, Status, Risk, Authority) and drops empty / em-dash
-placeholders so handlers only see values that would appear on the recon page (Proposed
-Action is not shown there but is kept when non-empty for skip policy and NIC parsing).
+workflow fields: Proposed Action, Status, Risk, Authority). Generic columns use
+non-placeholder heuristic; **NB Proposed Tenant** is kept only when the value matches the
+drift tenant picker catalog (otherwise omitted—never derived from free text).
 
 Execution order (e.g. create devices before create/update interfaces) is enforced in
 ``service.apply_reconciliation_run`` via ``AUDIT_REPORT_APPLY_ORDER`` and action phase.
@@ -26,6 +26,9 @@ from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import IntegrityError
 from django.utils.text import slugify
 
+from netbox_automation_plugin.sync.reporting.drift_report.drift_nb_picker_catalog import (
+    coerce_nb_proposed_tenant_cell,
+)
 from netbox_automation_plugin.sync.reconciliation.netbox_write_projection import (
     netbox_write_projection_for_op,
 )
@@ -1476,7 +1479,7 @@ def apply_create_vlan(op: dict[str, Any]) -> tuple[str, str]:
             f"NetBox requires unique names per group. Rename this proposed VLAN or edit the existing one."
         )
 
-    tenant_name = _cell(cells, "NB Proposed Tenant")
+    tenant_name = (_cell(cells, "NB Proposed Tenant") or "").strip()
     status_name = (_cell(cells, "NB proposed status") or "").strip() or "active"
 
     tenant = None
@@ -1509,9 +1512,15 @@ def apply_create_vlan(op: dict[str, Any]) -> tuple[str, str]:
         return _skip_missing_prereq(
             f"VLAN save hit a database constraint (often duplicate name or VID in this group): {em}"
         )
-    except Exception:
+    except Exception as e:
         logger.exception("apply_create_vlan: save failed (vid=%s group=%s)", vid_i, group_name)
-        return "failed", "failed_validation_save"
+        et = type(e).__name__
+        em = (str(e) or "").strip() or et
+        detail = f"{et}: {em}"
+        if len(detail) > 2000:
+            detail = detail[:1997] + "..."
+        # Third element becomes apply row ``reason_detail`` (2-tuple would leave UI empty).
+        return "failed", "failed_validation_save", detail
     return "created", "ok_created"
 
 
@@ -1539,14 +1548,10 @@ def apply_create_prefix(op: dict[str, Any]) -> tuple[str, str]:
     role = _resolve_by_name(Role, role_name) if role_name else None
     if role_name and role is None:
         return _skip_missing_prereq(f'IPAM role "{role_name}" not found in NetBox (create it or fix NB proposed role).')
+    # NetBox: Prefix.tenant is optional; only resolve when the audit cell is non-empty.
     tenant = None
     if tenant_name and tenant_name not in {"—", "-"}:
-        try:
-            from tenancy.models import Tenant
-
-            tenant = _resolve_tenant(tenant_name)
-        except Exception:
-            tenant = None
+        tenant = _resolve_tenant(tenant_name)
         if tenant is None:
             return _skip_missing_prereq(f'Tenant "{tenant_name}" not found in NetBox (create it or fix NB Proposed Tenant).')
     scope_obj = None
@@ -2083,12 +2088,7 @@ def apply_create_floating_ip(op: dict[str, Any]) -> tuple[str, str]:
             return _skip_missing_prereq(f'IPAM role "{role_name}" not found in NetBox (NB proposed role).')
     tenant_obj = None
     if tenant_name and tenant_name not in {"—", "-"}:
-        try:
-            from tenancy.models import Tenant
-
-            tenant_obj = _resolve_tenant(tenant_name)
-        except Exception:
-            tenant_obj = None
+        tenant_obj = _resolve_tenant(tenant_name)
         if tenant_obj is None:
             return _skip_missing_prereq(f'Tenant "{tenant_name}" not found in NetBox (NB Proposed Tenant).')
     existing = IPAddress.objects.filter(address=address, vrf=vrf).first()
@@ -2096,6 +2096,12 @@ def apply_create_floating_ip(op: dict[str, Any]) -> tuple[str, str]:
         merge_ch = _merge_audit_residual_onto_object(
             existing, cells, consumed, attr_names=("description",), max_len=max(dmax, 8000)
         )
+        tenant_cleared = False
+        if tenant_obj is None and getattr(existing, "tenant_id", None):
+            _netbox_changelog_snapshot(existing)
+            existing.tenant = None
+            existing.save()
+            tenant_cleared = True
         any_save = _floating_ip_apply_row_stepwise(
             existing,
             status_name=status_name,
@@ -2105,7 +2111,7 @@ def apply_create_floating_ip(op: dict[str, Any]) -> tuple[str, str]:
             cells=cells,
             vrf=vrf,
         )
-        if any_save or merge_ch:
+        if any_save or merge_ch or tenant_cleared:
             return "updated", "ok_updated"
         return "skipped", "skipped_already_desired"
     ip_obj = IPAddress(address=address, vrf=vrf)
@@ -2302,6 +2308,11 @@ def apply_create_openstack_vm(op: dict[str, Any]) -> tuple[str, str]:
             f'Cluster "{cluster_name}" not found in NetBox (Virtualization → Clusters). '
             f"Create the cluster or align NB proposed cluster in drift."
         )
+    tenant_name = (proj.get("tenant") or "").strip()
+    if tenant_name and tenant_name not in {"—", "-"} and _resolve_tenant(tenant_name) is None:
+        return _skip_missing_prereq(
+            f'Tenant "{tenant_name}" not found in NetBox (create it or fix NB Proposed Tenant).'
+        )
     if VirtualMachine.objects.filter(name=name).exists():
         return "skipped", "skipped_already_desired"
 
@@ -2343,7 +2354,6 @@ def apply_update_openstack_vm(op: dict[str, Any]) -> tuple[str, str]:
     try:
         from virtualization.models import VirtualMachine, Cluster
         from dcim.models import Device, Site
-        from tenancy.models import Tenant
     except Exception:
         return "failed", "failed_virtualization_not_available"
 
@@ -2362,6 +2372,17 @@ def apply_update_openstack_vm(op: dict[str, Any]) -> tuple[str, str]:
     if vm is None:
         return _skip_missing_prereq(
             f"VirtualMachine id={pk_raw} not found in NetBox (wrong branch, deleted, or stale drift ID)."
+        )
+
+    cluster_name_req = (proj.get("cluster") or "").strip()
+    if not cluster_name_req or cluster_name_req in {"—", "-"}:
+        return _skip_missing_prereq(
+            "NB proposed cluster is required — choose a NetBox cluster from the drift audit picker."
+        )
+    if Cluster.objects.filter(name=cluster_name_req).first() is None:
+        return _skip_missing_prereq(
+            f'Cluster "{cluster_name_req}" not found in NetBox (Virtualization → Clusters). '
+            f"Create the cluster or align NB proposed cluster in drift."
         )
 
     consumed = {
@@ -2425,9 +2446,19 @@ def apply_update_openstack_vm(op: dict[str, Any]) -> tuple[str, str]:
             vm.save()
             changed = True
     tenant_name = (proj.get("tenant") or "").strip()
-    if tenant_name and tenant_name not in {"—", "-"}:
+    if not tenant_name or tenant_name in {"—", "-"}:
+        if getattr(vm, "tenant_id", None):
+            _netbox_changelog_snapshot(vm)
+            vm.tenant = None
+            vm.save()
+            changed = True
+    else:
         tenant = _resolve_tenant(tenant_name)
-        if tenant is not None and getattr(vm, "tenant_id", None) != tenant.pk:
+        if tenant is None:
+            return _skip_missing_prereq(
+                f'Tenant "{tenant_name}" not found in NetBox (create it or fix NB Proposed Tenant).'
+            )
+        if getattr(vm, "tenant_id", None) != tenant.pk:
             _netbox_changelog_snapshot(vm)
             vm.tenant = tenant
             vm.save()
@@ -2679,7 +2710,7 @@ _MANDATORY_NETBOX_PREVIEW_FIELDS: dict[str, tuple[str, ...]] = {
     "detail_new_fips": ("address", "status"),
     "detail_existing_fips": ("address", "status"),
     "detail_new_vms": ("name", "cluster"),
-    "detail_existing_vms": ("id", "name"),
+    "detail_existing_vms": ("id", "name", "cluster"),
     "detail_nic_drift_os": ("device", "name"),
     "detail_nic_drift_maas": ("device", "name"),
     "detail_bmc_new_devices": ("device", "name", "IPAddress.address"),
@@ -3819,6 +3850,11 @@ def _cells_scoped_for_apply(selection_key: str, cells: Any) -> dict[str, str]:
         if kn in wf:
             if v.strip():
                 out[k] = v
+            continue
+        if kn == _norm_header("NB Proposed Tenant"):
+            coerced = coerce_nb_proposed_tenant_cell(v)
+            if coerced:
+                out[k] = coerced
             continue
         if _meaningful_cell_val(v):
             out[k] = v

@@ -6,10 +6,15 @@ import copy
 import json
 from typing import Any
 
+from netbox_automation_plugin.sync.reporting.drift_report.drift_nb_picker_catalog import (
+    coerce_nb_proposed_tenant_cell,
+)
 from netbox_automation_plugin.sync.reporting.drift_report.proposed_nic_derived import (
     NIC_DRIFT_AUTHORITY_COL_INDEX,
     NIC_NEW_AUTHORITY_COL_INDEX,
 )
+
+_NB_PROPOSED_TENANT_HEADER = "NB Proposed Tenant"
 
 # selection_key (HTML data-selection-key) -> prop dict key
 SELECTION_KEY_TO_PROP_LIST: dict[str, str] = {
@@ -385,7 +390,25 @@ def normalize_drift_review_overrides(raw: Any) -> dict[str, dict[str, dict[str, 
             out[sk] = inner
     _remap_legacy_truncated_nb_placement_headers(out)
     _remap_proposed_missing_vlan_editable_name_header(out)
+    _sanitize_nb_proposed_tenant_overrides(out)
     return out
+
+
+def _sanitize_nb_proposed_tenant_overrides(
+    out: dict[str, dict[str, dict[str, str]]],
+) -> None:
+    """Drop tenant values that are not real NetBox picker labels (same rule as audit HTML)."""
+    for sec in out.values():
+        for cmap in sec.values():
+            if _NB_PROPOSED_TENANT_HEADER not in cmap:
+                continue
+            coerced = coerce_nb_proposed_tenant_cell(
+                cmap.get(_NB_PROPOSED_TENANT_HEADER)
+            )
+            if coerced:
+                cmap[_NB_PROPOSED_TENANT_HEADER] = coerced
+            else:
+                cmap.pop(_NB_PROPOSED_TENANT_HEADER, None)
 
 
 def _remap_proposed_missing_vlan_editable_name_header(

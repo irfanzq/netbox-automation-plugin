@@ -7,8 +7,34 @@ Loaded once per page via json_script; keys match data-nb-pick-kind on picker cel
 from __future__ import annotations
 
 import logging
+from functools import lru_cache
 
 logger = logging.getLogger("netbox_automation_plugin")
+
+# Single placeholder for drift **NB Proposed Tenant** until the operator picks a label from the picker
+# (values come from :func:`build_drift_nb_picker_catalog`; do not copy NetBox/OS fields here).
+DRIFT_NB_PROPOSED_TENANT_DEFAULT = "—"
+
+_PLACEHOLDER_TENANT = frozenset(("", "—", "-"))
+
+
+@lru_cache(maxsize=1)
+def drift_picker_tenant_label_allowlist() -> frozenset[str]:
+    """Display strings that match the drift HTML tenant picker (hierarchy labels included)."""
+    return frozenset(build_drift_nb_picker_catalog(user=None).get("tenant") or [])
+
+
+def coerce_nb_proposed_tenant_cell(raw: str | None) -> str:
+    """
+    Return a tenant label safe for NetBox apply/preview: empty unless ``raw`` is empty/placeholder
+    or exactly matches a value from :func:`build_drift_nb_picker_catalog` (tenant key).
+    """
+    s = (raw or "").strip()
+    if not s or s in _PLACEHOLDER_TENANT:
+        return ""
+    if s in drift_picker_tenant_label_allowlist():
+        return s
+    return ""
 
 
 def _picker_field_values_main_branch(

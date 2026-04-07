@@ -8,13 +8,14 @@ VIDs are detected with the same rules as ``apply_create_interface`` /
 from __future__ import annotations
 
 import ipaddress
-import random
 import re
-from collections import Counter
 from typing import Any
 
 _NB_VLAN_NAME_MAX_LEN = 64
 
+from netbox_automation_plugin.sync.reporting.drift_report.drift_nb_picker_catalog import (
+    DRIFT_NB_PROPOSED_TENANT_DEFAULT,
+)
 from netbox_automation_plugin.sync.reporting.drift_report.drift_overrides_apply import (
     HEADERS_DETAIL_NIC_DRIFT,
     HEADERS_DETAIL_NEW_NICS,
@@ -25,10 +26,6 @@ from netbox_automation_plugin.sync.reporting.drift_report.proposed_action_format
 from netbox_automation_plugin.sync.reconciliation.apply_cells import (
     _interface_mac_vlan_ip_from_cells,
     _resolve_vlan_for_device,
-)
-from netbox_automation_plugin.sync.tenancy_netbox_compat import (
-    tenant_hierarchy_fk,
-    vlan_tenant_select_related_paths,
 )
 
 _RE_UNTAGGED = re.compile(r"\bSET_NETBOX_UNTAGGED_VLAN\s*=\s*([^;]+)", re.I)
@@ -294,62 +291,43 @@ def _suggest_vlan_group_name(*, device, nb_site: str, nb_location: str) -> str:
     return ""
 
 
-def _tenant_display_from_vlan(v) -> str:
-    if v is None or not getattr(v, "tenant_id", None):
-        return ""
-    t = getattr(v, "tenant", None)
-    if t is None:
-        return ""
-    child = (t.name or "").strip()
-    rel = tenant_hierarchy_fk()
-    if rel:
-        p = getattr(t, rel, None)
-        if p is not None and (p.name or "").strip():
-            return f"{(p.name or '').strip()} / {child}"
-    return child
-
-
 def _defaults_for_vlan_group(group_name: str) -> dict[str, str]:
     """
-    Tenant: plurality among 2–3 random VLANs in the group that already have a tenant.
     Status / VLAN name: first VLAN in the group by VID (stable template).
+    Tenant: left empty — operators set NB Proposed Tenant via the drift picker (real NetBox tenants only).
     """
     from ipam.models import VLAN, VLANGroup
 
     gn = (group_name or "").strip()
     if not gn:
-        return {"tenant": "", "status": "active", "vlan_name": "TBD"}
+        return {
+            "tenant": DRIFT_NB_PROPOSED_TENANT_DEFAULT,
+            "status": "active",
+            "vlan_name": "TBD",
+        }
     grp = VLANGroup.objects.filter(name__iexact=gn).first()
     if grp is None:
-        return {"tenant": "", "status": "active", "vlan_name": "TBD"}
+        return {
+            "tenant": DRIFT_NB_PROPOSED_TENANT_DEFAULT,
+            "status": "active",
+            "vlan_name": "TBD",
+        }
     gfk = "group" if any(f.name == "group" for f in VLAN._meta.fields) else "vlan_group"
-    all_v = list(
-        VLAN.objects.filter(**{gfk: grp})
-        .select_related(*vlan_tenant_select_related_paths())
-        .order_by("vid")
-    )
-    if not all_v:
-        return {"tenant": "", "status": "active", "vlan_name": "TBD"}
-
-    with_tenant = [v for v in all_v if getattr(v, "tenant_id", None)]
-    tenant_s = ""
-    if with_tenant:
-        nwt = len(with_tenant)
-        if nwt == 1:
-            sample = with_tenant
-        else:
-            k = 3 if nwt >= 3 else 2
-            sample = random.sample(with_tenant, k)
-        disps = [_tenant_display_from_vlan(v) for v in sample]
-        disps = [d for d in disps if d]
-        if disps:
-            tenant_s = Counter(disps).most_common(1)[0][0]
-
-    v0 = all_v[0]
+    v0 = VLAN.objects.filter(**{gfk: grp}).order_by("vid").first()
+    if v0 is None:
+        return {
+            "tenant": DRIFT_NB_PROPOSED_TENANT_DEFAULT,
+            "status": "active",
+            "vlan_name": "TBD",
+        }
     st = getattr(v0, "status", None)
     status_s = str(st).strip() if st is not None else "active"
     vn = (v0.name or "").strip() or "TBD"
-    return {"tenant": tenant_s, "status": status_s, "vlan_name": vn}
+    return {
+        "tenant": DRIFT_NB_PROPOSED_TENANT_DEFAULT,
+        "status": status_s,
+        "vlan_name": vn,
+    }
 
 
 def _clamp_nb_vlan_name(raw: str) -> str:
