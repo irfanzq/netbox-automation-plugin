@@ -1365,19 +1365,45 @@ def _device_apply_row_stepwise_changelog(
     return any_save
 
 
+def _vid_in_single_vlan_vid_range(vid_i: int, r) -> bool:
+    """
+    True if ``vid_i`` falls in one VLAN group range row.
+
+    NetBox ``VLAN.clean`` uses ``vid in range``. Some drivers / range types do not
+    implement ``__contains__`` reliably for plain ints, so we also use discrete bounds
+    (same lower/upper_inc idea as NetBox's VLANGroup range validation).
+    """
+    try:
+        if vid_i in r:
+            return True
+    except Exception:
+        pass
+    try:
+        lo_raw = r.lower
+        hi_raw = r.upper
+        if lo_raw is None or hi_raw is None:
+            return False
+        lo_inc = getattr(r, "lower_inc", True)
+        hi_inc = getattr(r, "upper_inc", True)
+        lo = int(lo_raw) if lo_inc else int(lo_raw) + 1
+        hi = int(hi_raw) if hi_inc else int(hi_raw) - 1
+        return lo <= vid_i <= hi
+    except (TypeError, ValueError, AttributeError):
+        return False
+
+
 def _vid_allowed_in_netbox_vlan_group(vid_i: int, grp) -> bool:
-    """Mirror NetBox ``VLAN.clean`` check: VID must fall within the group's configured ranges."""
+    """Mirror NetBox ``VLAN.clean``: VID must fall within at least one of the group's ``vid_ranges``."""
     if grp is None:
         return True
-    ranges = getattr(grp, "vid_ranges", None) or []
-    if not ranges:
+    ranges = getattr(grp, "vid_ranges", None)
+    if ranges is None:
         return True
-    try:
-        for vid_range in ranges:
-            if vid_i in vid_range:
-                return True
-    except (TypeError, ValueError):
-        logger.debug("vid range membership check failed", exc_info=True)
+    if len(ranges) == 0:
+        return False
+    for vid_range in ranges:
+        if _vid_in_single_vlan_vid_range(vid_i, vid_range):
+            return True
     return False
 
 
