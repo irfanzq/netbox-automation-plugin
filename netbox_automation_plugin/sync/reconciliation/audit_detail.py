@@ -7,10 +7,6 @@ import re
 from collections import defaultdict
 from typing import Dict, Optional
 
-from netbox_automation_plugin.sync.reporting.drift_report.maas_vlan_display import (
-    format_maas_vlan_vid_for_reports,
-)
-
 logger = logging.getLogger("netbox_automation_plugin.sync")
 
 
@@ -189,6 +185,10 @@ def build_maas_netbox_interface_audit(
     openstack_data: combined OpenStack payload; when runtime NIC rows are present, OS is
         authoritative for MAC/IP/VLAN on that MAC and MAAS is fallback.
     """
+    from netbox_automation_plugin.sync.reporting.drift_report.maas_vlan_display import (
+        format_maas_vlan_vid_for_reports,
+    )
+
     by_h = {}
     for m in maas_data.get("machines") or []:
         h = (m.get("hostname") or "").strip()
