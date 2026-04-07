@@ -36,6 +36,7 @@ from netbox_automation_plugin.sync.reporting.drift_report.drift_overrides_apply 
     HEADERS_DETAIL_NEW_PREFIXES,
     HEADERS_DETAIL_NEW_VMS,
     HEADERS_DETAIL_NIC_DRIFT,
+    HEADERS_DETAIL_PROPOSED_MISSING_VLANS,
     HEADERS_PLACEMENT_ALIGNMENT,
     HEADERS_SERIAL_REVIEW,
     merge_drift_review_overrides,
@@ -326,9 +327,13 @@ def build_drift_report_xlsx(
         + len(prop["add_mgmt_iface"])
         + len(prop.get("add_mgmt_iface_new_devices", []))
         + len(prop["review_serial"])
+        + len(prop.get("add_proposed_missing_vlans", []))
     )
     ws_sum.append(["New devices", str(len(prop["add_devices"]))])
     ws_sum.append(["Review-only MAAS-only hosts", str(len(prop.get("add_devices_review_only", [])))])
+    ws_sum.append(
+        ["Proposed missing VLANs (IPAM)", str(len(prop.get("add_proposed_missing_vlans", [])))]
+    )
     ws_sum.append(["New prefixes", str(len(prop["add_prefixes"]))])
     ws_sum.append(["Existing prefixes (drift)", str(len(prop.get("update_prefixes", [])))])
     ws_sum.append(["New IP ranges (allocation pools)", str(len(prop.get("add_ip_ranges", [])))])
@@ -354,6 +359,9 @@ def build_drift_report_xlsx(
     nic_drift_maas = [r for r in prop["update_nic"] if not _update_nic_row_is_os_authority(r)]
     ws_prop.append(["New devices (MAAS fallback)", len(prop["add_devices"])])
     ws_prop.append(["Review-only MAAS-only hosts", len(prop.get("add_devices_review_only", []))])
+    ws_prop.append(
+        ["Proposed missing VLANs (IPAM)", len(prop.get("add_proposed_missing_vlans", []))]
+    )
     ws_prop.append(["New prefixes (OpenStack authority)", len(prop["add_prefixes"])])
     ws_prop.append(["Existing prefixes (drift)", len(prop.get("update_prefixes", []))])
     ws_prop.append(["New IP ranges (OpenStack authority)", len(prop.get("add_ip_ranges", []))])
@@ -396,6 +404,11 @@ def build_drift_report_xlsx(
         "A) MAAS-only hosts (manual review required)",
         list(HEADERS_DETAIL_NEW_DEVICES),
         prop.get("add_devices_review_only", []),
+    )
+    _append_block(
+        "A) Proposed missing VLANs (IPAM)",
+        list(HEADERS_DETAIL_PROPOSED_MISSING_VLANS),
+        prop.get("add_proposed_missing_vlans", []),
     )
     _append_block(
         "A) New prefixes",

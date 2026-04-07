@@ -13,6 +13,7 @@ from netbox_automation_plugin.sync.reporting.drift_report.drift_overrides_apply 
     HEADERS_DETAIL_NEW_PREFIXES,
     HEADERS_DETAIL_NEW_VMS,
     HEADERS_DETAIL_NIC_DRIFT,
+    HEADERS_DETAIL_PROPOSED_MISSING_VLANS,
     HEADERS_SERIAL_REVIEW,
     _new_nic_row_is_os_authority,
     _update_nic_row_is_os_authority,
@@ -56,6 +57,11 @@ _PROPOSED_NB_PICK_NIC = {
     "NB Proposed intf Label": "intf_role",
     "NB Proposed intf Type": "interface_type",
 }
+_PROPOSED_NB_PICK_MISSING_VLAN = {
+    "NB proposed VLAN group": "vlan_group",
+    "NB Proposed Tenant": "tenant",
+    "NB proposed status": "vlan_status",
+}
 
 
 def emit_proposed_change_tables(e, prop):
@@ -98,6 +104,11 @@ def emit_proposed_change_tables(e, prop):
                 "Existing VMs (OpenStack drift)",
                 str(len(prop.get("update_openstack_vms", []))),
                 "Virtual Machine exists; vCPU/memory/disk/status/device/cluster differ",
+            ],
+            [
+                "Proposed missing VLANs (IPAM)",
+                str(len(prop.get("add_proposed_missing_vlans", []))),
+                "Tagged VID from MAAS/OS interface proposals not found in NetBox scope for that device/site",
             ],
         ],
     )
@@ -276,6 +287,30 @@ def emit_proposed_change_tables(e, prop):
             proposed_pick_columns=_PROPOSED_NB_PICK_DEVICE,
         )
 
+    if prop.get("add_proposed_missing_vlans"):
+        e.spacer()
+        e.subtitle("Detail — proposed missing VLANs (IPAM)")
+        e.paragraph(
+            "Interface drift or new-NIC rows propose ``SET_NETBOX_UNTAGGED_VLAN`` for a **tagged** VID "
+            "(1–4094) that does not resolve under the device site/location (VLAN groups / ``get_for_site``). "
+            "**NB Proposed VLAN ID** is that tag; **NB site** / **NB location** come from the NetBox device "
+            "(or from new-NIC placement rows when the device is not in NetBox yet). "
+            "**NB proposed VLAN group** matches the best **name** among all NetBox VLAN groups using the device/NB **location** text (e.g. Birch → ``Birch VLANs``); if none match, falls back to group scope on location/site. "
+            "**NB Proposed Tenant** is inferred from **2–3 random** existing VLANs in that group that already have a tenant (most common display). **NB proposed VLAN name** prefers (in order): a NetBox **Prefix** that contains a NIC IP and whose linked VLAN matches this VID; an existing **VLAN in the same group** with this VID; MAAS **interface VLAN name**; Neutron **network name** from runtime NICs; a fuzzy match on other VLAN names in the group using location hints plus MAAS/OS text; otherwise the first VLAN-by-VID template in that group or **TBD**. **NB proposed status** follows that template. "
+            "Apply creates ``ipam.VLAN`` under the selected **group** only (not a duplicate ``site`` on the VLAN row). "
+            "Runs **before** interface operations when this section is selected in reconciliation."
+        )
+        e.spacer()
+        e.table(
+            list(HEADERS_DETAIL_PROPOSED_MISSING_VLANS),
+            prop["add_proposed_missing_vlans"],
+            dynamic_columns=True,
+            wrap_max_width=None,
+            selectable=True,
+            selection_key="detail_proposed_missing_vlans",
+            proposed_pick_columns=_PROPOSED_NB_PICK_MISSING_VLAN,
+        )
+
     e.spacer()
     e.subtitle("B) NICs and BMC / OOB")
     e.spacer()
@@ -420,6 +455,7 @@ def emit_proposed_change_tables(e, prop):
         len(prop["add_devices"]) + len(prop["add_prefixes"]) + len(prop.get("update_prefixes", [])) +
         len(prop["add_fips"]) + len(prop.get("update_fips", [])) +
         len(prop.get("add_openstack_vms", [])) + len(prop.get("update_openstack_vms", [])) +
+        len(prop.get("add_proposed_missing_vlans", [])) +
         len(prop["update_nic"]) + len(prop["add_nb_interfaces"]) +
         len(prop["add_mgmt_iface"]) + len(prop.get("add_mgmt_iface_new_devices", [])) +
         len(prop["review_serial"])
@@ -434,6 +470,10 @@ def emit_proposed_change_tables(e, prop):
             ["Existing floating IPs (NAT drift)", str(len(prop.get("update_fips", [])))],
             ["New VMs (OpenStack)", str(len(prop.get("add_openstack_vms", [])))],
             ["Existing VMs (drift)", str(len(prop.get("update_openstack_vms", [])))],
+            [
+                "Proposed missing VLANs (IPAM)",
+                str(len(prop.get("add_proposed_missing_vlans", []))),
+            ],
             ["New NICs", str(len(prop["add_nb_interfaces"]))],
             ["NIC drift", str(len(prop["update_nic"]))],
             ["BMC / OOB", str(len(prop["add_mgmt_iface"]) + len(prop.get("add_mgmt_iface_new_devices", [])))],

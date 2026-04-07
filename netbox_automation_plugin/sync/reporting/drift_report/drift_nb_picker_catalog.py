@@ -84,6 +84,8 @@ def build_drift_nb_picker_catalog(*, user=None) -> dict[str, list[str]]:
         "vm_cluster_type": [],
         "vm_primary_ip": [],
         "vm_status": [],
+        "vlan_group": [],
+        "vlan_status": [],
     }
     out["_vlan_by_scope_location"] = {}
     try:
@@ -133,9 +135,55 @@ def build_drift_nb_picker_catalog(*, user=None) -> dict[str, list[str]]:
     try:
         from tenancy.models import Tenant
 
-        out["tenant"] = sorted({(x.name or "").strip() for x in Tenant.objects.only("name").iterator()} - {""})
+        def _tenant_labels_fetch() -> list[str]:
+            qs = Tenant.objects.select_related("parent").only("name", "parent__name").order_by("name")
+            lab: set[str] = set()
+            for t in qs.iterator(chunk_size=4096):
+                child = (t.name or "").strip()
+                if not child:
+                    continue
+                lab.add(child)
+                par = getattr(t, "parent", None)
+                if par is not None and (par.name or "").strip():
+                    lab.add(f"{(par.name or '').strip()} / {child}")
+            return sorted(lab - {""})
+
+        try:
+            from netbox_branching.utilities import deactivate_branch
+        except ImportError:
+            out["tenant"] = _tenant_labels_fetch()
+        else:
+            try:
+                with deactivate_branch():
+                    out["tenant"] = _tenant_labels_fetch()
+            except Exception as e:
+                logger.debug("drift picker tenant main-branch: %s", e)
+                out["tenant"] = _tenant_labels_fetch()
     except Exception as e:
         logger.debug("drift picker tenant: %s", e)
+
+    try:
+        from ipam.models import VLANGroup
+
+        out["vlan_group"] = _picker_field_values_main_branch(
+            VLANGroup, "name", user, restrict_view=False
+        )
+    except Exception as e:
+        logger.debug("drift picker vlan_group: %s", e)
+
+    try:
+        from ipam.models import VLAN
+
+        st_field = VLAN._meta.get_field("status")
+        ch = getattr(st_field, "choices", None) or []
+        vstat: list[str] = []
+        for val, _lab in ch:
+            if val is None or val == "":
+                continue
+            vstat.append(str(val).strip())
+        out["vlan_status"] = sorted(set(vstat) - {""})
+    except Exception as e:
+        logger.debug("drift picker vlan_status: %s", e)
 
     try:
         from ipam.models import VLAN

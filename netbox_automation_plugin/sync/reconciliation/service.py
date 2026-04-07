@@ -41,7 +41,7 @@ from .branch import (
 from .apply_cells import (
     NEW_NIC_SELECTION_KEYS,
     SUPPORTED_APPLY_ACTIONS,
-    _nic_proposed_property_segment_ok,
+    _interface_mac_vlan_ip_from_cells,
     apply_row_operation,
     netbox_write_preview_cells,
     netbox_write_preview_fieldnames,
@@ -190,11 +190,13 @@ SK_TO_ACTION = {
     "detail_bmc_existing": "bmc_alignment",
     "detail_serial_review": "serial_review",
     "detail_placement_lifecycle_alignment": "placement_alignment",
+    "detail_proposed_missing_vlans": "create_vlan",
 }
 
 # Drift audit HTML order: format_html_drift (placement) → format_html_proposed top-to-bottom
 # (prefix/IPAM/VM detail sections, then Detail — new devices / MAAS-only review, then B) NICs/BMC).
 # Apply still creates Devices before Interfaces: device selection_keys have lower rank than NIC keys.
+# Missing-VLAN rows run after device creates and before interface apply (see ``detail_proposed_missing_vlans`` rank).
 AUDIT_REPORT_APPLY_ORDER: tuple[str, ...] = (
     "detail_placement_lifecycle_alignment",
     "detail_new_prefixes",
@@ -206,6 +208,7 @@ AUDIT_REPORT_APPLY_ORDER: tuple[str, ...] = (
     "detail_existing_vms",
     "detail_new_devices",
     "detail_review_only_devices",
+    "detail_proposed_missing_vlans",
     "detail_new_nics",
     "detail_new_nics_os",
     "detail_new_nics_maas",
@@ -229,6 +232,7 @@ _ACTION_APPLY_PHASE: dict[str, int] = {
     "create_floating_ip": 2,
     "create_openstack_vm": 3,
     "update_openstack_vm": 3,
+    "create_vlan": 3,
     "create_interface": 4,
     "update_interface": 4,
     "bmc_documentation": 5,
@@ -242,6 +246,7 @@ RECON_SECTION_TITLES: dict[str, str] = {
     "detail_placement_lifecycle_alignment": "Detail — placement & lifecycle alignment",
     "detail_new_devices": "New devices",
     "detail_review_only_devices": "MAAS only hosts",
+    "detail_proposed_missing_vlans": "Proposed missing VLANs (IPAM)",
     "detail_new_prefixes": "New prefixes",
     "detail_existing_prefixes": "Existing prefixes",
     "detail_new_ip_ranges": "New IP ranges",
@@ -262,6 +267,7 @@ RECON_SECTION_TITLES: dict[str, str] = {
 # When selection_key is missing from SK_TO_ACTION (e.g. stale plugin HTML), infer from row metadata.
 _PROP_LIST_KEY_FALLBACK_ACTION: dict[str, str] = {
     "add_nb_interfaces": "create_interface",
+    "add_proposed_missing_vlans": "create_vlan",
 }
 
 
@@ -459,6 +465,10 @@ def _operation_summary(meta: dict[str, Any]) -> str:
     host = (cells.get("Host") or cells.get("Hostname") or "").strip()
     if sk in ("detail_new_devices", "detail_review_only_devices"):
         return f"Device row: {host or '—'}"
+    if sk == "detail_proposed_missing_vlans":
+        vid = (cells.get("NB Proposed VLAN ID") or cells.get("Target VID") or "").strip()
+        grp = (cells.get("NB proposed VLAN group") or "").strip()
+        return f"Create VLAN VID {vid or '—'} in group {grp or '—'}"
     if sk == "detail_new_prefixes":
         cidr = cells.get("CIDR") or "—"
         vrf = cells.get("NB proposed VRF") or "—"
@@ -487,33 +497,32 @@ def _operation_summary(meta: dict[str, Any]) -> str:
         if_name = (cells.get("Suggested NB name") or "").strip()
         if if_name:
             base += f" / {if_name}"
-        mac = (cells.get("Parsed MAC") or "").strip()
-        vlan = (cells.get("Parsed untagged VLAN") or "").strip()
-        ips = (cells.get("Parsed IPs") or "").strip()
-        if not _nic_proposed_property_segment_ok(mac):
-            mac = (cells.get("MAAS MAC") or cells.get("OS MAC") or "").strip()
-        if not _nic_proposed_property_segment_ok(vlan):
-            vlan = (cells.get("MAAS VLAN") or cells.get("OS runtime VLAN") or "").strip()
-        if not _nic_proposed_property_segment_ok(ips):
-            ips = (cells.get("MAAS IPs") or cells.get("OS runtime IP") or "").strip()
+        # Match apply_create_interface + frozen op payload: same merge as
+        # ``new_nic_cells_for_reconciliation`` and ``_interface_mac_vlan_ip_from_cells``
+        # (raw row MAAS vs OS column order must not contradict Proposed Action / SET_NETBOX_*).
+        rcells = new_nic_cells_for_reconciliation(cells)
+        mac_res, vid_res, ip_blob = _interface_mac_vlan_ip_from_cells(
+            rcells, include_nb_fallback=False
+        )
+        bits: list[str] = []
+        if mac_res:
+            bits.append(f"MAC {mac_res}")
+        if vid_res is not None:
+            bits.append(f"VLAN {vid_res}")
+        ip_s = (ip_blob or "").strip()
+        if ip_s:
+            bits.append(f"IPs {ip_s}")
         props = (
-            cells.get("Proposed Action")
+            rcells.get("Proposed Action")
+            or cells.get("Proposed Action")
             or cells.get("Proposed action")
             or cells.get("Proposed properties")
             or cells.get("Proposed properties (from MAAS)")
             or ""
         ).strip()
-        bits = []
-        if _nic_proposed_property_segment_ok(mac):
-            bits.append(f"MAC {mac}")
-        if _nic_proposed_property_segment_ok(vlan):
-            bits.append(f"VLAN {vlan}")
-        if _nic_proposed_property_segment_ok(ips):
-            bits.append(f"IPs {ips}")
         if bits:
             base += " — " + "; ".join(bits)
         elif props:
-            # No structured MAC/VLAN/IP columns: show Proposed Action once (not twice with bits).
             p = props if len(props) <= 160 else props[:157].rstrip() + "…"
             base += " — " + p
         return base

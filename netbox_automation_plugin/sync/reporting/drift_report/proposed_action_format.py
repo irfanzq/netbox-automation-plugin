@@ -4,6 +4,9 @@ Canonical ``SET_NETBOX_*`` strings for drift / proposed-change **Proposed Action
 Apply/reconciliation reads interface directives ``SET_NETBOX_MAC``, ``SET_NETBOX_UNTAGGED_VLAN``,
 and ``SET_NETBOX_IP`` from this column (see ``apply_cells``). Workflow rows use ``SET_NETBOX_ACTION=…``
 or ``SET_NETBOX_WORKFLOW=…`` so operators and automation share one vocabulary.
+
+MAAS VLAN: use ``vlan.vid`` for directives, never ``vlan.id``. Numeric **0** omits
+``SET_NETBOX_UNTAGGED_VLAN`` (MAAS native / untagged). See ``maas_client`` for the full mapping.
 """
 
 from __future__ import annotations
@@ -26,7 +29,14 @@ def format_set_netbox_nic_directives(
         parts.append(f"SET_NETBOX_MAC={m}")
     v = str(vlan or "").strip()
     if v and v not in _PLACEHOLDER:
-        parts.append(f"SET_NETBOX_UNTAGGED_VLAN={v}")
+        # MAAS ``vlan.vid`` 0 = untagged/native (not 1–4094); omit ``SET_NETBOX_UNTAGGED_VLAN``.
+        try:
+            if int(v, 10) == 0:
+                v = ""
+        except ValueError:
+            pass
+        if v:
+            parts.append(f"SET_NETBOX_UNTAGGED_VLAN={v}")
     raw_ips = str(ips or "").strip()
     if raw_ips and raw_ips not in _PLACEHOLDER:
         for chunk in re.split(r"[,;\s]+", raw_ips):
@@ -50,6 +60,7 @@ SET_NETBOX_ACTION_SERIAL_REVIEW = "SET_NETBOX_ACTION=SERIAL_REVIEW_MANUAL"
 SET_NETBOX_ACTION_REVIEW_PORT_ALIGNMENT = "SET_NETBOX_ACTION=REVIEW_PORT_ALIGNMENT"
 SET_NETBOX_WORKFLOW_PLACEMENT = "SET_NETBOX_WORKFLOW=PLACEMENT_DEVICE_ALIGNMENT"
 SET_NETBOX_ACTION_LLDP_REVIEW = "SET_NETBOX_ACTION=REVIEW_LLDP_CABLING"
+SET_NETBOX_ACTION_CREATE_VLAN = "SET_NETBOX_ACTION=CREATE_VLAN_FROM_DRIFT"
 
 
 def format_placement_proposed_action(human_hints: str) -> str:

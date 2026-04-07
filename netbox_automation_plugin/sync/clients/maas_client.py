@@ -9,6 +9,8 @@ NetBox devices use short hostname only (e.g. se-h1-23-gpu).
 We normalize MAAS hostname to the short name (part before first dot) for matching.
 """
 
+from __future__ import annotations
+
 import asyncio
 import json
 import logging
@@ -546,6 +548,137 @@ def _fetch_maas_fabric_catalog(maas_url: str, api_key: str, verify_tls: bool) ->
     return out
 
 
+def _maas_rest_fabric_id_from_value(fab) -> str:
+    """Fabric primary key string from MAAS REST ``fabric`` (URL, bare id, or dict)."""
+    if isinstance(fab, dict):
+        return str(fab.get("id") or "").strip()
+    if isinstance(fab, str) and fab.strip():
+        s = fab.strip()
+        if "/fabrics/" in s:
+            return s.rstrip("/").split("/fabrics/")[-1].split("/")[0]
+        if s.isdigit():
+            return s
+    return ""
+
+
+def _maas_vlan_pk_from_href(url: str) -> str:
+    """MAAS VLAN object id from ``.../vlans/{id}/`` (or ``.../fabrics/x/vlans/{id}/``)."""
+    s = (url or "").strip()
+    if "/vlans/" not in s:
+        return ""
+    return s.rstrip("/").split("/vlans/")[-1].split("/")[0]
+
+
+def _maas_untagged_is_fabric_native_placeholder(display_name: str, vid_s: str) -> bool:
+    """
+    MAAS names fabric-native VLAN (``vid`` 0) ``untagged``. A *tagged* VLAN may still be
+    legitimately named ``untagged`` in MAAS/NetBox — only strip the label when VID is 0.
+    """
+    if (display_name or "").strip().lower() != "untagged":
+        return False
+    try:
+        return int(str(vid_s).strip()) == 0
+    except (TypeError, ValueError):
+        return False
+
+
+def _fetch_maas_vlan_maps(maas_url: str, api_key: str, verify_tls: bool) -> tuple[dict[str, str], dict[str, str]]:
+    """
+    GET /api/2.0/vlans/ — map MAAS VLAN id / (fabric|vid) / bare vid to **name**, and vlan id → vid.
+
+    Interface JSON often references ``vlan`` as a hyperlink without embedding ``name``; the UI
+    (e.g. Horizon VLAN summary) still shows names like **Birch Management Default** for VID 2120.
+    """
+    parts = api_key.split(":", 2)
+    if len(parts) != 3:
+        return {}, {}
+    ck, tk, ts = parts[0], parts[1], parts[2]
+    base = _maas_rest_base(maas_url)
+    try:
+        import requests
+        from requests_oauthlib import OAuth1
+    except ImportError:
+        return {}, {}
+    auth = OAuth1(ck, "", tk, ts, signature_method="PLAINTEXT")
+    try:
+        r = requests.get(f"{base}/api/2.0/vlans/", auth=auth, verify=verify_tls, timeout=120)
+        if r.status_code != 200:
+            logger.warning("MAAS vlans list HTTP %s", r.status_code)
+            return {}, {}
+    except Exception:
+        logger.debug("MAAS vlans fetch failed", exc_info=True)
+        return {}, {}
+    names: dict[str, str] = {}
+    vid_by_pk: dict[str, str] = {}
+    for vlan in r.json() or []:
+        if not isinstance(vlan, dict):
+            continue
+        pk = str(vlan.get("id") or "").strip()
+        vid_raw = vlan.get("vid")
+        try:
+            vid_i = int(vid_raw)
+        except (TypeError, ValueError):
+            continue
+        vid_s = str(vid_i)
+        if pk:
+            vid_by_pk[pk] = vid_s
+        label = str(vlan.get("name") or "").strip()
+        if _maas_untagged_is_fabric_native_placeholder(label, vid_s):
+            label = ""
+        if not label:
+            continue
+        if pk:
+            names[pk] = label
+        fab_id = _maas_rest_fabric_id_from_value(vlan.get("fabric"))
+        if fab_id and vid_s != "0":
+            names[f"{fab_id}|{vid_s}"] = label
+        key_vid = f"vid:{vid_s}"
+        if vid_s != "0" and key_vid not in names:
+            names[key_vid] = label
+    return names, vid_by_pk
+
+
+def _maas_resolve_vlan_display_name(
+    *,
+    vlan_raw,
+    vlan_name_catalog: dict[str, str],
+    resolved_vid: str,
+    iface_fabric_raw,
+) -> str:
+    c = vlan_name_catalog or {}
+    vid_str = (resolved_vid or "").strip()
+    if isinstance(vlan_raw, dict):
+        vn = str(vlan_raw.get("name") or "").strip()
+        if vn:
+            raw_v = vlan_raw.get("vid")
+            try:
+                vnum = int(raw_v)
+            except (TypeError, ValueError):
+                vnum = None
+            eff = str(vnum) if vnum is not None else vid_str
+            if not _maas_untagged_is_fabric_native_placeholder(vn, eff):
+                return vn
+        pk = str(vlan_raw.get("id") or "").strip()
+        if pk and c.get(pk):
+            return str(c[pk]).strip()
+        fab_id = _maas_rest_fabric_id_from_value(vlan_raw.get("fabric"))
+        if not fab_id:
+            fab_id = _maas_rest_fabric_id_from_value(iface_fabric_raw)
+        if fab_id and vid_str.isdigit():
+            hit = c.get(f"{fab_id}|{vid_str}")
+            if hit:
+                return str(hit).strip()
+    if isinstance(vlan_raw, str) and vlan_raw.strip():
+        pk = _maas_vlan_pk_from_href(vlan_raw)
+        if pk and c.get(pk):
+            return str(c[pk]).strip()
+    if vid_str.isdigit():
+        hit = c.get(f"vid:{vid_str}")
+        if hit:
+            return str(hit).strip()
+    return ""
+
+
 def _fabric_from_rest_ifaces(items: list, fabric_catalog: dict | None = None) -> str:
     """Resolve fabric from MAAS interface JSON (interface.fabric string/URL + vlan.fabric)."""
     catalog = fabric_catalog or {}
@@ -695,7 +828,42 @@ def _ip_host_only(addr: str) -> str:
     return str(addr).split("/", 1)[0].strip().lower()
 
 
-def _iface_extended_from_rest(item: dict) -> dict:
+# --- MAAS → NetBox VLAN tag mapping (canonical; drift + apply rely on this) ---------------
+# * MAAS ``vlan.id``   → ignore for NetBox VLAN tag mapping (DB primary key only).
+# * MAAS ``vlan.vid``  → use for NetBox VLAN VID / reconciliation (string in NIC rows).
+# * ``vid == 0``       → untagged/native in MAAS (fabric default); not a tagged 802.1Q VLAN.
+# * ``vid`` 1–4094     → real tagged VLAN candidate for NetBox IPAM / ``Interface.untagged_vlan``.
+# -----------------------------------------------------------------------------------------
+
+
+def _maas_vlan_vid_string_from_rest_vlan(vlan: dict | None) -> str:
+    """Return ``str(vlan['vid'])`` when present; never ``vlan['id']`` (see module comment above)."""
+    if not isinstance(vlan, dict) or "vid" not in vlan:
+        return ""
+    raw = vlan.get("vid")
+    if raw is None:
+        return ""
+    return str(raw).strip()
+
+
+def _maas_vlan_vid_string_from_viscera_vlan(v) -> str:
+    """``vlan.vid`` from a viscera VLAN object only (same mapping as REST helper above)."""
+    if v is None:
+        return ""
+    if getattr(v, "vid", None) is not None:
+        return str(getattr(v, "vid")).strip()
+    vd = getattr(v, "_data", None)
+    if isinstance(vd, dict) and "vid" in vd and vd.get("vid") is not None:
+        return str(vd["vid"]).strip()
+    return ""
+
+
+def _iface_extended_from_rest(
+    item: dict,
+    vlan_name_catalog: dict[str, str] | None = None,
+    *,
+    resolved_vlan_vid: str = "",
+) -> dict:
     """Extra MAAS REST interface fields for drift (link speed, identity, VLAN name, MTU)."""
     if not isinstance(item, dict):
         return {}
@@ -703,6 +871,15 @@ def _iface_extended_from_rest(item: dict) -> dict:
     vn = ""
     if isinstance(vlan, dict):
         vn = str(vlan.get("name") or "").strip()
+        if _maas_untagged_is_fabric_native_placeholder(vn, resolved_vlan_vid):
+            vn = ""
+    if not vn:
+        vn = _maas_resolve_vlan_display_name(
+            vlan_raw=vlan,
+            vlan_name_catalog=vlan_name_catalog or {},
+            resolved_vid=resolved_vlan_vid,
+            iface_fabric_raw=item.get("fabric"),
+        )
     ls = item.get("link_speed")
     if ls in (None, ""):
         ls = item.get("link_speed_mbps") or item.get("speed")
@@ -736,7 +913,10 @@ def _iface_extended_from_viscera(iface) -> dict:
         if v is not None:
             n = getattr(v, "name", None)
             if n:
-                out["vlan_name"] = str(n).strip()
+                ns = str(n).strip()
+                vis_vid = _maas_vlan_vid_string_from_viscera_vlan(v)
+                if not _maas_untagged_is_fabric_native_placeholder(ns, vis_vid):
+                    out["vlan_name"] = ns
         ls = getattr(iface, "link_speed", None)
         if ls in (None, ""):
             ls = getattr(iface, "speed", None)
@@ -813,7 +993,7 @@ def _ifaces_from_viscera_list(iface_list):
             try:
                 v = getattr(iface, "vlan", None)
                 if v is not None:
-                    vid = str(getattr(v, "vid", None) or getattr(v, "id", None) or "")
+                    vid = _maas_vlan_vid_string_from_viscera_vlan(v)
                     fab = getattr(v, "fabric", None)
                     if fab is not None:
                         iface_fabric = str(getattr(fab, "name", None) or fab or "").strip()
@@ -918,9 +1098,16 @@ def _fabric_name_from_interface_item(item: dict, fabric_catalog: dict | None) ->
     return out[0] if out else ""
 
 
-def _rest_rows_from_iface_dicts(items: list, fabric_catalog: dict | None = None) -> list:
+def _rest_rows_from_iface_dicts(
+    items: list,
+    fabric_catalog: dict | None = None,
+    vlan_name_catalog: dict[str, str] | None = None,
+    vlan_pk_to_vid: dict[str, str] | None = None,
+) -> list:
     """Parse MAAS interface objects (list endpoint or interface_set on machine)."""
     rows = []
+    vcat = vlan_name_catalog or {}
+    pk2v = vlan_pk_to_vid or {}
     for item in items:
         if not isinstance(item, dict):
             continue
@@ -950,7 +1137,11 @@ def _rest_rows_from_iface_dicts(items: list, fabric_catalog: dict | None = None)
         vid = ""
         vlan = item.get("vlan") if isinstance(item, dict) else None
         if isinstance(vlan, dict):
-            vid = str(vlan.get("vid") or vlan.get("id") or "")
+            vid = _maas_vlan_vid_string_from_rest_vlan(vlan)
+        elif isinstance(vlan, str) and vlan.strip():
+            _pk = _maas_vlan_pk_from_href(vlan)
+            if _pk:
+                vid = (pk2v.get(_pk) or "").strip()
         iface_fabric = _fabric_name_from_interface_item(item, fabric_catalog)
         row = {
             "name": name,
@@ -960,7 +1151,7 @@ def _rest_rows_from_iface_dicts(items: list, fabric_catalog: dict | None = None)
             "vlan_vid": vid,
             "iface_fabric": iface_fabric,
         }
-        row.update(_iface_extended_from_rest(item))
+        row.update(_iface_extended_from_rest(item, vcat, resolved_vlan_vid=vid))
         rows.append(row)
     return rows
 
@@ -982,6 +1173,8 @@ def _maas_interfaces_rest(
     system_id: str,
     verify_tls: bool,
     fabric_catalog: dict | None = None,
+    vlan_name_catalog: dict | None = None,
+    vlan_pk_to_vid: dict | None = None,
 ):
     """
     When python-libmaas returns no NICs: same data as MAAS UI via REST.
@@ -1020,13 +1213,17 @@ def _maas_interfaces_rest(
                 continue
             data = r.json()
             if isinstance(data, list) and data:
-                rows = _rest_rows_from_iface_dicts(data, fabric_catalog)
+                rows = _rest_rows_from_iface_dicts(
+                    data, fabric_catalog, vlan_name_catalog, vlan_pk_to_vid
+                )
                 if rows:
                     return rows, _fabric_from_rest_ifaces(data, fabric_catalog)
             elif isinstance(data, dict) and data.get("interfaces"):
                 arr = data["interfaces"]
                 if isinstance(arr, list):
-                    rows = _rest_rows_from_iface_dicts(arr, fabric_catalog)
+                    rows = _rest_rows_from_iface_dicts(
+                        arr, fabric_catalog, vlan_name_catalog, vlan_pk_to_vid
+                    )
                     if rows:
                         return rows, _fabric_from_rest_ifaces(arr, fabric_catalog)
         except Exception as e:
@@ -1048,7 +1245,9 @@ def _maas_interfaces_rest(
             if not arr:
                 last_err = f"{url} -> 200 but no interface_set/interfaces on machine JSON"
                 continue
-            rows = _rest_rows_from_iface_dicts(arr, fabric_catalog)
+            rows = _rest_rows_from_iface_dicts(
+                arr, fabric_catalog, vlan_name_catalog, vlan_pk_to_vid
+            )
             if rows:
                 logger.info(
                     "MAAS interfaces from machine detail %s (%d NICs)",
@@ -1173,6 +1372,9 @@ async def fetch_maas_data(maas_url: str, maas_api_key: str, maas_insecure: bool)
         fabric_catalog = await asyncio.to_thread(
             _fetch_maas_fabric_catalog, maas_url, maas_api_key, not maas_insecure
         )
+        vlan_name_catalog, vlan_pk_to_vid = await asyncio.to_thread(
+            _fetch_maas_vlan_maps, maas_url, maas_api_key, not maas_insecure
+        )
         for m in machines:
             zone_name = "-"
             pool_name = "-"
@@ -1233,6 +1435,8 @@ async def fetch_maas_data(maas_url: str, maas_api_key: str, maas_insecure: bool)
                     sid,
                     not maas_insecure,
                     fabric_catalog,
+                    vlan_name_catalog,
+                    vlan_pk_to_vid,
                 )
                 if rest_if:
                     ifaces = rest_if

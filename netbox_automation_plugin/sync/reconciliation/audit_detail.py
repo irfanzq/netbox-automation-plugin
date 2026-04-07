@@ -7,6 +7,10 @@ import re
 from collections import defaultdict
 from typing import Dict, Optional
 
+from netbox_automation_plugin.sync.reporting.drift_report.maas_vlan_display import (
+    format_maas_vlan_vid_for_reports,
+)
+
 logger = logging.getLogger("netbox_automation_plugin.sync")
 
 
@@ -252,7 +256,7 @@ def build_maas_netbox_interface_audit(
             maas_ips = mi.get("ips") or []
             maas_ip_str = ", ".join(maas_ips) if maas_ips else "—"
             itype = (mi.get("type") or "")[:12]
-            maas_vlan = str(mi.get("vlan_vid") or "")[:8] or "—"
+            maas_vlan = format_maas_vlan_vid_for_reports(mi.get("vlan_vid"))[:8] or "—"
             row_fab = (_maas_iface_row_fabric(m, mi) or m.get("fabric_name") or "-")[:14]
 
             if not mac:

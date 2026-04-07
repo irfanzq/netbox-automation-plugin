@@ -1,5 +1,7 @@
 """Single NetBox write projection for MAAS/OpenStack reconciliation.
 
+MAAS VLAN columns use ``vlan.vid`` (0 = native/untagged; 1–4094 = tag). Never MAAS ``vlan.id``.
+
 This module defines the only mapping from drift/recon ``cells`` to the NetBox-oriented
 key/value dict shown on the reconciliation run page. ``apply_cells.netbox_write_preview_cells``
 delegates here so column order and values stay stable.
@@ -246,6 +248,16 @@ def netbox_write_projection_cells(selection_key: str, cells: dict[str, str] | No
         return _netbox_write_bmc_preview(c, existing_oob=False)
     if sk == "detail_bmc_existing":
         return _netbox_write_bmc_preview(c, existing_oob=True)
+    if sk == "detail_proposed_missing_vlans":
+        return {
+            "vid": _cell(c, "NB Proposed VLAN ID", "Target VID"),
+            "vlan_group": _cell(c, "NB proposed VLAN group"),
+            "site": _cell(c, "NB site"),
+            "location": _cell(c, "NB location"),
+            "name": _cell(c, "NB proposed VLAN name"),
+            "tenant": _cell(c, "NB Proposed Tenant"),
+            "status": _cell(c, "NB proposed status"),
+        }
     if sk == "detail_serial_review":
         return {
             "name": _cell(c, "Host", "Hostname"),

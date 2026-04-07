@@ -30,6 +30,9 @@ from netbox_automation_plugin.sync.reporting.drift_report.proposed_nic_drift imp
     _build_review_serial_rows,
     _build_update_nic_rows,
 )
+from netbox_automation_plugin.sync.reporting.drift_report.proposed_missing_vlans import (
+    build_proposed_missing_vlan_rows,
+)
 from netbox_automation_plugin.sync.reporting.drift_report.proposed_lldp_tables import (
     build_lldp_drift_rows,
 )
@@ -43,6 +46,9 @@ from netbox_automation_plugin.sync.reporting.drift_report.proposed_action_format
     SET_NETBOX_ACTION_UPDATE_PREFIX,
     SET_NETBOX_ACTION_UPDATE_VM,
     format_set_netbox_nic_directives,
+)
+from netbox_automation_plugin.sync.reporting.drift_report.maas_vlan_display import (
+    format_maas_vlan_vid_for_reports,
 )
 from netbox_automation_plugin.sync.reporting.drift_report.proposed_nic_helpers import (
     _build_add_nb_interface_rows,
@@ -1294,7 +1300,7 @@ def _proposed_changes_rows(
                 maas_if = str(r.get("name") or "").strip() or "—"
                 maas_fab = str(r.get("iface_fabric") or m.get("fabric_name") or "—")
                 ips = ", ".join(r.get("ips") or []) or "—"
-                vlan = str(r.get("vlan_vid") or "—")
+                vlan = format_maas_vlan_vid_for_reports(r.get("vlan_vid"))
                 suggested_name = (
                     maas_if
                     if maas_if != "—"
@@ -1881,6 +1887,12 @@ def _proposed_changes_rows(
             row[_nic_drift_auth_col] = "[MAAS]"
         filtered_update_nic.append(row)
     update_nic = filtered_update_nic
+    add_proposed_missing_vlans = build_proposed_missing_vlan_rows(
+        update_nic,
+        add_nb_interfaces,
+        maas_by_hostname=by_h,
+        runtime_nic_by_host_mac=os_runtime_idx,
+    )
     review_serial = _build_review_serial_rows(matched_rows)
     lldp_new, lldp_update = build_lldp_drift_rows(openstack_data, netbox_ifaces, maas_data)
 
@@ -1897,6 +1909,7 @@ def _proposed_changes_rows(
         "lldp_new": lldp_new,
         "lldp_update": lldp_update,
         "update_nic": update_nic,
+        "add_proposed_missing_vlans": add_proposed_missing_vlans,
         "add_nb_interfaces": add_nb_interfaces,
         "add_mgmt_iface": add_mgmt_iface,
         "add_mgmt_iface_new_devices": add_mgmt_iface_new_devices,

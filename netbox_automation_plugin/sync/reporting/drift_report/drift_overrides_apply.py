@@ -15,6 +15,7 @@ from netbox_automation_plugin.sync.reporting.drift_report.proposed_nic_derived i
 SELECTION_KEY_TO_PROP_LIST: dict[str, str] = {
     "detail_new_devices": "add_devices",
     "detail_review_only_devices": "add_devices_review_only",
+    "detail_proposed_missing_vlans": "add_proposed_missing_vlans",
     "detail_new_prefixes": "add_prefixes",
     "detail_new_ip_ranges": "add_ip_ranges",
     "detail_new_fips": "add_fips",
@@ -305,9 +306,25 @@ HEADERS_SERIAL_REVIEW: list[str] = [
     "Risk",
 ]
 
+HEADERS_DETAIL_PROPOSED_MISSING_VLANS: list[str] = [
+    "NB site",
+    "NB location",
+    "NB Proposed VLAN ID",
+    "VID source",
+    "MAAS VLAN",
+    "OS runtime VLAN",
+    "NB proposed VLAN group",
+    "NB proposed VLAN name",
+    "NB Proposed Tenant",
+    "NB proposed status",
+    "Proposed Action",
+    "Risk",
+]
+
 SELECTION_KEY_TO_HEADERS: dict[str, list[str]] = {
     "detail_new_devices": HEADERS_DETAIL_NEW_DEVICES,
     "detail_review_only_devices": HEADERS_DETAIL_NEW_DEVICES,
+    "detail_proposed_missing_vlans": HEADERS_DETAIL_PROPOSED_MISSING_VLANS,
     "detail_new_prefixes": HEADERS_DETAIL_NEW_PREFIXES,
     "detail_new_ip_ranges": HEADERS_DETAIL_NEW_IP_RANGES,
     "detail_new_fips": HEADERS_DETAIL_NEW_FIPS,

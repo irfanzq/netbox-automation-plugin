@@ -780,6 +780,7 @@ def _collect_runtime_nics(conn, networks: list[dict]) -> list[dict]:
                     "os_ips": list((chosen or {}).get("ips") or []),
                     "os_ip": ", ".join((chosen or {}).get("ips") or []) if chosen else "",
                     "network_id": network_id,
+                    "network_name": str(net.get("name") or "").strip(),
                     "network_type": net_type,
                     "provider_physical_network": str(
                         net.get("provider_physical_network") or bp.get("physical_network") or ""

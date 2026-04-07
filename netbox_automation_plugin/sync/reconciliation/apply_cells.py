@@ -50,6 +50,7 @@ SUPPORTED_APPLY_ACTIONS: frozenset[str] = frozenset(
         "bmc_alignment",
         "create_openstack_vm",
         "update_openstack_vm",
+        "create_vlan",
     }
 )
 
@@ -246,13 +247,29 @@ def _resolve_tenant(raw: str | None) -> Any:
 
     Audit columns may use hyphenated or project-specific labels (e.g. ``whitefiber-internal``)
     while NetBox stores a shorter ``name`` (e.g. ``whitefiber``). Try slug and a unique
-    prefix before the first hyphen when the full string does not match.
+    prefix before the first hyphen when the full string does not match. Hierarchical picker
+    labels ``Parent / Child`` match a tenant whose parent name and child name align.
     """
     from tenancy.models import Tenant
 
     s = str(raw or "").strip()
     if not s or s in ("—", "-"):
         return None
+    if " / " in s:
+        parent_part, child_part = s.split(" / ", 1)
+        parent_part = (parent_part or "").strip()
+        child_part = (child_part or "").strip()
+        if parent_part and child_part:
+            try:
+                for cand in Tenant.objects.filter(name__iexact=child_part).select_related(
+                    "parent"
+                ).iterator():
+                    par = getattr(cand, "parent", None)
+                    pn = (par.name or "").strip() if par else ""
+                    if pn.lower() == parent_part.lower():
+                        return cand
+            except Exception:
+                pass
     t = _resolve_by_name(Tenant, s)
     if t is not None:
         return t
@@ -286,7 +303,18 @@ def _normalize_ip_for_netbox(raw_ip: str) -> str:
     return f"{s}/32" if ip_obj.version == 4 else f"{s}/128"
 
 
+# NetBox ``VLAN.vid`` / ``Interface.untagged_vlan``: IEEE 802.1Q 1–4094. MAAS NIC rows must
+# carry ``vlan.vid`` only, never ``vlan.id`` (see ``maas_client`` MAAS→NetBox VLAN mapping).
+_NETBOX_IEEE_VLAN_VID_MAX = 4094
+
+
 def _parse_vlan_vid(raw: str) -> int | None:
+    """
+    Parse a VLAN tag for NetBox apply: **1–4094** only.
+
+    MAAS: ``vlan.vid == 0`` is untagged/native → returns ``None``. ``vlan.id`` must not appear
+    in these strings (collection strips it). Values outside 1–4094 return ``None``.
+    """
     s = str(raw or "").strip()
     if not s:
         return None
@@ -294,8 +322,32 @@ def _parse_vlan_vid(raw: str) -> int | None:
     if not m:
         return None
     v = int(m.group(1))
-    if 1 <= v <= 4094:
+    if 1 <= v <= _NETBOX_IEEE_VLAN_VID_MAX:
         return v
+    return None
+
+
+def _vlan_vid_over_ieee_max_from_proposed_body(body: str) -> int | None:
+    """
+    If Proposed Action names a VLAN integer above IEEE 802.1Q max, return that int.
+    Used to fail loudly instead of ``ok_updated`` with no VLAN change (``_parse_vlan_vid`` drops it).
+    """
+    b = (body or "").strip()
+    if not b:
+        return None
+    for pat in (
+        r"\bSET_NETBOX_UNTAGGED_VLAN\s*=\s*(\d+)",
+        r"\buntagged\s+VLAN\s+(\d+)",
+    ):
+        m = re.search(pat, b, flags=re.IGNORECASE)
+        if not m:
+            continue
+        try:
+            v = int(m.group(1))
+        except ValueError:
+            continue
+        if v > _NETBOX_IEEE_VLAN_VID_MAX:
+            return v
     return None
 
 
@@ -838,6 +890,56 @@ def _interface_apply_physical_fields_batched(
     return changed
 
 
+def _interface_apply_physical_fields_stepwise(
+    iface: Any,
+    *,
+    mac: str,
+    untagged: Any,
+    type_slug: Any,
+    description: str = "",
+) -> bool:
+    """
+    One ``snapshot()`` + ``save()`` per changed attribute (MAC, untagged VLAN, type,
+    description). netbox-branching Diff / ObjectChange views often collapse or under-report
+    when several mutations hit the same object in one transaction; stepwise updates match
+    :func:`_device_apply_row_stepwise_changelog` so interface **updates** appear alongside
+    device creates in the branch UI.
+    """
+    _interface_refresh_safe(iface)
+    any_save = False
+    m = (mac or "").strip()
+    if m and str(iface.mac_address or "").upper() != m.upper():
+        _netbox_changelog_snapshot(iface)
+        iface.mac_address = mac
+        iface.save()
+        any_save = True
+        _interface_refresh_safe(iface)
+    if untagged is not None and iface.untagged_vlan_id != untagged.pk:
+        _netbox_changelog_snapshot(iface)
+        iface.untagged_vlan = untagged
+        iface.save()
+        any_save = True
+        _interface_refresh_safe(iface)
+    if type_slug is not None and getattr(iface, "type", None) != type_slug:
+        _netbox_changelog_snapshot(iface)
+        iface.type = type_slug
+        iface.save()
+        any_save = True
+        _interface_refresh_safe(iface)
+    ds = (description or "").strip()
+    if ds and hasattr(iface, "description"):
+        ml = _interface_description_max_len()
+        if len(ds) > ml:
+            ds = ds[: max(ml - 3, 0)] + "..."
+        cur = (getattr(iface, "description", None) or "").strip()
+        if cur != ds:
+            _netbox_changelog_snapshot(iface)
+            iface.description = ds
+            iface.save()
+            any_save = True
+    return any_save
+
+
 def _interface_apply_role_tag_changelog(iface: Any, role_label: str | None) -> bool:
     """``snapshot()`` before M2M tag add, then ``save()`` so branch Diff records tag deltas."""
     rl = str(role_label or "").strip()
@@ -1247,6 +1349,68 @@ def _device_apply_row_stepwise_changelog(
         dev.save()
         any_save = True
     return any_save
+
+
+def apply_create_vlan(op: dict[str, Any]) -> tuple[str, str]:
+    from ipam.models import VLAN, VLANGroup
+
+    cells = op.get("cells") or {}
+    if (reason := skip_reason_from_row_guides(cells)) is not None:
+        return "skipped", reason
+
+    group_name = _cell(cells, "NB proposed VLAN group").strip()
+    vid_raw = _cell(cells, "NB Proposed VLAN ID", "Target VID").strip()
+    if not vid_raw.isdigit():
+        return _skip_missing_prereq("NB Proposed VLAN ID missing or not an integer (1–4094).")
+    vid_i = int(vid_raw)
+    if vid_i < 1 or vid_i > _NETBOX_IEEE_VLAN_VID_MAX:
+        return _skip_missing_prereq(
+            f"NB Proposed VLAN ID {vid_i} is outside IEEE 802.1Q 1–{_NETBOX_IEEE_VLAN_VID_MAX}."
+        )
+    if not group_name or group_name in {"—", "-"}:
+        return _skip_missing_prereq(
+            "NB proposed VLAN group is empty — pick a VLAN group scoped to the site/location for this VID."
+        )
+
+    grp = VLANGroup.objects.filter(name__iexact=group_name).first()
+    if grp is None:
+        return _skip_missing_prereq(f'VLAN group "{group_name}" not found in NetBox.')
+
+    gfk = "group" if any(f.name == "group" for f in VLAN._meta.fields) else "vlan_group"
+    existing = VLAN.objects.filter(**{gfk: grp, "vid": vid_i}).first()
+    if existing is not None:
+        return "skipped", "skipped_already_desired"
+
+    name = _cell(cells, "NB proposed VLAN name").strip()
+    if not name or name in {"—", "-"}:
+        name = f"VLAN-{vid_i}"
+
+    tenant_name = _cell(cells, "NB Proposed Tenant")
+    status_name = (_cell(cells, "NB proposed status") or "").strip() or "active"
+
+    tenant = None
+    if tenant_name and tenant_name not in {"—", "-"}:
+        tenant = _resolve_tenant(tenant_name)
+        if tenant is None:
+            return _skip_missing_prereq(
+                f'Tenant "{tenant_name}" not resolved — fix NB Proposed Tenant or create the tenant.'
+            )
+
+    vlan = VLAN(vid=vid_i, name=name)
+    setattr(vlan, gfk, grp)
+    st_f = vlan._meta.get_field("status")
+    st_val = _pick_choice_value(st_f, status_name)
+    if st_val is not None:
+        vlan.status = st_val
+    if tenant is not None and hasattr(vlan, "tenant_id"):
+        vlan.tenant = tenant
+
+    try:
+        vlan.save()
+    except Exception:
+        logger.debug("apply_create_vlan: save failed (vid=%s group=%s)", vid_i, group_name, exc_info=True)
+        return "failed", "failed_validation_save"
+    return "created", "ok_created"
 
 
 def apply_create_prefix(op: dict[str, Any]) -> tuple[str, str]:
@@ -2533,7 +2697,8 @@ def _reuse_iface_untagged_vlan_if_vid_matches(iface: Any, vid: int) -> Any | Non
 
 def _resolve_untagged_vlan_for_apply(device: Any, iface: Any | None, vid: int | None) -> Any | None:
     """
-    Resolve VLAN for interface apply. Returns None when no VID requested.
+    Resolve VLAN for interface apply. Returns None when no VID requested (including MAAS
+    native where ``vlan.vid`` is 0—handled upstream by :func:`_parse_vlan_vid`).
     Raises skip tuple via caller when VID requested but cannot be applied.
     """
     if vid is None:
@@ -2548,11 +2713,20 @@ def _resolve_untagged_vlan_for_apply(device: Any, iface: Any | None, vid: int | 
     return u
 
 
-def _skip_untagged_vlan_unresolved(host: str, vid: int) -> tuple[str, str, str]:
+def _skip_untagged_vlan_unresolved(
+    host: str, vid: int, *, iface_name: str = ""
+) -> tuple[str, str, str]:
+    """
+    Apply sets ``Interface.untagged_vlan`` (native/access VLAN on the port), not a field on
+    Device. Resolution walks the device's site/location to pick a unique ``ipam.VLAN`` row.
+    """
+    ifn = (iface_name or "").strip()
+    loc = f'interface "{ifn}" on device "{host}"' if ifn else f'device "{host}" (interface)'
     return _skip_missing_prereq(
-        f'Cannot set untagged VLAN VID {vid} on device "{host}": no VLAN row matches this '
-        f"device site/location in NetBox (VLAN groups / get_for_site), or VID {vid} is ambiguous. "
-        f"Create or scope a VLAN with VID {vid} for this site, then re-run apply."
+        f"Cannot apply untagged VLAN VID {vid} to {loc}: no IPAM VLAN matches this "
+        f"device's site or location (VLAN groups / get_for_site), or VID {vid} is ambiguous. "
+        f"NetBox stores native VLAN on the interface; the VLAN object must exist in IPAM and "
+        f"be in scope for the device. Create or scope VLAN {vid}, then re-run apply."
     )
 
 
@@ -2717,6 +2891,14 @@ def apply_create_interface(op: dict[str, Any]) -> tuple[str, str]:
     host = _cell(cells, "Host")
     if_name = _cell(cells, "Suggested NB name", "MAAS intf")
     mac, vid, ip_blob = _interface_mac_vlan_ip_from_cells(cells, include_nb_fallback=False)
+    proposed_body = _cell_nic_proposed_body(cells)
+    if (bad_vid := _vlan_vid_over_ieee_max_from_proposed_body(proposed_body)) is not None:
+        return _skip_missing_prereq(
+            f"VLAN VID {bad_vid} in Proposed Action exceeds NetBox IEEE 802.1Q maximum "
+            f"({_NETBOX_IEEE_VLAN_VID_MAX}); it cannot be set as Interface.untagged_vlan. "
+            f"Values above {_NETBOX_IEEE_VLAN_VID_MAX} are often VXLAN VNIs or fabric ids—use a "
+            f"1–{_NETBOX_IEEE_VLAN_VID_MAX} VLAN in NetBox or adjust the drift source."
+        )
     site_hint = _cell(cells, "NB site")
     loc_hint = _cell(cells, "NB location")
     type_slug = _resolve_interface_type_slug(_cell(cells, "NB Proposed intf Type"))
@@ -2756,7 +2938,7 @@ def apply_create_interface(op: dict[str, Any]) -> tuple[str, str]:
             vnum = int(vid)
         except (TypeError, ValueError):
             return _skip_missing_prereq(f"Invalid VLAN id in row for device {host!r}.")
-        return _skip_untagged_vlan_unresolved(host, vnum)
+        return _skip_untagged_vlan_unresolved(host, vnum, iface_name=if_name)
     if_desc = _interface_description_from_cells(cells)
     if iface is None and ip_blob:
         ip_tok, ip_parse = _nic_ip_blob_parse_stats(ip_blob)
@@ -2783,7 +2965,7 @@ def apply_create_interface(op: dict[str, Any]) -> tuple[str, str]:
             _assign_ips_to_interface(iface, ip_blob, ip_vrf)
         return "created", "ok_created"
     changed = _interface_scrub_audit_description_stepwise(iface)
-    changed |= _interface_apply_physical_fields_batched(
+    changed |= _interface_apply_physical_fields_stepwise(
         iface,
         mac=mac or "",
         untagged=untagged,
@@ -2846,10 +3028,10 @@ def apply_update_interface(op: dict[str, Any]) -> tuple[str, str]:
             vnum = int(vid)
         except (TypeError, ValueError):
             return _skip_missing_prereq(f"Invalid VLAN id in row for device {host!r}.")
-        return _skip_untagged_vlan_unresolved(host, vnum)
+        return _skip_untagged_vlan_unresolved(host, vnum, iface_name=iface.name or nb_name or ma_name)
     if_desc = _interface_description_from_cells(cells)
     changed = _interface_scrub_audit_description_stepwise(iface)
-    changed |= _interface_apply_physical_fields_batched(
+    changed |= _interface_apply_physical_fields_stepwise(
         iface,
         mac=mac or "",
         untagged=untagged,
@@ -2955,6 +3137,7 @@ def apply_bmc_alignment(op: dict[str, Any]) -> tuple[str, str]:
 
 
 _APPLY_FUNCS: dict[str, Any] = {
+    "create_vlan": apply_create_vlan,
     "create_prefix": apply_create_prefix,
     "create_ip_range": apply_create_ip_range,
     "create_floating_ip": apply_create_floating_ip,
@@ -3183,6 +3366,16 @@ def _netbox_preview_source_header_norms(selection_key: str) -> frozenset[str] | 
         )
     if sk == "detail_serial_review":
         return _header_norms("Host", "Hostname", "MAAS Serial", "NetBox Serial", "Serial Number")
+    if sk == "detail_proposed_missing_vlans":
+        return _header_norms(
+            "NB site",
+            "NB location",
+            "NB Proposed VLAN ID",
+            "NB proposed VLAN group",
+            "NB proposed VLAN name",
+            "NB Proposed Tenant",
+            "NB proposed status",
+        )
     return None
 
 
