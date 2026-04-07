@@ -193,19 +193,11 @@ SK_TO_ACTION = {
     "detail_proposed_missing_vlans": "create_vlan",
 }
 
-# Drift audit HTML order: format_html_drift (placement) → format_html_proposed top-to-bottom
-# (prefix/IPAM/VM detail sections, then Detail — new devices / MAAS-only review, then B) NICs/BMC).
-# Apply still creates Devices before Interfaces: device selection_keys have lower rank than NIC keys.
-# Missing-VLAN rows run after device creates and before interface apply (see ``detail_proposed_missing_vlans`` rank).
+# Reconciliation preview tables, frozen-op sorting, and branch apply all use this tuple (low index runs first).
+# DCIM dependency block first — matches “Detail — new devices / missing VLANs / new NICs” before OpenStack IPAM:
+#   devices → proposed missing VLANs (IPAM VLAN create) → interface creates/drift → prefixes/ranges/FIPs/VMs → BMC/serial.
 AUDIT_REPORT_APPLY_ORDER: tuple[str, ...] = (
     "detail_placement_lifecycle_alignment",
-    "detail_new_prefixes",
-    "detail_existing_prefixes",
-    "detail_new_ip_ranges",
-    "detail_new_fips",
-    "detail_existing_fips",
-    "detail_new_vms",
-    "detail_existing_vms",
     "detail_new_devices",
     "detail_review_only_devices",
     "detail_proposed_missing_vlans",
@@ -214,6 +206,13 @@ AUDIT_REPORT_APPLY_ORDER: tuple[str, ...] = (
     "detail_new_nics_maas",
     "detail_nic_drift_os",
     "detail_nic_drift_maas",
+    "detail_new_prefixes",
+    "detail_existing_prefixes",
+    "detail_new_ip_ranges",
+    "detail_new_fips",
+    "detail_existing_fips",
+    "detail_new_vms",
+    "detail_existing_vms",
     "detail_bmc_new_devices",
     "detail_bmc_existing",
     "detail_serial_review",
@@ -221,23 +220,22 @@ AUDIT_REPORT_APPLY_ORDER: tuple[str, ...] = (
 
 _APPLY_ORDER_RANK: dict[str, int] = {sk: i for i, sk in enumerate(AUDIT_REPORT_APPLY_ORDER)}
 
-# Secondary ordering when selection_key is missing from AUDIT_REPORT_APPLY_ORDER or ties:
-# ensure create_device runs before create_interface, etc. (matches coarse dependency tiers).
+# Tie-break when selection_key rank matches or is unknown: coarse NetBox write tiers.
 _ACTION_APPLY_PHASE: dict[str, int] = {
     "placement_alignment": 0,
     "create_device": 1,
     "review_device": 1,
-    "create_prefix": 2,
-    "create_ip_range": 2,
-    "create_floating_ip": 2,
-    "create_openstack_vm": 3,
-    "update_openstack_vm": 3,
-    "create_vlan": 3,
-    "create_interface": 4,
-    "update_interface": 4,
-    "bmc_documentation": 5,
-    "bmc_alignment": 5,
-    "serial_review": 6,
+    "create_vlan": 2,
+    "create_interface": 3,
+    "update_interface": 3,
+    "create_prefix": 4,
+    "create_ip_range": 4,
+    "create_floating_ip": 4,
+    "create_openstack_vm": 5,
+    "update_openstack_vm": 5,
+    "bmc_documentation": 6,
+    "bmc_alignment": 6,
+    "serial_review": 7,
     "unknown": 99,
 }
 
@@ -1099,11 +1097,14 @@ def apply_reconciliation_run(
     """
     Execute frozen operations with explicit row results and status transitions.
 
-    Operations are sorted by drift audit section order (devices before new NICs, etc.) and
-    by action phase before each row runs, including full apply and retry-failed-only passes.
+    Operations are sorted by ``AUDIT_REPORT_APPLY_ORDER`` (same as reconciliation preview
+    tables): placement, new devices, proposed missing VLANs, new/drift interfaces, then
+    OpenStack prefixes/ranges/FIPs/VMs, then BMC and serial review. Tie-break uses
+    ``_ACTION_APPLY_PHASE`` when needed.
 
     Apply handlers use full per-row ``cells`` (all audit columns) via
-    ``apply_cells.apply_row_operation``.
+    ``apply_cells.apply_row_operation``; preview projection is
+    ``netbox_write_projection.netbox_write_projection_for_op``.
     """
     allowed = {
         MAASOpenStackReconciliationRun.STATUS_BRANCH_CREATED,

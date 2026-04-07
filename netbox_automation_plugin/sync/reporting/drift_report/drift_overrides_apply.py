@@ -309,12 +309,12 @@ HEADERS_SERIAL_REVIEW: list[str] = [
 HEADERS_DETAIL_PROPOSED_MISSING_VLANS: list[str] = [
     "NB site",
     "NB location",
-    "NB Proposed VLAN ID",
-    "VID source",
     "MAAS VLAN",
     "OS runtime VLAN",
+    "VID source",
+    "NB Proposed VLAN ID",
     "NB proposed VLAN group",
-    "NB proposed VLAN name",
+    "NB proposed VLAN name (editable)",
     "NB Proposed Tenant",
     "NB proposed status",
     "Proposed Action",
@@ -384,7 +384,23 @@ def normalize_drift_review_overrides(raw: Any) -> dict[str, dict[str, dict[str, 
         if inner:
             out[sk] = inner
     _remap_legacy_truncated_nb_placement_headers(out)
+    _remap_proposed_missing_vlan_editable_name_header(out)
     return out
+
+
+def _remap_proposed_missing_vlan_editable_name_header(
+    out: dict[str, dict[str, dict[str, str]]],
+) -> None:
+    """Saved drift JSON may use the pre-editable-column label for VLAN display name."""
+    sec = out.get("detail_proposed_missing_vlans")
+    if not isinstance(sec, dict):
+        return
+    old, new = "NB proposed VLAN name", "NB proposed VLAN name (editable)"
+    for cmap in sec.values():
+        if not isinstance(cmap, dict):
+            continue
+        if old in cmap and new not in cmap:
+            cmap[new] = cmap.pop(old)
 
 
 def _remap_legacy_truncated_nb_placement_headers(

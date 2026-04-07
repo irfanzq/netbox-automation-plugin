@@ -253,6 +253,7 @@ def _html_col_is_prefix_description(header) -> bool:
         "nb prefix description",
         "nb proposed prefix description",
         "nb proposed prefix description (editable)",
+        "nb proposed vlan name (editable)",
     }
 
 

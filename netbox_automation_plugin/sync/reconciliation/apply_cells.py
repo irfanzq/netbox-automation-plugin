@@ -1394,7 +1394,9 @@ def apply_create_vlan(op: dict[str, Any]) -> tuple[str, str]:
     if existing is not None:
         return "skipped", "skipped_already_desired"
 
-    name = _cell(cells, "NB proposed VLAN name").strip()
+    name = _cell(
+        cells, "NB proposed VLAN name (editable)", "NB proposed VLAN name"
+    ).strip()
     if not name or name in {"—", "-"}:
         name = f"VLAN-{vid_i}"
 
@@ -3385,7 +3387,7 @@ def _netbox_preview_source_header_norms(selection_key: str) -> frozenset[str] | 
             "NB location",
             "NB Proposed VLAN ID",
             "NB proposed VLAN group",
-            "NB proposed VLAN name",
+            "NB proposed VLAN name (editable)",
             "NB Proposed Tenant",
             "NB proposed status",
         )

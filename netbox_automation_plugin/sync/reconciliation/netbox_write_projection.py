@@ -15,6 +15,10 @@ keys ``name``, ``id`` (existing only), ``primary_ip4``, ``primary_ip6``, ``clust
 ``tenant``, ``status``, ``device``, and ``nova_compute_host`` (VM custom field when defined
 in NetBox; see ``apply_cells._VM_PROJECTION_CF_KEYS``).
 
+**Proposed missing VLANs** (``detail_proposed_missing_vlans``): projection keys ``vid``,
+``vlan_group``, ``site``, ``location``, ``name``, ``tenant``, ``status`` — same cells contract as
+``apply_create_vlan``.
+
 Imports from ``apply_cells`` are deferred inside functions to avoid import cycles while
 ``apply_cells`` is still loading.
 """
@@ -254,7 +258,7 @@ def netbox_write_projection_cells(selection_key: str, cells: dict[str, str] | No
             "vlan_group": _cell(c, "NB proposed VLAN group"),
             "site": _cell(c, "NB site"),
             "location": _cell(c, "NB location"),
-            "name": _cell(c, "NB proposed VLAN name"),
+            "name": _cell(c, "NB proposed VLAN name (editable)", "NB proposed VLAN name"),
             "tenant": _cell(c, "NB Proposed Tenant"),
             "status": _cell(c, "NB proposed status"),
         }

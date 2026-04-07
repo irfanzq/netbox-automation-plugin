@@ -77,18 +77,37 @@ def _device_for_host(host: str):
         return None
 
 
-def _location_picker_label(loc) -> str:
+def _netbox_location_object_name(loc) -> str:
+    """NetBox Location model name only (no site prefix — NB site is a separate column)."""
     if loc is None:
         return ""
     try:
-        site = getattr(loc, "site", None)
-        site_name = (getattr(site, "name", None) or getattr(site, "slug", "") or "").strip()
-        loc_name = (getattr(loc, "name", None) or "").strip()
-        if site_name and loc_name:
-            return f"{site_name} / {loc_name}"
-        return loc_name or site_name
-    except Exception:
         return (getattr(loc, "name", None) or "").strip()
+    except Exception:
+        return ""
+
+
+def _nb_location_cell_for_missing_vlan_row(*, nb_location: str, site_disp: str) -> str:
+    """
+    NB location column: show Birch / Staging, not ``B52 / Birch`` when NB site already holds B52.
+    Strips a leading ``{site} /`` segment when it matches ``site_disp``; otherwise returns the cell
+    trimmed (operators may enter plain location names).
+    """
+    raw = (nb_location or "").strip()
+    if not raw or raw in {"—", "-"}:
+        return ""
+    site_s = (site_disp or "").strip()
+    if site_s:
+        parts = re.split(r"\s*/\s*", raw, maxsplit=1)
+        if (
+            len(parts) == 2
+            and (parts[0] or "").strip()
+            and (parts[0].strip().casefold() == site_s.casefold())
+        ):
+            rest = (parts[1] or "").strip()
+            if rest:
+                return rest
+    return raw
 
 
 def _location_match_hints(*, device, nb_site: str, nb_location: str) -> list[str]:
@@ -565,9 +584,11 @@ def build_proposed_missing_vlan_rows(
         site_disp = nb_site.strip() if (nb_site or "").strip() not in {"", "—", "-"} else ""
         if not site_disp and dev is not None and getattr(dev, "site", None):
             site_disp = (getattr(dev.site, "name", None) or "").strip()
-        loc_disp = nb_location.strip() if (nb_location or "").strip() not in {"", "—", "-"} else ""
+        loc_disp = _nb_location_cell_for_missing_vlan_row(
+            nb_location=nb_location, site_disp=site_disp
+        )
         if not loc_disp and dev is not None:
-            loc_disp = _location_picker_label(getattr(dev, "location", None))
+            loc_disp = _netbox_location_object_name(getattr(dev, "location", None))
         hints = _location_match_hints(device=dev, nb_site=nb_site, nb_location=nb_location)
         maas_machine = None
         if maas_by_hostname:
@@ -608,10 +629,10 @@ def build_proposed_missing_vlan_rows(
             [
                 site_disp or "—",
                 loc_disp or "—",
-                str(vid),
-                vid_src,
                 maas_vlan if (maas_vlan or "").strip() else "—",
                 os_vlan if (os_vlan or "").strip() else "—",
+                vid_src,
+                str(vid),
                 group,
                 vlan_disp,
                 dfl["tenant"],
@@ -640,7 +661,7 @@ def build_proposed_missing_vlan_rows(
         if dev is not None:
             if getattr(dev, "site", None):
                 nb_site = (dev.site.name or "").strip()
-            nb_loc = _location_picker_label(getattr(dev, "location", None))
+            nb_loc = _netbox_location_object_name(getattr(dev, "location", None))
         maas_vlan = str(r[_IDX_DRIFT["MAAS VLAN"]] or "—")
         os_vlan = str(r[_IDX_DRIFT["OS runtime VLAN"]] or "—")
         maas_ips = str(r[_IDX_DRIFT["MAAS IPs"]] or "")
@@ -714,6 +735,6 @@ def build_proposed_missing_vlan_rows(
         key=lambda x: (
             (x[0] or "").lower(),
             (x[1] or "").lower(),
-            int(x[2] or 0) if str(x[2] or "").strip().isdigit() else 0,
+            int(x[5] or 0) if str(x[5] or "").strip().isdigit() else 0,
         ),
     )

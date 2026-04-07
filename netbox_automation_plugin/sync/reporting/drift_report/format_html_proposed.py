@@ -87,6 +87,13 @@ def emit_proposed_change_tables(e, prop):
                 str(len(prop.get("add_devices_review_only", []))),
                 "Not safe to auto-propose (status/data quality policy)",
             ],
+            [
+                "Proposed missing VLANs (IPAM)",
+                str(len(prop.get("add_proposed_missing_vlans", []))),
+                "Tagged VID from MAAS/OS interface proposals not found in NetBox scope for that device/site",
+            ],
+            ["New NICs in NetBox", str(len(prop["add_nb_interfaces"])), "Runtime/MAAS fallback interface not modeled in NetBox"],
+            ["NIC drift", str(len(prop["update_nic"])), "Runtime authority (OS first, MAAS fallback) differs from NetBox"],
             ["New prefixes (OpenStack authority)", str(len(prop["add_prefixes"])), "Subnet not in IPAM"],
             [
                 "Existing prefixes (OpenStack drift)",
@@ -106,9 +113,9 @@ def emit_proposed_change_tables(e, prop):
                 "Virtual Machine exists; vCPU/memory/disk/status/device/cluster differ",
             ],
             [
-                "Proposed missing VLANs (IPAM)",
-                str(len(prop.get("add_proposed_missing_vlans", []))),
-                "Tagged VID from MAAS/OS interface proposals not found in NetBox scope for that device/site",
+                "BMC / OOB",
+                str(len(prop["add_mgmt_iface"]) + len(prop.get("add_mgmt_iface_new_devices", []))),
+                "BMC runtime authority (OS first, MAAS fallback) vs NetBox",
             ],
         ],
     )
@@ -126,6 +133,130 @@ def emit_proposed_change_tables(e, prop):
         wrap_max_width=None,
         selectable=False,
     )
+
+    # Detail order matches ``service.AUDIT_REPORT_APPLY_ORDER``: devices → missing VLANs → NICs, then OpenStack IPAM/VMs, then BMC.
+    if prop["add_devices"]:
+        e.spacer()
+        e.subtitle("Detail — new devices")
+        e.spacer()
+        e.table(
+            list(HEADERS_DETAIL_NEW_DEVICES),
+            prop["add_devices"],
+            dynamic_columns=True,
+            wrap_max_width=None,
+            selectable=True,
+            selection_key="detail_new_devices",
+            proposed_pick_columns=_PROPOSED_NB_PICK_DEVICE,
+        )
+    if prop.get("add_devices_review_only"):
+        e.spacer()
+        e.subtitle("Detail — MAAS-only hosts (manual review required)")
+        e.spacer()
+        e.table(
+            list(HEADERS_DETAIL_NEW_DEVICES),
+            prop["add_devices_review_only"],
+            dynamic_columns=True,
+            wrap_max_width=None,
+            selectable=True,
+            selection_key="detail_review_only_devices",
+            proposed_pick_columns=_PROPOSED_NB_PICK_DEVICE,
+        )
+    if prop.get("add_proposed_missing_vlans"):
+        e.spacer()
+        e.table(
+            list(HEADERS_DETAIL_PROPOSED_MISSING_VLANS),
+            prop["add_proposed_missing_vlans"],
+            dynamic_columns=True,
+            wrap_max_width=None,
+            selectable=True,
+            selection_key="detail_proposed_missing_vlans",
+            proposed_pick_columns=_PROPOSED_NB_PICK_MISSING_VLAN,
+            editable_columns=["NB proposed VLAN name (editable)"],
+        )
+
+    e.spacer()
+    e.subtitle("B) NICs")
+    e.spacer()
+    e.table(
+        ["What", "Count", "Note"],
+        [
+            ["New NICs in NetBox", str(len(prop["add_nb_interfaces"])), "Runtime/MAAS fallback interface not modeled in NetBox"],
+            ["NIC drift", str(len(prop["update_nic"])), "Runtime authority (OS first, MAAS fallback) differs from NetBox"],
+        ],
+    )
+    if prop["add_nb_interfaces"]:
+        e.spacer()
+        e.subtitle("Detail — new NICs")
+        e.spacer()
+        headers = list(HEADERS_DETAIL_NEW_NICS)
+        os_rows = [r for r in prop["add_nb_interfaces"] if _new_nic_row_is_os_authority(r)]
+        maas_rows = [r for r in prop["add_nb_interfaces"] if not _new_nic_row_is_os_authority(r)]
+        e.paragraph(
+            f"Authority split: OS runtime={len(os_rows)} row(s), MAAS fallback={len(maas_rows)} row(s)."
+        )
+        if os_rows:
+            e.spacer()
+            e.subtitle("Detail — new NICs (OS authority)")
+            e.spacer()
+            e.table(
+                headers,
+                os_rows,
+                dynamic_columns=True,
+                wrap_max_width=None,
+                selectable=True,
+                selection_key="detail_new_nics_os",
+                proposed_pick_columns=_PROPOSED_NB_PICK_NIC,
+            )
+        if maas_rows:
+            e.spacer()
+            e.subtitle("Detail — new NICs (MAAS authority)")
+            e.spacer()
+            e.table(
+                headers,
+                maas_rows,
+                dynamic_columns=True,
+                wrap_max_width=None,
+                selectable=True,
+                selection_key="detail_new_nics_maas",
+                proposed_pick_columns=_PROPOSED_NB_PICK_NIC,
+            )
+    if prop["update_nic"]:
+        e.spacer()
+        e.subtitle("Detail — NIC drift")
+        e.spacer()
+        headers = list(HEADERS_DETAIL_NIC_DRIFT)
+        os_rows = [r for r in prop["update_nic"] if _update_nic_row_is_os_authority(r)]
+        maas_rows = [r for r in prop["update_nic"] if not _update_nic_row_is_os_authority(r)]
+        e.paragraph(
+            f"Authority split: OS runtime={len(os_rows)} row(s), MAAS fallback={len(maas_rows)} row(s)."
+        )
+        if os_rows:
+            e.spacer()
+            e.subtitle("Detail — NIC drift (OS runtime authority)")
+            e.spacer()
+            e.table(
+                headers,
+                os_rows,
+                dynamic_columns=True,
+                wrap_max_width=None,
+                selectable=True,
+                selection_key="detail_nic_drift_os",
+                proposed_pick_columns=_PROPOSED_NB_PICK_NIC,
+            )
+        if maas_rows:
+            e.spacer()
+            e.subtitle("Detail — NIC drift (MAAS fallback authority)")
+            e.spacer()
+            e.table(
+                headers,
+                maas_rows,
+                dynamic_columns=True,
+                wrap_max_width=None,
+                selectable=True,
+                selection_key="detail_nic_drift_maas",
+                proposed_pick_columns=_PROPOSED_NB_PICK_NIC,
+            )
+
     if prop["add_prefixes"]:
         e.spacer()
         e.subtitle("Detail — new prefixes")
@@ -260,65 +391,12 @@ def emit_proposed_change_tables(e, prop):
             proposed_pick_columns=_PROPOSED_NB_PICK_VM,
         )
 
-    if prop["add_devices"]:
-        e.spacer()
-        e.subtitle("Detail — new devices")
-        e.spacer()
-        e.table(
-            list(HEADERS_DETAIL_NEW_DEVICES),
-            prop["add_devices"],
-            dynamic_columns=True,
-            wrap_max_width=None,
-            selectable=True,
-            selection_key="detail_new_devices",
-            proposed_pick_columns=_PROPOSED_NB_PICK_DEVICE,
-        )
-    if prop.get("add_devices_review_only"):
-        e.spacer()
-        e.subtitle("Detail — MAAS-only hosts (manual review required)")
-        e.spacer()
-        e.table(
-            list(HEADERS_DETAIL_NEW_DEVICES),
-            prop["add_devices_review_only"],
-            dynamic_columns=True,
-            wrap_max_width=None,
-            selectable=True,
-            selection_key="detail_review_only_devices",
-            proposed_pick_columns=_PROPOSED_NB_PICK_DEVICE,
-        )
-
-    if prop.get("add_proposed_missing_vlans"):
-        e.spacer()
-        e.subtitle("Detail — proposed missing VLANs (IPAM)")
-        e.paragraph(
-            "Interface drift or new-NIC rows propose ``SET_NETBOX_UNTAGGED_VLAN`` for a **tagged** VID "
-            "(1–4094) that does not resolve under the device site/location (VLAN groups / ``get_for_site``). "
-            "**NB Proposed VLAN ID** is that tag; **NB site** / **NB location** come from the NetBox device "
-            "(or from new-NIC placement rows when the device is not in NetBox yet). "
-            "**NB proposed VLAN group** matches the best **name** among all NetBox VLAN groups using the device/NB **location** text (e.g. Birch → ``Birch VLANs``); if none match, falls back to group scope on location/site. "
-            "**NB Proposed Tenant** is inferred from **2–3 random** existing VLANs in that group that already have a tenant (most common display). **NB proposed VLAN name** prefers (in order): a NetBox **Prefix** that contains a NIC IP and whose linked VLAN matches this VID; an existing **VLAN in the same group** with this VID; MAAS **interface VLAN name**; Neutron **network name** from runtime NICs; a fuzzy match on other VLAN names in the group using location hints plus MAAS/OS text; otherwise the first VLAN-by-VID template in that group or **TBD**. **NB proposed status** follows that template. "
-            "Apply creates ``ipam.VLAN`` under the selected **group** only (not a duplicate ``site`` on the VLAN row). "
-            "Runs **before** interface operations when this section is selected in reconciliation."
-        )
-        e.spacer()
-        e.table(
-            list(HEADERS_DETAIL_PROPOSED_MISSING_VLANS),
-            prop["add_proposed_missing_vlans"],
-            dynamic_columns=True,
-            wrap_max_width=None,
-            selectable=True,
-            selection_key="detail_proposed_missing_vlans",
-            proposed_pick_columns=_PROPOSED_NB_PICK_MISSING_VLAN,
-        )
-
     e.spacer()
-    e.subtitle("B) NICs and BMC / OOB")
+    e.subtitle("BMC / OOB")
     e.spacer()
     e.table(
         ["What", "Count", "Note"],
         [
-            ["New NICs in NetBox", str(len(prop["add_nb_interfaces"])), "Runtime/MAAS fallback interface not modeled in NetBox"],
-            ["NIC drift", str(len(prop["update_nic"])), "Runtime authority (OS first, MAAS fallback) differs from NetBox"],
             [
                 "BMC / OOB",
                 str(len(prop["add_mgmt_iface"]) + len(prop.get("add_mgmt_iface_new_devices", []))),
@@ -326,79 +404,6 @@ def emit_proposed_change_tables(e, prop):
             ],
         ],
     )
-    if prop["add_nb_interfaces"]:
-        e.spacer()
-        e.subtitle("Detail — new NICs")
-        e.spacer()
-        headers = list(HEADERS_DETAIL_NEW_NICS)
-        os_rows = [r for r in prop["add_nb_interfaces"] if _new_nic_row_is_os_authority(r)]
-        maas_rows = [r for r in prop["add_nb_interfaces"] if not _new_nic_row_is_os_authority(r)]
-        e.paragraph(
-            f"Authority split: OS runtime={len(os_rows)} row(s), MAAS fallback={len(maas_rows)} row(s)."
-        )
-        if os_rows:
-            e.spacer()
-            e.subtitle("Detail — new NICs (OS authority)")
-            e.spacer()
-            e.table(
-                headers,
-                os_rows,
-                dynamic_columns=True,
-                wrap_max_width=None,
-                selectable=True,
-                selection_key="detail_new_nics_os",
-                proposed_pick_columns=_PROPOSED_NB_PICK_NIC,
-            )
-        if maas_rows:
-            e.spacer()
-            e.subtitle("Detail — new NICs (MAAS authority)")
-            e.spacer()
-            e.table(
-                headers,
-                maas_rows,
-                dynamic_columns=True,
-                wrap_max_width=None,
-                selectable=True,
-                selection_key="detail_new_nics_maas",
-                proposed_pick_columns=_PROPOSED_NB_PICK_NIC,
-            )
-    if prop["update_nic"]:
-        e.spacer()
-        e.subtitle("Detail — NIC drift")
-        e.spacer()
-        headers = list(HEADERS_DETAIL_NIC_DRIFT)
-        os_rows = [r for r in prop["update_nic"] if _update_nic_row_is_os_authority(r)]
-        maas_rows = [r for r in prop["update_nic"] if not _update_nic_row_is_os_authority(r)]
-        e.paragraph(
-            f"Authority split: OS runtime={len(os_rows)} row(s), MAAS fallback={len(maas_rows)} row(s)."
-        )
-        if os_rows:
-            e.spacer()
-            e.subtitle("Detail — NIC drift (OS runtime authority)")
-            e.spacer()
-            e.table(
-                headers,
-                os_rows,
-                dynamic_columns=True,
-                wrap_max_width=None,
-                selectable=True,
-                selection_key="detail_nic_drift_os",
-                proposed_pick_columns=_PROPOSED_NB_PICK_NIC,
-            )
-        if maas_rows:
-            e.spacer()
-            e.subtitle("Detail — NIC drift (MAAS fallback authority)")
-            e.spacer()
-            e.table(
-                headers,
-                maas_rows,
-                dynamic_columns=True,
-                wrap_max_width=None,
-                selectable=True,
-                selection_key="detail_nic_drift_maas",
-                proposed_pick_columns=_PROPOSED_NB_PICK_NIC,
-            )
-
     if prop.get("add_mgmt_iface_new_devices"):
         e.spacer()
         e.subtitle("Detail — new BMC / OOB interfaces")
@@ -464,18 +469,18 @@ def emit_proposed_change_tables(e, prop):
         ["Bucket", "Count"],
         [
             ["New devices", str(len(prop["add_devices"]))],
-            ["New prefixes", str(len(prop["add_prefixes"]))],
-            ["Existing prefixes (drift)", str(len(prop.get("update_prefixes", [])))],
-            ["New floating IPs", str(len(prop["add_fips"]))],
-            ["Existing floating IPs (NAT drift)", str(len(prop.get("update_fips", [])))],
-            ["New VMs (OpenStack)", str(len(prop.get("add_openstack_vms", [])))],
-            ["Existing VMs (drift)", str(len(prop.get("update_openstack_vms", [])))],
             [
                 "Proposed missing VLANs (IPAM)",
                 str(len(prop.get("add_proposed_missing_vlans", []))),
             ],
             ["New NICs", str(len(prop["add_nb_interfaces"]))],
             ["NIC drift", str(len(prop["update_nic"]))],
+            ["New prefixes", str(len(prop["add_prefixes"]))],
+            ["Existing prefixes (drift)", str(len(prop.get("update_prefixes", [])))],
+            ["New floating IPs", str(len(prop["add_fips"]))],
+            ["Existing floating IPs (NAT drift)", str(len(prop.get("update_fips", [])))],
+            ["New VMs (OpenStack)", str(len(prop.get("add_openstack_vms", [])))],
+            ["Existing VMs (drift)", str(len(prop.get("update_openstack_vms", [])))],
             ["BMC / OOB", str(len(prop["add_mgmt_iface"]) + len(prop.get("add_mgmt_iface_new_devices", [])))],
             ["Serials (review)", str(len(prop["review_serial"]))],
             ["Total", str(total_props)],
