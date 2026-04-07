@@ -339,6 +339,97 @@ def _clamp_nb_vlan_name(raw: str) -> str:
     return s
 
 
+def _disambiguate_vlan_display_name(base: str, vid: int, attempt: int) -> str:
+    """Append VID (and optional suffix) so names stay unique within a VLAN group; respect max length."""
+    b = (base or "").strip() or f"VLAN-{vid}"
+    tag = f" ({vid})" if attempt == 0 else f" ({vid})#{attempt}"
+    room = _NB_VLAN_NAME_MAX_LEN - len(tag)
+    if room < 8:
+        return _clamp_nb_vlan_name(f"V{vid}-{attempt}" if attempt else f"V{vid}")
+    trimmed = b[:room].rstrip() if len(b) > room else b
+    return _clamp_nb_vlan_name(trimmed + tag)
+
+
+def _ensure_unique_proposed_missing_vlan_names(rows: list[list[Any]]) -> None:
+    """
+    NetBox enforces unique (vlan_group, name) regardless of VID. Rows often inherit the same
+    display name from :func:`_defaults_for_vlan_group` (first VLAN in the group) or OpenStack labels,
+    which duplicates across VIDs. De-duplicate proposed names against existing IPAM VLANs and within
+    this batch (stable order).
+    """
+    if not rows:
+        return
+    try:
+        from ipam.models import VLAN, VLANGroup
+    except Exception:
+        return
+
+    gfk = "group" if any(f.name == "group" for f in VLAN._meta.fields) else "vlan_group"
+    row_groups = {(r[6] or "").strip() for r in rows if isinstance(r, (list, tuple)) and len(r) > 6}
+    row_groups = {g for g in row_groups if g and g not in {"—", "-"}}
+
+    net_names: dict[str, dict[str, int]] = {}
+    for g in row_groups:
+        grp = VLANGroup.objects.filter(name__iexact=g).first()
+        if grp is None:
+            continue
+        gkey = g.casefold()
+        d: dict[str, int] = {}
+        try:
+            for v in VLAN.objects.filter(**{gfk: grp}).only("vid", "name"):
+                nm = (getattr(v, "name", None) or "").strip()
+                if nm:
+                    d[nm.casefold()] = int(v.vid)
+        except Exception:
+            continue
+        net_names[gkey] = d
+
+    batch_claims: dict[str, dict[str, int]] = {}
+
+    for row in rows:
+        if not isinstance(row, (list, tuple)) or len(row) <= 7:
+            continue
+        group = (row[6] or "").strip()
+        if not group or group in {"—", "-"}:
+            continue
+        gkey = group.casefold()
+        try:
+            vid = int(str(row[5] or "").strip())
+        except ValueError:
+            continue
+        raw = (row[7] or "").strip()
+        if not raw or raw in {"—", "-"}:
+            name = f"VLAN-{vid}"
+        else:
+            name = _clamp_nb_vlan_name(raw) or f"VLAN-{vid}"
+
+        nx = net_names.get(gkey) or {}
+        bn = batch_claims.setdefault(gkey, {})
+
+        def foreign_claim(nl: str) -> bool:
+            owner = nx.get(nl)
+            return owner is not None and int(owner) != int(vid)
+
+        def batch_conflict(nl: str) -> bool:
+            owner = bn.get(nl)
+            return owner is not None and int(owner) != int(vid)
+
+        def is_taken(n: str) -> bool:
+            nl = n.casefold()
+            return foreign_claim(nl) or batch_conflict(nl)
+
+        candidate = name
+        attempt = 0
+        while is_taken(candidate):
+            candidate = _disambiguate_vlan_display_name(name, vid, attempt)
+            attempt += 1
+            if attempt > 50:
+                candidate = _clamp_nb_vlan_name(f"VLAN-{vid}-{attempt}")
+                break
+        row[7] = candidate
+        bn[candidate.casefold()] = vid
+
+
 def _norm_mac_for_match(mac: str) -> str:
     s = (mac or "").strip().lower().replace("-", ":")
     parts = [p for p in s.split(":") if p]
@@ -761,6 +852,7 @@ def build_proposed_missing_vlan_rows(
                 vid=vid,
             )
 
+    _ensure_unique_proposed_missing_vlan_names(out)
     return sorted(
         out,
         key=lambda x: (

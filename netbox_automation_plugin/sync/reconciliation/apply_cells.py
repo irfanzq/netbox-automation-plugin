@@ -24,6 +24,7 @@ from typing import Any
 
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import IntegrityError
+from django.db import models as django_models
 from django.utils.text import slugify
 
 from netbox_automation_plugin.sync.reporting.drift_report.drift_nb_picker_catalog import (
@@ -1984,11 +1985,42 @@ def _apply_fip_nat_inside(ip_obj: Any, cells: dict[str, str], vrf: Any) -> bool:
     return True
 
 
+def _resolve_floating_ip_role_value(role_name: str) -> tuple[Any | None, str | None]:
+    """
+    NetBox 4+: ``IPAddress.role`` is a CharField (:class:`~ipam.choices.IPAddressRoleChoices`).
+    Older releases used an FK to ``ipam.Role`` (prefix/VLAN-style organizational roles).
+
+    Returns ``(value_or_Role_instance, None)`` or ``(None, error_message)``.
+    """
+    from ipam.models import IPAddress
+
+    s = (role_name or "").strip()
+    if not s or s in {"—", "-"}:
+        return None, None
+    field = IPAddress._meta.get_field("role")
+    if isinstance(field, django_models.CharField):
+        val = _pick_choice_value(field, s)
+        if val is None:
+            return None, (
+                f'IP address role "{s}" is not a valid built-in role (NB proposed role). '
+                f"Use a standard label such as VIP, Secondary, Anycast, Loopback, VRRP, etc."
+            )
+        return val, None
+    try:
+        from ipam.models import Role as IpamRole
+    except Exception:
+        return None, "ipam.Role could not be imported for legacy IP address role FK."
+    obj = _resolve_by_name(IpamRole, s)
+    if obj is None:
+        return None, f'IPAM role "{s}" not found in NetBox (NB proposed role).'
+    return obj, None
+
+
 def _floating_ip_apply_row_stepwise(
     ip_obj: Any,
     *,
     status_name: str,
-    role_obj: Any,
+    role_value: Any | None,
     tenant_obj: Any,
     full_descr: str,
     cells: dict[str, str],
@@ -2003,11 +2035,20 @@ def _floating_ip_apply_row_stepwise(
             ip_obj.status = val
             ip_obj.save()
             any_save = True
-    if role_obj is not None and hasattr(ip_obj, "role_id") and ip_obj.role_id != role_obj.pk:
-        _netbox_changelog_snapshot(ip_obj)
-        ip_obj.role = role_obj
-        ip_obj.save()
-        any_save = True
+    if role_value is not None and hasattr(ip_obj, "role"):
+        role_field = ip_obj._meta.get_field("role")
+        role_changed = False
+        if isinstance(role_field, django_models.CharField):
+            role_changed = getattr(ip_obj, "role", None) != role_value
+        elif isinstance(role_field, django_models.ForeignKey):
+            role_changed = getattr(ip_obj, "role_id", None) != getattr(role_value, "pk", None)
+        else:
+            role_changed = getattr(ip_obj, "role", None) != role_value
+        if role_changed:
+            _netbox_changelog_snapshot(ip_obj)
+            ip_obj.role = role_value
+            ip_obj.save()
+            any_save = True
     if tenant_obj is not None and hasattr(ip_obj, "tenant_id") and ip_obj.tenant_id != tenant_obj.pk:
         _netbox_changelog_snapshot(ip_obj)
         ip_obj.tenant = tenant_obj
@@ -2076,16 +2117,11 @@ def apply_create_floating_ip(op: dict[str, Any]) -> tuple[str, str]:
     vrf = _resolve_by_name(VRF, vrf_name) if vrf_name else None
     if vrf_name and vrf is None:
         return _skip_missing_prereq(f'VRF "{vrf_name}" not found in NetBox (NB proposed VRF for floating IP).')
-    role_obj = None
+    role_value = None
     if role_name:
-        try:
-            from ipam.models import Role
-
-            role_obj = _resolve_by_name(Role, role_name)
-        except Exception:
-            role_obj = None
-        if role_obj is None:
-            return _skip_missing_prereq(f'IPAM role "{role_name}" not found in NetBox (NB proposed role).')
+        role_value, role_err = _resolve_floating_ip_role_value(role_name)
+        if role_err:
+            return _skip_missing_prereq(role_err)
     tenant_obj = None
     if tenant_name and tenant_name not in {"—", "-"}:
         tenant_obj = _resolve_tenant(tenant_name)
@@ -2105,7 +2141,7 @@ def apply_create_floating_ip(op: dict[str, Any]) -> tuple[str, str]:
         any_save = _floating_ip_apply_row_stepwise(
             existing,
             status_name=status_name,
-            role_obj=role_obj,
+            role_value=role_value,
             tenant_obj=tenant_obj,
             full_descr=full_descr,
             cells=cells,
@@ -2137,8 +2173,8 @@ def apply_create_floating_ip(op: dict[str, Any]) -> tuple[str, str]:
                 val = _pick_choice_value(ip_fb._meta.get_field("status"), status_name)
                 if val is not None:
                     ip_fb.status = val
-            if role_obj is not None and hasattr(ip_fb, "role"):
-                ip_fb.role = role_obj
+            if role_value is not None and hasattr(ip_fb, "role"):
+                ip_fb.role = role_value
             if tenant_obj is not None and hasattr(ip_fb, "tenant"):
                 ip_fb.tenant = tenant_obj
             if hasattr(ip_fb, "description"):
@@ -2154,7 +2190,7 @@ def apply_create_floating_ip(op: dict[str, Any]) -> tuple[str, str]:
         _floating_ip_apply_row_stepwise(
             ip_fb,
             status_name=status_name,
-            role_obj=role_obj,
+            role_value=role_value,
             tenant_obj=tenant_obj,
             full_descr=full_descr,
             cells=cells,
@@ -2168,7 +2204,7 @@ def apply_create_floating_ip(op: dict[str, Any]) -> tuple[str, str]:
     _floating_ip_apply_row_stepwise(
         ip_obj,
         status_name=status_name,
-        role_obj=role_obj,
+        role_value=role_value,
         tenant_obj=tenant_obj,
         full_descr=full_descr,
         cells=cells,

@@ -887,4 +887,35 @@
         {% endif %}
   </div>
 </div>
+{# Reconciliation blocker/errors use .reconciliation-msg-detail in the message HTML. NetBox toasts default to data-bs-delay=10s; keep these until the user dismisses (close button). #}
+<script type="text/javascript">
+(function () {
+  function stickyReconciliationErrorToasts() {
+    if (typeof bootstrap === "undefined" || !bootstrap.Toast) {
+      return;
+    }
+    document.querySelectorAll("#django-messages .toast").forEach(function (el) {
+      if (!el.querySelector(".reconciliation-msg-detail")) {
+        return;
+      }
+      el.setAttribute("data-bs-autohide", "false");
+      el.removeAttribute("data-bs-delay");
+      var existing = bootstrap.Toast.getInstance(el);
+      if (existing) {
+        existing.dispose();
+      }
+      var t = new bootstrap.Toast(el, { autohide: false });
+      t.show();
+    });
+  }
+  function schedule() {
+    setTimeout(stickyReconciliationErrorToasts, 50);
+  }
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", schedule);
+  } else {
+    schedule();
+  }
+})();
+</script>
 {% endblock %}
