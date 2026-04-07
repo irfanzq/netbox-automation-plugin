@@ -17,6 +17,10 @@ from netbox_automation_plugin.sync.reporting.drift_report.drift_overrides_apply 
 from netbox_automation_plugin.sync.reporting.drift_report.proposed_action_format import (
     SET_NETBOX_ACTION_CREATE_VLAN,
 )
+from netbox_automation_plugin.sync.tenancy_netbox_compat import (
+    tenant_hierarchy_fk,
+    vlan_tenant_select_related_paths,
+)
 
 _RE_UNTAGGED = re.compile(r"\bSET_NETBOX_UNTAGGED_VLAN\s*=\s*([^;]+)", re.I)
 
@@ -221,9 +225,11 @@ def _tenant_display_from_vlan(v) -> str:
     if t is None:
         return ""
     child = (t.name or "").strip()
-    p = getattr(t, "parent", None)
-    if p is not None and (p.name or "").strip():
-        return f"{(p.name or '').strip()} / {child}"
+    rel = tenant_hierarchy_fk()
+    if rel:
+        p = getattr(t, rel, None)
+        if p is not None and (p.name or "").strip():
+            return f"{(p.name or '').strip()} / {child}"
     return child
 
 
@@ -241,7 +247,11 @@ def _defaults_for_vlan_group(group_name: str) -> dict[str, str]:
     if grp is None:
         return {"tenant": "", "status": "active", "vlan_name": "TBD"}
     gfk = "group" if any(f.name == "group" for f in VLAN._meta.fields) else "vlan_group"
-    all_v = list(VLAN.objects.filter(**{gfk: grp}).select_related("tenant", "tenant__parent").order_by("vid"))
+    all_v = list(
+        VLAN.objects.filter(**{gfk: grp})
+        .select_related(*vlan_tenant_select_related_paths())
+        .order_by("vid")
+    )
     if not all_v:
         return {"tenant": "", "status": "active", "vlan_name": "TBD"}
 

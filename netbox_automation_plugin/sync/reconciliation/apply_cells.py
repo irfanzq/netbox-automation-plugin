@@ -27,6 +27,7 @@ from django.utils.text import slugify
 from netbox_automation_plugin.sync.reconciliation.netbox_write_projection import (
     netbox_write_projection_for_op,
 )
+from netbox_automation_plugin.sync.tenancy_netbox_compat import tenant_hierarchy_fk
 
 logger = logging.getLogger(__name__)
 
@@ -248,7 +249,7 @@ def _resolve_tenant(raw: str | None) -> Any:
     Audit columns may use hyphenated or project-specific labels (e.g. ``whitefiber-internal``)
     while NetBox stores a shorter ``name`` (e.g. ``whitefiber``). Try slug and a unique
     prefix before the first hyphen when the full string does not match. Hierarchical picker
-    labels ``Parent / Child`` match a tenant whose parent name and child name align.
+    labels ``Parent / Child`` (or ``Group / Tenant`` on NetBox 4.x) match hierarchy names.
     """
     from tenancy.models import Tenant
 
@@ -260,16 +261,28 @@ def _resolve_tenant(raw: str | None) -> Any:
         parent_part = (parent_part or "").strip()
         child_part = (child_part or "").strip()
         if parent_part and child_part:
-            try:
-                for cand in Tenant.objects.filter(name__iexact=child_part).select_related(
-                    "parent"
-                ).iterator():
-                    par = getattr(cand, "parent", None)
-                    pn = (par.name or "").strip() if par else ""
-                    if pn.lower() == parent_part.lower():
-                        return cand
-            except Exception:
-                pass
+            rel = tenant_hierarchy_fk()
+            if rel == "parent":
+                try:
+                    for cand in Tenant.objects.filter(name__iexact=child_part).select_related(
+                        "parent"
+                    ).iterator():
+                        par = getattr(cand, "parent", None)
+                        pn = (par.name or "").strip() if par else ""
+                        if pn.lower() == parent_part.lower():
+                            return cand
+                except Exception:
+                    pass
+            elif rel == "group":
+                try:
+                    hit = Tenant.objects.filter(
+                        name__iexact=child_part,
+                        group__name__iexact=parent_part,
+                    ).first()
+                    if hit is not None:
+                        return hit
+                except Exception:
+                    pass
     t = _resolve_by_name(Tenant, s)
     if t is not None:
         return t

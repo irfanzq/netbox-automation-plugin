@@ -136,16 +136,27 @@ def build_drift_nb_picker_catalog(*, user=None) -> dict[str, list[str]]:
         from tenancy.models import Tenant
 
         def _tenant_labels_fetch() -> list[str]:
-            qs = Tenant.objects.select_related("parent").only("name", "parent__name").order_by("name")
+            from netbox_automation_plugin.sync.tenancy_netbox_compat import tenant_hierarchy_fk
+
+            rel = tenant_hierarchy_fk()
+            if rel:
+                qs = (
+                    Tenant.objects.select_related(rel)
+                    .only("name", f"{rel}__name")
+                    .order_by("name")
+                )
+            else:
+                qs = Tenant.objects.only("name").order_by("name")
             lab: set[str] = set()
             for t in qs.iterator(chunk_size=4096):
                 child = (t.name or "").strip()
                 if not child:
                     continue
                 lab.add(child)
-                par = getattr(t, "parent", None)
-                if par is not None and (par.name or "").strip():
-                    lab.add(f"{(par.name or '').strip()} / {child}")
+                if rel:
+                    par = getattr(t, rel, None)
+                    if par is not None and (par.name or "").strip():
+                        lab.add(f"{(par.name or '').strip()} / {child}")
             return sorted(lab - {""})
 
         try:
