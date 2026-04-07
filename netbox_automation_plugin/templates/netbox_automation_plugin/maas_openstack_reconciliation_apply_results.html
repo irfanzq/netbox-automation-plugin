@@ -27,7 +27,7 @@
     </div>
 
     {% include "netbox_automation_plugin/_reconciliation_page_nav.html" %}
-    {% include "netbox_automation_plugin/_reconciliation_lifecycle_card.html" %}
+    {% include "netbox_automation_plugin/_reconciliation_lifecycle_card.html" with hide_merge_to_main=True %}
     {% include "netbox_automation_plugin/_reconciliation_apply_results_sections.html" %}
   </div>
 </div>
