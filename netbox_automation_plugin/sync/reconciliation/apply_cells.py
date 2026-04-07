@@ -22,6 +22,7 @@ import re
 from functools import lru_cache
 from typing import Any
 
+from django.core.exceptions import ValidationError as DjangoValidationError
 from django.utils.text import slugify
 
 from netbox_automation_plugin.sync.reconciliation.netbox_write_projection import (
@@ -1364,6 +1365,37 @@ def _device_apply_row_stepwise_changelog(
     return any_save
 
 
+def _vid_allowed_in_netbox_vlan_group(vid_i: int, grp) -> bool:
+    """Mirror NetBox ``VLAN.clean`` check: VID must fall within the group's configured ranges."""
+    if grp is None:
+        return True
+    ranges = getattr(grp, "vid_ranges", None) or []
+    if not ranges:
+        return True
+    try:
+        for vid_range in ranges:
+            if vid_i in vid_range:
+                return True
+    except (TypeError, ValueError):
+        logger.debug("vid range membership check failed", exc_info=True)
+    return False
+
+
+def _format_django_validation_error(exc: DjangoValidationError) -> str:
+    if hasattr(exc, "message_dict") and exc.message_dict:
+        parts: list[str] = []
+        for k, msgs in exc.message_dict.items():
+            bits = [str(m) for m in msgs] if hasattr(msgs, "__iter__") and not isinstance(
+                msgs, str
+            ) else [str(msgs)]
+            label = k if k != "__all__" else "validation"
+            parts.append(f"{label}: {'; '.join(bits)}")
+        return "; ".join(parts)
+    if hasattr(exc, "messages"):
+        return "; ".join(str(m) for m in exc.messages)
+    return str(exc)
+
+
 def apply_create_vlan(op: dict[str, Any]) -> tuple[str, str]:
     from ipam.models import VLAN, VLANGroup
 
@@ -1389,6 +1421,13 @@ def apply_create_vlan(op: dict[str, Any]) -> tuple[str, str]:
     if grp is None:
         return _skip_missing_prereq(f'VLAN group "{group_name}" not found in NetBox.')
 
+    if not _vid_allowed_in_netbox_vlan_group(vid_i, grp):
+        return _skip_missing_prereq(
+            f'VID {vid_i} is not inside any VLAN ID range configured on NetBox VLAN group '
+            f'"{group_name}". Edit the group in IPAM (VLAN ID ranges) to include {vid_i}, '
+            f"or pick another group on the drift row."
+        )
+
     gfk = "group" if any(f.name == "group" for f in VLAN._meta.fields) else "vlan_group"
     existing = VLAN.objects.filter(**{gfk: grp, "vid": vid_i}).first()
     if existing is not None:
@@ -1397,7 +1436,7 @@ def apply_create_vlan(op: dict[str, Any]) -> tuple[str, str]:
     name = _cell(
         cells, "NB proposed VLAN name (editable)", "NB proposed VLAN name"
     ).strip()
-    if not name or name in {"—", "-"}:
+    if not name or name in ("—", "-"):
         name = f"VLAN-{vid_i}"
 
     tenant_name = _cell(cells, "NB Proposed Tenant")
@@ -1421,9 +1460,14 @@ def apply_create_vlan(op: dict[str, Any]) -> tuple[str, str]:
         vlan.tenant = tenant
 
     try:
+        vlan.full_clean()
         vlan.save()
+    except DjangoValidationError as e:
+        detail = _format_django_validation_error(e)
+        logger.info("apply_create_vlan validation (vid=%s group=%s): %s", vid_i, group_name, detail)
+        return _skip_missing_prereq(f"NetBox rejected the VLAN: {detail}")
     except Exception:
-        logger.debug("apply_create_vlan: save failed (vid=%s group=%s)", vid_i, group_name, exc_info=True)
+        logger.exception("apply_create_vlan: save failed (vid=%s group=%s)", vid_i, group_name)
         return "failed", "failed_validation_save"
     return "created", "ok_created"
 
