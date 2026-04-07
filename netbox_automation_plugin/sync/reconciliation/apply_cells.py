@@ -23,6 +23,7 @@ from functools import lru_cache
 from typing import Any
 
 from django.core.exceptions import ValidationError as DjangoValidationError
+from django.db import IntegrityError
 from django.utils.text import slugify
 
 from netbox_automation_plugin.sync.reconciliation.netbox_write_projection import (
@@ -1465,6 +1466,16 @@ def apply_create_vlan(op: dict[str, Any]) -> tuple[str, str]:
     if not name or name in ("—", "-"):
         name = f"VLAN-{vid_i}"
 
+    # NetBox: UNIQUE (group, name) — same display name with a different VID fails at DB save.
+    dup_name = (
+        VLAN.objects.filter(**{gfk: grp}).filter(name__iexact=name).exclude(vid=vid_i).first()
+    )
+    if dup_name is not None:
+        return _skip_missing_prereq(
+            f'In VLAN group "{group_name}", name "{name}" is already used by VID {dup_name.vid}. '
+            f"NetBox requires unique names per group. Rename this proposed VLAN or edit the existing one."
+        )
+
     tenant_name = _cell(cells, "NB Proposed Tenant")
     status_name = (_cell(cells, "NB proposed status") or "").strip() or "active"
 
@@ -1492,6 +1503,12 @@ def apply_create_vlan(op: dict[str, Any]) -> tuple[str, str]:
         detail = _format_django_validation_error(e)
         logger.info("apply_create_vlan validation (vid=%s group=%s): %s", vid_i, group_name, detail)
         return _skip_missing_prereq(f"NetBox rejected the VLAN: {detail}")
+    except IntegrityError as e:
+        em = str(e).strip() or repr(e)
+        logger.info("apply_create_vlan integrity (vid=%s group=%s): %s", vid_i, group_name, em)
+        return _skip_missing_prereq(
+            f"VLAN save hit a database constraint (often duplicate name or VID in this group): {em}"
+        )
     except Exception:
         logger.exception("apply_create_vlan: save failed (vid=%s group=%s)", vid_i, group_name)
         return "failed", "failed_validation_save"
