@@ -11,8 +11,10 @@ When any interface row is selected, ``build_frozen_operations`` auto-appends **e
 ``detail_new_devices``, ``detail_review_only_devices``, and ``detail_proposed_missing_vlans``
 row present in that audit index. For interface hosts that still have no ``create_device`` op,
 it also injects a synthetic ``create_device`` from **placement** (NetBox site on the placement
-row) when available. Ops are sorted by ``AUDIT_REPORT_APPLY_ORDER`` so device + VLAN creates
-run before ``create_interface`` / ``update_interface`` without ticking those sections manually.
+row) when available — **only if** no ``dcim.Device`` with that host name already exists (matched
+hosts are omitted; they are not listed under New devices but do not need a create op). Ops are
+sorted by ``AUDIT_REPORT_APPLY_ORDER`` so device + VLAN creates run before ``create_interface``
+/ ``update_interface`` without ticking those sections manually.
 """
 
 from __future__ import annotations
@@ -492,6 +494,27 @@ def _device_host_keys_from_ops(ops: list[dict[str, Any]]) -> set[str]:
     return out
 
 
+def _netbox_existing_device_host_keys_lower(host_keys: set[str]) -> set[str]:
+    """
+    Subset of *host_keys* (lowercase short names from recon cells) that already exist as
+    ``dcim.Device.name`` (case-insensitive). Used so NIC apply does not synthesize
+    ``create_device`` for matched inventory that was never selected under New devices.
+    """
+    lowered = {str(k).strip().lower() for k in host_keys if k and str(k).strip()}
+    if not lowered:
+        return set()
+    try:
+        from django.db.models.functions import Lower
+        from dcim.models import Device
+    except Exception:
+        return set()
+    return set(
+        Device.objects.annotate(_recon_hk=Lower("name"))
+        .filter(_recon_hk__in=lowered)
+        .values_list("_recon_hk", flat=True)
+    )
+
+
 def _inject_interface_prerequisite_ops(
     ops: list[dict[str, Any]],
     seen: set[str],
@@ -516,6 +539,7 @@ def _inject_interface_prerequisite_ops(
         _append_frozen_op_from_meta(meta, ops, seen)
 
     missing_hosts = _iface_host_keys_from_ops(ops) - _device_host_keys_from_ops(ops)
+    missing_hosts -= _netbox_existing_device_host_keys_lower(missing_hosts)
     for hk in sorted(missing_hosts):
         for meta in row_index.values():
             if str(meta.get("selection_key") or "") != "detail_placement_lifecycle_alignment":

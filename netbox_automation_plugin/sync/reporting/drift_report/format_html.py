@@ -64,7 +64,9 @@ def format_drift_report(
         netbox_prefix_count,
         netbox_inventory_counts=netbox_inventory_counts,
     )
-    align_rows = _alignment_review_rows(matched_rows)
+    align_rows = _alignment_review_rows(
+        matched_rows, scope_meta=(drift or {}).get("scope_meta")
+    )
     prop = _proposed_changes_rows(
         maas_data,
         netbox_data,

@@ -2,6 +2,9 @@
 
 import re
 
+from netbox_automation_plugin.sync.reporting.drift_report.birch_audit_scope import (
+    birch_audit_rules_active,
+)
 from netbox_automation_plugin.sync.reporting.drift_report.maas_netbox_status import (
     proposed_netbox_status_for_matched_row,
 )
@@ -97,13 +100,41 @@ def _alignment_maas_fabric_display(record: dict) -> str:
     return _select_alignment_fabric(record.get("maas_fabric"), record.get("netbox_location"))
 
 
-def _alignment_review_rows(matched_rows):
+def _matched_row_has_openstack_lifecycle_cells(r: dict) -> bool:
+    """
+    True when matched-host audit row carries OpenStack/Ironic lifecycle fields (not MAAS-only dashes).
+
+    Used for Birch-scoped audits to limit placement/lifecycle alignment to hosts with OS data.
+    """
+    if str(r.get("os_authority") or "") == "openstack_runtime":
+        return True
+
+    def _meaningful(v) -> bool:
+        s = str(v or "").strip()
+        return bool(s) and s not in {"—", "-"}
+
+    if _meaningful(r.get("os_provision_state")):
+        return True
+    if _meaningful(r.get("os_power_state")):
+        return True
+    if str(r.get("os_maintenance") or "").strip().lower() == "true":
+        return True
+    return False
+
+
+def _alignment_review_rows(matched_rows, scope_meta=None):
     """
     Matched hosts with placement/lifecycle hints only (not serial, NIC, or BMC/OOB —
     those have dedicated report tables).
+
+    When ``scope_meta`` indicates a Birch-only audit, rows without OpenStack lifecycle
+    data (provision/power/maintenance or ``openstack_runtime`` authority) are omitted.
     """
+    birch = birch_audit_rules_active(scope_meta or {})
     out = []
     for r in matched_rows or []:
+        if birch and not _matched_row_has_openstack_lifecycle_cells(r):
+            continue
         hints = r.get("hints") or []
         align = [h for h in hints if _hint_is_placement_alignment(h)]
         if not align:

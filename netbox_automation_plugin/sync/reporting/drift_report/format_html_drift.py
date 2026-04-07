@@ -128,7 +128,7 @@ def emit_drift_counts_and_alignment(
     align_rows = (
         alignment_rows_override
         if alignment_rows_override is not None
-        else _alignment_review_rows(matched_rows)
+        else _alignment_review_rows(matched_rows, scope_meta=scope_meta)
     )
     if align_rows:
         e.spacer()

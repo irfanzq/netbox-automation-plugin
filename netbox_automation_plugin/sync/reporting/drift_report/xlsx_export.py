@@ -277,7 +277,9 @@ def build_drift_report_xlsx(
         for row in _outside_scope:
             ws_sum.append(list(row))
         ws_sum.append([])
-    align_rows_x = _alignment_review_rows(matched_rows)
+    align_rows_x = _alignment_review_rows(
+        matched_rows, scope_meta=(drift or {}).get("scope_meta")
+    )
     prop = _proposed_changes_rows(
         maas_data,
         netbox_data,

@@ -84,7 +84,10 @@ def merged_proposed_from_drift_run(
         norm = normalize_drift_review_overrides(run.drift_review_overrides)
     else:
         norm = dict(review_norm)
-    align_rows = _alignment_review_rows(payload.get("matched_rows"))
+    align_rows = _alignment_review_rows(
+        payload.get("matched_rows"),
+        scope_meta=(drift or {}).get("scope_meta"),
+    )
     prop = _proposed_changes_rows(
         payload.get("maas_data") or {},
         payload.get("netbox_data") or {},
