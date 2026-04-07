@@ -2880,8 +2880,9 @@ def _resolve_vlan_for_device(device, vid: int):
     Resolve a VLAN instance for ``device`` + numeric VID.
 
     NetBox often scopes VLANs via VLAN groups (location/site/region) without setting
-    ``VLAN.site``. Matching only ``site_id`` + ``vid`` misses those rows, so apply would
-    skip the untagged VLAN while still reporting ``skipped_already_desired``.
+    ``VLAN.site``.     Prefer ``VLAN.objects.get_for_device(device)`` when available
+    (NetBox 3.5+ / 4.x) so VLAN group scope matches the same rules as the UI; fall back to
+    explicit site/location queries for older releases.
     """
     from django.contrib.contenttypes.models import ContentType
     from ipam.models import VLAN
@@ -2893,6 +2894,35 @@ def _resolve_vlan_for_device(device, vid: int):
     except (TypeError, ValueError):
         return None
 
+    try:
+        gfd = getattr(VLAN.objects, "get_for_device", None)
+        if callable(gfd):
+            dev_qs = gfd(device).filter(vid=vid_i)
+            hits = list(dev_qs[:2])
+            if len(hits) == 1:
+                return hits[0]
+            if len(hits) > 1:
+                if getattr(device, "site_id", None):
+                    hit = dev_qs.filter(site_id=device.site_id).first()
+                    if hit is not None:
+                        return hit
+                    try:
+                        ct_site = ContentType.objects.get_by_natural_key("dcim", "site")
+                        hit = dev_qs.filter(
+                            group__scope_type=ct_site,
+                            group__scope_id=device.site_id,
+                        ).first()
+                        if hit is not None:
+                            return hit
+                    except Exception:
+                        logger.debug(
+                            "VLAN disambiguation by site-scoped group failed",
+                            exc_info=True,
+                        )
+                return None
+    except Exception:
+        logger.debug("_resolve_vlan_for_device: get_for_device failed", exc_info=True)
+
     if device.site_id:
         hit = VLAN.objects.filter(site_id=device.site_id, vid=vid_i).first()
         if hit is not None:
@@ -2902,6 +2932,17 @@ def _resolve_vlan_for_device(device, vid: int):
             try:
                 site_qs = VLAN.objects.get_for_site(site)
                 hit = site_qs.filter(vid=vid_i).first()
+                if hit is not None:
+                    return hit
+            except Exception:
+                pass
+            try:
+                ct_site = ContentType.objects.get_by_natural_key("dcim", "site")
+                hit = VLAN.objects.filter(
+                    group__scope_type=ct_site,
+                    group__scope_id=device.site_id,
+                    vid=vid_i,
+                ).first()
                 if hit is not None:
                     return hit
             except Exception:
@@ -2936,6 +2977,23 @@ def _resolve_vlan_for_device(device, vid: int):
                         return hit
             except Exception:
                 pass
+
+    reg = getattr(getattr(device, "site", None), "region", None)
+    if reg is not None:
+        try:
+            ct_reg = ContentType.objects.get_by_natural_key("dcim", "region")
+            anc_r = list(
+                reg.get_ancestors(include_self=True).values_list("id", flat=True)
+            )
+            hit = VLAN.objects.filter(
+                group__scope_type=ct_reg,
+                group__scope_id__in=anc_r,
+                vid=vid_i,
+            ).first()
+            if hit is not None:
+                return hit
+        except Exception:
+            pass
 
     dup = list(VLAN.objects.filter(vid=vid_i)[:2])
     if len(dup) == 1:
