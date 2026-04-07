@@ -6,6 +6,12 @@ Each frozen op carries full audit ``cells`` for apply. The recon UI shows
 
 New-NIC sections store a minimal frozen row (``new_nic_cells_for_reconciliation``); preview
 still shows resolved MAC/VLAN/IP columns aligned with ``apply_create_interface``.
+
+When any interface row is selected, ``build_frozen_operations`` auto-appends **every**
+``detail_new_devices``, ``detail_review_only_devices``, and ``detail_proposed_missing_vlans``
+row present in that audit index, then sorts by ``AUDIT_REPORT_APPLY_ORDER`` so device + VLAN
+creates always run before ``create_interface`` / ``update_interface`` without ticking those
+sections manually.
 """
 
 from __future__ import annotations
@@ -49,6 +55,7 @@ from .apply_cells import (
     new_nic_cells_for_reconciliation,
     recon_operation_display_cells,
     reconciliation_apply_snapshot_cells,
+    validate_preview_mandatory_audit_fields,
 )
 from .merge import (
     _safe_selection_key,
@@ -60,6 +67,11 @@ from .merge import (
 from .netbox_write_projection import netbox_write_projection_for_op
 
 logger = logging.getLogger(__name__)
+
+# NIC drift sections use NB column fallbacks like ``apply_update_interface``.
+NIC_DRIFT_SELECTION_KEYS: frozenset[str] = frozenset(
+    {"detail_nic_drift_os", "detail_nic_drift_maas"}
+)
 
 PREVIEW_TOKEN_SALT = "netbox_automation_plugin.ma_openstack_recon.preview.v1"
 
@@ -194,12 +206,12 @@ SK_TO_ACTION = {
 }
 
 # Reconciliation preview tables, frozen-op sorting, and branch apply all use this tuple (low index runs first).
-# DCIM dependency block first — matches “Detail — new devices / missing VLANs / new NICs” before OpenStack IPAM:
-#   devices → proposed missing VLANs (IPAM VLAN create) → interface creates/drift → prefixes/ranges/FIPs/VMs → BMC/serial.
+# DCIM-first, then OpenStack VM creates next to device creates, then IPAM/VLAN/NIC, then remaining IPAM/FIP/VM drift → BMC/serial.
 AUDIT_REPORT_APPLY_ORDER: tuple[str, ...] = (
     "detail_placement_lifecycle_alignment",
     "detail_new_devices",
     "detail_review_only_devices",
+    "detail_new_vms",
     "detail_proposed_missing_vlans",
     "detail_new_nics",
     "detail_new_nics_os",
@@ -211,7 +223,6 @@ AUDIT_REPORT_APPLY_ORDER: tuple[str, ...] = (
     "detail_new_ip_ranges",
     "detail_new_fips",
     "detail_existing_fips",
-    "detail_new_vms",
     "detail_existing_vms",
     "detail_bmc_new_devices",
     "detail_bmc_existing",
@@ -327,136 +338,6 @@ def _cells_dict(headers: list, row: list) -> dict[str, str]:
     return out
 
 
-def _norm_host_key(host: str) -> str:
-    return str(host or "").strip().casefold()
-
-
-# Section titles must match format_html_proposed.py (drift audit UI).
-_AUDIT_DETAIL_TABLE_TITLE: dict[str, str] = {
-    "detail_new_devices": "Detail — new devices",
-    "detail_review_only_devices": "Detail — MAAS-only hosts (manual review required)",
-    "detail_new_nics": "Detail — new NICs",
-    "detail_new_nics_os": "Detail — new NICs (OS authority)",
-    "detail_new_nics_maas": "Detail — new NICs (MAAS authority)",
-}
-
-
-def _maas_only_device_report_hostnames(row_index: dict[str, dict[str, Any]]) -> set[str]:
-    """
-    Hostnames that appear on **Detail — new devices** or **Detail — review-only devices**
-    rows in this drift report. Matched (already-in-NetBox) hosts do not appear there, so
-    new-NIC rows for those hosts must not require a device-row selection.
-    """
-    sk_ok = frozenset({"detail_new_devices", "detail_review_only_devices"})
-    out: set[str] = set()
-    for meta in row_index.values():
-        if str(meta.get("selection_key") or "") not in sk_ok:
-            continue
-        cells = _cells_dict(meta.get("headers") or [], meta.get("row") or [])
-        h = (cells.get("Hostname") or "").strip()
-        if h:
-            out.add(_norm_host_key(h))
-    return out
-
-
-def _validate_new_nic_requires_selected_new_devices(
-    selected: dict[str, list[dict[str, Any]]],
-    row_index: dict[str, dict[str, Any]],
-    stable_index: dict[tuple[str, int], dict[str, Any]],
-) -> None:
-    """
-    For hosts that appear in the MAAS-only device sections of this report only: block when
-    New interface rows are selected without a matching selected device row (new or
-    review-only). Hosts that already have a NetBox device (new NICs from interface audit
-    only) are not in those tables and are excluded from this check.
-    """
-    allowed = all_registered_selection_keys()
-    nic_host_by_norm: dict[str, str] = {}
-    nic_tables_by_host: dict[str, set[str]] = {}
-    new_device_hosts_nf: set[str] = set()
-    _device_sk = frozenset({"detail_new_devices", "detail_review_only_devices"})
-
-    for sk_raw in selected:
-        canon = _canonical_selection_key(sk_raw, allowed)
-        if canon is None:
-            continue
-        if canon not in NEW_NIC_SELECTION_KEYS and canon not in _device_sk:
-            continue
-        safe = _safe_selection_key(canon)
-        for item in selected[sk_raw]:
-            rk = str(item.get("row_key") or "").strip()
-            ri = item.get("row_index")
-            try:
-                ri_int = int(ri) if ri is not None and ri != "" else None
-            except (TypeError, ValueError):
-                ri_int = None
-            meta = None
-            if rk and rk in row_index:
-                meta = row_index[rk]
-            if meta is None and ri_int is not None:
-                meta = stable_index.get((safe, ri_int))
-            if not meta:
-                continue
-            if _safe_selection_key(str(meta["selection_key"])) != safe:
-                continue
-            cells = _cells_dict(meta["headers"], meta["row"])
-            if canon in NEW_NIC_SELECTION_KEYS:
-                h = (cells.get("Host") or "").strip()
-                if h:
-                    nk = _norm_host_key(h)
-                    nic_host_by_norm.setdefault(nk, h)
-                    ttitle = _AUDIT_DETAIL_TABLE_TITLE.get(canon, canon)
-                    nic_tables_by_host.setdefault(nk, set()).add(ttitle)
-            if canon in _device_sk:
-                h = (cells.get("Hostname") or "").strip()
-                if h:
-                    new_device_hosts_nf.add(_norm_host_key(h))
-
-    if not nic_host_by_norm:
-        return
-    maas_only_hosts = _maas_only_device_report_hostnames(row_index)
-    missing_norm_keys = sorted(
-        (
-            k
-            for k in nic_host_by_norm
-            if k in maas_only_hosts and k not in new_device_hosts_nf
-        ),
-        key=lambda k: nic_host_by_norm[k].lower(),
-    )
-    if not missing_norm_keys:
-        return
-
-    hosts_per_table: dict[str, list[str]] = {}
-    for nk in missing_norm_keys:
-        host_label = nic_host_by_norm[nk]
-        tables = nic_tables_by_host.get(nk) or {_AUDIT_DETAIL_TABLE_TITLE["detail_new_nics"]}
-        for tbl in tables:
-            hosts_per_table.setdefault(tbl, []).append(host_label)
-    for tbl, hosts in hosts_per_table.items():
-        seen: set[str] = set()
-        uniq: list[str] = []
-        for h in hosts:
-            if h not in seen:
-                seen.add(h)
-                uniq.append(h)
-        hosts_per_table[tbl] = sorted(uniq, key=str.lower)
-
-    dev1 = _AUDIT_DETAIL_TABLE_TITLE["detail_new_devices"]
-    dev2 = _AUDIT_DETAIL_TABLE_TITLE["detail_review_only_devices"]
-    lines = [
-        _("Include the device row for the same hostname—not only new interfaces."),
-        _("Device sections: %(d1)s or %(d2)s.") % {"d1": dev1, "d2": dev2},
-        _("Hosts already modeled in NetBox: interface rows only."),
-        "",
-        _("Interfaces included without matching device row:"),
-    ]
-    for tbl in sorted(hosts_per_table.keys(), key=str.lower):
-        lines.append(tbl)
-        for h in hosts_per_table[tbl]:
-            lines.append(f"  {h}")
-    raise ValueError("\n".join(lines))
-
-
 def _operation_summary(meta: dict[str, Any]) -> str:
     sk = meta["selection_key"]
     cells = _cells_dict(meta["headers"], meta["row"])
@@ -536,6 +417,61 @@ def _operation_summary(meta: dict[str, Any]) -> str:
     return f"{sk}: {host or '—'}"
 
 
+def _append_frozen_op_from_meta(
+    meta: dict[str, Any],
+    ops: list[dict[str, Any]],
+    seen: set[str],
+) -> bool:
+    """Append one frozen op if ``row_key`` not already in ``seen``. Returns whether appended."""
+    msk = str(meta["selection_key"])
+    safe_meta = _safe_selection_key(msk)
+    row_key_final = _selection_row_key(safe_meta, meta["row_index"], list(meta["row"]))
+    if row_key_final in seen:
+        return False
+    seen.add(row_key_final)
+    summary = _operation_summary(meta)
+    cells = _cells_dict(meta["headers"], meta["row"])
+    if msk in NEW_NIC_SELECTION_KEYS:
+        cells = new_nic_cells_for_reconciliation(cells)
+    op: dict[str, Any] = {
+        "row_key": row_key_final,
+        "selection_key": msk,
+        "prop_list_key": meta.get("prop_list_key"),
+        "row_index": meta["row_index"],
+        "cells": cells,
+        "summary": summary,
+        "action": _frozen_op_action(msk, meta),
+    }
+    if "global_row_index" in meta:
+        op["global_row_index"] = meta["global_row_index"]
+    ops.append(op)
+    return True
+
+
+def _inject_interface_prerequisite_ops(
+    ops: list[dict[str, Any]],
+    seen: set[str],
+    row_index: dict[str, dict[str, Any]],
+) -> None:
+    """
+    If the operator selected any new-interface or NIC-drift row, pull in **every** device
+    and proposed missing-VLAN row from this drift/merge index so apply never runs interfaces
+    before those prerequisites. Final order is ``AUDIT_REPORT_APPLY_ORDER`` (sort below).
+    """
+    iface_src = NEW_NIC_SELECTION_KEYS | NIC_DRIFT_SELECTION_KEYS
+    if not any(str(o.get("selection_key") or "") in iface_src for o in ops):
+        return
+    sk_pull = frozenset({
+        "detail_new_devices",
+        "detail_review_only_devices",
+        "detail_proposed_missing_vlans",
+    })
+    for meta in row_index.values():
+        if str(meta.get("selection_key") or "") not in sk_pull:
+            continue
+        _append_frozen_op_from_meta(meta, ops, seen)
+
+
 def _normalize_selected(raw: Any) -> dict[str, list[dict[str, Any]]]:
     """Section -> list of {row_key, row_index} (from drift HTML); row_key may be stale after edits."""
     if not isinstance(raw, dict):
@@ -606,29 +542,9 @@ def build_frozen_operations(
                 raise ValueError(
                     f"Row {detail} belongs to section {meta['selection_key']}, not {sk}"
                 )
-            msk = str(meta["selection_key"])
-            safe_meta = _safe_selection_key(msk)
-            row_key_final = _selection_row_key(safe_meta, meta["row_index"], list(meta["row"]))
-            if row_key_final in seen:
-                continue
-            seen.add(row_key_final)
-            summary = _operation_summary(meta)
-            cells = _cells_dict(meta["headers"], meta["row"])
-            if msk in NEW_NIC_SELECTION_KEYS:
-                cells = new_nic_cells_for_reconciliation(cells)
-            op: dict[str, Any] = {
-                "row_key": row_key_final,
-                "selection_key": msk,
-                "prop_list_key": meta.get("prop_list_key"),
-                "row_index": meta["row_index"],
-                "cells": cells,
-                "summary": summary,
-                "action": _frozen_op_action(msk, meta),
-            }
-            if "global_row_index" in meta:
-                op["global_row_index"] = meta["global_row_index"]
-            ops.append(op)
+            _append_frozen_op_from_meta(meta, ops, seen)
 
+    _inject_interface_prerequisite_ops(ops, seen, row_index)
     ops.sort(key=lambda o: _operation_apply_sort_key(o, allowed=allowed))
     return ops
 
@@ -919,8 +835,8 @@ def preview_reconciliation(
     prop_f, align_f = merged_proposed_from_drift_run(drift_run, review_norm=final_norm)
     _, stable_auto = build_row_key_index(prop_auto, align_auto)
     row_index_f, stable_f = build_row_key_index(prop_f, align_f)
-    _validate_new_nic_requires_selected_new_devices(selected, row_index_f, stable_f)
     frozen = build_frozen_operations(selected, row_index_f, stable_f)
+    validate_preview_mandatory_audit_fields(frozen)
     digest = operations_digest(frozen)
     token = make_preview_token(drift_run_id=int(drift_run.pk), digest=digest)
     row_diffs = _row_diffs_vs_baseline(frozen, stable_auto)
@@ -1008,8 +924,8 @@ def create_reconciliation_run(
     final_norm = effective_review_norm_for_run(drift_run, posted_review_overrides_raw)
     prop_f, align_f = merged_proposed_from_drift_run(drift_run, review_norm=final_norm)
     row_index_f, stable_f = build_row_key_index(prop_f, align_f)
-    _validate_new_nic_requires_selected_new_devices(selected, row_index_f, stable_f)
     frozen = build_frozen_operations(selected, row_index_f, stable_f)
+    validate_preview_mandatory_audit_fields(frozen)
     digest = operations_digest(frozen)
 
     ok, err = verify_preview_token(

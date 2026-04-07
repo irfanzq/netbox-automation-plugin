@@ -368,6 +368,11 @@ def _match_netbox_role_from_hostname(hostname: str, netbox_data: dict) -> str:
             return role_display(candidates[0]) + f" (ambiguous ×{len(candidates)})"
         return "—"
 
+    # VyOS (hostname / MAAS): do not auto-pick among router roles — orgs define several (edge vs
+    # cluster vs gateway). Leave ``—`` so the operator chooses NB proposed role on the audit.
+    if "vyos" in tokens or "vyos" in hn:
+        return "—"
+
     if "cpu" in tokens or "osctrl" in tokens:
         return pick_cpu_host()
 

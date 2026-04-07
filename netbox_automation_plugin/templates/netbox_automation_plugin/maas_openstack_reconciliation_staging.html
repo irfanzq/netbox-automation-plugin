@@ -25,7 +25,7 @@
           {% endif %}
         </p>
         <p class="small text-body-secondary mb-0">
-          {% blocktrans trimmed %}Tables below follow the <strong>same order as the drift audit</strong>: IPAM/VM-style sections first, then new-device and MAAS-only review tables, then new interfaces and NIC drift (device rows still apply before their interfaces). Each column is a <strong>NetBox write preview</strong>: values that drive apply (typed fields and resolved MAC/VLAN/IP where applicable), not full MAAS/OS audit context. The <strong>Apply payload</strong> section further down lists each operation’s attribute/value pairs exactly as passed into apply after scoping, so you can match preview tables to what NetBox will see.{% endblocktrans %}
+          {% blocktrans trimmed %}Use the <strong>Apply payload</strong> section for each operation’s NetBox attribute/value pairs (same order as apply) so you see exactly what will be passed after scoping.{% endblocktrans %}
         </p>
         <h6 class="text-body-secondary text-uppercase small mt-3">{% trans "Next steps" %}</h6>
         <ol class="small mb-4">
@@ -60,7 +60,7 @@
         {% if row_diffs %}
           <h6 class="text-body-secondary text-uppercase small mt-3">{% trans "Audit diff (auto-proposed vs your review)" %}</h6>
           <p class="small text-body-secondary mb-2">
-            {% blocktrans trimmed %}The same <strong>NetBox write preview</strong> columns as the tables below are compared. A row appears only if at least one preview column differs between the automatic proposal and your merged review.{% endblocktrans %}
+            {% blocktrans trimmed %}Compared fields use the same <strong>projected NetBox attributes</strong> as the apply payload. A row appears only if at least one such field differs between the automatic proposal and your merged review.{% endblocktrans %}
           </p>
           <div class="table-responsive border rounded mb-3">
             <table class="table table-sm mb-0">
@@ -99,82 +99,6 @@
         </div>
       </div>
     </div>
-    {% if operation_tables %}
-      <h5 class="text-body-secondary text-uppercase small mb-2">{% trans "NetBox write preview (by audit section, apply order)" %}</h5>
-      {% for tbl in operation_tables %}
-      <div class="card mb-3">
-        <h5 class="card-header py-2 small d-flex flex-wrap align-items-center gap-2">
-          <span>{{ tbl.title }}</span>
-          <code class="text-muted small mb-0">{{ tbl.section_key }}</code>
-          <span class="badge text-bg-secondary">{% trans "Apply order" %} {{ tbl.apply_order }}</span>
-        </h5>
-        <div class="card-body p-0">
-          <div class="table-responsive">
-            <table class="table table-sm table-striped mb-0 align-middle">
-              <thead class="table-light">
-                <tr>
-                  {% for h in tbl.headers %}
-                  <th class="small text-wrap font-monospace" style="min-width: 6rem;" title="NetBox attribute">{{ h }}</th>
-                  {% endfor %}
-                </tr>
-              </thead>
-              <tbody>
-                {% for op in tbl.rows %}
-                <tr>
-                  {% for v in op.cell_values %}
-                  <td class="small text-break">{% if v %}{{ v }}{% else %}—{% endif %}</td>
-                  {% endfor %}
-                </tr>
-                {% endfor %}
-              </tbody>
-            </table>
-          </div>
-        </div>
-      </div>
-      {% endfor %}
-    {% elif operations %}
-      <div class="card">
-        <h5 class="card-header">{% trans "Operations" %}</h5>
-        <div class="card-body p-0">
-          <div class="table-responsive">
-            <table class="table table-sm table-striped mb-0">
-              <thead>
-                <tr>
-                  <th>#</th>
-                  <th>{% trans "Section" %}</th>
-                  <th>{% trans "Action" %}</th>
-                  <th>{% trans "NetBox payload" %}</th>
-                </tr>
-              </thead>
-              <tbody>
-                {% for op in operations %}
-                  <tr>
-                    <td class="text-muted">{{ forloop.counter }}</td>
-                    <td class="small text-monospace">{{ op.section|default:"—" }}</td>
-                    <td class="small">{{ op.action|default:"—" }}</td>
-                    <td class="small align-top" style="min-width: 12rem;">
-                      {% if op.cells %}
-                        <details class="drift-recon-op-cells">
-                          <summary class="text-primary" style="cursor: pointer;">{% trans "Show payload fields" %}</summary>
-                          <dl class="row small mb-0 mt-2 border-top pt-2">
-                            {% for col, val in op.cells.items %}
-                              <dt class="col-5 text-body-secondary text-wrap">{{ col }}</dt>
-                              <dd class="col-7 mb-1 text-wrap">{% if val %}{{ val }}{% else %}—{% endif %}</dd>
-                            {% endfor %}
-                          </dl>
-                        </details>
-                      {% else %}
-                        —
-                      {% endif %}
-                    </td>
-                  </tr>
-                {% endfor %}
-              </tbody>
-            </table>
-          </div>
-        </div>
-      </div>
-    {% endif %}
     {% include "netbox_automation_plugin/_reconciliation_apply_snapshot_block.html" %}
   </div>
 </div>

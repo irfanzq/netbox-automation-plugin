@@ -37,7 +37,7 @@
           {% endif %}
         </dl>
         <p class="text-body-secondary small mb-0 mt-2">
-          {% blocktrans trimmed %}The branch Diff tab shows one row per NetBox object and save: device updates never list interface MAC, VLAN, or IPs on the device row—those appear on separate interface or IP address rows. For the full intended payload per reconciliation row (including every projected NetBox attribute), use the frozen tables, apply snapshot, and the Apply results page after you run Apply.{% endblocktrans %}
+          {% blocktrans trimmed %}The branch Diff tab shows one row per NetBox object and save: device updates never list interface MAC, VLAN, or IPs on the device row—those appear on separate interface or IP address rows. For the full payload per frozen operation, use the apply snapshot tables below and the Apply results page after you run Apply.{% endblocktrans %}
         </p>
       </div>
     </div>
@@ -45,81 +45,6 @@
     {% include "netbox_automation_plugin/_reconciliation_page_nav.html" %}
     {% include "netbox_automation_plugin/_reconciliation_lifecycle_card.html" %}
 
-    {% if operation_tables %}
-      <h5 class="text-body-secondary text-uppercase small mb-2">{% trans "Frozen operations — NetBox write preview (apply order)" %}</h5>
-      {% for tbl in operation_tables %}
-      <div class="card mb-3">
-        <h5 class="card-header py-2 small d-flex flex-wrap align-items-center gap-2">
-          <span>{{ tbl.title }}</span>
-          <code class="text-muted small mb-0">{{ tbl.section_key }}</code>
-        </h5>
-        <div class="card-body p-0">
-          <div class="table-responsive">
-            <table class="table table-sm table-striped mb-0 align-middle">
-              <thead class="table-light">
-                <tr>
-                  {% for h in tbl.headers %}
-                  <th class="small text-wrap font-monospace" style="min-width: 6rem;" title="NetBox attribute">{{ h }}</th>
-                  {% endfor %}
-                </tr>
-              </thead>
-              <tbody>
-                {% for op in tbl.rows %}
-                <tr>
-                  {% for v in op.cell_values %}
-                  <td class="small text-break">{% if v %}{{ v }}{% else %}—{% endif %}</td>
-                  {% endfor %}
-                </tr>
-                {% endfor %}
-              </tbody>
-            </table>
-          </div>
-        </div>
-      </div>
-      {% endfor %}
-    {% elif frozen_ops %}
-      <div class="card">
-        <h5 class="card-header">{% trans "Frozen operations" %}</h5>
-        <div class="card-body p-0">
-          <div class="table-responsive">
-            <table class="table table-sm table-striped mb-0">
-              <thead>
-                <tr>
-                  <th>{# #}</th>
-                  <th>{% trans "Section" %}</th>
-                  <th>{% trans "Action" %}</th>
-                  <th>{% trans "NetBox payload" %}</th>
-                </tr>
-              </thead>
-              <tbody>
-                {% for op in frozen_ops %}
-                  <tr>
-                    <td class="text-muted">{{ forloop.counter }}</td>
-                    <td class="small text-monospace">{{ op.selection_key|default:"—" }}</td>
-                    <td class="small">{{ op.action|default:"—" }}</td>
-                    <td class="small align-top" style="min-width: 12rem;">
-                      {% if op.cells %}
-                        <details>
-                          <summary class="text-primary" style="cursor: pointer;">{% trans "Show payload fields" %}</summary>
-                          <dl class="row small mb-0 mt-2 border-top pt-2">
-                            {% for col, val in op.cells.items %}
-                              <dt class="col-5 text-body-secondary text-wrap">{{ col }}</dt>
-                              <dd class="col-7 mb-1 text-wrap">{% if val %}{{ val }}{% else %}—{% endif %}</dd>
-                            {% endfor %}
-                          </dl>
-                        </details>
-                      {% else %}
-                        —
-                      {% endif %}
-                    </td>
-                  </tr>
-                {% endfor %}
-              </tbody>
-            </table>
-          </div>
-        </div>
-      </div>
-    {% endif %}
     {% include "netbox_automation_plugin/_reconciliation_apply_snapshot_block.html" %}
   </div>
 </div>

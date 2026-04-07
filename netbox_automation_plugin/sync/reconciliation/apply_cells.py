@@ -2377,6 +2377,50 @@ def apply_update_openstack_vm(op: dict[str, Any]) -> tuple[str, str]:
     return "skipped", "skipped_already_desired"
 
 
+def _cell_is_placeholder(val: str | None) -> bool:
+    t = (val or "").strip()
+    return not t or t in ("—", "-")
+
+
+def _cells_indicate_vyos(hostname: str, cells: dict[str, str]) -> bool:
+    """True when hostname or common MAAS/OS columns suggest VyOS (router role must be chosen manually)."""
+    hn = (hostname or "").strip().lower()
+    if "vyos" in hn:
+        return True
+    blob = " ".join(
+        _cell(cells, h)
+        for h in (
+            "NB proposed platform",
+            "OS provision",
+            "OS release",
+            "MAAS OS",
+            "OS",
+            "MAAS status",
+        )
+    ).lower()
+    return "vyos" in blob
+
+
+def _fallback_device_role_for_create(hostname: str, cells: dict[str, str]):
+    """
+    When ``NB proposed role`` is empty, pick a safe default — except VyOS (operator must set role).
+    """
+    from dcim.models import DeviceRole
+
+    if _cells_indicate_vyos(hostname, cells):
+        return None
+
+    for slug in ("server", "compute", "network-device", "idc", "leaf", "spine"):
+        r = DeviceRole.objects.filter(slug=slug).first()
+        if r is not None:
+            return r
+    for nm in ("Server", "Compute", "Network Device"):
+        r = DeviceRole.objects.filter(name__iexact=nm).first()
+        if r is not None:
+            return r
+    return DeviceRole.objects.order_by("pk").first()
+
+
 def _apply_device_core(cells: dict[str, str], *, create_if_missing: bool) -> tuple[str, str]:
     from dcim.models import Device, DeviceRole, DeviceType, Location, Platform, Site
 
@@ -2441,13 +2485,27 @@ def _apply_device_core(cells: dict[str, str], *, create_if_missing: bool) -> tup
                 f'Device "{hostname}" does not exist in NetBox. '
                 f"Placement-only rows do not create devices; create the device first or include a new-device row."
             )
-        if not site_name or not role_name or not dtype_name:
+        role_raw = (role_name or "").strip()
+        if _cells_indicate_vyos(hostname, cells):
+            if _cell_is_placeholder(role_raw) or "ambiguous" in role_raw.lower():
+                return _skip_missing_prereq(
+                    "VyOS (vyos in hostname or OS columns): choose a specific NetBox device role "
+                    "in NB proposed role on the drift audit (e.g. Edge Router, Cluster Edge Router, "
+                    "Router Gateway — whichever your design uses). Save the drift review, "
+                    "re-open reconciliation preview so the frozen ops pick it up, then apply again."
+                )
+        if _cell_is_placeholder(role_name):
+            role_fb = _fallback_device_role_for_create(hostname, cells)
+            if role_fb is not None:
+                role = role_fb
+                role_name = (getattr(role_fb, "name", None) or "").strip()
+        if not site_name or _cell_is_placeholder(role_name) or _cell_is_placeholder(dtype_name):
             missing_bits = []
-            if not site_name:
+            if not site_name or _cell_is_placeholder(site_name):
                 missing_bits.append("NB proposed site / NetBox site")
-            if not role_name:
+            if _cell_is_placeholder(role_name):
                 missing_bits.append("NB proposed role")
-            if not dtype_name:
+            if _cell_is_placeholder(dtype_name):
                 missing_bits.append("NB proposed device type")
             return _skip_missing_prereq(
                 "Cannot create device; required fields empty in row: " + "; ".join(missing_bits) + "."
@@ -2487,6 +2545,20 @@ def _apply_device_core(cells: dict[str, str], *, create_if_missing: bool) -> tup
             placement=False,
         )
         return "created", "ok_created"
+    # Device exists in NetBox but has no role: fill from audit, or non-VyOS fallback; VyOS needs explicit pick.
+    if getattr(existing, "role_id", None) in (None, 0):
+        rr = (role_name or "").strip()
+        if _cells_indicate_vyos(hostname, cells) and (
+            _cell_is_placeholder(rr) or "ambiguous" in rr.lower()
+        ):
+            return _skip_missing_prereq(
+                "Device exists in NetBox without a device role; for VyOS pick NB proposed role "
+                "on the drift audit (e.g. Edge Router), save review, re-run reconciliation, then apply."
+            )
+        if role is None:
+            role_fb = _fallback_device_role_for_create(hostname, cells)
+            if role_fb is not None:
+                role = role_fb
     any_dev = _device_apply_row_stepwise_changelog(
         existing,
         site=site,
@@ -2505,6 +2577,149 @@ def _apply_device_core(cells: dict[str, str], *, create_if_missing: bool) -> tup
     if any_dev or site_saved:
         return "updated", "ok_updated"
     return "skipped", "skipped_already_desired"
+
+
+# Reconciliation preview must not proceed until these NetBox write-projection keys are filled
+# (aligned with apply prerequisites / NetBox required semantics for each section).
+_MANDATORY_NETBOX_PREVIEW_FIELDS: dict[str, tuple[str, ...]] = {
+    "detail_placement_lifecycle_alignment": ("name", "site", "status"),
+    "detail_new_devices": ("name", "site", "role", "device_type"),
+    "detail_review_only_devices": ("name", "site", "role", "device_type"),
+    "detail_proposed_missing_vlans": ("vid", "vlan_group"),
+    "detail_new_prefixes": ("prefix", "status"),
+    "detail_existing_prefixes": ("prefix", "status"),
+    "detail_new_ip_ranges": ("start_address", "end_address", "status"),
+    "detail_new_fips": ("address", "status"),
+    "detail_existing_fips": ("address", "status"),
+    "detail_new_vms": ("name", "cluster"),
+    "detail_existing_vms": ("id", "name"),
+    "detail_nic_drift_os": ("device", "name"),
+    "detail_nic_drift_maas": ("device", "name"),
+    "detail_bmc_new_devices": ("device", "name", "IPAddress.address"),
+    "detail_bmc_existing": ("device", "name", "IPAddress.address"),
+    "detail_serial_review": ("name", "serial"),
+}
+
+_PREVIEW_FIELD_LABELS: dict[str, str] = {
+    "name": "Name",
+    "id": "NetBox VM ID",
+    "site": "Site",
+    "site.region": "Site region",
+    "location": "Location",
+    "role": "Role (NB proposed role)",
+    "device_type": "Device type",
+    "status": "Status",
+    "serial": "Serial number",
+    "prefix": "Prefix (CIDR)",
+    "vrf": "VRF",
+    "tenant": "Tenant",
+    "cluster": "Cluster",
+    "device": "Device (host)",
+    "type": "Interface type",
+    "mac_address": "MAC address",
+    "untagged_vlan": "Untagged VLAN",
+    "description": "Description",
+    "tags": "Tags / labels",
+    "IPAddress.address": "IP address",
+    "start_address": "Start address",
+    "end_address": "End address",
+    "address": "Address",
+    "vid": "VLAN ID",
+    "vlan_group": "VLAN group",
+    "nat_inside": "NAT inside IP",
+}
+
+
+def _mandatory_netbox_projection_keys(selection_key: str) -> tuple[str, ...]:
+    sk = str(selection_key or "").strip()
+    if sk in NEW_NIC_SELECTION_KEYS:
+        return ("device", "name")
+    return _MANDATORY_NETBOX_PREVIEW_FIELDS.get(sk, ())
+
+
+def _preview_scalar_invalid(field_key: str, raw: str | None) -> bool:
+    s = "" if raw is None else str(raw).strip()
+    if _cell_is_placeholder(s):
+        return True
+    lk = str(field_key or "").lower()
+    if lk == "role" and "ambiguous" in s.lower():
+        return True
+    if field_key == "vid":
+        if not s.isdigit():
+            return True
+        v = int(s)
+        return v < 1 or v > _NETBOX_IEEE_VLAN_VID_MAX
+    if field_key == "id":
+        return not s.isdigit()
+    return False
+
+
+def _nic_drift_interface_name_ok(cells: dict[str, str], proj: dict[str, str]) -> bool:
+    pn = (proj.get("name") or "").strip()
+    if not _cell_is_placeholder(pn):
+        return True
+    return not _cell_is_placeholder(_cell(cells, "MAAS intf"))
+
+
+def validate_preview_mandatory_audit_fields(frozen: list[dict[str, Any]]) -> None:
+    """
+    Block reconciliation preview until NetBox-oriented audit columns required for apply
+    are filled (empty, em-dash, or invalid VID / ambiguous role count as missing).
+
+    Raises ValueError listing table, optional row summary, and field label for each problem.
+    """
+    from netbox_automation_plugin.sync.reconciliation.service import RECON_SECTION_TITLES
+
+    error_blocks: list[str] = []
+
+    for op in frozen:
+        if not isinstance(op, dict):
+            continue
+        sk = str(op.get("selection_key") or "").strip()
+        keys = _mandatory_netbox_projection_keys(sk)
+        if not keys:
+            continue
+        raw_cells = op.get("cells")
+        if not isinstance(raw_cells, dict):
+            raw_cells = {}
+        cells: dict[str, str] = {
+            str(k): "" if v is None else str(v) for k, v in raw_cells.items()
+        }
+        proj = netbox_write_projection_for_op(op)
+        table_title = RECON_SECTION_TITLES.get(sk, sk)
+        row_hint = str(op.get("summary") or "").strip()
+        for field_key in keys:
+            if field_key == "name" and sk in ("detail_nic_drift_os", "detail_nic_drift_maas"):
+                if _nic_drift_interface_name_ok(cells, proj):
+                    continue
+                label = _PREVIEW_FIELD_LABELS.get("name", "Name")
+                bits = [f"Table: {table_title}", f"Field: {label}"]
+                if row_hint:
+                    bits.append(f"Row: {row_hint}")
+                bits.append(
+                    "This field cannot be empty — please set NB intf or MAAS intf on the drift audit."
+                )
+                error_blocks.append("\n".join(bits))
+                continue
+            val = proj.get(field_key)
+            if not _preview_scalar_invalid(field_key, val if val is None else str(val)):
+                continue
+            label = _PREVIEW_FIELD_LABELS.get(
+                field_key, str(field_key).replace("_", " ").title()
+            )
+            bits = [f"Table: {table_title}", f"Field: {label}"]
+            if row_hint:
+                bits.append(f"Row: {row_hint}")
+            bits.append(
+                "This field cannot be empty — please select or enter a value for it on the drift audit."
+            )
+            error_blocks.append("\n".join(bits))
+
+    if error_blocks:
+        raise ValueError(
+            "Cannot continue to reconciliation — fix the following; save your drift review, then try again:\n\n"
+            + "\n\n".join(error_blocks)
+        )
 
 
 def apply_create_device(op: dict[str, Any]) -> tuple[str, str]:

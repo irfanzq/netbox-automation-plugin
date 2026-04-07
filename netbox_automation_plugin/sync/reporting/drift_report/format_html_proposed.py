@@ -87,6 +87,7 @@ def emit_proposed_change_tables(e, prop):
                 str(len(prop.get("add_devices_review_only", []))),
                 "Not safe to auto-propose (status/data quality policy)",
             ],
+            ["New VMs (OpenStack Nova)", str(len(prop.get("add_openstack_vms", []))), "Instance not modeled as NetBox Virtual Machine"],
             [
                 "Proposed missing VLANs (IPAM)",
                 str(len(prop.get("add_proposed_missing_vlans", []))),
@@ -106,7 +107,6 @@ def emit_proposed_change_tables(e, prop):
                 str(len(prop.get("update_fips", []))),
                 "FIP in IPAM; OpenStack fixed IP ≠ NetBox nat_inside",
             ],
-            ["New VMs (OpenStack Nova)", str(len(prop.get("add_openstack_vms", []))), "Instance not modeled as NetBox Virtual Machine"],
             [
                 "Existing VMs (OpenStack drift)",
                 str(len(prop.get("update_openstack_vms", []))),
@@ -134,7 +134,7 @@ def emit_proposed_change_tables(e, prop):
         selectable=False,
     )
 
-    # Detail order matches ``service.AUDIT_REPORT_APPLY_ORDER``: devices → missing VLANs → NICs, then OpenStack IPAM/VMs, then BMC.
+    # Detail order matches ``service.AUDIT_REPORT_APPLY_ORDER``: devices → new VMs → missing VLANs → NICs, then OpenStack IPAM / drift VMs, then BMC.
     if prop["add_devices"]:
         e.spacer()
         e.subtitle("Detail — new devices")
@@ -161,8 +161,34 @@ def emit_proposed_change_tables(e, prop):
             selection_key="detail_review_only_devices",
             proposed_pick_columns=_PROPOSED_NB_PICK_DEVICE,
         )
+    if prop.get("add_openstack_vms"):
+        e.spacer()
+        e.subtitle("Detail — new VMs")
+        e.paragraph(
+            "OpenStack Nova instances (VMs and Ironic bare metal) with no NetBox Virtual Machine of the same name. "
+            "Requires an existing Cluster (NB proposed cluster). NB proposed device (VM) is always the "
+            "Nova instance name (same as VM name). Hypervisor hostname shows Nova's compute host for "
+            "reference. Apply links a NetBox Device by that VM name first, then by hypervisor hostname "
+            "if no Device matches the VM name. "
+            "If the VM has a custom field whose key is one of "
+            "<code>nova_compute_host</code>, <code>openstack_hypervisor_hostname</code>, "
+            "<code>hypervisor_hostname</code>, or <code>os_hypervisor_host</code>, apply copies "
+            "<strong>Hypervisor hostname</strong> there so the compute host stays visible even when "
+            "the linked Device is the instance name."
+        )
+        e.spacer()
+        e.table(
+            list(HEADERS_DETAIL_NEW_VMS),
+            prop["add_openstack_vms"],
+            dynamic_columns=True,
+            wrap_max_width=None,
+            selectable=True,
+            selection_key="detail_new_vms",
+            proposed_pick_columns=_PROPOSED_NB_PICK_VM,
+        )
     if prop.get("add_proposed_missing_vlans"):
         e.spacer()
+        e.line_total("Detail — proposed missing VLANs (IPAM)")
         e.table(
             list(HEADERS_DETAIL_PROPOSED_MISSING_VLANS),
             prop["add_proposed_missing_vlans"],
@@ -345,31 +371,6 @@ def emit_proposed_change_tables(e, prop):
             selection_key="detail_existing_fips",
             proposed_pick_columns=_PROPOSED_NB_PICK_FIP,
         )
-    if prop.get("add_openstack_vms"):
-        e.spacer()
-        e.subtitle("Detail — new VMs")
-        e.paragraph(
-            "OpenStack Nova instances (VMs and Ironic bare metal) with no NetBox Virtual Machine of the same name. "
-            "Requires an existing Cluster (NB proposed cluster). NB proposed device (VM) is always the "
-            "Nova instance name (same as VM name). Hypervisor hostname shows Nova's compute host for "
-            "reference. Apply links a NetBox Device by that VM name first, then by hypervisor hostname "
-            "if no Device matches the VM name. "
-            "If the VM has a custom field whose key is one of "
-            "<code>nova_compute_host</code>, <code>openstack_hypervisor_hostname</code>, "
-            "<code>hypervisor_hostname</code>, or <code>os_hypervisor_host</code>, apply copies "
-            "<strong>Hypervisor hostname</strong> there so the compute host stays visible even when "
-            "the linked Device is the instance name."
-        )
-        e.spacer()
-        e.table(
-            list(HEADERS_DETAIL_NEW_VMS),
-            prop["add_openstack_vms"],
-            dynamic_columns=True,
-            wrap_max_width=None,
-            selectable=True,
-            selection_key="detail_new_vms",
-            proposed_pick_columns=_PROPOSED_NB_PICK_VM,
-        )
     if prop.get("update_openstack_vms"):
         e.spacer()
         e.subtitle("Detail — existing VMs")
@@ -469,6 +470,7 @@ def emit_proposed_change_tables(e, prop):
         ["Bucket", "Count"],
         [
             ["New devices", str(len(prop["add_devices"]))],
+            ["New VMs (OpenStack)", str(len(prop.get("add_openstack_vms", [])))],
             [
                 "Proposed missing VLANs (IPAM)",
                 str(len(prop.get("add_proposed_missing_vlans", []))),
@@ -479,7 +481,6 @@ def emit_proposed_change_tables(e, prop):
             ["Existing prefixes (drift)", str(len(prop.get("update_prefixes", [])))],
             ["New floating IPs", str(len(prop["add_fips"]))],
             ["Existing floating IPs (NAT drift)", str(len(prop.get("update_fips", [])))],
-            ["New VMs (OpenStack)", str(len(prop.get("add_openstack_vms", [])))],
             ["Existing VMs (drift)", str(len(prop.get("update_openstack_vms", [])))],
             ["BMC / OOB", str(len(prop["add_mgmt_iface"]) + len(prop.get("add_mgmt_iface_new_devices", [])))],
             ["Serials (review)", str(len(prop["review_serial"]))],

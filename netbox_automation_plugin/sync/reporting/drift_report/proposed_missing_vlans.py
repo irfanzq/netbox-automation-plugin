@@ -1,4 +1,9 @@
-"""Proposed IPAM VLAN rows when interface drift names a tagged VID missing from NetBox scope."""
+"""Proposed IPAM VLAN rows when NIC proposals imply an untagged VID that IPAM cannot resolve.
+
+VIDs are detected with the same rules as ``apply_create_interface`` /
+``apply_update_interface`` (``_interface_mac_vlan_ip_from_cells``), not only when
+``SET_NETBOX_UNTAGGED_VLAN`` appears in Proposed Action.
+"""
 
 from __future__ import annotations
 
@@ -26,6 +31,54 @@ _RE_UNTAGGED = re.compile(r"\bSET_NETBOX_UNTAGGED_VLAN\s*=\s*([^;]+)", re.I)
 
 _IDX_DRIFT = {h: i for i, h in enumerate(HEADERS_DETAIL_NIC_DRIFT)}
 _IDX_NEW = {h: i for i, h in enumerate(HEADERS_DETAIL_NEW_NICS)}
+
+
+def _audit_row_to_cells(headers: list[str], row: list[Any]) -> dict[str, str]:
+    out: dict[str, str] = {}
+    for i, h in enumerate(headers):
+        v = row[i] if i < len(row) else ""
+        out[str(h)] = "" if v is None else str(v).strip()
+    return out
+
+
+def _unicast_ieee_vids_from_nic_cells(
+    cells: dict[str, str], *, include_nb_vlan_fallback: bool
+) -> list[int]:
+    """
+    Same VLAN resolution path as interface apply so missing-VLAN rows are emitted whenever
+    create/update interface would set an untagged VID (not only when Proposed Action
+    contains ``SET_NETBOX_UNTAGGED_VLAN``).
+    """
+    _mac, vid, _ips = _interface_mac_vlan_ip_from_cells(
+        cells, include_nb_fallback=include_nb_vlan_fallback
+    )
+    if vid is None:
+        return []
+    try:
+        vi = int(vid)
+    except (TypeError, ValueError):
+        return []
+    if not (1 <= vi <= 4094):
+        return []
+    return [vi]
+
+
+def _collect_vids_for_nic_drift(pa: str, cells: dict[str, str]) -> list[int]:
+    vids = _parse_tagged_vids_from_proposed_action(pa)
+    if not vids:
+        vids = _unicast_ieee_vids_from_nic_cells(
+            cells, include_nb_vlan_fallback=True
+        )
+    return list(dict.fromkeys(vids))
+
+
+def _collect_vids_for_new_nic(pa: str, cells: dict[str, str]) -> list[int]:
+    vids = _parse_tagged_vids_from_proposed_action(pa)
+    if not vids:
+        vids = _unicast_ieee_vids_from_nic_cells(
+            cells, include_nb_vlan_fallback=False
+        )
+    return list(dict.fromkeys(vids))
 
 
 def _parse_tagged_vids_from_proposed_action(pa: str) -> list[int]:
@@ -551,7 +604,10 @@ def build_proposed_missing_vlan_rows(
     One row per (suggested VLAN group, VID) where NIC drift / new-NIC proposals reference a tagged
     VID that does not resolve for the device (or device absent — placement from NB site/location).
     """
-    from netbox_automation_plugin.sync.reconciliation.apply_cells import _resolve_vlan_for_device
+    from netbox_automation_plugin.sync.reconciliation.apply_cells import (
+    _interface_mac_vlan_ip_from_cells,
+    _resolve_vlan_for_device,
+)
 
     prefix_v4, prefix_v6 = _build_prefix_vlan_lookup()
     seen: set[tuple[str, int]] = set()
@@ -649,9 +705,8 @@ def build_proposed_missing_vlan_rows(
         while len(r) < len(HEADERS_DETAIL_NIC_DRIFT):
             r.append("")
         pa = str(r[_IDX_DRIFT["Proposed Action"]] or "")
-        if "SET_NETBOX_UNTAGGED_VLAN" not in pa.upper():
-            continue
-        vids = _parse_tagged_vids_from_proposed_action(pa)
+        cells = _audit_row_to_cells(HEADERS_DETAIL_NIC_DRIFT, r)
+        vids = _collect_vids_for_nic_drift(pa, cells)
         if not vids:
             continue
         host = str(r[_IDX_DRIFT["Host"]] or "").strip()
@@ -695,9 +750,8 @@ def build_proposed_missing_vlan_rows(
         while len(r) < len(HEADERS_DETAIL_NEW_NICS):
             r.append("")
         pa = str(r[_IDX_NEW["Proposed Action"]] or "")
-        if "SET_NETBOX_UNTAGGED_VLAN" not in pa.upper():
-            continue
-        vids = _parse_tagged_vids_from_proposed_action(pa)
+        cells = _audit_row_to_cells(HEADERS_DETAIL_NEW_NICS, r)
+        vids = _collect_vids_for_new_nic(pa, cells)
         if not vids:
             continue
         host = str(r[_IDX_NEW["Host"]] or "").strip()
