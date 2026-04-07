@@ -10,8 +10,9 @@ workflow fields: Proposed Action, Status, Risk, Authority). Generic columns use
 non-placeholder heuristic; **NB Proposed Tenant** is kept only when the value matches the
 drift tenant picker catalog (otherwise omitted—never derived from free text).
 
-Execution order (e.g. create devices before create/update interfaces) is enforced in
-``service.apply_reconciliation_run`` via ``AUDIT_REPORT_APPLY_ORDER`` and action phase.
+Execution order (new devices → proposed missing VLANs → placement → NICs → IPAM/VMs, etc.)
+is enforced in ``service.apply_reconciliation_run`` via ``AUDIT_REPORT_APPLY_ORDER`` and
+action phase.
 """
 
 from __future__ import annotations
@@ -3360,6 +3361,116 @@ def _assign_ips_to_interface(iface, ip_blob: str, vrf) -> tuple[bool, bool, bool
     return changed, row_had_ip_tokens, any_parse_ok
 
 
+def _fallback_device_type_label_for_bootstrap() -> str:
+    """
+    Label for ``NB proposed device type`` when inferring a DCIM device from a NIC or placement row.
+    """
+    from dcim.models import DeviceType
+
+    for slug in ("generic-1u-server", "server", "bare-metal-server"):
+        dt = DeviceType.objects.select_related("manufacturer").filter(slug=slug).first()
+        if dt is not None:
+            mname = getattr(dt.manufacturer, "name", "") or ""
+            return f"{mname} {dt.model}".strip()
+    dt = DeviceType.objects.select_related("manufacturer").order_by("pk").first()
+    if dt is None:
+        return ""
+    mname = getattr(dt.manufacturer, "name", "") or ""
+    return f"{mname} {dt.model}".strip()
+
+
+def synthetic_device_cells_from_placement_for_nic_prereq(
+    cells: dict[str, str],
+) -> dict[str, str] | None:
+    """
+    ``detail_new_devices``-shaped cells from a placement row for prerequisite ``create_device``.
+    """
+    host = (_cell(cells, "Host", "Hostname") or "").strip()
+    if not host:
+        return None
+    site = (_cell(cells, "NetBox site", "NB proposed site") or "").strip()
+    if not site or _cell_is_placeholder(site):
+        return None
+    dtype_lbl = _fallback_device_type_label_for_bootstrap()
+    if not dtype_lbl:
+        return None
+    out: dict[str, str] = {
+        "Hostname": host,
+        "Host": host,
+        "NB proposed site": site,
+        "NetBox site": site,
+        "NB proposed device type": dtype_lbl,
+    }
+    loc = (_cell(cells, "NetBox location", "NB proposed location") or "").strip()
+    if loc and not _cell_is_placeholder(loc):
+        out["NB proposed location"] = loc
+        out["NetBox location"] = loc
+    st = (_cell(cells, "NB proposed device status", "NB state (current)") or "").strip()
+    if st and not _cell_is_placeholder(st):
+        out["NB proposed device status"] = st
+    plat = (_cell(cells, "OS provision", "OS region") or "").strip()
+    if plat:
+        out["NB proposed platform"] = plat
+    return out
+
+
+def synthetic_device_cells_from_new_nic_for_prereq(
+    cells: dict[str, str], host: str
+) -> dict[str, str] | None:
+    """Minimal new-device cells from a new-NIC row when ``NB site`` is set (apply-time fallback)."""
+    site = (_cell(cells, "NB site") or "").strip()
+    if not site or _cell_is_placeholder(site):
+        return None
+    dtype_lbl = _fallback_device_type_label_for_bootstrap()
+    if not dtype_lbl:
+        return None
+    out: dict[str, str] = {
+        "Hostname": host,
+        "Host": host,
+        "NB proposed site": site,
+        "NetBox site": site,
+        "NB proposed device type": dtype_lbl,
+    }
+    loc = (_cell(cells, "NB location") or "").strip()
+    if loc and not _cell_is_placeholder(loc):
+        out["NB proposed location"] = loc
+        out["NetBox location"] = loc
+    plat = (_cell(cells, "OS region", "OS provision", "OS") or "").strip()
+    if plat:
+        out["NB proposed platform"] = plat
+    return out
+
+
+def _try_bootstrap_device_for_new_interface_apply(
+    cells: dict[str, str], host: str
+) -> tuple[str, str, str] | None:
+    """
+    Attempt :func:`_apply_device_core` from the NIC row when the device record is missing.
+    Returns a skip triple if creation failed and the device is still absent; otherwise None.
+    """
+    from dcim.models import Device
+
+    if Device.objects.filter(name=host).first():
+        return None
+    synth = synthetic_device_cells_from_new_nic_for_prereq(cells, host)
+    if synth is None:
+        return None
+    res = _apply_device_core(synth, create_if_missing=True)
+    detail = res[2] if len(res) > 2 else None
+    reason = str(res[1])
+    status = str(res[0])
+    if Device.objects.filter(name=host).first():
+        return None
+    if status in ("created", "updated"):
+        return None
+    if status == "skipped" and reason == "skipped_already_desired":
+        return None
+    msg = (str(detail).strip() if detail else "") or reason
+    return _skip_missing_prereq(
+        f'Device "{host}" is not in NetBox yet; inferred create from this interface row failed: {msg}'
+    )
+
+
 def apply_create_interface(op: dict[str, Any]) -> tuple[str, str]:
     from dcim.models import Device, Interface, Location, Site
 
@@ -3394,8 +3505,14 @@ def apply_create_interface(op: dict[str, Any]) -> tuple[str, str]:
         )
     dev = Device.objects.filter(name=host).first()
     if not dev:
+        boot_err = _try_bootstrap_device_for_new_interface_apply(cells, host)
+        if boot_err is not None:
+            return boot_err
+        dev = Device.objects.filter(name=host).first()
+    if not dev:
         return _skip_missing_prereq(
-            f'Device "{host}" not found in NetBox; create the device before adding interfaces.'
+            f'Device "{host}" not found in NetBox. Include a new-device row, or set NB site (and '
+            f"role/type on the drift audit) so the reconciler can create the device before interfaces."
         )
     if site_hint:
         site_obj = _resolve_by_name(Site, site_hint)

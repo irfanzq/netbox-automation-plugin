@@ -887,12 +887,15 @@
         {% endif %}
   </div>
 </div>
-{# Reconciliation blocker toasts: NetBox uses data-bs-delay=10s on all toasts. Keep preview/cluster/role blockers until the user clicks the toast close button. #}
+{# Reconciliation blocker toasts: NetBox uses data-bs-delay=10s and initMessages() runs before this script's DOMContentLoaded handler. Patch the live Toast instance (clear _timeout) and re-run until NetBox cannot re-arm autohide. #}
 <script type="text/javascript">
 (function () {
   var STICKY_CLASS = "reconciliation-sticky-toast";
   /** English first line from validate_preview_mandatory_audit_fields (not gettext-wrapped). */
   var PREVIEW_MISSING_PREFIX = "Fill the missing audit fields";
+
+  var msgObserver = null;
+  var stickyPollTimer = null;
 
   function toastBodyText(el) {
     var b = el.querySelector(".toast-body");
@@ -900,10 +903,16 @@
   }
 
   function isReconciliationStickyToast(el) {
+    if (el.querySelector(".nb-recon-sticky-marker")) {
+      return true;
+    }
     if (el.querySelector(".reconciliation-msg-detail")) {
       return true;
     }
     if (el.querySelector("." + STICKY_CLASS)) {
+      return true;
+    }
+    if (el.classList && el.classList.contains("nb-recon-sticky")) {
       return true;
     }
     var txt = toastBodyText(el);
@@ -913,54 +922,108 @@
     return false;
   }
 
-  function stickyReconciliationErrorToasts() {
+  /** Disable autohide without dispose() so we do not fight NetBox initMessages/show. */
+  function patchStickyToastElement(el) {
     if (typeof bootstrap === "undefined" || !bootstrap.Toast) {
       return;
     }
-    document.querySelectorAll("#django-messages .toast").forEach(function (el) {
-      if (!isReconciliationStickyToast(el)) {
-        return;
-      }
-      if (el.getAttribute("data-nb-recon-sticky-applied") === "1") {
-        return;
-      }
-      try {
-        el.setAttribute("data-bs-autohide", "false");
-        el.removeAttribute("data-bs-delay");
-        var existing = bootstrap.Toast.getInstance(el);
-        if (existing) {
-          existing.dispose();
-        }
+    if (!el || !el.classList || !el.classList.contains("toast")) {
+      return;
+    }
+    if (!isReconciliationStickyToast(el)) {
+      return;
+    }
+    try {
+      el.setAttribute("data-bs-autohide", "false");
+      el.removeAttribute("data-bs-delay");
+      var inst = bootstrap.Toast.getInstance(el);
+      if (inst) {
+        try {
+          inst._config.autohide = false;
+          if (typeof inst._config.delay === "number") {
+            inst._config.delay = 0;
+          }
+          if (inst._timeout != null) {
+            clearTimeout(inst._timeout);
+            inst._timeout = null;
+          }
+        } catch (ignore) {}
+      } else {
         var ctor = bootstrap.Toast;
         if (typeof ctor.getOrCreateInstance === "function") {
           ctor.getOrCreateInstance(el, { autohide: false });
         } else {
           new ctor(el, { autohide: false });
         }
-        el.setAttribute("data-nb-recon-sticky-applied", "1");
-        var inst = bootstrap.Toast.getInstance(el);
-        if (inst && typeof inst.show === "function") {
-          inst.show();
-        }
-      } catch (ignore) {}
-    });
+      }
+    } catch (ignore2) {}
+  }
+
+  function stickyReconciliationErrorToasts() {
+    document.querySelectorAll("#django-messages .toast").forEach(patchStickyToastElement);
   }
 
   function runStickyPasses() {
     stickyReconciliationErrorToasts();
-    [50, 150, 400, 1200].forEach(function (ms) {
+    [0, 50, 100, 200, 400, 800, 1600, 3200, 6000, 11000].forEach(function (ms) {
       setTimeout(stickyReconciliationErrorToasts, ms);
     });
   }
 
-  function schedule() {
-    if (typeof requestAnimationFrame === "function") {
-      requestAnimationFrame(function () {
+  function ensureMessagesObserver() {
+    if (typeof MutationObserver === "undefined") {
+      return;
+    }
+    var msgRoot = document.getElementById("django-messages");
+    if (!msgRoot || msgRoot.getAttribute("data-nb-sticky-obs") === "1") {
+      return;
+    }
+    msgRoot.setAttribute("data-nb-sticky-obs", "1");
+    var obsTimer = null;
+    msgObserver = new MutationObserver(function () {
+      if (obsTimer) {
+        clearTimeout(obsTimer);
+      }
+      obsTimer = setTimeout(function () {
+        obsTimer = null;
         stickyReconciliationErrorToasts();
-      });
+      }, 30);
+    });
+    msgObserver.observe(msgRoot, { childList: true, subtree: true });
+  }
+
+  function armShortPolling() {
+    if (stickyPollTimer) {
+      clearInterval(stickyPollTimer);
+    }
+    var end = Date.now() + 25000;
+    stickyPollTimer = setInterval(function () {
+      stickyReconciliationErrorToasts();
+      if (Date.now() >= end) {
+        clearInterval(stickyPollTimer);
+        stickyPollTimer = null;
+      }
+    }, 400);
+  }
+
+  function schedule() {
+    ensureMessagesObserver();
+    armShortPolling();
+    if (typeof requestAnimationFrame === "function") {
+      requestAnimationFrame(stickyReconciliationErrorToasts);
     }
     runStickyPasses();
   }
+
+  function onShownToast(ev) {
+    var el = ev.target;
+    if (!el || !el.classList || !el.classList.contains("toast")) {
+      return;
+    }
+    patchStickyToastElement(el);
+  }
+
+  document.addEventListener("shown.bs.toast", onShownToast, true);
 
   if (document.readyState === "loading") {
     document.addEventListener("DOMContentLoaded", schedule);
@@ -968,20 +1031,9 @@
     schedule();
   }
 
-  var msgRoot = document.getElementById("django-messages");
-  if (msgRoot && typeof MutationObserver !== "undefined") {
-    var obsTimer = null;
-    var mo = new MutationObserver(function () {
-      if (obsTimer) {
-        clearTimeout(obsTimer);
-      }
-      obsTimer = setTimeout(function () {
-        obsTimer = null;
-        runStickyPasses();
-      }, 30);
-    });
-    mo.observe(msgRoot, { childList: true, subtree: true });
-  }
+  window.addEventListener("load", function () {
+    schedule();
+  });
 })();
 </script>
 {% endblock %}

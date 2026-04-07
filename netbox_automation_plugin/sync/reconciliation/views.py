@@ -95,7 +95,10 @@ def _reconciliation_toast_error(title: str, detail: str):
     """
     t = escape(str(title))
     br_detail = "<br>".join(escape(line) for line in str(detail).split("\n"))
+    # Marker for maas_openstack_sync_form sticky-toast JS (NetBox renders messages after
+    # page content; outer toast still uses data-bs-delay unless we patch the instance).
     return mark_safe(
+        '<span class="d-none nb-recon-sticky-marker" aria-hidden="true"></span>'
         '<div class="alert alert-danger border-danger mb-0 py-2 px-3 text-start reconciliation-sticky-toast" role="alert">'
         f'<div class="fw-semibold mb-1">{t}</div>'
         f'<div class="small text-break reconciliation-msg-detail">{br_detail}</div>'
@@ -518,6 +521,7 @@ class ReconciliationStagingView(LoginRequiredMixin, View):
             messages.error(
                 request,
                 _reconciliation_toast_error(_("Reconciliation preview blocked"), str(e)),
+                extra_tags="nb-recon-sticky",
             )
             return redirect(back)
         except Exception as e:
@@ -525,6 +529,7 @@ class ReconciliationStagingView(LoginRequiredMixin, View):
             messages.error(
                 request,
                 _reconciliation_toast_error(_("Reconciliation preview failed"), str(e)),
+                extra_tags="nb-recon-sticky",
             )
             return redirect(back)
 

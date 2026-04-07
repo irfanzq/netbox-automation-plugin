@@ -9,9 +9,10 @@ still shows resolved MAC/VLAN/IP columns aligned with ``apply_create_interface``
 
 When any interface row is selected, ``build_frozen_operations`` auto-appends **every**
 ``detail_new_devices``, ``detail_review_only_devices``, and ``detail_proposed_missing_vlans``
-row present in that audit index, then sorts by ``AUDIT_REPORT_APPLY_ORDER`` so device + VLAN
-creates always run before ``create_interface`` / ``update_interface`` without ticking those
-sections manually.
+row present in that audit index. For interface hosts that still have no ``create_device`` op,
+it also injects a synthetic ``create_device`` from **placement** (NetBox site on the placement
+row) when available. Ops are sorted by ``AUDIT_REPORT_APPLY_ORDER`` so device + VLAN creates
+run before ``create_interface`` / ``update_interface`` without ticking those sections manually.
 """
 
 from __future__ import annotations
@@ -55,6 +56,7 @@ from .apply_cells import (
     new_nic_cells_for_reconciliation,
     recon_operation_display_cells,
     reconciliation_apply_snapshot_cells,
+    synthetic_device_cells_from_placement_for_nic_prereq,
     validate_preview_mandatory_audit_fields,
 )
 from .merge import (
@@ -209,13 +211,14 @@ SK_TO_ACTION = {
 }
 
 # Reconciliation preview tables, frozen-op sorting, and branch apply all use this tuple (low index runs first).
-# DCIM-first, then OpenStack VM creates next to device creates, then IPAM/VLAN/NIC, then remaining IPAM/FIP/VM drift → BMC/serial.
+# New devices + MAAS review hosts first, then proposed missing VLANs (IPAM) so VLANs exist before NICs attach
+# untagged/tagged VIDs; then placement, VMs, NICs, OpenStack IPAM/FIP/VM drift, BMC, serial.
 AUDIT_REPORT_APPLY_ORDER: tuple[str, ...] = (
-    "detail_placement_lifecycle_alignment",
     "detail_new_devices",
     "detail_review_only_devices",
-    "detail_new_vms",
     "detail_proposed_missing_vlans",
+    "detail_placement_lifecycle_alignment",
+    "detail_new_vms",
     "detail_new_nics",
     "detail_new_nics_os",
     "detail_new_nics_maas",
@@ -234,22 +237,22 @@ AUDIT_REPORT_APPLY_ORDER: tuple[str, ...] = (
 
 _APPLY_ORDER_RANK: dict[str, int] = {sk: i for i, sk in enumerate(AUDIT_REPORT_APPLY_ORDER)}
 
-# Tie-break when selection_key rank matches or is unknown: coarse NetBox write tiers.
+# Tie-break when selection_key rank matches or is unknown: device → VLAN → placement → interfaces → IPAM → VMs → BMC → serial.
 _ACTION_APPLY_PHASE: dict[str, int] = {
-    "placement_alignment": 0,
     "create_device": 1,
     "review_device": 1,
     "create_vlan": 2,
-    "create_interface": 3,
-    "update_interface": 3,
-    "create_prefix": 4,
-    "create_ip_range": 4,
-    "create_floating_ip": 4,
-    "create_openstack_vm": 5,
-    "update_openstack_vm": 5,
-    "bmc_documentation": 6,
-    "bmc_alignment": 6,
-    "serial_review": 7,
+    "placement_alignment": 3,
+    "create_interface": 4,
+    "update_interface": 4,
+    "create_prefix": 5,
+    "create_ip_range": 5,
+    "create_floating_ip": 5,
+    "create_openstack_vm": 6,
+    "update_openstack_vm": 6,
+    "bmc_documentation": 7,
+    "bmc_alignment": 7,
+    "serial_review": 8,
     "unknown": 99,
 }
 
@@ -451,15 +454,53 @@ def _append_frozen_op_from_meta(
     return True
 
 
+def _host_key_from_recon_cells(cells: dict[str, str]) -> str:
+    for k in ("Host", "Hostname"):
+        v = str(cells.get(k) or "").strip().lower()
+        if v:
+            return v
+    return ""
+
+
+def _iface_host_keys_from_ops(ops: list[dict[str, Any]]) -> set[str]:
+    out: set[str] = set()
+    for o in ops:
+        if str(o.get("action") or "") not in ("create_interface", "update_interface"):
+            continue
+        raw = o.get("cells")
+        if not isinstance(raw, dict):
+            continue
+        c = {str(k): "" if v is None else str(v).strip() for k, v in raw.items()}
+        hk = _host_key_from_recon_cells(c)
+        if hk:
+            out.add(hk)
+    return out
+
+
+def _device_host_keys_from_ops(ops: list[dict[str, Any]]) -> set[str]:
+    out: set[str] = set()
+    for o in ops:
+        if str(o.get("action") or "") not in ("create_device", "review_device"):
+            continue
+        raw = o.get("cells")
+        if not isinstance(raw, dict):
+            continue
+        c = {str(k): "" if v is None else str(v).strip() for k, v in raw.items()}
+        hk = _host_key_from_recon_cells(c)
+        if hk:
+            out.add(hk)
+    return out
+
+
 def _inject_interface_prerequisite_ops(
     ops: list[dict[str, Any]],
     seen: set[str],
     row_index: dict[str, dict[str, Any]],
 ) -> None:
     """
-    If the operator selected any new-interface or NIC-drift row, pull in **every** device
-    and proposed missing-VLAN row from this drift/merge index so apply never runs interfaces
-    before those prerequisites. Final order is ``AUDIT_REPORT_APPLY_ORDER`` (sort below).
+    If the operator selected any new-interface or NIC-drift row, pull in **every** device,
+    proposed missing-VLAN, and (when needed) synthetic ``create_device`` from **placement**
+    for hosts that still have no device op. Final order is ``AUDIT_REPORT_APPLY_ORDER``.
     """
     iface_src = NEW_NIC_SELECTION_KEYS | NIC_DRIFT_SELECTION_KEYS
     if not any(str(o.get("selection_key") or "") in iface_src for o in ops):
@@ -473,6 +514,37 @@ def _inject_interface_prerequisite_ops(
         if str(meta.get("selection_key") or "") not in sk_pull:
             continue
         _append_frozen_op_from_meta(meta, ops, seen)
+
+    missing_hosts = _iface_host_keys_from_ops(ops) - _device_host_keys_from_ops(ops)
+    for hk in sorted(missing_hosts):
+        for meta in row_index.values():
+            if str(meta.get("selection_key") or "") != "detail_placement_lifecycle_alignment":
+                continue
+            c = _cells_dict(meta["headers"], meta["row"])
+            if _host_key_from_recon_cells(c) != hk:
+                continue
+            synth = synthetic_device_cells_from_placement_for_nic_prereq(c)
+            if not synth:
+                continue
+            ri = meta.get("row_index")
+            rk_raw = f"nic-prereq-dev|placement|{hk}|{ri}"
+            rk = hashlib.sha1(rk_raw.encode("utf-8", errors="ignore")).hexdigest()[:16]
+            if rk in seen:
+                break
+            seen.add(rk)
+            host_disp = (c.get("Host") or c.get("Hostname") or hk or "—").strip()
+            ops.append(
+                {
+                    "row_key": rk,
+                    "selection_key": "detail_new_devices",
+                    "prop_list_key": None,
+                    "row_index": 10**9,
+                    "cells": synth,
+                    "summary": f"Device create (auto): {host_disp} — NIC prerequisite from placement",
+                    "action": "create_device",
+                }
+            )
+            break
 
 
 def _normalize_selected(raw: Any) -> dict[str, list[dict[str, Any]]]:
@@ -1020,9 +1092,9 @@ def apply_reconciliation_run(
     Execute frozen operations with explicit row results and status transitions.
 
     Operations are sorted by ``AUDIT_REPORT_APPLY_ORDER`` (same as reconciliation preview
-    tables): placement, new devices, proposed missing VLANs, new/drift interfaces, then
-    OpenStack prefixes/ranges/FIPs/VMs, then BMC and serial review. Tie-break uses
-    ``_ACTION_APPLY_PHASE`` when needed.
+    tables): new devices, MAAS review hosts, proposed missing VLANs (IPAM), placement, new VMs,
+    new/drift interfaces, OpenStack prefixes/ranges/FIPs, existing VM drift, BMC, serial review.
+    Tie-break uses ``_ACTION_APPLY_PHASE`` when needed.
 
     Apply handlers use full per-row ``cells`` (all audit columns) via
     ``apply_cells.apply_row_operation``; preview projection is

@@ -90,12 +90,12 @@ def emit_proposed_change_tables(e, prop):
                 str(len(prop.get("add_devices_review_only", []))),
                 "Not safe to auto-propose (status/data quality policy)",
             ],
-            ["New VMs (OpenStack Nova)", str(len(prop.get("add_openstack_vms", []))), "Instance not modeled as NetBox Virtual Machine"],
             [
                 "Proposed missing VLANs (IPAM)",
                 str(len(prop.get("add_proposed_missing_vlans", []))),
                 "Tagged VID from MAAS/OS interface proposals not found in NetBox scope for that device/site",
             ],
+            ["New VMs (OpenStack Nova)", str(len(prop.get("add_openstack_vms", []))), "Instance not modeled as NetBox Virtual Machine"],
             ["New NICs in NetBox", str(len(prop["add_nb_interfaces"])), "Runtime/MAAS fallback interface not modeled in NetBox"],
             ["NIC drift", str(len(prop["update_nic"])), "Runtime authority (OS first, MAAS fallback) differs from NetBox"],
             ["New prefixes (OpenStack authority)", str(len(prop["add_prefixes"])), "Subnet not in IPAM"],
@@ -137,7 +137,7 @@ def emit_proposed_change_tables(e, prop):
         selectable=False,
     )
 
-    # Detail order matches ``service.AUDIT_REPORT_APPLY_ORDER``: devices → new VMs → missing VLANs → NICs, then OpenStack IPAM / drift VMs, then BMC.
+    # Detail order matches ``service.AUDIT_REPORT_APPLY_ORDER``: devices → missing VLANs → VMs → NICs, then IPAM / drift VMs, then BMC.
     if prop["add_devices"]:
         e.spacer()
         e.subtitle("Detail — new devices")
@@ -164,6 +164,19 @@ def emit_proposed_change_tables(e, prop):
             selection_key="detail_review_only_devices",
             proposed_pick_columns=_PROPOSED_NB_PICK_DEVICE,
         )
+    if prop.get("add_proposed_missing_vlans"):
+        e.spacer()
+        e.line_total("Detail — proposed missing VLANs (IPAM)")
+        e.table(
+            list(HEADERS_DETAIL_PROPOSED_MISSING_VLANS),
+            prop["add_proposed_missing_vlans"],
+            dynamic_columns=True,
+            wrap_max_width=None,
+            selectable=True,
+            selection_key="detail_proposed_missing_vlans",
+            proposed_pick_columns=_PROPOSED_NB_PICK_MISSING_VLAN,
+            editable_columns=["NB proposed VLAN name (editable)"],
+        )
     if prop.get("add_openstack_vms"):
         e.spacer()
         e.subtitle("Detail — new VMs")
@@ -188,19 +201,6 @@ def emit_proposed_change_tables(e, prop):
             selectable=True,
             selection_key="detail_new_vms",
             proposed_pick_columns=_PROPOSED_NB_PICK_VM,
-        )
-    if prop.get("add_proposed_missing_vlans"):
-        e.spacer()
-        e.line_total("Detail — proposed missing VLANs (IPAM)")
-        e.table(
-            list(HEADERS_DETAIL_PROPOSED_MISSING_VLANS),
-            prop["add_proposed_missing_vlans"],
-            dynamic_columns=True,
-            wrap_max_width=None,
-            selectable=True,
-            selection_key="detail_proposed_missing_vlans",
-            proposed_pick_columns=_PROPOSED_NB_PICK_MISSING_VLAN,
-            editable_columns=["NB proposed VLAN name (editable)"],
         )
 
     e.spacer()
