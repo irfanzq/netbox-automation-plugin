@@ -2679,15 +2679,18 @@ def validate_preview_mandatory_audit_fields(frozen: list[dict[str, Any]]) -> Non
     Block reconciliation preview until NetBox-oriented audit columns required for apply
     are filled (empty, em-dash, or invalid VID / ambiguous role count as missing).
 
-    Raises ValueError: short copy, grouped by table then field, rows listed once per group.
+    Raises ValueError: one block per table; under each table, each row once with missing fields below it.
     """
     from collections import defaultdict
 
     from netbox_automation_plugin.sync.reconciliation.service import RECON_SECTION_TITLES
 
-    # table -> field label -> row hints (order preserved, deduped when formatting)
-    by_table_field: dict[str, dict[str, list[str]]] = defaultdict(lambda: defaultdict(list))
-    nic_name_fields: set[tuple[str, str]] = set()
+    # table -> row hint -> ordered unique field labels
+    by_table_row: dict[str, dict[str, list[str]]] = defaultdict(lambda: defaultdict(list))
+    # first-seen row order within each table
+    row_order: dict[str, list[str]] = defaultdict(list)
+    row_seen: dict[str, set[str]] = defaultdict(set)
+    nic_name_issue = False
 
     for op in frozen:
         if not isinstance(op, dict):
@@ -2710,36 +2713,45 @@ def validate_preview_mandatory_audit_fields(frozen: list[dict[str, Any]]) -> Non
                 if _nic_drift_interface_name_ok(cells, proj):
                     continue
                 label = _PREVIEW_FIELD_LABELS.get("name", "Name")
-                by_table_field[table_title][label].append(row_hint)
-                nic_name_fields.add((table_title, label))
-                continue
-            val = proj.get(field_key)
-            if not _preview_scalar_invalid(field_key, val if val is None else str(val)):
-                continue
-            label = _PREVIEW_FIELD_LABELS.get(
-                field_key, str(field_key).replace("_", " ").title()
-            )
-            by_table_field[table_title][label].append(row_hint)
+                nic_name_issue = True
+            else:
+                val = proj.get(field_key)
+                if not _preview_scalar_invalid(
+                    field_key, val if val is None else str(val)
+                ):
+                    continue
+                label = _PREVIEW_FIELD_LABELS.get(
+                    field_key, str(field_key).replace("_", " ").title()
+                )
+            if row_hint not in row_seen[table_title]:
+                row_seen[table_title].add(row_hint)
+                row_order[table_title].append(row_hint)
+            row_fields = by_table_row[table_title][row_hint]
+            if label not in row_fields:
+                row_fields.append(label)
 
-    if not by_table_field:
+    tables_with_errors = [t for t in by_table_row if row_order[t]]
+    if not tables_with_errors:
         return
 
     lines: list[str] = [
         "Fill the missing audit fields, save the review, then continue.",
         "",
     ]
-    for table in sorted(by_table_field.keys(), key=lambda t: t.lower()):
+    for table in sorted(tables_with_errors, key=lambda t: t.lower()):
         lines.append(table)
-        field_map = by_table_field[table]
-        for field_label in sorted(field_map.keys(), key=lambda f: f.lower()):
-            uniq = list(dict.fromkeys(field_map[field_label]))
-            lines.append(f"  • {field_label}: {', '.join(uniq)}")
+        for row in row_order[table]:
+            field_list = by_table_row[table][row]
+            if not field_list:
+                continue
+            lines.append(f"  {row}")
+            lines.append(f"    Missing: {', '.join(field_list)}")
         lines.append("")
 
     while lines and lines[-1] == "":
         lines.pop()
 
-    if nic_name_fields:
+    if nic_name_issue:
         lines.extend(["", "NIC drift: set NB intf or MAAS intf where name is missing."])
 
     raise ValueError("\n".join(lines))
