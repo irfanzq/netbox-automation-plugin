@@ -22,6 +22,10 @@ from netbox_automation_plugin.sync.reporting.drift_report.drift_overrides_apply 
 from netbox_automation_plugin.sync.reporting.drift_report.proposed_action_format import (
     SET_NETBOX_ACTION_CREATE_VLAN,
 )
+from netbox_automation_plugin.sync.reconciliation.apply_cells import (
+    _interface_mac_vlan_ip_from_cells,
+    _resolve_vlan_for_device,
+)
 from netbox_automation_plugin.sync.tenancy_netbox_compat import (
     tenant_hierarchy_fk,
     vlan_tenant_select_related_paths,
@@ -604,11 +608,6 @@ def build_proposed_missing_vlan_rows(
     One row per (suggested VLAN group, VID) where NIC drift / new-NIC proposals reference a tagged
     VID that does not resolve for the device (or device absent — placement from NB site/location).
     """
-    from netbox_automation_plugin.sync.reconciliation.apply_cells import (
-    _interface_mac_vlan_ip_from_cells,
-    _resolve_vlan_for_device,
-)
-
     prefix_v4, prefix_v6 = _build_prefix_vlan_lookup()
     seen: set[tuple[str, int]] = set()
     out: list[list[Any]] = []
