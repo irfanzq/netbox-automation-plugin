@@ -57,6 +57,9 @@ _PROPOSED_NB_PICK_NIC = {
     "NB Proposed intf Label": "intf_role",
     "NB Proposed intf Type": "interface_type",
 }
+_PROPOSED_NB_PICK_BMC_EXISTING = {
+    "NB Proposed intf Label": "intf_role",
+}
 _PROPOSED_NB_PICK_MISSING_VLAN = {
     "NB proposed VLAN group": "vlan_group",
     "NB Proposed Tenant": "tenant",
@@ -430,7 +433,7 @@ def emit_proposed_change_tables(e, prop):
             wrap_max_width=None,
             selectable=True,
             selection_key="detail_bmc_existing",
-            proposed_pick_columns=_PROPOSED_NB_PICK_NIC,
+            proposed_pick_columns=_PROPOSED_NB_PICK_BMC_EXISTING,
         )
 
     e.spacer()

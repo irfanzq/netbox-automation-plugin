@@ -887,34 +887,100 @@
         {% endif %}
   </div>
 </div>
-{# Reconciliation blocker/errors use .reconciliation-msg-detail in the message HTML. NetBox toasts default to data-bs-delay=10s; keep these until the user dismisses (close button). #}
+{# Reconciliation blocker toasts: NetBox uses data-bs-delay=10s on all toasts. Keep preview/cluster/role blockers until the user clicks the toast close button. #}
 <script type="text/javascript">
 (function () {
+  var STICKY_CLASS = "reconciliation-sticky-toast";
+  /** English first line from validate_preview_mandatory_audit_fields (not gettext-wrapped). */
+  var PREVIEW_MISSING_PREFIX = "Fill the missing audit fields";
+
+  function toastBodyText(el) {
+    var b = el.querySelector(".toast-body");
+    return b ? (b.textContent || "").trim() : "";
+  }
+
+  function isReconciliationStickyToast(el) {
+    if (el.querySelector(".reconciliation-msg-detail")) {
+      return true;
+    }
+    if (el.querySelector("." + STICKY_CLASS)) {
+      return true;
+    }
+    var txt = toastBodyText(el);
+    if (txt.indexOf(PREVIEW_MISSING_PREFIX) !== -1) {
+      return true;
+    }
+    return false;
+  }
+
   function stickyReconciliationErrorToasts() {
     if (typeof bootstrap === "undefined" || !bootstrap.Toast) {
       return;
     }
     document.querySelectorAll("#django-messages .toast").forEach(function (el) {
-      if (!el.querySelector(".reconciliation-msg-detail")) {
+      if (!isReconciliationStickyToast(el)) {
         return;
       }
-      el.setAttribute("data-bs-autohide", "false");
-      el.removeAttribute("data-bs-delay");
-      var existing = bootstrap.Toast.getInstance(el);
-      if (existing) {
-        existing.dispose();
+      if (el.getAttribute("data-nb-recon-sticky-applied") === "1") {
+        return;
       }
-      var t = new bootstrap.Toast(el, { autohide: false });
-      t.show();
+      try {
+        el.setAttribute("data-bs-autohide", "false");
+        el.removeAttribute("data-bs-delay");
+        var existing = bootstrap.Toast.getInstance(el);
+        if (existing) {
+          existing.dispose();
+        }
+        var ctor = bootstrap.Toast;
+        if (typeof ctor.getOrCreateInstance === "function") {
+          ctor.getOrCreateInstance(el, { autohide: false });
+        } else {
+          new ctor(el, { autohide: false });
+        }
+        el.setAttribute("data-nb-recon-sticky-applied", "1");
+        var inst = bootstrap.Toast.getInstance(el);
+        if (inst && typeof inst.show === "function") {
+          inst.show();
+        }
+      } catch (ignore) {}
     });
   }
-  function schedule() {
-    setTimeout(stickyReconciliationErrorToasts, 50);
+
+  function runStickyPasses() {
+    stickyReconciliationErrorToasts();
+    [50, 150, 400, 1200].forEach(function (ms) {
+      setTimeout(stickyReconciliationErrorToasts, ms);
+    });
   }
+
+  function schedule() {
+    if (typeof requestAnimationFrame === "function") {
+      requestAnimationFrame(function () {
+        stickyReconciliationErrorToasts();
+      });
+    }
+    runStickyPasses();
+  }
+
   if (document.readyState === "loading") {
     document.addEventListener("DOMContentLoaded", schedule);
   } else {
     schedule();
+  }
+
+  var msgRoot = document.getElementById("django-messages");
+  if (msgRoot && typeof MutationObserver !== "undefined") {
+    var obsTimer = null;
+    var mo = new MutationObserver(function () {
+      if (obsTimer) {
+        clearTimeout(obsTimer);
+      }
+      obsTimer = setTimeout(function () {
+        obsTimer = null;
+        runStickyPasses();
+      }, 30);
+    });
+    mo.observe(msgRoot, { childList: true, subtree: true });
   }
 })();
 </script>

@@ -1461,7 +1461,6 @@ def _proposed_changes_rows(
                     maas_vendor,
                     maas_product,
                     str(m.get("bmc_mac") or "—"),
-                    bx["maas_link_speed_disp"],
                     bx["maas_lldp_switch_disp"],
                     os_bmc_ip or "—",
                     os_mgmt_type or "—",
@@ -1907,6 +1906,8 @@ def _proposed_changes_rows(
         add_nb_interfaces,
         maas_by_hostname=by_h,
         runtime_nic_by_host_mac=os_runtime_idx,
+        add_prefixes=add_prefixes,
+        update_prefixes=update_prefixes,
     )
     review_serial = _build_review_serial_rows(matched_rows)
     lldp_new, lldp_update = build_lldp_drift_rows(openstack_data, netbox_ifaces, maas_data)

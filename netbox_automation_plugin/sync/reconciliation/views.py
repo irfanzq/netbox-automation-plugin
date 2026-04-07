@@ -96,7 +96,7 @@ def _reconciliation_toast_error(title: str, detail: str):
     t = escape(str(title))
     br_detail = "<br>".join(escape(line) for line in str(detail).split("\n"))
     return mark_safe(
-        '<div class="alert alert-danger border-danger mb-0 py-2 px-3 text-start" role="alert">'
+        '<div class="alert alert-danger border-danger mb-0 py-2 px-3 text-start reconciliation-sticky-toast" role="alert">'
         f'<div class="fw-semibold mb-1">{t}</div>'
         f'<div class="small text-break reconciliation-msg-detail">{br_detail}</div>'
         "</div>"

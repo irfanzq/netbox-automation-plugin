@@ -233,27 +233,6 @@ def format_link_speed_display(raw: Any) -> str:
     return s[:64]
 
 
-def maas_machine_best_link_speed_display(machine: dict | None) -> str:
-    """Single display cell for BMC rows: best-effort max link_speed from any MAAS NIC."""
-    best_raw: Any = None
-    best_n = 0
-    for mi in (machine or {}).get("interfaces") or []:
-        if not isinstance(mi, dict):
-            continue
-        raw = mi.get("link_speed")
-        if raw in (None, ""):
-            raw = mi.get("speed")
-        n = _link_speed_int(raw)
-        if n and n > best_n:
-            best_n = n
-            best_raw = raw
-        elif not n and raw not in (None, "") and not best_raw:
-            best_raw = raw
-    if best_raw is None:
-        return "—"
-    return format_link_speed_display(best_raw)
-
-
 def _suggest_type_slug(
     link_mbps: int | None,
     product: str,
@@ -346,10 +325,9 @@ def derive_nic_proposed_columns(
     }
 
 
-def bmc_row_proposed_defaults(machine: dict | None) -> dict[str, str]:
-    """Defaults for BMC / OOB tables; MAAS link speed from any host NIC when present."""
+def bmc_row_proposed_defaults(_machine: dict | None) -> dict[str, str]:
+    """Defaults for BMC / OOB drift table columns (label/type/LLDP display helpers)."""
     return {
-        "maas_link_speed_disp": maas_machine_best_link_speed_display(machine),
         "os_lldp_switch_disp": "—",
         "maas_lldp_switch_disp": "—",
         "os_switch_disp": "—",

@@ -919,10 +919,11 @@ def _interface_apply_physical_fields_stepwise(
 ) -> bool:
     """
     One ``snapshot()`` + ``save()`` per changed attribute (MAC, untagged VLAN, type,
-    description). netbox-branching Diff / ObjectChange views often collapse or under-report
-    when several mutations hit the same object in one transaction; stepwise updates match
-    :func:`_device_apply_row_stepwise_changelog` so interface **updates** appear alongside
-    device creates in the branch UI.
+    description). Prefer :func:`_interface_apply_physical_fields_batched` for interface
+    **updates** from reconciliation: netbox-branching often **collapses** multiple saves on
+    the same Interface into one sparse Diff row, showing wrong before/after VLAN (e.g. MAAS
+    VID vs true NetBox ``untagged_vlan``) or only tag deltas. Stepwise remains for callers
+    that need per-field ObjectChange rows despite collapse risk.
     """
     _interface_refresh_safe(iface)
     any_save = False
@@ -2771,7 +2772,7 @@ _PREVIEW_FIELD_LABELS: dict[str, str] = {
     "device": "Device (host)",
     "type": "Interface type",
     "mac_address": "MAC address",
-    "untagged_vlan": "Untagged VLAN",
+    "untagged_vlan_vid": "Untagged VLAN (802.1Q VID)",
     "description": "Description",
     "tags": "Tags / labels",
     "IPAddress.address": "IP address",
@@ -3492,13 +3493,22 @@ def apply_update_interface(op: dict[str, Any]) -> tuple[str, str]:
         return _skip_missing_prereq(f'Device "{host}" not found in NetBox.')
     iface = None
     if nb_name:
-        iface = Interface.objects.filter(device=dev, name=nb_name).first()
+        iface = (
+            Interface.objects.filter(device=dev, name=nb_name)
+            .select_related("untagged_vlan")
+            .first()
+        )
     if iface is None and ma_name:
-        iface = Interface.objects.filter(device=dev, name=ma_name).first()
+        iface = (
+            Interface.objects.filter(device=dev, name=ma_name)
+            .select_related("untagged_vlan")
+            .first()
+        )
     if iface is None:
         return _skip_missing_prereq(
             f'No interface on device "{host}" matching NB intf "{nb_name}" or MAAS intf "{ma_name}".'
         )
+    _interface_refresh_safe(iface)
     untagged = _resolve_untagged_vlan_for_apply(dev, iface, vid)
     if vid is not None and untagged is None:
         try:
@@ -3508,7 +3518,9 @@ def apply_update_interface(op: dict[str, Any]) -> tuple[str, str]:
         return _skip_untagged_vlan_unresolved(host, vnum, iface_name=iface.name or nb_name or ma_name)
     if_desc = _interface_description_from_cells(cells)
     changed = _interface_scrub_audit_description_stepwise(iface)
-    changed |= _interface_apply_physical_fields_stepwise(
+    # One batched save for MAC / untagged VLAN / type / description so branch Diff is not
+    # collapsed into a misleading single delta (wrong "before" VLAN vs audit / NetBox UI).
+    changed |= _interface_apply_physical_fields_batched(
         iface,
         mac=mac or "",
         untagged=untagged,
@@ -3547,7 +3559,11 @@ def _bmc_apply(op: dict[str, Any], *, existing_oob: bool) -> tuple[str, str]:
         cells,
         "Suggested NB mgmt iface" if not existing_oob else "Suggested NB OOB Port",
     )
-    type_slug = _resolve_interface_type_slug(_cell(cells, "NB Proposed intf Type"))
+    type_slug = (
+        None
+        if existing_oob
+        else _resolve_interface_type_slug(_cell(cells, "NB Proposed intf Type"))
+    )
     role_label = _cell(cells, "NB Proposed intf Label")
     if not host or not if_name:
         return _skip_missing_prereq(
@@ -3838,7 +3854,6 @@ def _netbox_preview_source_header_norms(selection_key: str) -> frozenset[str] | 
             "NB OOB MAC",
             "Suggested NB OOB Port",
             "NB Proposed intf Label",
-            "NB Proposed intf Type",
             "NetBox OOB",
         )
     if sk == "detail_serial_review":

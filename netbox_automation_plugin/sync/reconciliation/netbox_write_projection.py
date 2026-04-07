@@ -19,6 +19,10 @@ in NetBox; see ``apply_cells._VM_PROJECTION_CF_KEYS``).
 ``vlan_group``, ``site``, ``location``, ``name``, ``tenant`` (optional when empty or ``—``),
 ``status`` — same cells contract as ``apply_create_vlan``.
 
+**New / NIC drift interfaces**: projection uses ``untagged_vlan_vid`` (802.1Q tag parsed from
+audit cells), not NetBox ``ipam.VLAN`` database ``id`` — avoids confusing VID with VLAN pk in
+apply logs and preview tables.
+
 Imports from ``apply_cells`` are deferred inside functions to avoid import cycles while
 ``apply_cells`` is still loading.
 """
@@ -205,7 +209,7 @@ def netbox_write_projection_cells(selection_key: str, cells: dict[str, str] | No
             "name": if_name,
             "type": _cell(cc, "NB Proposed intf Type"),
             "mac_address": mac or "—",
-            "untagged_vlan": str(vid) if vid else "—",
+            "untagged_vlan_vid": str(vid) if vid else "—",
             "description": if_desc or "—",
             "tags": _cell(cc, "NB Proposed intf Label"),
             "device.site": _cell(cc, "NB site"),
@@ -227,7 +231,7 @@ def netbox_write_projection_cells(selection_key: str, cells: dict[str, str] | No
             "name": _cell(cc, "NB intf"),
             "type": _cell(cc, "NB Proposed intf Type"),
             "mac_address": mac or "—",
-            "untagged_vlan": str(vid) if vid else "—",
+            "untagged_vlan_vid": str(vid) if vid else "—",
             "description": if_desc or "—",
             "tags": _cell(cc, "NB Proposed intf Label"),
             "IPAddress.address": ip_blob or "—",
@@ -243,7 +247,16 @@ def netbox_write_projection_cells(selection_key: str, cells: dict[str, str] | No
             cc,
             "Suggested NB OOB Port" if existing_oob else "Suggested NB mgmt iface",
         )
-        out: dict[str, str] = {
+        if existing_oob:
+            return {
+                "device": _cell(cc, "Host"),
+                "name": if_name,
+                "mac_address": mac or "—",
+                "tags": _cell(cc, "NB Proposed intf Label"),
+                "IPAddress.address": bmc_ip or "—",
+                "description": _cell(cc, "NetBox OOB"),
+            }
+        return {
             "device": _cell(cc, "Host"),
             "name": if_name,
             "mac_address": mac or "—",
@@ -251,9 +264,6 @@ def netbox_write_projection_cells(selection_key: str, cells: dict[str, str] | No
             "tags": _cell(cc, "NB Proposed intf Label"),
             "IPAddress.address": bmc_ip or "—",
         }
-        if existing_oob:
-            out["description"] = _cell(cc, "NetBox OOB")
-        return out
 
     if sk == "detail_placement_lifecycle_alignment":
         return {

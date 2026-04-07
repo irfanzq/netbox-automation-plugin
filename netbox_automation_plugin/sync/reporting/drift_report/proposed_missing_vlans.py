@@ -1,8 +1,11 @@
-"""Proposed IPAM VLAN rows when NIC proposals imply an untagged VID that IPAM cannot resolve.
+"""Proposed IPAM VLAN rows when NIC or prefix proposals reference a VID that IPAM cannot resolve.
 
-VIDs are detected with the same rules as ``apply_create_interface`` /
+NIC VIDs use the same rules as ``apply_create_interface`` /
 ``apply_update_interface`` (``_interface_mac_vlan_ip_from_cells``), not only when
 ``SET_NETBOX_UNTAGGED_VLAN`` appears in Proposed Action.
+
+Prefix rows (new/update OpenStack prefix gaps) use ``NB Proposed VLAN`` + ``NB Proposed Scope``
+with the same resolution as ``apply_create_prefix`` (``_resolve_vlan_for_prefix_scope``).
 """
 
 from __future__ import annotations
@@ -17,8 +20,10 @@ from netbox_automation_plugin.sync.reporting.drift_report.drift_nb_picker_catalo
     DRIFT_NB_PROPOSED_TENANT_DEFAULT,
 )
 from netbox_automation_plugin.sync.reporting.drift_report.drift_overrides_apply import (
+    HEADERS_DETAIL_EXISTING_PREFIXES,
     HEADERS_DETAIL_NIC_DRIFT,
     HEADERS_DETAIL_NEW_NICS,
+    HEADERS_DETAIL_NEW_PREFIXES,
 )
 from netbox_automation_plugin.sync.reporting.drift_report.proposed_action_format import (
     SET_NETBOX_ACTION_CREATE_VLAN,
@@ -26,12 +31,16 @@ from netbox_automation_plugin.sync.reporting.drift_report.proposed_action_format
 from netbox_automation_plugin.sync.reconciliation.apply_cells import (
     _interface_mac_vlan_ip_from_cells,
     _resolve_vlan_for_device,
+    _resolve_vlan_for_prefix_scope,
 )
 
 _RE_UNTAGGED = re.compile(r"\bSET_NETBOX_UNTAGGED_VLAN\s*=\s*([^;]+)", re.I)
 
 _IDX_DRIFT = {h: i for i, h in enumerate(HEADERS_DETAIL_NIC_DRIFT)}
 _IDX_NEW = {h: i for i, h in enumerate(HEADERS_DETAIL_NEW_NICS)}
+
+# Same label as drift_overrides_apply.HEADERS_DETAIL_*_PREFIXES — VLAN name hint for prefix rows.
+_NB_PREFIX_PROPOSED_DESC_HEADER = "NB Proposed Prefix description (editable)"
 
 
 def _audit_row_to_cells(headers: list[str], row: list[Any]) -> dict[str, str]:
@@ -441,6 +450,38 @@ def _norm_mac_for_match(mac: str) -> str:
         return s
 
 
+def _first_ip_hint_from_cidr(cidr: str) -> str:
+    """First usable IPv4/IPv6 host in prefix for VLAN name / prefix-correlation hints."""
+    t = (cidr or "").strip()
+    if not t:
+        return ""
+    try:
+        net = ipaddress.ip_network(t, strict=False)
+    except ValueError:
+        return ""
+    try:
+        addr = net.network_address
+        if net.version == 4 and net.num_addresses > 1:
+            return str(addr + 1)
+        return str(addr)
+    except ValueError:
+        return str(net.network_address)
+
+
+def _location_obj_for_prefix_scope(scope_name: str):
+    sn = (scope_name or "").strip()
+    if not sn or sn in {"—", "-"}:
+        return None
+    try:
+        from dcim.models import Location
+
+        from netbox_automation_plugin.sync.reconciliation.apply_cells import _resolve_by_name
+
+        return _resolve_by_name(Location, sn)
+    except Exception:
+        return None
+
+
 def _parse_nic_ip_strings(maas_ips_cell: str, os_ip_cell: str) -> list[str]:
     """Host IP strings (no mask) from MAAS / OS NIC columns for prefix correlation."""
     out: list[str] = []
@@ -603,15 +644,22 @@ def _suggest_vlan_display_name(
     maas_vlan_label: str,
     os_network_name: str,
     location_hints: list[str],
+    openstack_subnet_description: str = "",
 ) -> str:
     """
-    Prefer NetBox-backed labels (prefix VLAN, existing group+VID), then MAAS/OpenStack names,
-    then template default from :func:`_defaults_for_vlan_group`.
+    NetBox prefix/VLAN correlation from NIC (or prefix CIDR) IPs first, then the combined prefix-row
+    hint (``NB Proposed Prefix description (editable)`` or ``OS Description`` passed together as
+    ``openstack_subnet_description``), then existing VLAN in group, MAAS/OpenStack labels, fuzzy
+    match in group, then template default from :func:`_defaults_for_vlan_group`.
     """
     for ip_s in ip_strings:
         hit = _vlan_name_from_prefixes(prefix_rows_v4, prefix_rows_v6, ip_s, vid)
         if hit:
             return hit
+
+    desc_hint = _clamp_nb_vlan_name(openstack_subnet_description)
+    if desc_hint and not _is_vid_like_label(desc_hint):
+        return desc_hint
 
     hit_g = _vlan_name_in_netbox_group(group_name, vid)
     if hit_g:
@@ -672,10 +720,14 @@ def build_proposed_missing_vlan_rows(
     *,
     maas_by_hostname: dict[str, dict] | None = None,
     runtime_nic_by_host_mac: dict[tuple[str, str], dict] | None = None,
+    add_prefixes: list | None = None,
+    update_prefixes: list | None = None,
 ) -> list[list[Any]]:
     """
     One row per (suggested VLAN group, VID) where NIC drift / new-NIC proposals reference a tagged
-    VID that does not resolve for the device (or device absent — placement from NB site/location).
+    VID that does not resolve for the device (or device absent — placement from NB site/location),
+    or where new/update prefix rows reference ``NB Proposed VLAN`` that
+    :func:`_resolve_vlan_for_prefix_scope` cannot satisfy (same as ``apply_create_prefix``).
     """
     prefix_v4, prefix_v6 = _build_prefix_vlan_lookup()
     seen: set[tuple[str, int]] = set()
@@ -695,6 +747,7 @@ def build_proposed_missing_vlan_rows(
         maas_mac: str,
         vid_src: str,
         vid: int,
+        openstack_subnet_description: str = "",
     ) -> None:
         try:
             if int(vid) <= 0 or int(vid) > 4094:
@@ -735,6 +788,7 @@ def build_proposed_missing_vlan_rows(
             maas_vlan_label=maas_iface_vlan,
             os_network_name=os_net_name,
             location_hints=hints,
+            openstack_subnet_description=openstack_subnet_description,
         )
         # Never pre-fill create-VLAN rows with MAAS's fabric-native label; operators set a NetBox name.
         if (vlan_disp or "").strip().lower() == "untagged":
@@ -809,6 +863,7 @@ def build_proposed_missing_vlan_rows(
                 maas_mac=maas_mac,
                 vid_src=vid_src,
                 vid=vid,
+                openstack_subnet_description="",
             )
 
     for row in add_nb_interfaces or []:
@@ -850,7 +905,85 @@ def build_proposed_missing_vlan_rows(
                 maas_mac=maas_mac,
                 vid_src=vid_src,
                 vid=vid,
+                openstack_subnet_description="",
             )
+
+    def maybe_append_from_prefix_row(
+        *,
+        nb_scope: str,
+        vlan_cell: str,
+        nb_proposed_prefix_description: str,
+        os_description: str,
+        cidr: str,
+    ) -> None:
+        raw_v = str(vlan_cell or "").strip()
+        if not raw_v or raw_v in {"—", "-"}:
+            return
+        scope_obj = _location_obj_for_prefix_scope(nb_scope)
+        try:
+            if _resolve_vlan_for_prefix_scope(raw_v, scope_obj) is not None:
+                return
+        except Exception:
+            return
+        try:
+            vi = int(str(raw_v).split()[0], 10)
+        except ValueError:
+            return
+        if not (1 <= vi <= 4094):
+            return
+        nb_site = ""
+        if scope_obj is not None and getattr(scope_obj, "site", None):
+            nb_site = (getattr(scope_obj.site, "name", None) or "").strip()
+        nb_location = (nb_scope or "").strip()
+        ip_hint = _first_ip_hint_from_cidr(cidr)
+        prop = (nb_proposed_prefix_description or "").strip()
+        if not prop or prop in {"—", "-"}:
+            prop = (os_description or "").strip()
+        maybe_append(
+            host="",
+            dev=None,
+            nb_site=nb_site,
+            nb_location=nb_location,
+            maas_vlan="—",
+            os_vlan=str(vi),
+            maas_ips="",
+            os_ip=ip_hint,
+            maas_intf="",
+            maas_mac="",
+            vid_src="OpenStack prefix",
+            vid=vi,
+            openstack_subnet_description=prop,
+        )
+
+    for row in add_prefixes or []:
+        if not isinstance(row, (list, tuple)):
+            continue
+        r = list(row)
+        while len(r) < len(HEADERS_DETAIL_NEW_PREFIXES):
+            r.append("")
+        cells = _audit_row_to_cells(HEADERS_DETAIL_NEW_PREFIXES, r)
+        maybe_append_from_prefix_row(
+            nb_scope=cells.get("NB Proposed Scope") or "",
+            vlan_cell=cells.get("NB Proposed VLAN") or "",
+            nb_proposed_prefix_description=cells.get(_NB_PREFIX_PROPOSED_DESC_HEADER) or "",
+            os_description=cells.get("OS Description") or "",
+            cidr=cells.get("CIDR") or "",
+        )
+
+    for row in update_prefixes or []:
+        if not isinstance(row, (list, tuple)):
+            continue
+        r = list(row)
+        while len(r) < len(HEADERS_DETAIL_EXISTING_PREFIXES):
+            r.append("")
+        cells = _audit_row_to_cells(HEADERS_DETAIL_EXISTING_PREFIXES, r)
+        maybe_append_from_prefix_row(
+            nb_scope=cells.get("NB Proposed Scope") or "",
+            vlan_cell=cells.get("NB Proposed VLAN") or "",
+            nb_proposed_prefix_description=cells.get(_NB_PREFIX_PROPOSED_DESC_HEADER) or "",
+            os_description=cells.get("OS Description") or "",
+            cidr=cells.get("CIDR") or "",
+        )
 
     _ensure_unique_proposed_missing_vlan_names(out)
     return sorted(

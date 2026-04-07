@@ -2,8 +2,8 @@
 
 Detail tables use the same ``HEADERS_*`` lists as ``format_html_proposed`` /
 ``drift_overrides_apply``. BMC sheets omit the ``MAAS NIC model`` column (NIC sheets still include
-it). Rows are padded/truncated to header width; BMC rows that still carry a legacy extra cell after
-``MAAS link speed`` have that cell dropped so columns stay aligned.
+it). Rows are padded/truncated to header width; legacy BMC rows with an extra cell between
+``MAAS BMC MAC`` and ``MAAS LLDP switch`` have that cell dropped so columns stay aligned.
 """
 
 from io import BytesIO
@@ -50,19 +50,19 @@ from netbox_automation_plugin.sync.reporting.drift_report.proposed_changes impor
 
 
 def _coerce_bmc_row_to_headers(headers: list[str], row: list | tuple) -> list:
-    """If a row has one extra value between MAAS link speed and MAAS LLDP switch, drop it (legacy MAAS NIC model)."""
+    """If a row has one extra value between MAAS BMC MAC and MAAS LLDP switch, drop it (legacy)."""
     rl = list(row) if isinstance(row, (list, tuple)) else [row]
     n = len(headers)
     if len(rl) != n + 1:
         return rl
     try:
-        i_speed = headers.index("MAAS link speed")
+        i_mac = headers.index("MAAS BMC MAC")
         i_lldp = headers.index("MAAS LLDP switch")
     except ValueError:
         return rl
-    if i_lldp != i_speed + 1 or len(rl) <= i_speed + 1:
+    if i_lldp != i_mac + 1 or len(rl) <= i_mac + 1:
         return rl
-    del rl[i_speed + 1]
+    del rl[i_mac + 1]
     return rl
 
 
