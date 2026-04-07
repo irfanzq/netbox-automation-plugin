@@ -2538,6 +2538,30 @@ def _cell_is_placeholder(val: str | None) -> bool:
     return not t or t in ("—", "-")
 
 
+def _device_for_reconciliation_apply(hostname: str):
+    """
+    Resolve ``dcim.Device`` during reconciliation apply (branch-aware via NetBox router).
+
+    Tries exact name, case-insensitive full name, then case-insensitive short label before
+    the first ``.`` (FQDN in audit cells vs short NetBox ``Device.name``).
+    """
+    from dcim.models import Device
+
+    n = (hostname or "").strip()
+    if not n:
+        return None
+    dev = Device.objects.filter(name=n).first()
+    if dev is not None:
+        return dev
+    dev = Device.objects.filter(name__iexact=n).first()
+    if dev is not None:
+        return dev
+    short = n.split(".", 1)[0].strip()
+    if short and short.casefold() != n.casefold():
+        return Device.objects.filter(name__iexact=short).first()
+    return None
+
+
 def _cells_indicate_vyos(hostname: str, cells: dict[str, str]) -> bool:
     """True when hostname or common MAAS/OS columns suggest VyOS (router role must be chosen manually)."""
     hn = (hostname or "").strip().lower()
@@ -2634,7 +2658,7 @@ def _apply_device_core(cells: dict[str, str], *, create_if_missing: bool) -> tup
             return _skip_missing_prereq(
                 f'Location "{location_name}" not found in NetBox (NB proposed location / NetBox location).'
             )
-    existing = Device.objects.filter(name=hostname).first()
+    existing = _device_for_reconciliation_apply(hostname)
     if existing is None:
         if not create_if_missing:
             return _skip_missing_prereq(
@@ -2955,8 +2979,6 @@ def apply_placement_alignment(op: dict[str, Any]) -> tuple[str, str]:
 
 
 def apply_serial_review(op: dict[str, Any]) -> tuple[str, str]:
-    from dcim.models import Device
-
     cells = op.get("cells") or {}
     if (reason := skip_reason_from_row_guides(cells)) is not None:
         return "skipped", reason
@@ -2973,7 +2995,7 @@ def apply_serial_review(op: dict[str, Any]) -> tuple[str, str]:
     }
     if not host:
         return _skip_missing_prereq("Serial review row missing device name (Host / Hostname / projection).")
-    dev = Device.objects.filter(name=host).first()
+    dev = _device_for_reconciliation_apply(host)
     if not dev:
         return _skip_missing_prereq(f'Device "{host}" not found in NetBox.')
     if not serial:
@@ -3448,9 +3470,7 @@ def _try_bootstrap_device_for_new_interface_apply(
     Attempt :func:`_apply_device_core` from the NIC row when the device record is missing.
     Returns a skip triple if creation failed and the device is still absent; otherwise None.
     """
-    from dcim.models import Device
-
-    if Device.objects.filter(name=host).first():
+    if _device_for_reconciliation_apply(host):
         return None
     synth = synthetic_device_cells_from_new_nic_for_prereq(cells, host)
     if synth is None:
@@ -3459,7 +3479,7 @@ def _try_bootstrap_device_for_new_interface_apply(
     detail = res[2] if len(res) > 2 else None
     reason = str(res[1])
     status = str(res[0])
-    if Device.objects.filter(name=host).first():
+    if _device_for_reconciliation_apply(host):
         return None
     if status in ("created", "updated"):
         return None
@@ -3472,7 +3492,7 @@ def _try_bootstrap_device_for_new_interface_apply(
 
 
 def apply_create_interface(op: dict[str, Any]) -> tuple[str, str]:
-    from dcim.models import Device, Interface, Location, Site
+    from dcim.models import Interface, Location, Site
 
     cells = op.get("cells") or {}
     if (reason := skip_reason_from_row_guides(cells)) is not None:
@@ -3503,12 +3523,12 @@ def apply_create_interface(op: dict[str, Any]) -> tuple[str, str]:
             f'Cannot apply MAC for device "{host}" interface "{if_name}": '
             f"value is not a valid Ethernet MAC ({mac_intent[:80]!r}{mac_tail})."
         )
-    dev = Device.objects.filter(name=host).first()
+    dev = _device_for_reconciliation_apply(host)
     if not dev:
         boot_err = _try_bootstrap_device_for_new_interface_apply(cells, host)
         if boot_err is not None:
             return boot_err
-        dev = Device.objects.filter(name=host).first()
+        dev = _device_for_reconciliation_apply(host)
     if not dev:
         return _skip_missing_prereq(
             f'Device "{host}" not found in NetBox. Include a new-device row, or set NB site (and '
@@ -3585,7 +3605,7 @@ def apply_create_interface(op: dict[str, Any]) -> tuple[str, str]:
 
 
 def apply_update_interface(op: dict[str, Any]) -> tuple[str, str]:
-    from dcim.models import Device, Interface
+    from dcim.models import Interface
 
     cells = op.get("cells") or {}
     if (reason := skip_reason_from_row_guides(cells)) is not None:
@@ -3605,7 +3625,7 @@ def apply_update_interface(op: dict[str, Any]) -> tuple[str, str]:
             f'Cannot apply MAC for NIC drift row (device "{host}"): '
             f"value is not a valid Ethernet MAC ({mac_intent[:80]!r}{mac_tail})."
         )
-    dev = Device.objects.filter(name=host).first()
+    dev = _device_for_reconciliation_apply(host)
     if not dev:
         return _skip_missing_prereq(f'Device "{host}" not found in NetBox.')
     iface = None
@@ -3661,7 +3681,7 @@ def apply_update_interface(op: dict[str, Any]) -> tuple[str, str]:
 
 
 def _bmc_apply(op: dict[str, Any], *, existing_oob: bool) -> tuple[str, str]:
-    from dcim.models import Device, Interface
+    from dcim.models import Interface
 
     cells = op.get("cells") or {}
     if (reason := skip_reason_from_row_guides(cells)) is not None:
@@ -3691,7 +3711,7 @@ def _bmc_apply(op: dict[str, Any], *, existing_oob: bool) -> tuple[str, str]:
         return _skip_missing_prereq(
             "BMC IP empty (MAAS BMC IP / OS BMC IP / NB mgmt iface IP); need an address to assign."
         )
-    dev = Device.objects.filter(name=host).first()
+    dev = _device_for_reconciliation_apply(host)
     if not dev:
         return _skip_missing_prereq(f'Device "{host}" not found in NetBox.')
     iface = Interface.objects.filter(device=dev, name=if_name).first()

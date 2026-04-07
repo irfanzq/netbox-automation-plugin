@@ -3,6 +3,7 @@
 import re
 
 from netbox_automation_plugin.sync.reporting.drift_report.birch_audit_scope import (
+    birch_audit_hostname_is_weka_storage,
     birch_audit_rules_active,
 )
 from netbox_automation_plugin.sync.reporting.drift_report.maas_netbox_status import (
@@ -134,7 +135,8 @@ def _alignment_review_rows(matched_rows, scope_meta=None):
     out = []
     for r in matched_rows or []:
         if birch and not _matched_row_has_openstack_lifecycle_cells(r):
-            continue
+            if not birch_audit_hostname_is_weka_storage(str(r.get("hostname") or "")):
+                continue
         hints = r.get("hints") or []
         align = [h for h in hints if _hint_is_placement_alignment(h)]
         if not align:

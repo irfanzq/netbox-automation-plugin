@@ -32,6 +32,7 @@ from netbox_automation_plugin.sync.reconciliation.audit_detail import (
 )
 from netbox_automation_plugin.sync.clients.openstack_client import fetch_openstack_data, fetch_all_openstack_data
 from netbox_automation_plugin.sync.reporting.drift_report.birch_audit_scope import (
+    birch_audit_hostname_is_weka_storage,
     birch_audit_rules_active,
 )
 from netbox_automation_plugin.sync.reporting.drift_report.maas_netbox_status import (
@@ -879,6 +880,7 @@ class MAASOpenStackSyncView(LoginRequiredMixin, View):
                 m
                 for m in (maas_data.get("machines") or [])
                 if normalize_maas_status(m.get("status_name") or m.get("status")) == "DEPLOYED"
+                or birch_audit_hostname_is_weka_storage(str(m.get("hostname") or ""))
             ]
         maas_machines_before = list(maas_data.get("machines") or [])
         scope_meta["maas_machines_before"] = len(maas_machines_before)

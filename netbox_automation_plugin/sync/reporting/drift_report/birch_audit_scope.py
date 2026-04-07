@@ -5,9 +5,30 @@ When the operator scopes an audit to NetBox locations (or sites) whose names/slu
 contain ``birch``, stricter filtering applies: MAAS machines must be Deployed, proposed
 new devices must appear in OpenStack inventory, and MAAS-authority NIC rows without OS
 MAC are dropped.
+
+**Exception:** hostnames containing ``-weka-`` (case-insensitive) are treated like
+pre-Birch behavior for MAAS inclusion, OpenStack membership checks, placement alignment,
+and MAAS-only NIC rows so Weka storage nodes stay in the audit when not Deployed or
+not present in OpenStack inventory.
 """
 
 from __future__ import annotations
+
+# Birch audit: include these MAAS hosts even when Deployed-only / OpenStack gates would drop them.
+_BIRCH_AUDIT_WILDCARD_HOST_SUBSTRING = "-weka-"
+
+
+def birch_audit_hostname_is_weka_storage(hostname: str | None) -> bool:
+    """
+    True when the hostname should bypass strict Birch MAAS/OpenStack/NIC filters.
+
+    Matches short or FQDN host labels containing ``-weka-`` (case-insensitive), e.g.
+    ``b1-r2-weka-1``.
+    """
+    h = (hostname or "").strip().casefold()
+    if not h:
+        return False
+    return _BIRCH_AUDIT_WILDCARD_HOST_SUBSTRING in h.split(".", 1)[0].strip()
 
 
 def birch_audit_rules_active(scope_meta: dict | None) -> bool:

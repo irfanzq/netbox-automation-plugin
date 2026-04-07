@@ -22,6 +22,7 @@ from netbox_automation_plugin.sync.reporting.drift_report.new_device_policy impo
     proposed_netbox_status_for_new_maas_machine,
 )
 from netbox_automation_plugin.sync.reporting.drift_report.birch_audit_scope import (
+    birch_audit_hostname_is_weka_storage,
     birch_audit_rules_active,
     openstack_hostnames_short,
 )
@@ -1329,6 +1330,8 @@ def _proposed_changes_rows(
     def _birch_skip_maas_only_host(h: str) -> bool:
         if not _birch_audit:
             return False
+        if birch_audit_hostname_is_weka_storage(h):
+            return False
         hn = (h or "").strip().lower().split(".", 1)[0]
         return bool(hn) and hn not in _os_hosts_birch
 
@@ -1513,6 +1516,7 @@ def _proposed_changes_rows(
                 and len(r) > NIC_NEW_AUTHORITY_COL_INDEX
                 and str(r[NIC_NEW_AUTHORITY_COL_INDEX]).strip() == "[MAAS]"
                 and not nic_row_os_mac_is_present(r)
+                and not birch_audit_hostname_is_weka_storage(str(r[0] or ""))
             )
         ]
 
@@ -1940,6 +1944,7 @@ def _proposed_changes_rows(
                 and len(r) > _nic_drift_auth_col
                 and str(r[_nic_drift_auth_col]).strip() == "[MAAS]"
                 and not nic_row_os_mac_is_present(r)
+                and not birch_audit_hostname_is_weka_storage(str(r[0] or ""))
             )
         ]
     else:

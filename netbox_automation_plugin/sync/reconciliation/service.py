@@ -28,7 +28,7 @@ from datetime import datetime, timezone as dt_timezone
 from typing import Any
 
 from django.core import signing
-from django.db import transaction
+from django.db import connections, transaction
 from django.utils import timezone
 from django.utils.translation import gettext as _
 
@@ -155,8 +155,37 @@ def _failed_apply_row(op: dict[str, Any], exc: Exception) -> dict[str, Any]:
     return _finalize_apply_row(op, result)
 
 
+def _execute_branch_apply_in_branch_transaction(branch_db: str, op: dict[str, Any]) -> dict[str, Any]:
+    """
+    Run one branch apply with a per-row transaction only when needed.
+
+    ``branch_write_context`` (netbox-branching) often already wraps
+    ``transaction.atomic(using=<branch schema alias>)``. Nesting another full ``atomic``
+    for every row can break read-your-writes so a ``create_device`` is not visible to the
+    next ``create_interface`` / BMC op. When already inside that outer atomic, use an
+    explicit **savepoint** so rows still share one branch transaction (visibility) but a
+    failing row can roll back without aborting the whole apply batch.
+    """
+    try:
+        conn = connections[branch_db]
+    except KeyError:
+        with transaction.atomic(using=branch_db):
+            return _execute_branch_apply(op)
+    if getattr(conn, "in_atomic_block", False):
+        sid = transaction.savepoint(using=branch_db)
+        try:
+            out = _execute_branch_apply(op)
+            transaction.savepoint_commit(sid, using=branch_db)
+            return out
+        except Exception:
+            transaction.savepoint_rollback(sid, using=branch_db)
+            raise
+    with transaction.atomic(using=branch_db):
+        return _execute_branch_apply(op)
+
+
 def _execute_branch_apply(op: dict[str, Any]) -> dict[str, Any]:
-    """Run one apply inside a per-row savepoint (caller wraps with transaction.atomic(using=…))."""
+    """Run one apply; optional per-row ``atomic(using=…)`` is applied by the caller / helper above."""
     result = _apply_result_row_shell(op)
     action = result["action"]
     if action not in SUPPORTED_APPLY_ACTIONS:
@@ -1193,8 +1222,9 @@ def apply_reconciliation_run(
                     for op in target_ops:
                         if branch_db:
                             try:
-                                with transaction.atomic(using=branch_db):
-                                    applied_rows.append(_execute_branch_apply(op))
+                                applied_rows.append(
+                                    _execute_branch_apply_in_branch_transaction(branch_db, op)
+                                )
                             except Exception as exc:
                                 logger.exception(
                                     "Reconciliation apply row failed: row_key=%s action=%s",
