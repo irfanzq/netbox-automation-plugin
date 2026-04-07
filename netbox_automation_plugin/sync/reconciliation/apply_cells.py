@@ -2661,16 +2661,33 @@ def _nic_drift_interface_name_ok(cells: dict[str, str], proj: dict[str, str]) ->
     return not _cell_is_placeholder(_cell(cells, "MAAS intf"))
 
 
+def _compact_preview_row_hint(summary: str) -> str:
+    """Short label for grouping errors (strip common drift summary prefixes)."""
+    s = (summary or "").strip()
+    if not s:
+        return "—"
+    low = s.lower()
+    for prefix in ("device row:", "device:", "vm row:", "row:"):
+        if low.startswith(prefix):
+            rest = s.split(":", 1)[1].strip()
+            return rest or "—"
+    return s
+
+
 def validate_preview_mandatory_audit_fields(frozen: list[dict[str, Any]]) -> None:
     """
     Block reconciliation preview until NetBox-oriented audit columns required for apply
     are filled (empty, em-dash, or invalid VID / ambiguous role count as missing).
 
-    Raises ValueError listing table, optional row summary, and field label for each problem.
+    Raises ValueError: short copy, grouped by table then field, rows listed once per group.
     """
+    from collections import defaultdict
+
     from netbox_automation_plugin.sync.reconciliation.service import RECON_SECTION_TITLES
 
-    error_blocks: list[str] = []
+    # table -> field label -> row hints (order preserved, deduped when formatting)
+    by_table_field: dict[str, dict[str, list[str]]] = defaultdict(lambda: defaultdict(list))
+    nic_name_fields: set[tuple[str, str]] = set()
 
     for op in frozen:
         if not isinstance(op, dict):
@@ -2687,19 +2704,14 @@ def validate_preview_mandatory_audit_fields(frozen: list[dict[str, Any]]) -> Non
         }
         proj = netbox_write_projection_for_op(op)
         table_title = RECON_SECTION_TITLES.get(sk, sk)
-        row_hint = str(op.get("summary") or "").strip()
+        row_hint = _compact_preview_row_hint(str(op.get("summary") or ""))
         for field_key in keys:
             if field_key == "name" and sk in ("detail_nic_drift_os", "detail_nic_drift_maas"):
                 if _nic_drift_interface_name_ok(cells, proj):
                     continue
                 label = _PREVIEW_FIELD_LABELS.get("name", "Name")
-                bits = [f"Table: {table_title}", f"Field: {label}"]
-                if row_hint:
-                    bits.append(f"Row: {row_hint}")
-                bits.append(
-                    "This field cannot be empty — please set NB intf or MAAS intf on the drift audit."
-                )
-                error_blocks.append("\n".join(bits))
+                by_table_field[table_title][label].append(row_hint)
+                nic_name_fields.add((table_title, label))
                 continue
             val = proj.get(field_key)
             if not _preview_scalar_invalid(field_key, val if val is None else str(val)):
@@ -2707,19 +2719,30 @@ def validate_preview_mandatory_audit_fields(frozen: list[dict[str, Any]]) -> Non
             label = _PREVIEW_FIELD_LABELS.get(
                 field_key, str(field_key).replace("_", " ").title()
             )
-            bits = [f"Table: {table_title}", f"Field: {label}"]
-            if row_hint:
-                bits.append(f"Row: {row_hint}")
-            bits.append(
-                "This field cannot be empty — please select or enter a value for it on the drift audit."
-            )
-            error_blocks.append("\n".join(bits))
+            by_table_field[table_title][label].append(row_hint)
 
-    if error_blocks:
-        raise ValueError(
-            "Cannot continue to reconciliation — fix the following; save your drift review, then try again:\n\n"
-            + "\n\n".join(error_blocks)
-        )
+    if not by_table_field:
+        return
+
+    lines: list[str] = [
+        "Fill the missing audit fields, save the review, then continue.",
+        "",
+    ]
+    for table in sorted(by_table_field.keys(), key=lambda t: t.lower()):
+        lines.append(table)
+        field_map = by_table_field[table]
+        for field_label in sorted(field_map.keys(), key=lambda f: f.lower()):
+            uniq = list(dict.fromkeys(field_map[field_label]))
+            lines.append(f"  • {field_label}: {', '.join(uniq)}")
+        lines.append("")
+
+    while lines and lines[-1] == "":
+        lines.pop()
+
+    if nic_name_fields:
+        lines.extend(["", "NIC drift: set NB intf or MAAS intf where name is missing."])
+
+    raise ValueError("\n".join(lines))
 
 
 def apply_create_device(op: dict[str, Any]) -> tuple[str, str]:
