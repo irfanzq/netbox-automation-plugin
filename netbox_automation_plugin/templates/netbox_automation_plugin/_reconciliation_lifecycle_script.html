@@ -42,7 +42,7 @@
           "Content-Type": "application/json",
           "X-CSRFToken": csrfToken()
         },
-        body: "{}"
+        body: opts.body != null ? opts.body : "{}"
       }).then(function(r) {
         return r.json().then(function(j) { return { ok: r.ok, body: j }; });
       }).then(function(res) {
@@ -114,18 +114,26 @@
       });
     });
     var applyBtn = document.querySelector(".js-recon-apply");
-    var retryBtn = document.querySelector(".js-recon-retry");
     var applyResultsUrl = "{{ apply_results_url|escapejs }}";
+    var retryUrl = "{{ retry_failed_url|escapejs }}";
     if (applyBtn) {
       applyBtn.addEventListener("click", function() {
         postAction("{{ apply_url|escapejs }}", applyBtn, { openBranchPageRefresh: true, fallbackRedirect: applyResultsUrl });
       });
     }
-    if (retryBtn) {
-      retryBtn.addEventListener("click", function() {
-        postAction("{{ retry_failed_url|escapejs }}", retryBtn, { openBranchPageRefresh: true, fallbackRedirect: applyResultsUrl });
+    function wireRetry(btn, payload) {
+      if (!btn) return;
+      btn.addEventListener("click", function() {
+        postAction(retryUrl, btn, {
+          openBranchPageRefresh: true,
+          fallbackRedirect: applyResultsUrl,
+          body: JSON.stringify(payload || { retry: "failed" })
+        });
       });
     }
+    wireRetry(document.querySelector(".js-recon-retry-failed"), { retry: "failed" });
+    wireRetry(document.querySelector(".js-recon-retry-skipped"), { retry: "skipped" });
+    wireRetry(document.querySelector(".js-recon-retry-both"), { retry: "both" });
     var discardBtn = document.querySelector(".js-recon-discard");
     if (discardBtn) {
       discardBtn.addEventListener("click", function() {

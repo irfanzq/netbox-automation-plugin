@@ -9,7 +9,13 @@
         <div class="col-md-2"><strong>{% trans "Updated" %}:</strong> {{ apply_results.summary.updated|default:0 }}</div>
         <div class="col-md-2"><strong>{% trans "Skipped" %}:</strong> {{ apply_results.summary.skipped|default:0 }}</div>
         <div class="col-md-2"><strong>{% trans "Failed" %}:</strong> {{ apply_results.summary.failed|default:0 }}</div>
-        <div class="col-md-2"><strong>{% trans "Retry only" %}:</strong> {{ apply_results.retry_failed_only|yesno:"yes,no" }}</div>
+        <div class="col-md-3"><strong>{% trans "Partial retry" %}:</strong>
+          {% if apply_results.retry_failed_only and apply_results.retry_skipped_only %}{% trans "failed + skipped" %}
+          {% elif apply_results.retry_skipped_only %}{% trans "skipped only" %}
+          {% elif apply_results.retry_failed_only %}{% trans "failed only" %}
+          {% else %}{% trans "no (full apply)" %}
+          {% endif %}
+        </div>
       </div>
       {% if apply_results.summary.first_failed_exception %}
         <div class="alert alert-warning small mb-0 mt-3">

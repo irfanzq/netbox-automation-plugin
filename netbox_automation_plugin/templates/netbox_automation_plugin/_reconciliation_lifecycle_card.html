@@ -9,9 +9,14 @@
         {% blocktrans trimmed %}Apply writes frozen operations into the branch schema only. Discard abandons the run and deletes the NetBox branch when possible; it does not undo individual rows inside an existing branch. Merge to main uses NetBox Branching (not wired here yet).{% endblocktrans %}
       {% endif %}
     </p>
+    <p class="text-body-secondary small mb-2">
+      {% blocktrans trimmed %}After an apply, use the re-apply buttons to run only rows that failed or were skipped. Re-applying interface or BMC rows pulls in matching frozen new-device or MAAS-review rows for the same host first; if none exist, a one-off device create is built from placement or from the NIC row’s NB site when possible, then sorted so device runs before NIC/BMC.{% endblocktrans %}
+    </p>
     <div class="d-flex flex-wrap gap-1 align-items-center">
       <button type="button" class="btn btn-primary btn-sm js-recon-apply js-recon-lifecycle-btn" data-initial-disabled="{% if not can_apply %}true{% else %}false{% endif %}" {% if not can_apply %}disabled{% endif %}>{% trans "Apply selected changes to branch" %}</button>
-      <button type="button" class="btn btn-outline-primary btn-sm js-recon-retry js-recon-lifecycle-btn" data-initial-disabled="{% if not can_retry_failed %}true{% else %}false{% endif %}" {% if not can_retry_failed %}disabled{% endif %}>{% trans "Re-apply failed items" %}</button>
+      <button type="button" class="btn btn-outline-primary btn-sm js-recon-retry-failed js-recon-lifecycle-btn" data-initial-disabled="{% if not can_retry_failed %}true{% else %}false{% endif %}" {% if not can_retry_failed %}disabled{% endif %} title="{% trans 'Rows whose latest status is failed' %}">{% trans "Re-apply failed" %} ({{ recon_apply_failed_row_count|default:0 }})</button>
+      <button type="button" class="btn btn-outline-primary btn-sm js-recon-retry-skipped js-recon-lifecycle-btn" data-initial-disabled="{% if not can_retry_skipped %}true{% else %}false{% endif %}" {% if not can_retry_skipped %}disabled{% endif %} title="{% trans 'Rows whose latest status is skipped (e.g. missing device); device rows for the same host are included when present' %}">{% trans "Re-apply skipped" %} ({{ recon_apply_skipped_row_count|default:0 }})</button>
+      <button type="button" class="btn btn-outline-secondary btn-sm js-recon-retry-both js-recon-lifecycle-btn" data-initial-disabled="{% if not can_retry_failed_or_skipped %}true{% else %}false{% endif %}" {% if not can_retry_failed_or_skipped %}disabled{% endif %} title="{% trans 'Union of failed and skipped rows in one pass' %}">{% trans "Re-apply failed & skipped" %}</button>
       <button type="button" class="btn btn-outline-secondary btn-sm" disabled title="{% trans 'Not implemented yet' %}">{% trans "Run validation" %}</button>
       {% if not hide_merge_to_main %}
       <button type="button" class="btn btn-outline-secondary btn-sm" disabled title="{% trans 'Not implemented yet' %}">{% trans "Merge to main" %}</button>

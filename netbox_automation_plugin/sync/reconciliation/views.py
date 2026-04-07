@@ -52,6 +52,19 @@ def _reconciliation_run_page_context(
         MAASOpenStackReconciliationRun.STATUS_APPLY_FAILED,
     }
     apply_results: dict = run.apply_results if isinstance(run.apply_results, dict) else {}
+    result_rows = apply_results.get("rows") if isinstance(apply_results.get("rows"), list) else []
+    failed_row_n = sum(
+        1 for r in result_rows if isinstance(r, dict) and str(r.get("status") or "") == "failed"
+    )
+    skipped_row_n = sum(
+        1 for r in result_rows if isinstance(r, dict) and str(r.get("status") or "") == "skipped"
+    )
+    retry_eligible_status = run.status in {
+        MAASOpenStackReconciliationRun.STATUS_APPLY_FAILED_PARTIAL,
+        MAASOpenStackReconciliationRun.STATUS_APPLY_FAILED,
+        MAASOpenStackReconciliationRun.STATUS_APPLIED,
+    }
+    can_retry_partial_base = retry_eligible_status and bool(result_rows)
     detail_url = reverse(
         "plugins:netbox_automation_plugin:maas_openstack_reconciliation_detail",
         args=[run.pk],
@@ -80,8 +93,12 @@ def _reconciliation_run_page_context(
         "branching_branch_url": _netbox_branching_branch_url(branch_pk=run.branch_id),
         "can_discard": run.status not in blocked_discard,
         "can_apply": run.status in apply_ok,
-        "can_retry_failed": run.status in apply_ok
-        and run.status != MAASOpenStackReconciliationRun.STATUS_BRANCH_CREATED,
+        "can_retry_failed": can_retry_partial_base and failed_row_n > 0,
+        "can_retry_skipped": can_retry_partial_base and skipped_row_n > 0,
+        "can_retry_failed_or_skipped": can_retry_partial_base
+        and (failed_row_n > 0 or skipped_row_n > 0),
+        "recon_apply_failed_row_count": failed_row_n,
+        "recon_apply_skipped_row_count": skipped_row_n,
         "nav_active": nav_active,
     }
 
@@ -332,9 +349,30 @@ class ReconciliationRetryFailedView(LoginRequiredMixin, View):
     http_method_names = ["post"]
 
     def post(self, request, run_id: int):
+        mode = "failed"
+        if request.body:
+            try:
+                raw = json.loads(request.body.decode() or "{}")
+            except json.JSONDecodeError:
+                raw = {}
+            if isinstance(raw, dict):
+                m = str(raw.get("retry") or raw.get("mode") or "").strip().lower()
+                if m in ("skipped", "failed", "both", "failed_and_skipped"):
+                    mode = "failed_and_skipped" if m == "both" else m
         run = get_object_or_404(MAASOpenStackReconciliationRun, pk=run_id)
         try:
-            run = apply_reconciliation_run(run=run, actor=request.user, retry_failed_only=True)
+            if mode == "skipped":
+                run = apply_reconciliation_run(
+                    run=run, actor=request.user, retry_failed_only=False, retry_skipped_only=True
+                )
+            elif mode == "failed_and_skipped":
+                run = apply_reconciliation_run(
+                    run=run, actor=request.user, retry_failed_only=True, retry_skipped_only=True
+                )
+            else:
+                run = apply_reconciliation_run(
+                    run=run, actor=request.user, retry_failed_only=True, retry_skipped_only=False
+                )
         except ValueError as e:
             return JsonResponse({"ok": False, "error": str(e)}, status=400)
         except Exception as e:

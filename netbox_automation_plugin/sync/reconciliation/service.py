@@ -58,6 +58,7 @@ from .apply_cells import (
     new_nic_cells_for_reconciliation,
     recon_operation_display_cells,
     reconciliation_apply_snapshot_cells,
+    synthetic_device_cells_from_new_nic_for_prereq,
     synthetic_device_cells_from_placement_for_nic_prereq,
     validate_preview_mandatory_audit_fields,
 )
@@ -491,6 +492,143 @@ def _host_key_from_recon_cells(cells: dict[str, str]) -> str:
         if v:
             return v
     return ""
+
+
+_PARTIAL_RETRY_DEVICE_PREREQ_ACTIONS: frozenset[str] = frozenset(
+    {
+        "create_interface",
+        "update_interface",
+        "bmc_documentation",
+        "bmc_alignment",
+    }
+)
+
+
+def _expand_partial_retry_ops_with_device_creates(
+    seed_ops: list[dict[str, Any]],
+    all_ops: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """
+    When re-applying skipped/failed NIC or BMC rows, ensure device work runs first:
+
+    - Pull frozen ``create_device`` and ``review_device`` rows for the same host from this run.
+    - If none exist but placement (or NIC ``NB site``) can supply a bootstrap, append a
+      synthetic ``create_device`` op (same idea as NIC prerequisite inject at freeze time).
+
+    Apply order (``AUDIT_REPORT_APPLY_ORDER`` + phase) already places device/review before
+    interfaces and BMC.
+    """
+    seed_rks = {str(o.get("row_key") or "").strip() for o in seed_ops if isinstance(o, dict)}
+    prereq_hosts: set[str] = set()
+    host_sample_cells: dict[str, dict[str, str]] = {}
+    for o in seed_ops:
+        if not isinstance(o, dict):
+            continue
+        if str(o.get("action") or "") not in _PARTIAL_RETRY_DEVICE_PREREQ_ACTIONS:
+            continue
+        raw = o.get("cells")
+        if not isinstance(raw, dict):
+            continue
+        c = {str(k): "" if v is None else str(v).strip() for k, v in raw.items()}
+        hk = _host_key_from_recon_cells(c)
+        if not hk:
+            continue
+        prereq_hosts.add(hk)
+        if hk not in host_sample_cells:
+            host_sample_cells[hk] = c
+    if not prereq_hosts:
+        return seed_ops
+
+    extra_rks: set[str] = set()
+    for o in all_ops:
+        if not isinstance(o, dict):
+            continue
+        if str(o.get("action") or "") not in ("create_device", "review_device"):
+            continue
+        raw = o.get("cells")
+        if not isinstance(raw, dict):
+            continue
+        c = {str(k): "" if v is None else str(v).strip() for k, v in raw.items()}
+        hk = _host_key_from_recon_cells(c)
+        if hk not in prereq_hosts:
+            continue
+        rk = str(o.get("row_key") or "").strip()
+        if rk and rk not in seed_rks:
+            extra_rks.add(rk)
+
+    combined_rks = set(seed_rks) | extra_rks
+    out = [
+        o
+        for o in all_ops
+        if isinstance(o, dict) and str(o.get("row_key") or "").strip() in combined_rks
+    ]
+
+    def _hosts_covered_by_device_ops(ops: list[dict[str, Any]]) -> set[str]:
+        found: set[str] = set()
+        for o in ops:
+            if not isinstance(o, dict):
+                continue
+            if str(o.get("action") or "") not in ("create_device", "review_device"):
+                continue
+            raw = o.get("cells")
+            if not isinstance(raw, dict):
+                continue
+            c = {str(k): "" if v is None else str(v).strip() for k, v in raw.items()}
+            hk = _host_key_from_recon_cells(c)
+            if hk:
+                found.add(hk)
+        return found
+
+    covered = _hosts_covered_by_device_ops(out)
+    existing_nb = _netbox_existing_device_host_keys_lower(prereq_hosts)
+    synth_ops: list[dict[str, Any]] = []
+    for hk in sorted(prereq_hosts):
+        if hk in covered or hk in existing_nb:
+            continue
+        synth_cells = None
+        for o in all_ops:
+            if not isinstance(o, dict):
+                continue
+            if str(o.get("selection_key") or "") != "detail_placement_lifecycle_alignment":
+                continue
+            raw = o.get("cells")
+            if not isinstance(raw, dict):
+                continue
+            c = {str(k): "" if v is None else str(v).strip() for k, v in raw.items()}
+            if _host_key_from_recon_cells(c) != hk:
+                continue
+            synth_cells = synthetic_device_cells_from_placement_for_nic_prereq(c)
+            if synth_cells:
+                break
+        if synth_cells is None:
+            nic_c = host_sample_cells.get(hk)
+            if nic_c:
+                host_disp = (nic_c.get("Host") or nic_c.get("Hostname") or hk).strip() or hk
+                synth_cells = synthetic_device_cells_from_new_nic_for_prereq(nic_c, host_disp)
+        if synth_cells is None:
+            continue
+        host_disp = (
+            (synth_cells.get("Hostname") or synth_cells.get("Host") or hk).strip() or hk
+        )
+        rk_raw = f"nic-prereq-dev|partial-retry|{hk}|{host_disp}"
+        rk = hashlib.sha1(rk_raw.encode("utf-8", errors="ignore")).hexdigest()[:16]
+        synth_ops.append(
+            {
+                "row_key": rk,
+                "selection_key": "detail_new_devices",
+                "prop_list_key": None,
+                "row_index": 10**9,
+                "cells": synth_cells,
+                "summary": f"Device create (retry prerequisite): {host_disp}",
+                "action": "create_device",
+            }
+        )
+        covered.add(hk)
+
+    out.extend(synth_ops)
+    allowed_sk = all_registered_selection_keys()
+    out.sort(key=lambda o: _operation_apply_sort_key(o, allowed=allowed_sk))
+    return out
 
 
 def _iface_host_keys_from_ops(ops: list[dict[str, Any]]) -> set[str]:
@@ -1140,6 +1278,7 @@ def apply_reconciliation_run(
     run: MAASOpenStackReconciliationRun,
     actor,
     retry_failed_only: bool = False,
+    retry_skipped_only: bool = False,
 ) -> MAASOpenStackReconciliationRun:
     """
     Execute frozen operations with explicit row results and status transitions.
@@ -1152,15 +1291,27 @@ def apply_reconciliation_run(
     Apply handlers use full per-row ``cells`` (all audit columns) via
     ``apply_cells.apply_row_operation``; preview projection is
     ``netbox_write_projection.netbox_write_projection_for_op``.
+
+    Partial retries (``retry_failed_only`` / ``retry_skipped_only``) re-run only rows whose
+    latest result status matches; results are merged into prior row history. Interface retries
+    automatically pull in matching frozen ``create_device`` rows for the same host when present.
     """
-    allowed = {
-        MAASOpenStackReconciliationRun.STATUS_BRANCH_CREATED,
-        MAASOpenStackReconciliationRun.STATUS_APPLY_FAILED_PARTIAL,
-        MAASOpenStackReconciliationRun.STATUS_APPLY_FAILED,
-    }
+    partial_retry = bool(retry_failed_only or retry_skipped_only)
     run.refresh_from_db(
         fields=["status", "frozen_operations", "apply_results", "branch_name", "branch_id"]
     )
+    if partial_retry:
+        allowed = {
+            MAASOpenStackReconciliationRun.STATUS_APPLY_FAILED_PARTIAL,
+            MAASOpenStackReconciliationRun.STATUS_APPLY_FAILED,
+            MAASOpenStackReconciliationRun.STATUS_APPLIED,
+        }
+    else:
+        allowed = {
+            MAASOpenStackReconciliationRun.STATUS_BRANCH_CREATED,
+            MAASOpenStackReconciliationRun.STATUS_APPLY_FAILED_PARTIAL,
+            MAASOpenStackReconciliationRun.STATUS_APPLY_FAILED,
+        }
     if run.status not in allowed:
         raise ValueError(f"Run status '{run.status}' cannot enter apply.")
     if not run.branch_name and not run.branch_id:
@@ -1177,8 +1328,10 @@ def apply_reconciliation_run(
             latest_by_key[rk] = row
 
     ops = run.frozen_operations if isinstance(run.frozen_operations, list) else []
-    if retry_failed_only:
-        target_ops: list[dict[str, Any]] = []
+    if partial_retry:
+        want_failed = bool(retry_failed_only)
+        want_skipped = bool(retry_skipped_only)
+        target_ops = []
         for op in ops:
             if not isinstance(op, dict):
                 continue
@@ -1186,13 +1339,25 @@ def apply_reconciliation_run(
             if not rk:
                 continue
             prev = latest_by_key.get(rk)
-            if prev and str(prev.get("status")) == "failed":
+            if not prev:
+                continue
+            st = str(prev.get("status") or "")
+            if want_failed and st == "failed":
                 target_ops.append(op)
+            elif want_skipped and st == "skipped":
+                target_ops.append(op)
+        target_ops = _expand_partial_retry_ops_with_device_creates(target_ops, ops)
     else:
         target_ops = [op for op in ops if isinstance(op, dict)]
 
-    if retry_failed_only and not target_ops:
-        raise ValueError("No failed rows available to retry.")
+    if partial_retry and not target_ops:
+        if retry_failed_only and retry_skipped_only:
+            msg = "No failed or skipped rows available to retry."
+        elif retry_skipped_only:
+            msg = "No skipped rows available to retry."
+        else:
+            msg = "No failed rows available to retry."
+        raise ValueError(msg)
 
     allowed_sk = all_registered_selection_keys()
     target_ops = sorted(
@@ -1255,7 +1420,7 @@ def apply_reconciliation_run(
                 applied_rows.append(row)
         merged_rows = []
         seen_retry: set[str] = set()
-        if retry_failed_only:
+        if partial_retry:
             for new_row in applied_rows:
                 rk = str(new_row.get("row_key") or "").strip()
                 if rk:
@@ -1286,6 +1451,7 @@ def apply_reconciliation_run(
             "attempted_at": timezone.now().isoformat(),
             "attempted_by": getattr(actor, "username", None) or "",
             "retry_failed_only": bool(retry_failed_only),
+            "retry_skipped_only": bool(retry_skipped_only),
             "summary": {
                 "attempted": len(applied_rows),
                 "created": created,

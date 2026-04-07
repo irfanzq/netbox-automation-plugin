@@ -1807,7 +1807,6 @@ _NEW_FIP_DRIFT_SNAPSHOT_HEADERS: tuple[str, ...] = (
     "Floating IP",
     "Name",
     "NAT inside IP (from OpenStack fixed IP)",
-    "Project",
     "NB Proposed Tenant",
     "NB proposed status",
     "NB proposed role",
