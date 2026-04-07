@@ -21,13 +21,19 @@ from netbox_automation_plugin.sync.reporting.drift_report.new_device_policy impo
     _new_device_fabric_display,
     proposed_netbox_status_for_new_maas_machine,
 )
+from netbox_automation_plugin.sync.reporting.drift_report.birch_audit_scope import (
+    birch_audit_rules_active,
+    openstack_hostnames_short,
+)
 from netbox_automation_plugin.sync.reporting.drift_report.placement import (
     _maas_machine_by_hostname,
     _netbox_placement_from_maas_machine,
 )
 from netbox_automation_plugin.sync.reporting.drift_report.proposed_nic_derived import (
     NIC_DRIFT_AUTHORITY_COL_INDEX,
+    NIC_NEW_AUTHORITY_COL_INDEX,
     bmc_row_proposed_defaults,
+    nic_row_os_mac_is_present,
 )
 from netbox_automation_plugin.sync.reporting.drift_report.proposed_nic_drift import (
     _build_review_serial_rows,
@@ -1317,10 +1323,20 @@ def _proposed_changes_rows(
 
     os_runtime_idx = _runtime_nic_index_by_host_mac(openstack_data)
     os_host_authority = _os_host_authority_map(openstack_data)
+    _birch_audit = birch_audit_rules_active((drift or {}).get("scope_meta") or {})
+    _os_hosts_birch = openstack_hostnames_short(openstack_data)
+
+    def _birch_skip_maas_only_host(h: str) -> bool:
+        if not _birch_audit:
+            return False
+        hn = (h or "").strip().lower().split(".", 1)[0]
+        return bool(hn) and hn not in _os_hosts_birch
 
     def _new_device_nic_rows():
         out = []
         for h in sorted(drift.get("in_maas_not_netbox") or []):
+            if _birch_skip_maas_only_host(h):
+                continue
             m = by_h.get(h, {})
             _, nb_site, nb_loc = _netbox_placement_from_maas_machine(
                 m, netbox_data, _fabric_site_map, _pool_site_map
@@ -1415,6 +1431,8 @@ def _proposed_changes_rows(
 
         out = []
         for h in sorted(drift.get("in_maas_not_netbox") or []):
+            if _birch_skip_maas_only_host(h):
+                continue
             m = by_h.get(h, {})
             bmc_ip = str(m.get("bmc_ip") or "").strip()
             power_type = str(m.get("power_type") or "").strip()
@@ -1486,10 +1504,23 @@ def _proposed_changes_rows(
     add_mgmt_iface_new_devices = _new_device_bmc_rows()
     add_nb_interfaces = _build_add_nb_interface_rows(interface_audit) + _new_device_nic_rows()
     add_nb_interfaces = sorted(add_nb_interfaces, key=lambda x: (x[0] or "").lower())
+    if _birch_audit:
+        add_nb_interfaces = [
+            r
+            for r in add_nb_interfaces
+            if not (
+                isinstance(r, (list, tuple))
+                and len(r) > NIC_NEW_AUTHORITY_COL_INDEX
+                and str(r[NIC_NEW_AUTHORITY_COL_INDEX]).strip() == "[MAAS]"
+                and not nic_row_os_mac_is_present(r)
+            )
+        ]
 
     add_devices = []
     add_devices_review_only = []
     for h in sorted(drift.get("in_maas_not_netbox") or []):
+        if _birch_skip_maas_only_host(h):
+            continue
         m = by_h.get(h, {})
         ifaces = m.get("interfaces") or []
         nic_count = sum(1 for r in ifaces if str(r.get("mac") or "").strip())
@@ -1900,7 +1931,19 @@ def _proposed_changes_rows(
                 continue
             row[_nic_drift_auth_col] = "[MAAS]"
         filtered_update_nic.append(row)
-    update_nic = filtered_update_nic
+    if _birch_audit:
+        update_nic = [
+            r
+            for r in filtered_update_nic
+            if not (
+                isinstance(r, (list, tuple))
+                and len(r) > _nic_drift_auth_col
+                and str(r[_nic_drift_auth_col]).strip() == "[MAAS]"
+                and not nic_row_os_mac_is_present(r)
+            )
+        ]
+    else:
+        update_nic = filtered_update_nic
     add_proposed_missing_vlans = build_proposed_missing_vlan_rows(
         update_nic,
         add_nb_interfaces,

@@ -19,6 +19,30 @@ from typing import Any
 # Must match HEADERS_DETAIL_NEW_NICS / HEADERS_DETAIL_NIC_DRIFT "Authority" position.
 NIC_DRIFT_AUTHORITY_COL_INDEX = 20
 NIC_NEW_AUTHORITY_COL_INDEX = 20
+# "OS MAC" column (same index in new-NIC and NIC-drift detail tables).
+NIC_OS_MAC_COL_INDEX = 11
+
+
+def nic_row_os_mac_is_present(row: Any) -> bool:
+    """
+    True when the row's OS MAC cell holds a normalized 6-octet Ethernet address.
+    Placeholders (—, -, _, n/a, none) and non-MAC text are treated as absent.
+    """
+    if not isinstance(row, (list, tuple)) or len(row) <= NIC_OS_MAC_COL_INDEX:
+        return False
+    raw = str(row[NIC_OS_MAC_COL_INDEX] or "").strip()
+    if not raw or raw.casefold() in {"—", "-", "_", "none", "n/a"}:
+        return False
+    s = raw.lower().replace("-", ":")
+    parts = [p for p in s.split(":") if p]
+    if len(parts) != 6:
+        return False
+    try:
+        for p in parts:
+            int(p, 16)
+    except ValueError:
+        return False
+    return True
 
 # Drift picker + default suggestions must match these strings exactly.
 INTF_ROLE_PICKLIST = ("BMC", "Management", "Data", "GPU", "CPU")
