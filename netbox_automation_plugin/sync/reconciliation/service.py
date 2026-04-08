@@ -55,6 +55,7 @@ from .apply_cells import (
     _interface_mac_vlan_ip_from_cells,
     _norm_header,
     apply_row_operation,
+    consume_apply_routing_debug_snapshot,
     netbox_write_preview_cells,
     netbox_write_preview_fieldnames,
     netbox_write_preview_ordered_fieldnames,
@@ -206,6 +207,22 @@ def _build_field_changes_from_proj_and_snapshot(
             out.append({"header": k, "before": before, "after": after})
         return out
     return []
+
+
+def _attach_routing_debug_to_apply_result(result: dict[str, Any]) -> None:
+    """Merge per-row routing snapshot (populated by :func:`apply_row_operation`) into result."""
+    snap = consume_apply_routing_debug_snapshot()
+    if not snap:
+        return
+    result["routing_debug"] = snap
+    result["routing_debug_text"] = json.dumps(snap, indent=2, sort_keys=True, default=str)
+    logger.debug(
+        "reconciliation apply routing row_key=%s action=%s status=%s snapshot=%s",
+        result.get("row_key"),
+        result.get("action"),
+        result.get("status"),
+        json.dumps(snap, sort_keys=True, default=str),
+    )
 
 
 def _finalize_apply_row(op: dict[str, Any], result: dict[str, Any]) -> dict[str, Any]:
@@ -523,17 +540,18 @@ def _execute_branch_apply(op: dict[str, Any], branch_db: str | None = None) -> d
         result["status"] = "failed"
         result["reason"] = "failed_not_implemented"
         return _finalize_apply_row(op, result)
-    # Thread branch_db into the op dict so handlers can open per-save atomic() savepoints
-    # that force netbox_branching to treat each save as a separate transaction boundary,
-    # preventing the diff UI from collapsing multiple saves on the same object into one row
-    # that shows only the last mutation (e.g. tags swallowing MAC/VLAN).
-    if branch_db:
-        op = {**op, "branch_db": branch_db}
+    # Thread branch_db into the op dict so handlers and ``_ab()`` / savepoints stay aligned.
+    # Always copy the op dict; set branch_db whenever the caller passed it (including the
+    # literal alias ``default``).
+    op = dict(op)
+    if branch_db is not None:
+        op["branch_db"] = str(branch_db).strip()
     # Accept 3- or 4-tuple from ``apply_row_operation`` (older plugin wheels / mixed deploys).
     _ar = apply_row_operation(op)
     if not isinstance(_ar, tuple) or len(_ar) not in (3, 4):
         result["status"] = "failed"
         result["reason"] = "failed_bad_apply_return"
+        _attach_routing_debug_to_apply_result(result)
         return _finalize_apply_row(op, result)
     st, reason, skip_detail = _ar[0], _ar[1], _ar[2]
     written_meta = _ar[3] if len(_ar) == 4 and isinstance(_ar[3], dict) else None
@@ -547,6 +565,7 @@ def _execute_branch_apply(op: dict[str, Any], branch_db: str | None = None) -> d
         )
     if branch_db and st in ("created", "updated"):
         _capture_applied_object_snapshot(op, result, branch_db)
+    _attach_routing_debug_to_apply_result(result)
     return _finalize_apply_row(op, result)
 
 
@@ -2010,7 +2029,16 @@ def apply_reconciliation_run(
             branch_name=run.branch_name,
         )
         applied_rows: list[dict[str, Any]] = []
+        run_routing_core: dict[str, Any] | None = None
         if branch_obj is not None:
+            run_routing_core = {
+                "reconciliation_run_branch_id": run.branch_id,
+                "reconciliation_run_branch_name": (run.branch_name or "").strip(),
+                "netbox_branch_model_pk": getattr(branch_obj, "pk", None),
+                "netbox_branch_connection_name": str(
+                    getattr(branch_obj, "connection_name", None) or ""
+                ).strip(),
+            }
             branch_db = str(getattr(branch_obj, "connection_name", None) or "").strip()
             if not branch_db:
                 bd_msg = (
@@ -2117,6 +2145,11 @@ def apply_reconciliation_run(
             "rows": merged_rows,
             "display_rows": _apply_result_rows_for_comprehensive_display(merged_rows),
         }
+        if run_routing_core is not None:
+            apply_payload["run_routing_context"] = run_routing_core
+            apply_payload["run_routing_context_text"] = json.dumps(
+                run_routing_core, indent=2, sort_keys=True, default=str
+            )
         # Partial re-apply: optional ``last_attempt_rows`` for a "this click only" drill-down.
         if partial_retry:
             apply_payload["last_attempt_rows"] = applied_rows

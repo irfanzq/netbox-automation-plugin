@@ -63,6 +63,16 @@
   </div>
 {% endif %}
 
+{% if apply_results.run_routing_context_text %}
+  <div class="card mb-3 border-info">
+    <h5 class="card-header">{% trans "Apply batch — NetBox branch routing (copy for support)" %}</h5>
+    <div class="card-body py-2">
+      <p class="small text-body-secondary mb-2">{% trans "Reconciliation run target branch and DB connection name. Compare with per-row blocks below. Paste this JSON when troubleshooting main vs branch writes." %}</p>
+      <pre class="small mb-0 text-break font-monospace" style="white-space: pre-wrap; max-height: 16rem; overflow: auto;">{{ apply_results.run_routing_context_text }}</pre>
+    </div>
+  </div>
+{% endif %}
+
 {% if apply_results.display_rows or apply_results.rows %}
   {% with comprehensive_rows=apply_results.display_rows|default:apply_results.rows %}
   <div class="card mb-3">
@@ -83,7 +93,7 @@
               <th>{% trans "Action" %}</th>
               <th>{% trans "Summary" %}</th>
               <th>{% trans "NetBox write (preview)" %}</th>
-              <th>{% trans "Detail (exceptions, skip reasons)" %}</th>
+              <th>{% trans "Detail (exceptions, skip reasons, routing)" %}</th>
             </tr>
           </thead>
           <tbody>
@@ -104,6 +114,10 @@
                     {{ row.exception_type|default:"" }}{% if row.exception_type and row.exception_message %}: {% endif %}{{ row.exception_message|default:"" }}
                   {% else %}
                     —
+                  {% endif %}
+                  {% if row.routing_debug_text %}
+                    <div class="mt-2 pt-2 border-top text-body-secondary small">{% trans "Routing debug (copy)" %}</div>
+                    <pre class="small mb-0 text-break font-monospace mt-1" style="white-space: pre-wrap; max-height: 12rem; overflow: auto;">{{ row.routing_debug_text }}</pre>
                   {% endif %}
                 </td>
               </tr>
@@ -131,7 +145,7 @@
               <th>{% trans "Action" %}</th>
               <th>{% trans "Summary" %}</th>
               <th>{% trans "NetBox write (preview)" %}</th>
-              <th>{% trans "Detail (exceptions, skip reasons)" %}</th>
+              <th>{% trans "Detail (exceptions, skip reasons, routing)" %}</th>
             </tr>
           </thead>
           <tbody>
@@ -152,6 +166,10 @@
                     {{ row.exception_type|default:"" }}{% if row.exception_type and row.exception_message %}: {% endif %}{{ row.exception_message|default:"" }}
                   {% else %}
                     —
+                  {% endif %}
+                  {% if row.routing_debug_text %}
+                    <div class="mt-2 pt-2 border-top text-body-secondary small">{% trans "Routing debug (copy)" %}</div>
+                    <pre class="small mb-0 text-break font-monospace mt-1" style="white-space: pre-wrap; max-height: 12rem; overflow: auto;">{{ row.routing_debug_text }}</pre>
                   {% endif %}
                 </td>
               </tr>

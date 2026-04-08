@@ -141,7 +141,9 @@ def _validate_run(run_id: int, *, verbose: bool = False) -> dict[str, Any]:
                     with reconciliation_apply_guard(branch_obj, branch_db):
                         sid = transaction.savepoint(using=branch_db)
                         try:
-                            status, reason, _skip_detail, _written = apply_row_operation(op)
+                            status, reason, _skip_detail, _written = apply_row_operation(
+                                {**op, "branch_db": branch_db}
+                            )
                         finally:
                             transaction.savepoint_rollback(sid, using=branch_db)
             except Exception as e:

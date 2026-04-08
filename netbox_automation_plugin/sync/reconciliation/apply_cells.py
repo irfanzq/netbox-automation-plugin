@@ -19,7 +19,9 @@ from __future__ import annotations
 
 import ipaddress
 import logging
+import os
 import re
+import threading
 from contextlib import contextmanager
 from contextvars import ContextVar
 from functools import lru_cache
@@ -37,6 +39,7 @@ from netbox_automation_plugin.sync.reporting.drift_report.drift_nb_picker_catalo
 from netbox_automation_plugin.sync.reconciliation.branch import (
     check_reconciliation_apply_safe_to_mutate,
     get_reconciliation_apply_guard_context,
+    get_netbox_plugin_active_branch,
 )
 from netbox_automation_plugin.sync.reconciliation.netbox_write_projection import (
     netbox_write_projection_for_op,
@@ -133,6 +136,91 @@ def _skip_missing_prereq(detail: str) -> tuple[str, str, str]:
 _APPLY_BRANCH_DB: ContextVar[str] = ContextVar(
     "netbox_automation_apply_branch_db", default="default"
 )
+
+# Per-thread snapshot of ORM routing context for one apply_row_operation call (see service.py).
+_apply_routing_debug_tls = threading.local()
+
+
+def _reconciliation_apply_unscoped_allowed(op: dict[str, Any]) -> bool:
+    if op.get("_allow_unscoped_apply"):
+        return True
+    flag = (os.environ.get("NETBOX_AUTOMATION_ALLOW_UNSCOPED_APPLY") or "").strip().lower()
+    return flag in ("1", "true", "yes")
+
+
+def _clear_tls_routing_snapshot() -> None:
+    try:
+        delattr(_apply_routing_debug_tls, "last_row_snapshot")
+    except AttributeError:
+        pass
+
+
+def _set_tls_routing_snapshot(snap: dict[str, Any]) -> None:
+    _apply_routing_debug_tls.last_row_snapshot = snap
+
+
+def consume_apply_routing_debug_snapshot() -> dict[str, Any] | None:
+    """Pop routing debug dict for the last :func:`apply_row_operation` (branch apply path)."""
+    snap = getattr(_apply_routing_debug_tls, "last_row_snapshot", None)
+    _clear_tls_routing_snapshot()
+    return snap if isinstance(snap, dict) else None
+
+
+def _build_reconciliation_apply_routing_snapshot(op: dict[str, Any]) -> dict[str, Any]:
+    """
+    JSON-friendly routing context at handler entry (after ``branch_db`` ContextVar is set).
+
+    Explains how Django ORM will route saves for this row; does not prove PostgreSQL schema
+    (that depends on NetBox Branching + ``activate_branch``).
+    """
+    from django.conf import settings
+
+    out: dict[str, Any] = {}
+    op_bd = str(op.get("branch_db") or "").strip()
+    out["op_branch_db"] = op_bd
+    ctx_eff = str(op.get("branch_db") or "default").strip() or "default"
+    out["apply_contextvar_set_to"] = ctx_eff
+    g = get_reconciliation_apply_guard_context()
+    if g:
+        out["reconciliation_guard_branch_pk"] = g.get("branch_pk")
+        out["reconciliation_guard_connection_name"] = str(g.get("branch_db") or "").strip()
+    else:
+        out["reconciliation_guard_branch_pk"] = None
+        out["reconciliation_guard_connection_name"] = ""
+    active = get_netbox_plugin_active_branch()
+    if active is not None:
+        out["netbox_active_branch_pk"] = getattr(active, "pk", None)
+        out["netbox_active_branch_name"] = str(getattr(active, "name", "") or "").strip()
+    else:
+        out["netbox_active_branch_pk"] = None
+        out["netbox_active_branch_name"] = ""
+    rab = (_ab() or "").strip() or "default"
+    out["resolved_branch_db_alias"] = rab
+    orm_u = _orm_alias()
+    out["django_save_using_kwarg"] = orm_u
+    routers = list(getattr(settings, "DATABASE_ROUTERS", None) or [])
+    joined = " ".join(str(x) for x in routers)
+    out["branch_router_configured"] = "netbox_branching.database.BranchAwareRouter" in joined
+    gpk = out.get("reconciliation_guard_branch_pk")
+    apk = out.get("netbox_active_branch_pk")
+    try:
+        out["guard_matches_netbox_active_branch"] = (
+            gpk is not None and apk is not None and int(gpk) == int(apk)
+        )
+    except (TypeError, ValueError):
+        out["guard_matches_netbox_active_branch"] = False
+    if orm_u is None:
+        out["how_writes_route"] = (
+            "save() omits using=; ORM uses default manager. Under activate_branch, "
+            "BranchAwareRouter should send branching models to the active branch schema "
+            f"(connection_name={rab!r}). Literal 'default' here is normal for many installs."
+        )
+    else:
+        out["how_writes_route"] = (
+            f"save(using={orm_u!r}) / atomic(using={orm_u!r}) for nested savepoints; "
+            "this connection alias should be the branch DB."
+        )
+    return out
 
 
 def _ab() -> str:
@@ -4489,8 +4577,25 @@ def apply_row_operation(
     - 3-tuple with optional human ``reason_detail`` (skips/failures)
     - 4-tuple adding optional ``written_object`` (``{"label": ..., "pk": ...}`` for post-apply snapshot)
     """
+    _clear_tls_routing_snapshot()
     if (gerr := check_reconciliation_apply_safe_to_mutate(op)) is not None:
         return "failed", "failed_reconciliation_branch_guard", gerr, None
+
+    branch_db_val = str(op.get("branch_db") or "").strip()
+    if not branch_db_val and not _reconciliation_apply_unscoped_allowed(op):
+        logger.error(
+            "apply_row_operation missing branch_db in op (ContextVar would fall back to "
+            "'default'). row_key=%s action=%s selection_key=%s",
+            op.get("row_key"),
+            op.get("action"),
+            op.get("selection_key"),
+        )
+        return (
+            "failed",
+            "failed_missing_branch_db",
+            "branch_db missing from apply op — aborted to protect NetBox main.",
+            None,
+        )
 
     action = str(op.get("action") or "").strip()
     fn = _APPLY_FUNCS.get(action)
@@ -4501,6 +4606,7 @@ def apply_row_operation(
     op_use["cells"] = _cells_scoped_for_apply(sk, op.get("cells"))
     # Publish branch_db so all handlers and helpers can open correctly-aliased savepoints.
     _bdb_token = _APPLY_BRANCH_DB.set(str(op.get("branch_db") or "default"))
+    _set_tls_routing_snapshot(_build_reconciliation_apply_routing_snapshot(op))
     try:
         raw = fn(op_use)
     finally:
