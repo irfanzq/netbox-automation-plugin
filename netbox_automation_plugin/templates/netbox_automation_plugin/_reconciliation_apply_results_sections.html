@@ -1,7 +1,36 @@
 {% load i18n %}
+{% if apply_results.cumulative_summary %}
+  <div class="card mb-3">
+    <h5 class="card-header">{% trans "Comprehensive apply state (latest status per row)" %}</h5>
+    <div class="card-body py-2">
+      <p class="small text-body-secondary mb-2">
+        {% trans "Each frozen row appears once. Earlier failed or blocked skips are replaced when a re-apply fixes that row. Counts below are the current outcome after your last apply." %}
+      </p>
+      <div class="row g-2 small">
+        <div class="col-md-2"><strong>{% trans "Rows" %}:</strong> {{ apply_results.cumulative_summary.rows|default:0 }}</div>
+        <div class="col-md-2"><strong>{% trans "Succeeded" %}:</strong> {{ apply_results.cumulative_summary.succeeded|default:0 }}</div>
+        <div class="col-md-2"><strong>{% trans "Created" %}:</strong> {{ apply_results.cumulative_summary.created|default:0 }}</div>
+        <div class="col-md-2"><strong>{% trans "Updated" %}:</strong> {{ apply_results.cumulative_summary.updated|default:0 }}</div>
+        <div class="col-md-2"><strong>{% trans "Skipped (no-op)" %}:</strong> {{ apply_results.cumulative_summary.skipped_benign|default:0 }}</div>
+      </div>
+      <div class="row g-2 small mt-2">
+        <div class="col-md-3"><strong class="text-danger">{% trans "Still failed" %}:</strong> {{ apply_results.cumulative_summary.failed|default:0 }}</div>
+        <div class="col-md-4"><strong class="text-warning">{% trans "Skipped (needs attention)" %}:</strong> {{ apply_results.cumulative_summary.skipped_needs_attention|default:0 }}</div>
+        <div class="col-md-3"><strong>{% trans "Needs attention (total)" %}:</strong> {{ apply_results.cumulative_summary.needs_attention|default:0 }}</div>
+      </div>
+    </div>
+  </div>
+{% endif %}
+
 {% if apply_results.summary %}
   <div class="card mb-3">
-    <h5 class="card-header">{% trans "Latest apply summary" %}</h5>
+    <h5 class="card-header">
+      {% if apply_results.last_attempt_rows %}
+        {% trans "Latest re-apply attempt (this click only)" %}
+      {% else %}
+        {% trans "Latest apply attempt" %}
+      {% endif %}
+    </h5>
     <div class="card-body py-2">
       <div class="row g-2 small">
         <div class="col-md-2"><strong>{% trans "Attempted" %}:</strong> {{ apply_results.summary.attempted|default:0 }}</div>
@@ -19,7 +48,7 @@
       </div>
       {% if apply_results.summary.first_failed_exception %}
         <div class="alert alert-warning small mb-0 mt-3">
-          <strong>{% trans "First exception (per-row savepoints isolate later rows)" %}</strong>
+          <strong>{% trans "First exception (this attempt; per-row savepoints isolate later rows)" %}</strong>
           <div class="mt-1 font-monospace">
             {{ apply_results.summary.first_failed_exception.exception_type|default:"—" }}:
             {{ apply_results.summary.first_failed_exception.exception_message|default:"—" }}
@@ -34,10 +63,14 @@
   </div>
 {% endif %}
 
-{% if apply_results.rows %}
+{% if apply_results.display_rows or apply_results.rows %}
+  {% with comprehensive_rows=apply_results.display_rows|default:apply_results.rows %}
   <div class="card mb-3">
-    <h5 class="card-header">{% trans "Apply row results" %}</h5>
-    <div class="card-body p-0">
+    <h5 class="card-header">{% trans "Apply row results (comprehensive)" %}</h5>
+    <div class="card-body py-2">
+      <p class="small text-body-secondary mb-0">{% trans "All frozen rows with their latest merged status. Order: failed and skips that need action first, then updates and creates, then no-op skips." %}</p>
+    </div>
+    <div class="card-body p-0 border-top">
       <div class="table-responsive">
         <table class="table table-sm table-striped mb-0">
           <thead>
@@ -53,7 +86,7 @@
             </tr>
           </thead>
           <tbody>
-            {% for row in apply_results.rows %}
+            {% for row in comprehensive_rows %}
               <tr>
                 <td class="small"><span class="badge text-bg-secondary">{{ row.status|default:"—" }}</span></td>
                 <td class="small text-monospace">{{ row.reason|default:"—" }}</td>
@@ -78,6 +111,53 @@
       </div>
     </div>
   </div>
+  {% endwith %}
+
+  {% if apply_results.last_attempt_rows %}
+  <details class="card mb-3">
+    <summary class="card-header user-select-none" style="cursor: pointer;">{% trans "This re-apply only — rows executed in the last partial apply" %}</summary>
+    <div class="card-body p-0 border-top">
+      <div class="table-responsive">
+        <table class="table table-sm table-striped mb-0">
+          <thead>
+            <tr>
+              <th>{% trans "Status" %}</th>
+              <th>{% trans "Reason" %}</th>
+              <th>{% trans "Row key" %}</th>
+              <th>{% trans "Section" %}</th>
+              <th>{% trans "Action" %}</th>
+              <th>{% trans "Summary" %}</th>
+              <th>{% trans "NetBox write (preview)" %}</th>
+              <th>{% trans "Detail (exceptions, skip reasons)" %}</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for row in apply_results.last_attempt_rows %}
+              <tr>
+                <td class="small"><span class="badge text-bg-secondary">{{ row.status|default:"—" }}</span></td>
+                <td class="small text-monospace">{{ row.reason|default:"—" }}</td>
+                <td class="small text-monospace text-break">{{ row.row_key|default:"—" }}</td>
+                <td class="small text-monospace">{{ row.selection_key|default:"—" }}</td>
+                <td class="small">{{ row.action|default:"—" }}</td>
+                <td class="small">{{ row.summary|default:"—" }}</td>
+                <td class="small text-break font-monospace" style="min-width: 14rem; max-width: 36rem;">{% if row.write_preview %}{{ row.write_preview }}{% else %}—{% endif %}</td>
+                <td class="small text-break font-monospace">
+                  {% if row.reason_detail %}
+                    {{ row.reason_detail }}
+                  {% elif row.exception_type or row.exception_message %}
+                    {{ row.exception_type|default:"" }}{% if row.exception_type and row.exception_message %}: {% endif %}{{ row.exception_message|default:"" }}
+                  {% else %}
+                    —
+                  {% endif %}
+                </td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </details>
+  {% endif %}
 {% elif not apply_results.summary %}
   <div class="alert alert-secondary mb-0">{% trans "No apply has been recorded for this run yet. Use Apply on the reconciliation run page; you will be redirected here when apply finishes." %}</div>
 {% endif %}

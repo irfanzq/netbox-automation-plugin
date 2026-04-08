@@ -688,12 +688,27 @@ def _nic_ip_blob_parse_stats(ip_blob: str) -> tuple[bool, bool]:
     return True, ok
 
 
-NEW_NIC_RECON_PAYLOAD_HEADERS: tuple[str, ...] = (
+# Core Frozen-action headers (first block copied in ``new_nic_cells_for_reconciliation``).
+NEW_NIC_RECON_CORE_HEADERS: tuple[str, ...] = (
     "Host",
     "NB Proposed intf Label",
     "NB Proposed intf Type",
     "Suggested NB name",
     "Proposed Action",
+)
+# Site / scope / VLAN-group hints must survive freezing so ``apply_create_interface`` can
+# align ``Device.site`` with recon-created VLANs (same NB site as IPAM rows) and resolve
+# untagged VLAN by group+VID when device-scoped queries are ambiguous.
+NEW_NIC_RECON_SCOPE_HEADERS: tuple[str, ...] = (
+    "NB site",
+    "NetBox site",
+    "NB location",
+    "NetBox location",
+    "NB proposed VLAN group",
+)
+NEW_NIC_RECON_PAYLOAD_HEADERS: tuple[str, ...] = (
+    *NEW_NIC_RECON_CORE_HEADERS,
+    *NEW_NIC_RECON_SCOPE_HEADERS,
     "Parsed MAC",
     "Parsed untagged VLAN",
     "Parsed IPs",
@@ -713,7 +728,7 @@ def new_nic_cells_for_reconciliation(full_cells: dict[str, str]) -> dict[str, st
     ``Parsed *`` keys are for preview/diff and apply resolution (MAC/VLAN/IP).
     """
     out: dict[str, str] = {}
-    for k in NEW_NIC_RECON_PAYLOAD_HEADERS[:5]:
+    for k in NEW_NIC_RECON_CORE_HEADERS:
         if k == "Proposed Action":
             v = (
                 full_cells.get("Proposed Action")
@@ -725,6 +740,8 @@ def new_nic_cells_for_reconciliation(full_cells: dict[str, str]) -> dict[str, st
             out[k] = str(v).strip()
         else:
             out[k] = str(full_cells.get(k) or "").strip()
+    for k in NEW_NIC_RECON_SCOPE_HEADERS:
+        out[k] = str(full_cells.get(k) or "").strip()
     props = out["Proposed Action"]
     p_mac, p_vlan, p_ips = _parse_nic_proposed_properties_segments(props)
     s_mac, s_vlan, s_ips = _parse_set_netbox_interface_directives(props)
@@ -3251,7 +3268,13 @@ def _reuse_iface_untagged_vlan_if_vid_matches(iface: Any, vid: int) -> Any | Non
     return cur
 
 
-def _resolve_untagged_vlan_for_apply(device: Any, iface: Any | None, vid: int | None) -> Any | None:
+def _resolve_untagged_vlan_for_apply(
+    device: Any,
+    iface: Any | None,
+    vid: int | None,
+    *,
+    vlan_group_name: str | None = None,
+) -> Any | None:
     """
     Resolve VLAN for interface apply. Returns None when no VID requested (including MAAS
     native where ``vlan.vid`` is 0—handled upstream by :func:`_parse_vlan_vid`).
@@ -3266,6 +3289,10 @@ def _resolve_untagged_vlan_for_apply(device: Any, iface: Any | None, vid: int | 
     u = _resolve_vlan_for_device(device, vid_i)
     if u is None and iface is not None:
         u = _reuse_iface_untagged_vlan_if_vid_matches(iface, vid_i)
+    if u is None:
+        gn = (vlan_group_name or "").strip()
+        if gn and gn not in {"—", "-"}:
+            u = _resolve_vlan_by_group_name_and_vid(gn, vid_i)
     return u
 
 
@@ -3563,8 +3590,9 @@ def apply_create_interface(op: dict[str, Any]) -> tuple[str, str]:
             f"Values above {_NETBOX_IEEE_VLAN_VID_MAX} are often VXLAN VNIs or fabric ids—use a "
             f"1–{_NETBOX_IEEE_VLAN_VID_MAX} VLAN in NetBox or adjust the drift source."
         )
-    site_hint = _cell(cells, "NB site")
-    loc_hint = _cell(cells, "NB location")
+    site_hint = _cell(cells, "NB site", "NetBox site")
+    loc_hint = _cell(cells, "NB location", "NetBox location")
+    vlan_group_hint = _cell(cells, "NB proposed VLAN group")
     type_slug = _resolve_interface_type_slug(_cell(cells, "NB Proposed intf Type"))
     role_label = _cell(cells, "NB Proposed intf Label")
     if not host or not if_name:
@@ -3589,20 +3617,27 @@ def apply_create_interface(op: dict[str, Any]) -> tuple[str, str]:
             f'Device "{host}" not found in NetBox. Include a new-device row, or set NB site (and '
             f"role/type on the drift audit) so the reconciler can create the device before interfaces."
         )
+    dev_geom_dirty = False
     if site_hint:
         site_obj = _resolve_by_name(Site, site_hint)
         if site_obj and dev.site_id != site_obj.pk:
             _netbox_changelog_snapshot(dev)
             dev.site = site_obj
             dev.save()
+            dev_geom_dirty = True
     if loc_hint:
         loc_obj = _resolve_by_name(Location, loc_hint)
         if loc_obj and getattr(dev, "location_id", None) != loc_obj.pk:
             _netbox_changelog_snapshot(dev)
             dev.location = loc_obj
             dev.save()
+            dev_geom_dirty = True
+    if dev_geom_dirty:
+        dev.refresh_from_db(fields=["site_id", "location_id"])
     iface = Interface.objects.filter(device=dev, name=if_name).first()
-    untagged = _resolve_untagged_vlan_for_apply(dev, iface, vid)
+    untagged = _resolve_untagged_vlan_for_apply(
+        dev, iface, vid, vlan_group_name=vlan_group_hint or None
+    )
     if vid is not None and untagged is None:
         try:
             vnum = int(vid)
@@ -3673,6 +3708,7 @@ def apply_update_interface(op: dict[str, Any]) -> tuple[str, str]:
     role_label = _cell(cells, "NB Proposed intf Label")
     if not host:
         return _skip_missing_prereq("NIC drift row missing Host.")
+    vlan_group_hint = _cell(cells, "NB proposed VLAN group")
     mac_intent = _nic_mac_intent_raw(cells, include_nb_fallback=True)
     if mac_intent and not mac:
         mac_tail = "…" if len(mac_intent) > 80 else ""
@@ -3701,7 +3737,9 @@ def apply_update_interface(op: dict[str, Any]) -> tuple[str, str]:
             f'No interface on device "{host}" matching NB intf "{nb_name}" or MAAS intf "{ma_name}".'
         )
     _interface_refresh_safe(iface)
-    untagged = _resolve_untagged_vlan_for_apply(dev, iface, vid)
+    untagged = _resolve_untagged_vlan_for_apply(
+        dev, iface, vid, vlan_group_name=vlan_group_hint or None
+    )
     if vid is not None and untagged is None:
         try:
             vnum = int(vid)
@@ -3991,7 +4029,10 @@ def _netbox_preview_source_header_norms(selection_key: str) -> frozenset[str] | 
             "Suggested NB name",
             "MAAS intf",
             "NB site",
+            "NetBox site",
             "NB location",
+            "NetBox location",
+            "NB proposed VLAN group",
             "NB Proposed intf Label",
             "NB Proposed intf Type",
             "Parsed MAC",
@@ -4017,6 +4058,7 @@ def _netbox_preview_source_header_norms(selection_key: str) -> frozenset[str] | 
             "MAAS VLAN",
             "OS runtime VLAN",
             "NB VLAN",
+            "NB proposed VLAN group",
             "MAAS IPs",
             "OS runtime IP",
             "NB IPs",

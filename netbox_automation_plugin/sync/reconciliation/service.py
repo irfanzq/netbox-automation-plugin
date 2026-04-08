@@ -234,6 +234,92 @@ def _first_failed_exception_snapshot(rows: list[dict[str, Any]]) -> dict[str, An
         }
     return None
 
+
+# Skipped rows with these reasons are “already aligned / no-op”, not operator attention items.
+_APPLY_SUMMARY_BENIGN_SKIP_REASONS: frozenset[str] = frozenset({"skipped_already_desired"})
+
+
+def _apply_row_comprehensive_sort_key(row: dict[str, Any]) -> tuple[int, str, str]:
+    """
+    Sort merged apply rows for the UI: outstanding issues first, then successes, benign skips last.
+    """
+    st = str(row.get("status") or "")
+    reason = str(row.get("reason") or "")
+    sk = str(row.get("selection_key") or "")
+    summ = str(row.get("summary") or "")
+    if st == "failed":
+        tier = 0
+    elif st == "skipped" and reason not in _APPLY_SUMMARY_BENIGN_SKIP_REASONS:
+        tier = 1
+    elif st == "updated":
+        tier = 2
+    elif st == "created":
+        tier = 3
+    elif st == "skipped":
+        tier = 4
+    else:
+        tier = 5
+    return (tier, sk, summ)
+
+
+def _apply_result_rows_for_comprehensive_display(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    usable = [r for r in rows if isinstance(r, dict)]
+    return sorted(usable, key=_apply_row_comprehensive_sort_key)
+
+
+def apply_result_row_needs_attention(row: dict[str, Any] | None) -> bool:
+    """Whether a merged apply row still needs operator follow-up (failed or non-benign skip)."""
+    if not isinstance(row, dict):
+        return False
+    st = str(row.get("status") or "")
+    if st == "failed":
+        return True
+    if st != "skipped":
+        return False
+    return str(row.get("reason") or "") not in _APPLY_SUMMARY_BENIGN_SKIP_REASONS
+
+
+def _summarize_apply_result_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """Per-status counts over merged ``apply_results[\"rows\"]`` (latest status per frozen row)."""
+    n = 0
+    failed = skipped = created = updated = other = 0
+    skipped_benign = skipped_attention = 0
+    for r in rows:
+        if not isinstance(r, dict):
+            continue
+        n += 1
+        st = str(r.get("status") or "")
+        if st == "failed":
+            failed += 1
+        elif st == "skipped":
+            skipped += 1
+            reason = str(r.get("reason") or "")
+            if reason in _APPLY_SUMMARY_BENIGN_SKIP_REASONS:
+                skipped_benign += 1
+            else:
+                skipped_attention += 1
+        elif st == "created":
+            created += 1
+        elif st == "updated":
+            updated += 1
+        else:
+            other += 1
+    succeeded = created + updated
+    out: dict[str, Any] = {
+        "rows": n,
+        "created": created,
+        "updated": updated,
+        "succeeded": succeeded,
+        "skipped": skipped,
+        "skipped_benign": skipped_benign,
+        "skipped_needs_attention": skipped_attention,
+        "failed": failed,
+        "needs_attention": failed + skipped_attention,
+    }
+    if other:
+        out["other_status"] = other
+    return out
+
 SK_TO_ACTION = {
     "detail_new_devices": "create_device",
     "detail_review_only_devices": "review_device",
@@ -1358,7 +1444,7 @@ def apply_reconciliation_run(
             st = str(prev.get("status") or "")
             if want_failed and st == "failed":
                 target_ops.append(op)
-            elif want_skipped and st == "skipped":
+            elif want_skipped and st == "skipped" and apply_result_row_needs_attention(prev):
                 target_ops.append(op)
         target_ops = _expand_partial_retry_ops_with_device_creates(target_ops, ops)
     else:
@@ -1474,21 +1560,28 @@ def apply_reconciliation_run(
             final_status = MAASOpenStackReconciliationRun.STATUS_APPLY_FAILED_PARTIAL
 
         first_fail = _first_failed_exception_snapshot(applied_rows)
-        run.apply_results = {
+        batch_summary = {
+            "attempted": len(applied_rows),
+            "created": created,
+            "updated": updated,
+            "skipped": skipped,
+            "failed": failed,
+            **({"first_failed_exception": first_fail} if first_fail else {}),
+        }
+        apply_payload: dict[str, Any] = {
             "attempted_at": timezone.now().isoformat(),
             "attempted_by": getattr(actor, "username", None) or "",
             "retry_failed_only": bool(retry_failed_only),
             "retry_skipped_only": bool(retry_skipped_only),
-            "summary": {
-                "attempted": len(applied_rows),
-                "created": created,
-                "updated": updated,
-                "skipped": skipped,
-                "failed": failed,
-                **({"first_failed_exception": first_fail} if first_fail else {}),
-            },
+            "summary": batch_summary,
+            "cumulative_summary": _summarize_apply_result_rows(merged_rows),
             "rows": merged_rows,
+            "display_rows": _apply_result_rows_for_comprehensive_display(merged_rows),
         }
+        # Partial re-apply: optional ``last_attempt_rows`` for a "this click only" drill-down.
+        if partial_retry:
+            apply_payload["last_attempt_rows"] = applied_rows
+        run.apply_results = apply_payload
         run.status = final_status
         if failed > 0:
             run.error_message = "Apply completed with failures. Review per-row results."

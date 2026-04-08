@@ -23,6 +23,7 @@ from netbox_automation_plugin.workflows.maas_openstack_sync.history_models impor
     MAASOpenStackDriftRun,
 )
 from .service import (
+    apply_result_row_needs_attention,
     frozen_operations_apply_snapshots,
     frozen_operations_for_display,
     group_apply_snapshot_tables,
@@ -57,7 +58,11 @@ def _reconciliation_run_page_context(
         1 for r in result_rows if isinstance(r, dict) and str(r.get("status") or "") == "failed"
     )
     skipped_row_n = sum(
-        1 for r in result_rows if isinstance(r, dict) and str(r.get("status") or "") == "skipped"
+        1
+        for r in result_rows
+        if isinstance(r, dict)
+        and str(r.get("status") or "") == "skipped"
+        and apply_result_row_needs_attention(r)
     )
     retry_eligible_status = run.status in {
         MAASOpenStackReconciliationRun.STATUS_APPLY_FAILED_PARTIAL,
