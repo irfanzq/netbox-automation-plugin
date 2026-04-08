@@ -138,41 +138,32 @@ def _build_field_changes_from_proj_and_snapshot(
     proj: dict[str, str],
     snap: dict[str, str] | None,
 ) -> list[dict[str, str]]:
+    """
+    Build the field-changes list shown in the apply results log.
+
+    Only projection fields (what the handler was asked to write) are included —
+    never extra snap fields that were not part of the operation.  The snap value
+    is used as the authoritative "after" value when available (it is the resolved
+    FK label read back from the branch DB after the save).
+
+    For "created": before="", after=snap value (or proj value as fallback).
+    For "updated": before="—", after=snap value (or proj value as fallback).
+    Both cases show every non-empty projection field so the log always reflects
+    exactly what was sent to NetBox.
+    """
     snap = snap or {}
     out: list[dict[str, str]] = []
-    if st == "created":
-        seen: set[str] = set()
+    if st in ("created", "updated"):
+        before = "" if st == "created" else "—"
         for k, v in proj.items():
             if not _field_changes_nonempty_scalar(v):
                 continue
+            # Prefer the snap value (resolved FK label from branch DB); fall back
+            # to the raw projection string if the snap doesn't have this key.
             after = str(snap.get(k, v) or "").strip() or str(v).strip()
-            out.append({"header": k, "before": "", "after": after})
-            seen.add(k)
-        for k, v in snap.items():
-            if k in seen or not _field_changes_nonempty_scalar(v):
+            if not after:
                 continue
-            out.append({"header": k, "before": "", "after": str(v).strip()})
-        return out
-    if st == "updated":
-        if not snap:
-            return [
-                {"header": k, "before": "—", "after": str(v).strip()}
-                for k, v in proj.items()
-                if _field_changes_nonempty_scalar(v)
-            ]
-        keys = sorted(set(proj.keys()) | set(snap.keys()))
-        for k in keys:
-            pb = str(proj.get(k, "") or "").strip()
-            sa = str(snap.get(k, "") or "").strip()
-            if pb == sa:
-                continue
-            out.append(
-                {
-                    "header": k,
-                    "before": pb if pb else "—",
-                    "after": sa if sa else "—",
-                }
-            )
+            out.append({"header": k, "before": before, "after": after})
         return out
     return []
 
