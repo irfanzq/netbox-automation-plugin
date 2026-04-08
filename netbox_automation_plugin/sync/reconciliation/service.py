@@ -1862,6 +1862,11 @@ def apply_reconciliation_run(
     """
     Execute frozen operations with explicit row results and status transitions.
 
+    The NetBox branch is always the one stored on this run (``run.branch_id`` /
+    ``run.branch_name``): the UI “Apply selected changes to branch” button does not
+    use NetBox’s global branch picker; it resolves ``Branch`` via
+    :func:`get_netbox_branch` and opens :func:`branch_write_context` for that instance.
+
     Operations are sorted by ``AUDIT_REPORT_APPLY_ORDER`` (same as reconciliation preview
     tables): new devices, MAAS review hosts, proposed missing VLANs (IPAM), placement, new VMs,
     new/drift interfaces, OpenStack prefixes/ranges/FIPs, existing VM drift, BMC, serial review.

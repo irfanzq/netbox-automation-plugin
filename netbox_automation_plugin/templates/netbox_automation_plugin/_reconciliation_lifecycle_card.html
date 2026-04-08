@@ -12,6 +12,13 @@
     <p class="text-body-secondary small mb-2">
       {% blocktrans trimmed %}After applying, use the re-apply buttons to retry only the rows that failed or were skipped. If a device row exists for the same host, it is automatically included so the device is created before its interfaces or BMC.{% endblocktrans %}
     </p>
+    {% if run.branch_id %}
+    <p class="small mb-2 text-body-secondary border-start border-3 ps-2">
+      {% blocktrans with bname=run.branch_name bid=run.branch_id trimmed %}
+      “Apply selected changes to branch” always writes to the NetBox branch for this run (“{{ bname }}”, pk {{ bid }}), not to Main. To browse VMs, VLANs, and other objects created here, select that same branch in NetBox’s branch selector (or use Open branch page above).
+      {% endblocktrans %}
+    </p>
+    {% endif %}
     <div class="d-flex flex-wrap gap-1 align-items-center">
       <button type="button" class="btn btn-primary btn-sm js-recon-apply js-recon-lifecycle-btn" data-initial-disabled="{% if not can_apply %}true{% else %}false{% endif %}" {% if not can_apply %}disabled{% endif %}>{% trans "Apply selected changes to branch" %}</button>
       <button type="button" class="btn btn-outline-primary btn-sm js-recon-retry-failed js-recon-lifecycle-btn" data-initial-disabled="{% if not can_retry_failed %}true{% else %}false{% endif %}" {% if not can_retry_failed %}disabled{% endif %} title="{% trans 'Rows whose latest status is failed' %}">{% trans "Re-apply failed" %} ({{ recon_apply_failed_row_count|default:0 }})</button>
