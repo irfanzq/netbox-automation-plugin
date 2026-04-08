@@ -4147,30 +4147,47 @@ def _cells_scoped_for_apply(selection_key: str, cells: Any) -> dict[str, str]:
     return out
 
 
-def apply_row_operation(op: dict[str, Any]) -> tuple[str, str, str | None]:
+def apply_row_operation(
+    op: dict[str, Any],
+) -> tuple[str, str, str | None, dict[str, Any] | None]:
     """
-    Returns ``(status, reason, reason_detail)``. Handlers may return a 2-tuple; optional third
-    element is human text for skips/failures (e.g. which prerequisite was missing).
+    Returns ``(status, reason, reason_detail, written_object)``.
+
+    Handlers may return:
+
+    - 2-tuple ``(status, reason)``
+    - 3-tuple with optional human ``reason_detail`` (skips/failures)
+    - 4-tuple adding optional ``written_object`` (``{"label": ..., "pk": ...}`` for post-apply snapshot)
     """
     if (gerr := check_reconciliation_apply_safe_to_mutate(op)) is not None:
-        return "failed", "failed_reconciliation_branch_guard", gerr
+        return "failed", "failed_reconciliation_branch_guard", gerr, None
 
     action = str(op.get("action") or "").strip()
     fn = _APPLY_FUNCS.get(action)
     if not fn:
-        return "failed", "failed_not_implemented", None
+        return "failed", "failed_not_implemented", None, None
     sk = str(op.get("selection_key") or "").strip()
     op_use = dict(op)
     op_use["cells"] = _cells_scoped_for_apply(sk, op.get("cells"))
     raw = fn(op_use)
     if not isinstance(raw, tuple):
-        return "failed", "failed_bad_apply_return", None
+        return "failed", "failed_bad_apply_return", None, None
     if len(raw) == 2:
-        return str(raw[0]), str(raw[1]), None
+        return str(raw[0]), str(raw[1]), None, None
     if len(raw) == 3:
         det = raw[2]
         if det is None:
-            return str(raw[0]), str(raw[1]), None
+            return str(raw[0]), str(raw[1]), None, None
         ds = str(det).strip()
-        return str(raw[0]), str(raw[1]), ds or None
-    return "failed", "failed_bad_apply_return", None
+        return str(raw[0]), str(raw[1]), ds or None, None
+    if len(raw) == 4:
+        det = raw[2]
+        if det is None:
+            skip_detail: str | None = None
+        else:
+            ds = str(det).strip()
+            skip_detail = ds or None
+        meta = raw[3]
+        written: dict[str, Any] | None = meta if isinstance(meta, dict) else None
+        return str(raw[0]), str(raw[1]), skip_detail, written
+    return "failed", "failed_bad_apply_return", None, None
