@@ -4,13 +4,13 @@
   <div class="card-body">
     <p class="text-body-secondary small mb-2">
       {% if hide_merge_to_main %}
-        {% blocktrans trimmed %}Apply writes frozen operations into the branch schema only. Discard abandons the run and deletes the NetBox branch when possible; it does not undo individual rows inside an existing branch.{% endblocktrans %}
+        {% blocktrans trimmed %}Apply saves your selected changes into the branch. Discard cancels the run and removes the branch — it does not roll back individual rows already applied.{% endblocktrans %}
       {% else %}
-        {% blocktrans trimmed %}Apply writes frozen operations into the branch schema only. Discard abandons the run and deletes the NetBox branch when possible; it does not undo individual rows inside an existing branch. Merge to main uses NetBox Branching (not wired here yet).{% endblocktrans %}
+        {% blocktrans trimmed %}Apply saves your selected changes into the branch. Discard cancels the run and removes the branch — it does not roll back individual rows already applied.{% endblocktrans %}
       {% endif %}
     </p>
     <p class="text-body-secondary small mb-2">
-      {% blocktrans trimmed %}After an apply, use the re-apply buttons to run only rows that failed or were skipped. Re-applying interface or BMC rows pulls in matching frozen new-device or MAAS-review rows for the same host first; if none exist, a one-off device create is built from placement or from the NIC row’s NB site when possible, then sorted so device runs before NIC/BMC.{% endblocktrans %}
+      {% blocktrans trimmed %}After applying, use the re-apply buttons to retry only the rows that failed or were skipped. If a device row exists for the same host, it is automatically included so the device is created before its interfaces or BMC.{% endblocktrans %}
     </p>
     <div class="d-flex flex-wrap gap-1 align-items-center">
       <button type="button" class="btn btn-primary btn-sm js-recon-apply js-recon-lifecycle-btn" data-initial-disabled="{% if not can_apply %}true{% else %}false{% endif %}" {% if not can_apply %}disabled{% endif %}>{% trans "Apply selected changes to branch" %}</button>

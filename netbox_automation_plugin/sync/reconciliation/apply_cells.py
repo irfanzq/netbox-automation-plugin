@@ -1679,9 +1679,9 @@ def apply_create_prefix(op: dict[str, Any]) -> tuple[str, str]:
     prefix_pk_raw = _cell(cells, "NetBox prefix ID")
     existing = None
     if prefix_pk_raw and str(prefix_pk_raw).strip().isdigit():
-        existing = Prefix.objects.filter(pk=int(str(prefix_pk_raw).strip())).first()
+        existing = Prefix.objects.using(_ab()).filter(pk=int(str(prefix_pk_raw).strip())).first()
     if existing is None:
-        existing = Prefix.objects.filter(prefix=cidr, vrf=vrf).first()
+        existing = Prefix.objects.using(_ab()).filter(prefix=cidr, vrf=vrf).first()
     if existing is not None:
         if _prefix_apply_row_stepwise_changelog(
             existing,
@@ -1698,7 +1698,7 @@ def apply_create_prefix(op: dict[str, Any]) -> tuple[str, str]:
         return "skipped", "skipped_already_desired"
     obj = Prefix(prefix=cidr, vrf=vrf)
     try:
-        obj.save()
+        obj.save(using=_ab())
     except Exception:
         logger.debug(
             "Prefix two-phase create: initial minimal save failed; retry minimal then stepwise or single save (prefix=%s)",
@@ -1707,7 +1707,7 @@ def apply_create_prefix(op: dict[str, Any]) -> tuple[str, str]:
         )
         pfx = Prefix(prefix=cidr, vrf=vrf)
         try:
-            pfx.save()
+            pfx.save(using=_ab())
         except Exception:
             logger.debug(
                 "Prefix minimal save failed again; single create with all fields (prefix=%s)",
@@ -1730,7 +1730,7 @@ def apply_create_prefix(op: dict[str, Any]) -> tuple[str, str]:
             if hasattr(pfx, "description"):
                 pfx.description = full_descr
             _merge_prefix_row_into_custom_fields(pfx, cells)
-            pfx.save()
+            pfx.save(using=_ab())
             return "created", "ok_created"
         _prefix_apply_row_stepwise_changelog(
             pfx,
@@ -1800,7 +1800,7 @@ def apply_create_ip_range(op: dict[str, Any]) -> tuple[str, str]:
     role = _resolve_by_name(Role, role_name) if role_name else None
     if role_name and role is None:
         return _skip_missing_prereq(f'IPAM role "{role_name}" not found in NetBox (NB proposed role).')
-    existing = IPRange.objects.filter(
+    existing = IPRange.objects.using(_ab()).filter(
         start_address=start_addr,
         end_address=end_addr,
         vrf=vrf,
@@ -1824,12 +1824,12 @@ def apply_create_ip_range(op: dict[str, Any]) -> tuple[str, str]:
             existing, cells, consumed, attr_names=("description",), max_len=4000
         )
         if changed or merge_ch:
-            existing.save()
+            existing.save(using=_ab())
             return "updated", "ok_updated"
         return "skipped", "skipped_already_desired"
     obj = IPRange(start_address=start_addr, end_address=end_addr, vrf=vrf)
     try:
-        obj.save()
+        obj.save(using=_ab())
     except Exception:
         logger.debug(
             "IPRange two-phase create: initial minimal save failed; retry minimal then field saves or single save (%s–%s)",
@@ -1839,7 +1839,7 @@ def apply_create_ip_range(op: dict[str, Any]) -> tuple[str, str]:
         )
         rng = IPRange(start_address=start_addr, end_address=end_addr, vrf=vrf)
         try:
-            rng.save()
+            rng.save(using=_ab())
         except Exception:
             logger.debug(
                 "IPRange minimal save failed again; single create with all fields (%s–%s)",
@@ -1856,7 +1856,7 @@ def apply_create_ip_range(op: dict[str, Any]) -> tuple[str, str]:
                 rng.role = role
             if descr and hasattr(rng, "description"):
                 rng.description = descr[:2000]
-            rng.save()
+            rng.save(using=_ab())
             return "created", "ok_created"
         _netbox_changelog_snapshot(rng)
         phase2_fb = False
@@ -1874,7 +1874,7 @@ def apply_create_ip_range(op: dict[str, Any]) -> tuple[str, str]:
         if _merge_audit_residual_onto_object(rng, cells, consumed, attr_names=("description",), max_len=4000):
             phase2_fb = True
         if phase2_fb:
-            rng.save()
+            rng.save(using=_ab())
         return "created", "ok_created"
 
     _netbox_changelog_snapshot(obj)
@@ -1893,7 +1893,7 @@ def apply_create_ip_range(op: dict[str, Any]) -> tuple[str, str]:
     if _merge_audit_residual_onto_object(obj, cells, consumed, attr_names=("description",), max_len=4000):
         phase2 = True
     if phase2:
-        obj.save()
+        obj.save(using=_ab())
     return "created", "ok_created"
 
 
@@ -2230,7 +2230,7 @@ def apply_create_floating_ip(op: dict[str, Any]) -> tuple[str, str]:
         tenant_obj = _resolve_tenant(tenant_name)
         if tenant_obj is None:
             return _skip_missing_prereq(f'Tenant "{tenant_name}" not found in NetBox (NB Proposed Tenant).')
-    existing = IPAddress.objects.filter(address=address, vrf=vrf).first()
+    existing = IPAddress.objects.using(_ab()).filter(address=address, vrf=vrf).first()
     if existing is not None:
         merge_ch = _merge_audit_residual_onto_object(
             existing, cells, consumed, attr_names=("description",), max_len=max(dmax, 8000)
@@ -2239,7 +2239,7 @@ def apply_create_floating_ip(op: dict[str, Any]) -> tuple[str, str]:
         if tenant_obj is None and getattr(existing, "tenant_id", None):
             _netbox_changelog_snapshot(existing)
             existing.tenant = None
-            existing.save()
+            existing.save(using=_ab())
             tenant_cleared = True
         any_save = _floating_ip_apply_row_stepwise(
             existing,
@@ -2255,7 +2255,7 @@ def apply_create_floating_ip(op: dict[str, Any]) -> tuple[str, str]:
         return "skipped", "skipped_already_desired"
     ip_obj = IPAddress(address=address, vrf=vrf)
     try:
-        ip_obj.save()
+        ip_obj.save(using=_ab())
     except Exception:
         logger.debug(
             "Floating IP two-phase create: initial minimal save failed; retry minimal then stepwise or single save (address=%s)",
@@ -2264,7 +2264,7 @@ def apply_create_floating_ip(op: dict[str, Any]) -> tuple[str, str]:
         )
         ip_fb = IPAddress(address=address, vrf=vrf)
         try:
-            ip_fb.save()
+            ip_fb.save(using=_ab())
         except Exception:
             logger.debug(
                 "Floating IP minimal save failed again; giving up on two-phase create (address=%s)",
@@ -2310,7 +2310,7 @@ def _resolve_ipaddress_for_vm_primary(raw: str):
     raw = (raw or "").strip()
     if not raw or raw in {"—", "-"}:
         return None
-    o = IPAddress.objects.filter(address=raw).first()
+    o = IPAddress.objects.using(_ab()).filter(address=raw).first()
     if o is not None:
         return o
     host = raw.split("/", 1)[0].strip()
@@ -2319,11 +2319,11 @@ def _resolve_ipaddress_for_vm_primary(raw: str):
     except ValueError:
         return None
     suffix = "/32" if ver == 4 else "/128"
-    o = IPAddress.objects.filter(address=host + suffix).first()
+    o = IPAddress.objects.using(_ab()).filter(address=host + suffix).first()
     if o is not None:
         return o
     try:
-        return IPAddress.objects.filter(address__startswith=host + "/").order_by("pk").first()
+        return IPAddress.objects.using(_ab()).filter(address__startswith=host + "/").order_by("pk").first()
     except Exception:
         return None
 
@@ -2381,30 +2381,34 @@ def _openstack_vm_apply_site_tenant_status_device_stepwise(vm: Any, proj: dict[s
     if site_name and site_name not in {"—", "-"}:
         site = _resolve_by_name(Site, site_name)
         if site is not None and hasattr(vm, "site_id") and getattr(vm, "site_id", None) != site.pk:
-            _netbox_changelog_snapshot(vm)
-            vm.site = site
-            vm.save()
+            with transaction.atomic(using=_ab()):
+                _netbox_changelog_snapshot(vm)
+                vm.site = site
+                vm.save(using=_ab())
     tenant_name = (proj.get("tenant") or "").strip()
     if tenant_name and tenant_name not in {"—", "-"}:
         tenant = _resolve_tenant(tenant_name)
         if tenant is not None and hasattr(vm, "tenant_id") and getattr(vm, "tenant_id", None) != tenant.pk:
-            _netbox_changelog_snapshot(vm)
-            vm.tenant = tenant
-            vm.save()
+            with transaction.atomic(using=_ab()):
+                _netbox_changelog_snapshot(vm)
+                vm.tenant = tenant
+                vm.save(using=_ab())
     status_name = (proj.get("status") or "").strip()
     if status_name and status_name not in {"—", "-"}:
         val = _pick_choice_value(vm._meta.get_field("status"), status_name)
         if val is not None and vm.status != val:
-            _netbox_changelog_snapshot(vm)
-            vm.status = val
-            vm.save()
+            with transaction.atomic(using=_ab()):
+                _netbox_changelog_snapshot(vm)
+                vm.status = val
+                vm.save(using=_ab())
     device_cell = (proj.get("device") or "").strip()
     if device_cell and device_cell not in {"—", "-"}:
-        dev = Device.objects.filter(name=device_cell).first()
+        dev = Device.objects.using(_ab()).filter(name=device_cell).first()
         if dev is not None and hasattr(vm, "device_id") and getattr(vm, "device_id", None) != dev.pk:
-            _netbox_changelog_snapshot(vm)
-            vm.device = dev
-            vm.save()
+            with transaction.atomic(using=_ab()):
+                _netbox_changelog_snapshot(vm)
+                vm.device = dev
+                vm.save(using=_ab())
 
 
 def apply_create_openstack_vm(op: dict[str, Any]) -> tuple[str, str]:
@@ -2425,7 +2429,7 @@ def apply_create_openstack_vm(op: dict[str, Any]) -> tuple[str, str]:
         return _skip_missing_prereq(
             "NB proposed cluster empty in row; OpenStack VM apply requires a NetBox cluster name."
         )
-    cluster = Cluster.objects.filter(name=cluster_name).first()
+    cluster = Cluster.objects.using(_ab()).filter(name=cluster_name).first()
     if cluster is None:
         return _skip_missing_prereq(
             f'Cluster "{cluster_name}" not found in NetBox (Virtualization → Clusters). '
@@ -2436,7 +2440,7 @@ def apply_create_openstack_vm(op: dict[str, Any]) -> tuple[str, str]:
         return _skip_missing_prereq(
             f'Tenant "{tenant_name}" not found in NetBox (create it or fix NB Proposed Tenant).'
         )
-    if VirtualMachine.objects.filter(name=name).exists():
+    if VirtualMachine.objects.using(_ab()).filter(name=name).exists():
         return "skipped", "skipped_already_desired"
 
     consumed = {
@@ -2457,16 +2461,19 @@ def apply_create_openstack_vm(op: dict[str, Any]) -> tuple[str, str]:
     }
 
     vm = VirtualMachine(name=name, cluster=cluster)
-    vm.save()
+    with transaction.atomic(using=_ab()):
+        vm.save(using=_ab())
     _openstack_vm_apply_site_tenant_status_device_stepwise(vm, proj)
     _netbox_changelog_snapshot(vm)
     pri_ch = _apply_vm_primary_ip_from_projection(vm, proj, cells)
     if pri_ch:
-        vm.save()
+        with transaction.atomic(using=_ab()):
+            vm.save(using=_ab())
     _netbox_changelog_snapshot(vm)
     vm_cf_ch, _ = _merge_vm_row_into_custom_fields(vm, cells, proj)
     if vm_cf_ch:
-        vm.save()
+        with transaction.atomic(using=_ab()):
+            vm.save(using=_ab())
     _netbox_changelog_snapshot(vm)
     _merge_audit_residual_onto_object(
         vm, cells, consumed, attr_names=("description",), max_len=8000
@@ -2490,7 +2497,7 @@ def apply_update_openstack_vm(op: dict[str, Any]) -> tuple[str, str]:
         return _skip_missing_prereq(
             "NetBox VM ID missing or not numeric in row (NetBox VM ID / projection id)."
         )
-    vm = VirtualMachine.objects.filter(pk=int(str(pk_raw).strip())).select_related(
+    vm = VirtualMachine.objects.using(_ab()).filter(pk=int(str(pk_raw).strip())).select_related(
         "cluster", "device", "tenant", "primary_ip4", "primary_ip6"
     ).first()
     if vm is None:
@@ -2503,7 +2510,7 @@ def apply_update_openstack_vm(op: dict[str, Any]) -> tuple[str, str]:
         return _skip_missing_prereq(
             "NB proposed cluster is required — choose a NetBox cluster from the drift audit picker."
         )
-    if Cluster.objects.filter(name=cluster_name_req).first() is None:
+    if Cluster.objects.using(_ab()).filter(name=cluster_name_req).first() is None:
         return _skip_missing_prereq(
             f'Cluster "{cluster_name_req}" not found in NetBox (Virtualization → Clusters). '
             f"Create the cluster or align NB proposed cluster in drift."
@@ -2548,21 +2555,21 @@ def apply_update_openstack_vm(op: dict[str, Any]) -> tuple[str, str]:
             with transaction.atomic(using=_ab()):
                 _netbox_changelog_snapshot(vm)
                 vm.name = name_new
-                vm.save()
+                vm.save(using=_ab())
             changed = True
     with transaction.atomic(using=_ab()):
         _netbox_changelog_snapshot(vm)
         if _apply_vm_primary_ip_from_projection(vm, proj, cells):
-            vm.save()
+            vm.save(using=_ab())
             changed = True
     cluster_name = (proj.get("cluster") or "").strip()
     if cluster_name and cluster_name not in {"—", "-"}:
-        cl = Cluster.objects.filter(name=cluster_name).first()
+        cl = Cluster.objects.using(_ab()).filter(name=cluster_name).first()
         if cl is not None and vm.cluster_id != cl.pk:
             with transaction.atomic(using=_ab()):
                 _netbox_changelog_snapshot(vm)
                 vm.cluster = cl
-                vm.save()
+                vm.save(using=_ab())
             changed = True
     site_name = (proj.get("site") or "").strip()
     if site_name and site_name not in {"—", "-"} and hasattr(vm, "site_id"):
@@ -2571,7 +2578,7 @@ def apply_update_openstack_vm(op: dict[str, Any]) -> tuple[str, str]:
             with transaction.atomic(using=_ab()):
                 _netbox_changelog_snapshot(vm)
                 vm.site = site
-                vm.save()
+                vm.save(using=_ab())
             changed = True
     tenant_name = (proj.get("tenant") or "").strip()
     if not tenant_name or tenant_name in {"—", "-"}:
@@ -2579,7 +2586,7 @@ def apply_update_openstack_vm(op: dict[str, Any]) -> tuple[str, str]:
             with transaction.atomic(using=_ab()):
                 _netbox_changelog_snapshot(vm)
                 vm.tenant = None
-                vm.save()
+                vm.save(using=_ab())
             changed = True
     else:
         tenant = _resolve_tenant(tenant_name)
@@ -2591,7 +2598,7 @@ def apply_update_openstack_vm(op: dict[str, Any]) -> tuple[str, str]:
             with transaction.atomic(using=_ab()):
                 _netbox_changelog_snapshot(vm)
                 vm.tenant = tenant
-                vm.save()
+                vm.save(using=_ab())
             changed = True
     status_name = (proj.get("status") or "").strip()
     if status_name and status_name not in {"—", "-"}:
@@ -2600,24 +2607,24 @@ def apply_update_openstack_vm(op: dict[str, Any]) -> tuple[str, str]:
             with transaction.atomic(using=_ab()):
                 _netbox_changelog_snapshot(vm)
                 vm.status = val
-                vm.save()
+                vm.save(using=_ab())
             changed = True
     dev = None
     device_cell = (proj.get("device") or "").strip()
     if device_cell and device_cell not in {"—", "-"}:
-        dev = Device.objects.filter(name=device_cell).first()
+        dev = Device.objects.using(_ab()).filter(name=device_cell).first()
     if dev is not None and hasattr(vm, "device_id"):
         if getattr(vm, "device_id", None) != dev.pk:
             with transaction.atomic(using=_ab()):
                 _netbox_changelog_snapshot(vm)
                 vm.device = dev
-                vm.save()
+                vm.save(using=_ab())
             changed = True
     with transaction.atomic(using=_ab()):
         _netbox_changelog_snapshot(vm)
         vm_cf_ch, _ = _merge_vm_row_into_custom_fields(vm, cells, proj)
         if vm_cf_ch:
-            vm.save()
+            vm.save(using=_ab())
             changed = True
     merge_ch = _merge_audit_residual_onto_object(
         vm, cells, consumed, attr_names=("description",), max_len=8000
@@ -2644,15 +2651,15 @@ def _device_for_reconciliation_apply(hostname: str):
     n = (hostname or "").strip()
     if not n:
         return None
-    dev = Device.objects.filter(name=n).first()
+    dev = Device.objects.using(_ab()).filter(name=n).first()
     if dev is not None:
         return dev
-    dev = Device.objects.filter(name__iexact=n).first()
+    dev = Device.objects.using(_ab()).filter(name__iexact=n).first()
     if dev is not None:
         return dev
     short = n.split(".", 1)[0].strip()
     if short and short.casefold() != n.casefold():
-        return Device.objects.filter(name__iexact=short).first()
+        return Device.objects.using(_ab()).filter(name__iexact=short).first()
     return None
 
 
@@ -2803,7 +2810,7 @@ def _apply_device_core(cells: dict[str, str], *, create_if_missing: bool) -> tup
             )
         # Structural create first, then one save per metadata field so netbox-branching lists each.
         dev = Device(name=hostname, site=site, location=location, role=role, device_type=dtype)
-        dev.save()
+        dev.save(using=_ab())
         _sync_site_region(dev.site, region_name)
         _device_apply_row_stepwise_changelog(
             dev,
@@ -3455,13 +3462,13 @@ def _assign_ips_to_interface(iface, ip_blob: str, vrf) -> tuple[bool, bool, bool
         except Exception:
             continue
         any_parse_ok = True
-        existing = IPAddress.objects.filter(address=addr, vrf=vrf).first()
+        existing = IPAddress.objects.using(_ab()).filter(address=addr, vrf=vrf).first()
         if existing is None:
             # Two-phase: create address+VRF first, then snapshot + assign to interface so branch
             # changelog shows assignment (and VRF on the create row stays visible as its own delta).
             ip_obj = IPAddress(address=addr, vrf=vrf)
             try:
-                ip_obj.save()
+                ip_obj.save(using=_ab())
             except Exception:
                 logger.debug(
                     "IPAddress two-phase create: initial minimal save failed; retry minimal then assign or single save (address=%s)",
@@ -3470,7 +3477,7 @@ def _assign_ips_to_interface(iface, ip_blob: str, vrf) -> tuple[bool, bool, bool
                 )
                 ip_fb = IPAddress(address=addr, vrf=vrf)
                 try:
-                    ip_fb.save()
+                    ip_fb.save(using=_ab())
                 except Exception:
                     logger.debug(
                         "IPAddress minimal save failed again; attempting two-phase create+assign (address=%s)",
@@ -3479,7 +3486,7 @@ def _assign_ips_to_interface(iface, ip_blob: str, vrf) -> tuple[bool, bool, bool
                     )
                     ip_fb2 = IPAddress(address=addr, vrf=vrf)
                     try:
-                        ip_fb2.save()
+                        ip_fb2.save(using=_ab())
                     except Exception:
                         logger.debug(
                             "IPAddress two-phase fallback: minimal save failed; skipping address=%s",
@@ -3492,7 +3499,7 @@ def _assign_ips_to_interface(iface, ip_blob: str, vrf) -> tuple[bool, bool, bool
                         ip_fb2.assigned_object = iface
                     elif hasattr(ip_fb2, "interface"):
                         ip_fb2.interface = iface
-                    ip_fb2.save()
+                    ip_fb2.save(using=_ab())
                     changed = True
                     continue
                 _netbox_changelog_snapshot(ip_fb)
@@ -3500,7 +3507,7 @@ def _assign_ips_to_interface(iface, ip_blob: str, vrf) -> tuple[bool, bool, bool
                     ip_fb.assigned_object = iface
                 elif hasattr(ip_fb, "interface"):
                     ip_fb.interface = iface
-                ip_fb.save()
+                ip_fb.save(using=_ab())
                 changed = True
                 continue
             _netbox_changelog_snapshot(ip_obj)
@@ -3508,7 +3515,7 @@ def _assign_ips_to_interface(iface, ip_blob: str, vrf) -> tuple[bool, bool, bool
                 ip_obj.assigned_object = iface
             elif hasattr(ip_obj, "interface"):
                 ip_obj.interface = iface
-            ip_obj.save()
+            ip_obj.save(using=_ab())
             changed = True
         else:
             same = False
@@ -3522,7 +3529,7 @@ def _assign_ips_to_interface(iface, ip_blob: str, vrf) -> tuple[bool, bool, bool
                     existing.assigned_object = iface
                 elif hasattr(existing, "interface"):
                     existing.interface = iface
-                existing.save()
+                existing.save(using=_ab())
                 changed = True
     return changed, row_had_ip_tokens, any_parse_ok
 
@@ -3686,18 +3693,18 @@ def apply_create_interface(op: dict[str, Any]) -> tuple[str, str]:
         if site_obj and dev.site_id != site_obj.pk:
             _netbox_changelog_snapshot(dev)
             dev.site = site_obj
-            dev.save()
+            dev.save(using=_ab())
             dev_geom_dirty = True
     if loc_hint:
         loc_obj = _resolve_by_name(Location, loc_hint)
         if loc_obj and getattr(dev, "location_id", None) != loc_obj.pk:
             _netbox_changelog_snapshot(dev)
             dev.location = loc_obj
-            dev.save()
+            dev.save(using=_ab())
             dev_geom_dirty = True
     if dev_geom_dirty:
         dev.refresh_from_db()
-    iface = Interface.objects.filter(device=dev, name=if_name).first()
+    iface = Interface.objects.using(_ab()).filter(device=dev, name=if_name).first()
     untagged = _resolve_untagged_vlan_for_apply(
         dev, iface, vid, vlan_group_name=vlan_group_hint or None
     )
@@ -3721,7 +3728,7 @@ def apply_create_interface(op: dict[str, Any]) -> tuple[str, str]:
         # mutation — e.g. tags — and hide MAC / VLAN / type changes).
         with transaction.atomic(using=branch_db):
             iface = Interface(device=dev, name=if_name, type=_iface_type_default())
-            iface.save()
+            iface.save(using=branch_db)
         with transaction.atomic(using=branch_db):
             _interface_apply_physical_fields_batched(
                 iface,
@@ -3797,27 +3804,27 @@ def apply_update_interface(op: dict[str, Any]) -> tuple[str, str]:
         if site_obj and dev.site_id != site_obj.pk:
             _netbox_changelog_snapshot(dev)
             dev.site = site_obj
-            dev.save()
+            dev.save(using=_ab())
             dev_geom_dirty = True
     if loc_hint:
         loc_obj = _resolve_by_name(Location, loc_hint)
         if loc_obj and getattr(dev, "location_id", None) != loc_obj.pk:
             _netbox_changelog_snapshot(dev)
             dev.location = loc_obj
-            dev.save()
+            dev.save(using=_ab())
             dev_geom_dirty = True
     if dev_geom_dirty:
         dev.refresh_from_db()
     iface = None
     if nb_name:
         iface = (
-            Interface.objects.filter(device=dev, name=nb_name)
+            Interface.objects.using(_ab()).filter(device=dev, name=nb_name)
             .select_related("untagged_vlan")
             .first()
         )
     if iface is None and ma_name:
         iface = (
-            Interface.objects.filter(device=dev, name=ma_name)
+            Interface.objects.using(_ab()).filter(device=dev, name=ma_name)
             .select_related("untagged_vlan")
             .first()
         )
@@ -3899,10 +3906,10 @@ def _bmc_apply(op: dict[str, Any], *, existing_oob: bool) -> tuple[str, str]:
     dev = _device_for_reconciliation_apply(host)
     if not dev:
         return _skip_missing_prereq(f'Device "{host}" not found in NetBox.')
-    iface = Interface.objects.filter(device=dev, name=if_name).first()
+    iface = Interface.objects.using(_ab()).filter(device=dev, name=if_name).first()
     if iface is None:
         iface = Interface(device=dev, name=if_name, type=_iface_type_default())
-        iface.save()
+        iface.save(using=_ab())
         _interface_apply_physical_fields_batched(
             iface,
             mac=bmc_mac or "",
@@ -3937,7 +3944,7 @@ def _bmc_apply(op: dict[str, Any], *, existing_oob: bool) -> tuple[str, str]:
     tag_ch = _interface_apply_role_tag_changelog(iface, role_label)
     if desc_changed:
         _netbox_changelog_snapshot(iface)
-        iface.save()
+        iface.save(using=_ab())
     if ip_changed or desc_changed or created or tag_ch:
         return ("created", "ok_created") if created else ("updated", "ok_updated")
     return "skipped", "skipped_already_desired"

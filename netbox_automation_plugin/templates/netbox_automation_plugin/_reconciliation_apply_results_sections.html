@@ -11,7 +11,7 @@
         <div class="col-md-2"><strong>{% trans "Succeeded" %}:</strong> {{ apply_results.cumulative_summary.succeeded|default:0 }}</div>
         <div class="col-md-2"><strong>{% trans "Created" %}:</strong> {{ apply_results.cumulative_summary.created|default:0 }}</div>
         <div class="col-md-2"><strong>{% trans "Updated" %}:</strong> {{ apply_results.cumulative_summary.updated|default:0 }}</div>
-        <div class="col-md-2"><strong>{% trans "Skipped (no-op)" %}:</strong> {{ apply_results.cumulative_summary.skipped_benign|default:0 }}</div>
+        <div class="col-md-2"><strong>{% trans "Skipped (Already in Sync)" %}:</strong> {{ apply_results.cumulative_summary.skipped_benign|default:0 }}</div>
       </div>
       <div class="row g-2 small mt-2">
         <div class="col-md-3"><strong class="text-danger">{% trans "Still failed" %}:</strong> {{ apply_results.cumulative_summary.failed|default:0 }}</div>
@@ -68,7 +68,7 @@
   <div class="card mb-3">
     <h5 class="card-header">{% trans "Apply row results (comprehensive)" %}</h5>
     <div class="card-body py-2">
-      <p class="small text-body-secondary mb-0">{% trans "All frozen rows with their latest merged status. Order: failed and skips that need action first, then updates and creates, then no-op skips." %}</p>
+      <p class="small text-body-secondary mb-0">{% trans "All frozen rows with their latest merged status. Order: failed and skips that need action first, then updates and creates, then already-in-sync skips." %}</p>
     </div>
     <div class="card-body p-0 border-top">
       <div class="table-responsive">
