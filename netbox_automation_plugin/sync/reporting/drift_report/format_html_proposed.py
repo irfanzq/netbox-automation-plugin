@@ -56,6 +56,7 @@ _PROPOSED_NB_PICK_VM = {
 _PROPOSED_NB_PICK_NIC = {
     "NB Proposed intf Label": "intf_role",
     "NB Proposed intf Type": "interface_type",
+    "NB proposed VLAN group": "vlan_group",
 }
 _PROPOSED_NB_PICK_BMC_EXISTING = {
     "NB Proposed intf Label": "intf_role",

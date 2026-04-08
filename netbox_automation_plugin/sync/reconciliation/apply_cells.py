@@ -1,9 +1,10 @@
 """Apply frozen reconciliation rows using scoped audit cells.
 
-NetBox-oriented fields shown on the recon page are defined in
-:mod:`netbox_write_projection` (:func:`netbox_write_projection_cells`). Preview delegates
-there; apply handlers should read those same projected strings where possible so UI and
-writes stay aligned.
+NetBox-oriented fields on the recon page come from
+:mod:`netbox_write_projection` (:func:`netbox_write_projection_cells`). Values are the
+attributes apply persists (e.g. proposed-missing-VLAN ``site`` is ``VLAN.site`` after NB site /
+group-scope resolution—not ``NB location``, which has no IPAM VLAN field). Apply ``write_preview``
+in :mod:`netbox_automation_plugin.sync.reconciliation.service` serializes the same projection.
 
 ``apply_row_operation`` narrows each row to reconciliation-preview source columns (plus
 workflow fields: Proposed Action, Status, Risk, Authority). Generic columns use
@@ -23,6 +24,7 @@ import re
 from functools import lru_cache
 from typing import Any
 
+from django.core.exceptions import FieldDoesNotExist
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import IntegrityError
 from django.db import models as django_models
@@ -1399,6 +1401,64 @@ def _vid_in_single_vlan_vid_range(vid_i: int, r) -> bool:
         return False
 
 
+def _infer_site_from_vlan_group(grp) -> Any | None:
+    """
+    When the recon row omits **NB site**, derive a ``dcim.Site`` from the VLAN group's scope.
+
+    NetBox VLANs have a ``site`` FK but no ``location`` FK; location-style scoping is on the
+    group (scope = Site or Location, etc.). For Location-scoped groups we use that location's site.
+    """
+    if grp is None:
+        return None
+    scope = getattr(grp, "scope", None)
+    if scope is None:
+        return None
+    try:
+        from dcim.models import Location, Site
+
+        if isinstance(scope, Site):
+            return scope
+        if isinstance(scope, Location):
+            sid = getattr(scope, "site_id", None)
+            if sid:
+                return Site.objects.filter(pk=sid).first()
+    except Exception:
+        logger.debug("_infer_site_from_vlan_group: scope resolution failed", exc_info=True)
+    return None
+
+
+def _resolve_site_for_vlan_create(cells: dict[str, str], grp) -> tuple[Any | None, str | None]:
+    """
+    Returns ``(site, error_detail)``. ``error_detail`` is set when **NB site** is non-empty
+    but does not resolve (caller should skip apply).
+    """
+    from dcim.models import Site
+
+    raw = (_cell(cells, "NB site") or "").strip()
+    if raw and raw not in {"—", "-"}:
+        site = _resolve_by_name(Site, raw)
+        if site is None:
+            return None, f'NB site "{raw}" not found in NetBox — fix the drift row or create the site.'
+        return site, None
+    inferred = _infer_site_from_vlan_group(grp)
+    return inferred, None
+
+
+def create_vlan_netbox_site_write_preview(cells: dict[str, str]) -> str:
+    """
+    ``VLAN.site`` label matching :func:`apply_create_vlan` (NB site cell or inferred from group
+    scope). For recon tables and apply ``write_preview`` only—mirrors the attribute persisted on save.
+    """
+    from ipam.models import VLANGroup
+
+    group_name = _cell(cells, "NB proposed VLAN group").strip()
+    grp = VLANGroup.objects.filter(name__iexact=group_name).first() if group_name else None
+    site_obj, _ = _resolve_site_for_vlan_create(cells, grp)
+    if site_obj is None:
+        return ""
+    return (getattr(site_obj, "name", None) or "").strip() or str(site_obj.pk)
+
+
 def _vid_allowed_in_netbox_vlan_group(vid_i: int, grp) -> bool:
     """Mirror NetBox ``VLAN.clean``: VID must fall within at least one of the group's ``vid_ranges``."""
     if grp is None:
@@ -1501,6 +1561,17 @@ def apply_create_vlan(op: dict[str, Any]) -> tuple[str, str]:
         vlan.status = st_val
     if tenant is not None and hasattr(vlan, "tenant_id"):
         vlan.tenant = tenant
+
+    site_obj, site_err = _resolve_site_for_vlan_create(cells, grp)
+    if site_err:
+        return _skip_missing_prereq(site_err)
+    if site_obj is not None:
+        try:
+            vlan._meta.get_field("site")
+        except FieldDoesNotExist:
+            pass
+        else:
+            vlan.site = site_obj
 
     try:
         vlan.full_clean()
@@ -3182,6 +3253,22 @@ def _resolve_vlan_for_device(device, vid: int):
     return None
 
 
+def _resolve_vlan_by_group_and_vid(group_name: str | None, vid_i: int) -> Any | None:
+    """Return ``ipam.VLAN`` when group name + VID uniquely identify a row (same as NetBox group scope)."""
+    from ipam.models import VLAN, VLANGroup
+
+    if not group_name:
+        return None
+    gn = str(group_name).strip()
+    if not gn or gn in ("—", "-"):
+        return None
+    grp = VLANGroup.objects.filter(name__iexact=gn).first()
+    if grp is None:
+        return None
+    gfk = "group" if any(f.name == "group" for f in VLAN._meta.fields) else "vlan_group"
+    return VLAN.objects.filter(**{gfk: grp, "vid": vid_i}).first()
+
+
 def _reuse_iface_untagged_vlan_if_vid_matches(iface: Any, vid: int) -> Any | None:
     """When resolution fails, still accept the interface's current untagged VLAN if its VID matches."""
     from ipam.models import VLAN
@@ -3195,11 +3282,18 @@ def _reuse_iface_untagged_vlan_if_vid_matches(iface: Any, vid: int) -> Any | Non
     return cur
 
 
-def _resolve_untagged_vlan_for_apply(device: Any, iface: Any | None, vid: int | None) -> Any | None:
+def _resolve_untagged_vlan_for_apply(
+    device: Any,
+    iface: Any | None,
+    vid: int | None,
+    *,
+    vlan_group_name: str | None = None,
+) -> Any | None:
     """
     Resolve VLAN for interface apply. Returns None when no VID requested (including MAAS
     native where ``vlan.vid`` is 0—handled upstream by :func:`_parse_vlan_vid`).
-    Raises skip tuple via caller when VID requested but cannot be applied.
+    When ``vlan_group_name`` is set (``NB proposed VLAN group``), resolve by group + VID first,
+    then fall back to device site / ``get_for_device`` (NetBox UI semantics).
     """
     if vid is None:
         return None
@@ -3207,7 +3301,9 @@ def _resolve_untagged_vlan_for_apply(device: Any, iface: Any | None, vid: int | 
         vid_i = int(vid)
     except (TypeError, ValueError):
         return None
-    u = _resolve_vlan_for_device(device, vid_i)
+    u = _resolve_vlan_by_group_and_vid(vlan_group_name, vid_i)
+    if u is None:
+        u = _resolve_vlan_for_device(device, vid_i)
     if u is None and iface is not None:
         u = _reuse_iface_untagged_vlan_if_vid_matches(iface, vid_i)
     return u
@@ -3223,10 +3319,12 @@ def _skip_untagged_vlan_unresolved(
     ifn = (iface_name or "").strip()
     loc = f'interface "{ifn}" on device "{host}"' if ifn else f'device "{host}" (interface)'
     return _skip_missing_prereq(
-        f"Cannot apply untagged VLAN VID {vid} to {loc}: no IPAM VLAN matches this "
-        f"device's site or location (VLAN groups / get_for_site), or VID {vid} is ambiguous. "
-        f"NetBox stores native VLAN on the interface; the VLAN object must exist in IPAM and "
-        f"be in scope for the device. Create or scope VLAN {vid}, then re-run apply."
+        f"Cannot apply untagged VLAN VID {vid} to {loc}: no IPAM VLAN matches "
+        f"NB proposed VLAN group + VID (if set), this device's site or location "
+        f"(VLAN groups / get_for_site), or VID {vid} is ambiguous. "
+        f"NetBox stores native VLAN on the interface; the VLAN object must exist in IPAM. "
+        f"Create or align VLAN {vid}, set **NB proposed VLAN group** on the row when helpful, "
+        f"then re-run apply."
     )
 
 
@@ -3546,7 +3644,9 @@ def apply_create_interface(op: dict[str, Any]) -> tuple[str, str]:
             dev.location = loc_obj
             dev.save()
     iface = Interface.objects.filter(device=dev, name=if_name).first()
-    untagged = _resolve_untagged_vlan_for_apply(dev, iface, vid)
+    vg = (_cell(cells, "NB proposed VLAN group") or "").strip()
+    vg_arg = vg if vg and vg not in ("—", "-") else None
+    untagged = _resolve_untagged_vlan_for_apply(dev, iface, vid, vlan_group_name=vg_arg)
     if vid is not None and untagged is None:
         try:
             vnum = int(vid)
@@ -3645,7 +3745,9 @@ def apply_update_interface(op: dict[str, Any]) -> tuple[str, str]:
             f'No interface on device "{host}" matching NB intf "{nb_name}" or MAAS intf "{ma_name}".'
         )
     _interface_refresh_safe(iface)
-    untagged = _resolve_untagged_vlan_for_apply(dev, iface, vid)
+    vg = (_cell(cells, "NB proposed VLAN group") or "").strip()
+    vg_arg = vg if vg and vg not in ("—", "-") else None
+    untagged = _resolve_untagged_vlan_for_apply(dev, iface, vid, vlan_group_name=vg_arg)
     if vid is not None and untagged is None:
         try:
             vnum = int(vid)
@@ -3955,6 +4057,7 @@ def _netbox_preview_source_header_norms(selection_key: str) -> frozenset[str] | 
             "MAAS intf",
             "NB Proposed intf Label",
             "NB Proposed intf Type",
+            "NB proposed VLAN group",
             "MAAS MAC",
             "OS MAC",
             "NB MAC",

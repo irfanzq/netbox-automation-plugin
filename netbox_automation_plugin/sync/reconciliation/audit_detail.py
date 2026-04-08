@@ -271,6 +271,7 @@ def build_maas_netbox_interface_audit(
                     "maas_ips": maas_ip_str,
                     "nb_if": "—",
                     "nb_vlan": "—",
+                    "nb_vlan_group": "—",
                     "nb_mac": "—",
                     "nb_ips": "—",
                     "status": "MAAS_NO_MAC",
@@ -305,6 +306,8 @@ def build_maas_netbox_interface_audit(
                             "maas_ips": maas_ip_str,
                             "nb_if": cand.get("name") or "—",
                             "nb_vlan": str(cand.get("untagged_vlan_vid") or "")[:8] or "—",
+                            "nb_vlan_group": str(cand.get("untagged_vlan_group") or "").strip()
+                            or "—",
                             "nb_mac": cmac,
                             "nb_ips": ", ".join(cand.get("ips") or []) or "—",
                             "status": "MAC_MISMATCH",
@@ -365,6 +368,7 @@ def build_maas_netbox_interface_audit(
                     "authority": "openstack_runtime" if os_auth_n else "maas_fallback",
                     "nb_if": "—",
                     "nb_vlan": "—",
+                    "nb_vlan_group": "—",
                     "nb_mac": "—",
                     "nb_ips": "—",
                     "status": "NOT_IN_NETBOX",
@@ -396,6 +400,7 @@ def build_maas_netbox_interface_audit(
             nb_name = nb.get("name") or "—"
             nb_ip_str = ", ".join(nb.get("ips") or []) if nb.get("ips") else "—"
             nb_vlan = str(nb.get("untagged_vlan_vid") or "")[:8] or "—"
+            nb_vlan_group = str(nb.get("untagged_vlan_group") or "").strip() or "—"
             mgmt = "mgmt" if nb.get("mgmt_only") else ""
             maas_name_l = (maas_name or "").strip().lower()
             nb_name_l = (nb_name or "").strip().lower()
@@ -532,6 +537,7 @@ def build_maas_netbox_interface_audit(
                 "nb_if": nb_name,
                 "nb_mac": nb_mac_out,
                 "nb_vlan": nb_vlan,
+                "nb_vlan_group": nb_vlan_group,
                 "nb_ips": nb_ip_str,
                 "status": status,
                 "notes": "; ".join(notes) if notes else "—",

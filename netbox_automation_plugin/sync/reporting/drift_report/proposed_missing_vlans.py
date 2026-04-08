@@ -30,6 +30,7 @@ from netbox_automation_plugin.sync.reporting.drift_report.proposed_action_format
 )
 from netbox_automation_plugin.sync.reconciliation.apply_cells import (
     _interface_mac_vlan_ip_from_cells,
+    _resolve_vlan_by_group_and_vid,
     _resolve_vlan_for_device,
     _resolve_vlan_for_prefix_scope,
 )
@@ -850,6 +851,10 @@ def build_proposed_missing_vlan_rows(
             continue
         vid_src = "OS runtime" if "[OS]" in auth else "MAAS"
         for vid in vids:
+            grp_cell = (cells.get("NB proposed VLAN group") or "").strip()
+            if grp_cell and grp_cell not in {"—", "-"}:
+                if _resolve_vlan_by_group_and_vid(grp_cell, vid) is not None:
+                    continue
             maybe_append(
                 host=host,
                 dev=dev,
@@ -892,6 +897,10 @@ def build_proposed_missing_vlan_rows(
             continue
         vid_src = "OS runtime" if "[OS]" in auth else "MAAS"
         for vid in vids:
+            grp_cell = (cells.get("NB proposed VLAN group") or "").strip()
+            if grp_cell and grp_cell not in {"—", "-"}:
+                if _resolve_vlan_by_group_and_vid(grp_cell, vid) is not None:
+                    continue
             maybe_append(
                 host=host,
                 dev=dev,

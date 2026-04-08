@@ -125,7 +125,6 @@
       if (!btn) return;
       btn.addEventListener("click", function() {
         postAction(retryUrl, btn, {
-          openBranchPageRefresh: true,
           fallbackRedirect: applyResultsUrl,
           body: JSON.stringify(payload || { retry: "failed" })
         });

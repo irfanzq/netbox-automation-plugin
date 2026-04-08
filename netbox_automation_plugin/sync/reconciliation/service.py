@@ -1,8 +1,10 @@
 """Preview, signed acknowledgement, and frozen operations for branch reconciliation.
 
 Each frozen op carries full audit ``cells`` for apply. The recon UI shows
-``netbox_write_preview_cells`` per section: NetBox model field names (values from audit cells)
-(see ``group_reconciliation_operation_tables`` and ``AUDIT_REPORT_APPLY_ORDER``).
+``netbox_write_preview_cells`` per section: NetBox-oriented keys whose values match what apply
+handlers persist (e.g. proposed-missing-VLAN ``site`` is ``VLAN.site`` from the NB site cell or
+group-scope inference, not ``NB location``—VLANs have no Location field). Apply row ``write_preview``
+uses the same projection. See ``group_reconciliation_operation_tables`` and ``AUDIT_REPORT_APPLY_ORDER``.
 
 New-NIC sections store a minimal frozen row (``new_nic_cells_for_reconciliation``); preview
 still shows resolved MAC/VLAN/IP columns aligned with ``apply_create_interface``.
@@ -509,14 +511,18 @@ def _expand_partial_retry_ops_with_device_creates(
     all_ops: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
     """
-    When re-applying skipped/failed NIC or BMC rows, ensure device work runs first:
+    When re-applying skipped/failed NIC or BMC rows, match freeze-time prerequisites:
 
-    - Pull frozen ``create_device`` and ``review_device`` rows for the same host from this run.
+    - Pull frozen ``create_device`` and ``review_device`` rows for the same host.
     - If none exist but placement (or NIC ``NB site``) can supply a bootstrap, append a
       synthetic ``create_device`` op (same idea as NIC prerequisite inject at freeze time).
+    - If the batch includes ``create_interface`` / ``update_interface``, also pull **every**
+      frozen ``create_vlan`` row from this run (``detail_proposed_missing_vlans``), same as
+      ``_inject_interface_prerequisite_ops`` on first apply — otherwise partial retry can
+      run interfaces before VLAN 2249 exists in IPAM.
 
-    Apply order (``AUDIT_REPORT_APPLY_ORDER`` + phase) already places device/review before
-    interfaces and BMC.
+    Final sort uses ``AUDIT_REPORT_APPLY_ORDER`` so devices, VLANs, and interfaces run in the
+    correct relative order.
     """
     seed_rks = {str(o.get("row_key") or "").strip() for o in seed_ops if isinstance(o, dict)}
     prereq_hosts: set[str] = set()
@@ -626,6 +632,21 @@ def _expand_partial_retry_ops_with_device_creates(
         covered.add(hk)
 
     out.extend(synth_ops)
+    if any(
+        str(o.get("action") or "") in ("create_interface", "update_interface")
+        for o in out
+        if isinstance(o, dict)
+    ):
+        have_rk = {str(o.get("row_key") or "").strip() for o in out if isinstance(o, dict)}
+        for o in all_ops:
+            if not isinstance(o, dict):
+                continue
+            if str(o.get("action") or "") != "create_vlan":
+                continue
+            rk = str(o.get("row_key") or "").strip()
+            if rk and rk not in have_rk:
+                have_rk.add(rk)
+                out.append(o)
     allowed_sk = all_registered_selection_keys()
     out.sort(key=lambda o: _operation_apply_sort_key(o, allowed=allowed_sk))
     return out
