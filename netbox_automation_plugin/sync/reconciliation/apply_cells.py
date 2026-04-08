@@ -1762,8 +1762,13 @@ def apply_create_prefix(op: dict[str, Any]) -> tuple[str, str]:
             )
     vlan_obj = None
     if vlan_name and vlan_name not in {"—", "-"}:
+        vg_hint = (_cell(cells, "NB proposed VLAN group") or "").strip()
         try:
-            vlan_obj = _resolve_vlan_for_prefix_scope(vlan_name, scope_obj)
+            vlan_obj = _resolve_vlan_for_prefix_scope(
+                vlan_name,
+                scope_obj,
+                vlan_group_hint=vg_hint or None,
+            )
         except Exception:
             vlan_obj = None
         if vlan_obj is None:
@@ -3471,7 +3476,12 @@ def _skip_untagged_vlan_unresolved(
     )
 
 
-def _resolve_vlan_for_prefix_scope(vlan_name: str, scope_obj) -> Any | None:
+def _resolve_vlan_for_prefix_scope(
+    vlan_name: str,
+    scope_obj,
+    *,
+    vlan_group_hint: str | None = None,
+) -> Any | None:
     from dcim.models import Site
     from ipam.models import VLAN
 
@@ -3493,7 +3503,14 @@ def _resolve_vlan_for_prefix_scope(vlan_name: str, scope_obj) -> Any | None:
             candidate_vid = None
 
     vlan_mgr = _orm_mgr(VLAN)
-    q = vlan_mgr.all()
+    gh = (vlan_group_hint or "").strip()
+    if gh and gh not in {"—", "-"} and candidate_vid is not None:
+        hit = _resolve_vlan_by_group_name_and_vid(gh, candidate_vid)
+        if hit is not None:
+            return hit
+
+    q_loc = None
+    q_site = None
     if scope_obj is not None:
         try:
             from django.contrib.contenttypes.models import ContentType
@@ -3506,30 +3523,52 @@ def _resolve_vlan_for_prefix_scope(vlan_name: str, scope_obj) -> Any | None:
                 group__scope_type=ct_loc,
                 group__scope_id__in=anc_ids,
             )
-            q_site = vlan_mgr.none()
             if getattr(scope_obj, "site_id", None):
-                try:
-                    site_br = _orm_qs(Site).filter(pk=scope_obj.site_id).first()
-                    if site_br is not None:
+                site_br = _orm_qs(Site).filter(pk=scope_obj.site_id).first()
+                if site_br is not None:
+                    try:
                         q_site = vlan_mgr.get_for_site(site_br)
-                except Exception:
-                    q_site = vlan_mgr.none()
-            q = (q_loc | q_site).distinct()
+                    except Exception:
+                        q_site = None
         except Exception:
-            q = vlan_mgr.all()
+            q_loc = None
+            q_site = None
 
     if candidate_vid is not None:
-        by_vid = q.filter(vid=candidate_vid).first()
-        if by_vid is not None:
-            return by_vid
-        by_vid_any = vlan_mgr.filter(vid=candidate_vid).first()
-        if by_vid_any is not None:
-            return by_vid_any
+        if q_loc is not None:
+            hit = q_loc.filter(vid=candidate_vid).first()
+            if hit is not None:
+                return hit
+        if q_site is not None:
+            try:
+                hit = q_site.filter(vid=candidate_vid).first()
+            except Exception:
+                hit = None
+            if hit is not None:
+                return hit
+        if scope_obj is not None and getattr(scope_obj, "site_id", None):
+            hit = vlan_mgr.filter(vid=candidate_vid, site_id=scope_obj.site_id).first()
+            if hit is not None:
+                return hit
+        hit = vlan_mgr.filter(vid=candidate_vid).first()
+        if hit is not None:
+            return hit
 
     by_name = _resolve_by_name(VLAN, raw, using=_orm_alias())
     if by_name is not None:
         return by_name
-    return q.filter(name=raw).first()
+    if q_loc is not None:
+        hit = q_loc.filter(name=raw).first()
+        if hit is not None:
+            return hit
+    if q_site is not None:
+        try:
+            hit = q_site.filter(name=raw).first()
+        except Exception:
+            hit = None
+        if hit is not None:
+            return hit
+    return vlan_mgr.filter(name=raw).first()
 
 
 def _vrf_for_ip_from_row_cells(cells: dict[str, str] | None) -> Any:
@@ -3843,6 +3882,16 @@ def apply_create_interface(op: dict[str, Any]) -> tuple[str, str]:
         with _tx_op(branch_db):
             iface = Interface(device=dev, name=if_name, type=_iface_type_default())
             _iface_save_on_op(branch_db, iface)
+        # Reload from DB after the create savepoint: nested branching transactions can
+        # leave an in-memory instance that refresh_from_db / snapshot cannot resolve
+        # (DoesNotExist on Interface).
+        iface = _orm_qs(Interface).filter(device=dev, name=if_name).first()
+        if iface is None:
+            return (
+                "failed",
+                "failed_interface_missing_after_create",
+                f'Interface "{if_name}" on device "{host}" not found immediately after create.',
+            )
         with _tx_op(branch_db):
             _interface_apply_physical_fields_batched(
                 iface,

@@ -48,6 +48,7 @@ _NETBOX_PREVIEW_FULL_KEY_ORDER: dict[str, tuple[str, ...]] = {
         "tenant",
         "scope",
         "vlan",
+        "vlan_group",
         "description",
     ),
     "detail_existing_prefixes": (
@@ -58,6 +59,7 @@ _NETBOX_PREVIEW_FULL_KEY_ORDER: dict[str, tuple[str, ...]] = {
         "tenant",
         "scope",
         "vlan",
+        "vlan_group",
         "description",
     ),
     "detail_new_fips": (
@@ -337,6 +339,7 @@ def netbox_write_projection_cells(selection_key: str, cells: dict[str, str] | No
                 "tenant": coerce_nb_proposed_tenant_cell(_cell(c, "NB Proposed Tenant")),
                 "scope": _prefix_scope_cell(c, _cell),
                 "vlan": _cell(c, "NB Proposed VLAN"),
+                "vlan_group": _cell(c, "NB proposed VLAN group"),
                 "description": ac._prefix_description_from_cells(c, max_len=pd),
             }
         )
@@ -351,6 +354,7 @@ def netbox_write_projection_cells(selection_key: str, cells: dict[str, str] | No
                 "tenant": coerce_nb_proposed_tenant_cell(_cell(c, "NB Proposed Tenant")),
                 "scope": _prefix_scope_cell(c, _cell),
                 "vlan": _cell(c, "NB Proposed VLAN"),
+                "vlan_group": _cell(c, "NB proposed VLAN group"),
                 "description": ac._prefix_description_from_cells(c, max_len=pd),
             }
         )

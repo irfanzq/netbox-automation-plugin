@@ -645,12 +645,17 @@ SK_TO_ACTION = {
 }
 
 # Reconciliation preview tables, frozen-op sorting, and branch apply all use this tuple (low index runs first).
-# New devices + MAAS review hosts first, then proposed missing VLANs (IPAM) so VLANs exist before NICs attach
-# untagged/tagged VIDs; then placement, VMs, NICs, OpenStack IPAM/FIP/VM drift, BMC, serial.
+# New devices + MAAS review hosts first, then proposed missing VLANs (IPAM), then new/existing
+# prefix rows (VLAN FK), then placement, VMs, NICs, OpenStack IPAM/FIP/VM drift, BMC, serial.
 AUDIT_REPORT_APPLY_ORDER: tuple[str, ...] = (
     "detail_new_devices",
     "detail_review_only_devices",
     "detail_proposed_missing_vlans",
+    # Prefixes reference IPAM VLANs: run immediately after proposed VLAN creates so the
+    # same apply batch resolves VLAN FKs before NIC / VM rows (ordering tie-break is still
+    # phase-based; this keeps section order aligned with dependencies).
+    "detail_new_prefixes",
+    "detail_existing_prefixes",
     "detail_placement_lifecycle_alignment",
     "detail_new_vms",
     "detail_new_nics",
@@ -658,8 +663,6 @@ AUDIT_REPORT_APPLY_ORDER: tuple[str, ...] = (
     "detail_new_nics_maas",
     "detail_nic_drift_os",
     "detail_nic_drift_maas",
-    "detail_new_prefixes",
-    "detail_existing_prefixes",
     "detail_new_ip_ranges",
     "detail_new_fips",
     "detail_existing_fips",
