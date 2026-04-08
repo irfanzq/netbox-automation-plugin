@@ -3130,14 +3130,15 @@ def _sync_site_region(site_obj, region_name: str) -> tuple[bool, bool]:
     reg = _resolve_by_name(Region, rn)
     if reg is None:
         return False, False
-    site_db = Site.objects.filter(pk=site_obj.pk).first()
+    site_db = Site.objects.using(_ab()).filter(pk=site_obj.pk).first()
     if site_db is None or not hasattr(site_db, "region_id"):
         return False, False
     if site_db.region_id == reg.pk:
         return True, False
-    _netbox_changelog_snapshot(site_db)
-    site_db.region = reg
-    site_db.save()
+    with transaction.atomic(using=_ab()):
+        _netbox_changelog_snapshot(site_db)
+        site_db.region = reg
+        site_db.save()
     return True, True
 
 
