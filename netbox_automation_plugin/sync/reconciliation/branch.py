@@ -182,12 +182,13 @@ def branch_write_context(*, branch: Any) -> Iterator[None]:
     """
     Activate NetBox Branching context for ORM writes.
 
-    For netboxlabs/netbox-branching, matches Branch.sync: activate_branch plus
-    transaction.atomic(using=branch.connection_name). If no API fits, raises so
-    callers do not write branch-aware models to main by accident.
+    For netboxlabs/netbox-branching: activate_branch plus a DB transaction. When
+    ``connection_name`` is a dedicated branch alias, use ``atomic(using=…)``; when it is
+    the literal ``default``, use plain ``atomic()`` so ORM routing stays branch-scoped.
+    If no API fits, raises so callers do not write branch-aware models to main by accident.
     """
-    # Prefer netboxlabs/netbox-branching first: never call activate_branch without
-    # transaction.atomic(using=connection_name) — without it, ORM can hit NetBox main.
+    # Prefer netboxlabs/netbox-branching: always pair activate_branch with atomic; avoid
+    # atomic(using="default") which can bypass branching and hit NetBox main.
     try:
         from netbox_branching.utilities import activate_branch as _nb_activate_branch
     except ImportError:
@@ -201,8 +202,17 @@ def branch_write_context(*, branch: Any) -> Iterator[None]:
                 "transaction.atomic(using=…) for the branch schema — refusing ORM writes "
                 "(would risk NetBox main). Wait until the branch is provisioned and ready."
             )
-        with _nb_activate_branch(branch), transaction.atomic(using=using):
-            yield
+        # NetBox Branching often reports connection_name as the literal "default". Pairing
+        # activate_branch with transaction.atomic(using="default") pins Django to the default
+        # connection and can bypass branching routers — writes then land in main. Use a plain
+        # atomic() on the default connection so routing matches NetBox UI/API under activate_branch.
+        with _nb_activate_branch(branch):
+            if using.lower() == "default":
+                with transaction.atomic():
+                    yield
+            else:
+                with transaction.atomic(using=using):
+                    yield
         return
 
     # 1) Branch instance may provide a context manager method (non-netbox_branching).

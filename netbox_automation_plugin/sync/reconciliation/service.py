@@ -93,6 +93,21 @@ _APPLY_SKIP_REASON_DETAIL_MAX = 2000
 _WRITE_PREVIEW_MAX = 4000
 
 
+def _recon_explicit_orm_using(db_alias: str) -> str | None:
+    """
+    Django ``using=`` for reconciliation ORM only when the alias is not the literal ``default``.
+
+    NetBox Branching often sets ``Branch.connection_name`` to the literal name ``default``.
+    Passing that
+    to ``.using()`` / ``save(using=)`` can bypass branching routers; return ``None`` to use
+    the default manager so ``activate_branch`` routes like NetBox UI/API.
+    """
+    u = (db_alias or "").strip()
+    if not u or u.lower() == "default":
+        return None
+    return u
+
+
 def _apply_result_projection_dict(op: dict[str, Any]) -> dict[str, str]:
     """NetBox write projection (resolved FK labels) for one frozen op — same basis as preview tables."""
     sk = str(op.get("selection_key") or "").strip()
@@ -241,18 +256,22 @@ def _load_netbox_model_instance(label: str, pk: int, using: str) -> Any | None:
     except (LookupError, ValueError, TypeError):
         return None
     try:
-        return Model.objects.using(using).filter(pk=int(pk)).first()
+        alias = _recon_explicit_orm_using(using)
+        qs = Model.objects.using(alias).filter(pk=int(pk)) if alias is not None else Model.objects.filter(pk=int(pk))
+        return qs.first()
     except Exception:
         return None
 
 
 def _interface_assigned_ip_blob(iface: Any, using: str) -> str:
+    alias = _recon_explicit_orm_using(using)
     try:
         from django.contrib.contenttypes.models import ContentType
         from ipam.models import IPAddress
 
         ct = ContentType.objects.get_for_model(iface.__class__)
-        qs = IPAddress.objects.using(using).filter(
+        base = IPAddress.objects.using(alias) if alias is not None else IPAddress.objects
+        qs = base.filter(
             assigned_object_type_id=ct.pk, assigned_object_id=iface.pk
         )
         parts = sorted(str(x.address) for x in qs if getattr(x, "address", None))
@@ -263,7 +282,8 @@ def _interface_assigned_ip_blob(iface: Any, using: str) -> str:
     try:
         from ipam.models import IPAddress
 
-        qs = IPAddress.objects.using(using).filter(interface_id=getattr(iface, "pk", None))
+        base = IPAddress.objects.using(alias) if alias is not None else IPAddress.objects
+        qs = base.filter(interface_id=getattr(iface, "pk", None))
         return ", ".join(
             sorted(str(x.address) for x in qs if getattr(x, "address", None))
         )
@@ -332,6 +352,11 @@ def _fetch_written_object_fallback(op: dict[str, Any], using: str) -> Any | None
     except Exception:
         proj = {}
     try:
+        alias = _recon_explicit_orm_using(using)
+
+        def _orm(model_cls: Any):
+            return model_cls.objects.using(alias) if alias is not None else model_cls.objects
+
         if action == "create_vlan":
             from ipam.models import VLAN
 
@@ -340,7 +365,7 @@ def _fetch_written_object_fallback(op: dict[str, Any], using: str) -> Any | None
                 return None
             vid_i = int(vid_s)
             grp = str(proj.get("vlan_group") or "").strip()
-            qs = VLAN.objects.using(using).filter(vid=vid_i)
+            qs = _orm(VLAN).filter(vid=vid_i)
             if grp:
                 qs = qs.filter(group__name=grp)
             return qs.first()
@@ -353,8 +378,8 @@ def _fetch_written_object_fallback(op: dict[str, Any], using: str) -> Any | None
             vrf_name = str(proj.get("vrf") or "").strip()
             vrf = None
             if vrf_name:
-                vrf = VRF.objects.using(using).filter(name=vrf_name).first()
-            qs = Prefix.objects.using(using).filter(prefix=cidr)
+                vrf = _orm(VRF).filter(name=vrf_name).first()
+            qs = _orm(Prefix).filter(prefix=cidr)
             if vrf is not None:
                 qs = qs.filter(vrf=vrf)
             elif not vrf_name:
@@ -365,7 +390,7 @@ def _fetch_written_object_fallback(op: dict[str, Any], using: str) -> Any | None
 
             host = str(proj.get("name") or "").strip()
             if host:
-                return Device.objects.using(using).filter(name=host).first()
+                return _orm(Device).filter(name=host).first()
         if action in (
             "create_interface",
             "update_interface",
@@ -378,16 +403,16 @@ def _fetch_written_object_fallback(op: dict[str, Any], using: str) -> Any | None
             if_name = str(proj.get("name") or "").strip()
             if not host or not if_name:
                 return None
-            dev = Device.objects.using(using).filter(name=host).first()
+            dev = _orm(Device).filter(name=host).first()
             if not dev:
                 return None
-            return Interface.objects.using(using).filter(device=dev, name=if_name).first()
+            return _orm(Interface).filter(device=dev, name=if_name).first()
         if action == "update_openstack_vm":
             from virtualization.models import VirtualMachine
 
             raw_id = str(proj.get("id") or "").strip()
             if raw_id.isdigit():
-                return VirtualMachine.objects.using(using).filter(pk=int(raw_id)).first()
+                return _orm(VirtualMachine).filter(pk=int(raw_id)).first()
     except Exception:
         return None
     return None
@@ -413,18 +438,6 @@ def _capture_applied_object_snapshot(
         return
 
 
-def _apply_tx_using(db_alias: str) -> str | None:
-    """
-    Match apply_cells._orm_alias: explicit ``using`` for the default DB alias on nested
-    transactions can bypass netbox_branching routing; use plain ``transaction.atomic()`` /
-    ``savepoint()`` instead.
-    """
-    u = (db_alias or "").strip()
-    if not u or u.lower() == "default":
-        return None
-    return u
-
-
 def _execute_branch_apply_in_branch_transaction(branch_db: str, op: dict[str, Any]) -> dict[str, Any]:
     """
     Run one branch apply with a per-row transaction only when needed.
@@ -436,7 +449,7 @@ def _execute_branch_apply_in_branch_transaction(branch_db: str, op: dict[str, An
     explicit **savepoint** so rows still share one branch transaction (visibility) but a
     failing row can roll back without aborting the whole apply batch.
     """
-    txu = _apply_tx_using(branch_db)
+    txu = _recon_explicit_orm_using(branch_db)
     conn_key = txu if txu is not None else "default"
     try:
         conn = connections[conn_key]
