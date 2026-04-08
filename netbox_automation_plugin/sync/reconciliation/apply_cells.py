@@ -194,20 +194,21 @@ def _pick_choice_value(field, raw: str) -> Any:
     return None
 
 
-def _resolve_by_name(model, name: str):
+def _resolve_by_name(model, name: str, *, using: str | None = None):
     s = str(name or "").strip()
     if not s:
         return None
+    mgr = model.objects.using(using) if using else model.objects
     for lookup in ("name", "slug", "model"):
         try:
-            obj = model.objects.filter(**{lookup: s}).first()
+            obj = mgr.filter(**{lookup: s}).first()
         except Exception:
             obj = None
         if obj is not None:
             return obj
     for lookup in ("name__iexact", "slug__iexact", "model__iexact"):
         try:
-            obj = model.objects.filter(**{lookup: s}).first()
+            obj = mgr.filter(**{lookup: s}).first()
         except Exception:
             obj = None
         if obj is not None:
@@ -1574,7 +1575,12 @@ def apply_create_vlan(op: dict[str, Any]) -> tuple[str, str]:
     vlan = VLAN(vid=vid_i, name=name)
     setattr(vlan, gfk, grp)
     try:
-        vlan.full_clean()
+        # validate_unique=False: our branch-scoped existence checks above already guard
+        # against duplicates in the branch schema; passing False avoids full_clean() querying
+        # the default (main) DB for uniqueness, which would raise a false ValidationError for
+        # VLANs that exist in main from a prior bad run but are absent from the branch.
+        # The branch DB enforces the real constraint — any true duplicate triggers IntegrityError below.
+        vlan.full_clean(validate_unique=False)
         vlan.save(using=_ab())
     except DjangoValidationError as e:
         detail = _format_django_validation_error(e)
@@ -1603,17 +1609,17 @@ def apply_create_vlan(op: dict[str, Any]) -> tuple[str, str]:
         with transaction.atomic(using=_ab()):
             _netbox_changelog_snapshot(vlan)
             vlan.status = st_val
-            vlan.save()
+            vlan.save(using=_ab())
     if site_obj is not None and hasattr(vlan, "site_id") and getattr(vlan, "site_id", None) != site_obj.pk:
         with transaction.atomic(using=_ab()):
             _netbox_changelog_snapshot(vlan)
             vlan.site = site_obj
-            vlan.save()
+            vlan.save(using=_ab())
     if tenant is not None and hasattr(vlan, "tenant_id") and getattr(vlan, "tenant_id", None) != tenant.pk:
         with transaction.atomic(using=_ab()):
             _netbox_changelog_snapshot(vlan)
             vlan.tenant = tenant
-            vlan.save()
+            vlan.save(using=_ab())
     return "created", "ok_created"
 
 
@@ -3379,7 +3385,7 @@ def _resolve_vlan_for_prefix_scope(vlan_name: str, scope_obj) -> Any | None:
         except Exception:
             candidate_vid = None
 
-    q = VLAN.objects.all()
+    q = VLAN.objects.using(_ab()).all()
     if scope_obj is not None:
         try:
             from django.contrib.contenttypes.models import ContentType
@@ -3388,29 +3394,29 @@ def _resolve_vlan_for_prefix_scope(vlan_name: str, scope_obj) -> Any | None:
             anc_ids = list(
                 scope_obj.get_ancestors(include_self=True).values_list("id", flat=True)
             )
-            q_loc = VLAN.objects.filter(
+            q_loc = VLAN.objects.using(_ab()).filter(
                 group__scope_type=ct_loc,
                 group__scope_id__in=anc_ids,
             )
-            q_site = VLAN.objects.none()
+            q_site = VLAN.objects.using(_ab()).none()
             if getattr(scope_obj, "site_id", None):
                 try:
-                    q_site = VLAN.objects.get_for_site(scope_obj.site)
+                    q_site = VLAN.objects.get_for_site(scope_obj.site).using(_ab())
                 except Exception:
-                    q_site = VLAN.objects.none()
+                    q_site = VLAN.objects.using(_ab()).none()
             q = (q_loc | q_site).distinct()
         except Exception:
-            q = VLAN.objects.all()
+            q = VLAN.objects.using(_ab()).all()
 
     if candidate_vid is not None:
         by_vid = q.filter(vid=candidate_vid).first()
         if by_vid is not None:
             return by_vid
-        by_vid_any = VLAN.objects.filter(vid=candidate_vid).first()
+        by_vid_any = VLAN.objects.using(_ab()).filter(vid=candidate_vid).first()
         if by_vid_any is not None:
             return by_vid_any
 
-    by_name = _resolve_by_name(VLAN, raw)
+    by_name = _resolve_by_name(VLAN, raw, using=_ab())
     if by_name is not None:
         return by_name
     return q.filter(name=raw).first()
