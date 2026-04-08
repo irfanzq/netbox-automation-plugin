@@ -20,6 +20,7 @@ from __future__ import annotations
 import ipaddress
 import logging
 import re
+from contextvars import ContextVar
 from functools import lru_cache
 from typing import Any
 
@@ -117,6 +118,24 @@ def _skip_missing_prereq(detail: str) -> tuple[str, str, str]:
     if len(d) > 2000:
         d = d[:1997] + "..."
     return "skipped", "skipped_prerequisite_missing", d
+
+
+# ---------------------------------------------------------------------------
+# Branch-DB context for per-save transaction.atomic() savepoints
+# ---------------------------------------------------------------------------
+# Set by apply_row_operation from op["branch_db"] so every handler and helper
+# can open correctly-aliased savepoints without needing an extra argument.
+# Each snapshot+save block wraps itself in transaction.atomic(using=_ab()) so
+# netbox_branching sees a distinct transaction boundary per save and cannot
+# collapse multiple saves on the same object into a single diff row.
+_APPLY_BRANCH_DB: ContextVar[str] = ContextVar(
+    "netbox_automation_apply_branch_db", default="default"
+)
+
+
+def _ab() -> str:
+    """Current branch DB alias for per-save savepoints (short alias for readability)."""
+    return _APPLY_BRANCH_DB.get()
 
 
 def _netbox_changelog_snapshot(instance: Any) -> None:
@@ -1268,52 +1287,60 @@ def _prefix_apply_row_stepwise_changelog(
         return False
     any_save = False
     if vrf is not None and getattr(prefix_obj, "vrf_id", None) != vrf.pk:
-        _netbox_changelog_snapshot(prefix_obj)
-        prefix_obj.vrf = vrf
-        prefix_obj.save()
+        with transaction.atomic(using=_ab()):
+            _netbox_changelog_snapshot(prefix_obj)
+            prefix_obj.vrf = vrf
+            prefix_obj.save()
         any_save = True
     if status_name:
         val = _pick_choice_value(prefix_obj._meta.get_field("status"), status_name)
         if val is not None and prefix_obj.status != val:
-            _netbox_changelog_snapshot(prefix_obj)
-            prefix_obj.status = val
-            prefix_obj.save()
+            with transaction.atomic(using=_ab()):
+                _netbox_changelog_snapshot(prefix_obj)
+                prefix_obj.status = val
+                prefix_obj.save()
             any_save = True
     if role is not None and getattr(prefix_obj, "role_id", None) != role.pk:
-        _netbox_changelog_snapshot(prefix_obj)
-        prefix_obj.role = role
-        prefix_obj.save()
+        with transaction.atomic(using=_ab()):
+            _netbox_changelog_snapshot(prefix_obj)
+            prefix_obj.role = role
+            prefix_obj.save()
         any_save = True
     if tenant is not None and hasattr(prefix_obj, "tenant_id"):
         if prefix_obj.tenant_id != tenant.pk:
-            _netbox_changelog_snapshot(prefix_obj)
-            prefix_obj.tenant = tenant
-            prefix_obj.save()
+            with transaction.atomic(using=_ab()):
+                _netbox_changelog_snapshot(prefix_obj)
+                prefix_obj.tenant = tenant
+                prefix_obj.save()
             any_save = True
     if scope_obj is not None and hasattr(prefix_obj, "scope"):
         cur = getattr(prefix_obj, "scope", None)
         if cur is None or getattr(cur, "pk", None) != scope_obj.pk:
-            _netbox_changelog_snapshot(prefix_obj)
-            prefix_obj.scope = scope_obj
-            prefix_obj.save()
+            with transaction.atomic(using=_ab()):
+                _netbox_changelog_snapshot(prefix_obj)
+                prefix_obj.scope = scope_obj
+                prefix_obj.save()
             any_save = True
     if vlan_obj is not None and hasattr(prefix_obj, "vlan_id"):
         if prefix_obj.vlan_id != vlan_obj.pk:
-            _netbox_changelog_snapshot(prefix_obj)
-            prefix_obj.vlan = vlan_obj
-            prefix_obj.save()
+            with transaction.atomic(using=_ab()):
+                _netbox_changelog_snapshot(prefix_obj)
+                prefix_obj.vlan = vlan_obj
+                prefix_obj.save()
             any_save = True
     if hasattr(prefix_obj, "description"):
         want = (full_descr or "").strip()
         if (prefix_obj.description or "").strip() != want:
-            _netbox_changelog_snapshot(prefix_obj)
-            prefix_obj.description = full_descr
-            prefix_obj.save()
+            with transaction.atomic(using=_ab()):
+                _netbox_changelog_snapshot(prefix_obj)
+                prefix_obj.description = full_descr
+                prefix_obj.save()
             any_save = True
     cf_ch, _ = _merge_prefix_row_into_custom_fields(prefix_obj, cells)
     if cf_ch:
-        _netbox_changelog_snapshot(prefix_obj)
-        prefix_obj.save()
+        with transaction.atomic(using=_ab()):
+            _netbox_changelog_snapshot(prefix_obj)
+            prefix_obj.save()
         any_save = True
     return any_save
 
@@ -1343,52 +1370,61 @@ def _device_apply_row_stepwise_changelog(
     any_save = False
     if placement:
         if site is not None and dev.site_id != site.pk:
-            _netbox_changelog_snapshot(dev)
-            dev.site = site
-            dev.save()
+            with transaction.atomic(using=_ab()):
+                _netbox_changelog_snapshot(dev)
+                dev.site = site
+                dev.save()
             any_save = True
         if location is not None and getattr(dev, "location_id", None) != location.pk:
-            _netbox_changelog_snapshot(dev)
-            dev.location = location
-            dev.save()
+            with transaction.atomic(using=_ab()):
+                _netbox_changelog_snapshot(dev)
+                dev.location = location
+                dev.save()
             any_save = True
         if role is not None and dev.role_id != role.pk:
-            _netbox_changelog_snapshot(dev)
-            dev.role = role
-            dev.save()
+            with transaction.atomic(using=_ab()):
+                _netbox_changelog_snapshot(dev)
+                dev.role = role
+                dev.save()
             any_save = True
         if dtype is not None and dev.device_type_id != dtype.pk:
-            _netbox_changelog_snapshot(dev)
-            dev.device_type = dtype
-            dev.save()
+            with transaction.atomic(using=_ab()):
+                _netbox_changelog_snapshot(dev)
+                dev.device_type = dtype
+                dev.save()
             any_save = True
     if status_name:
         val = _pick_choice_value(dev._meta.get_field("status"), status_name)
         if val is not None and dev.status != val:
-            _netbox_changelog_snapshot(dev)
-            dev.status = val
-            dev.save()
+            with transaction.atomic(using=_ab()):
+                _netbox_changelog_snapshot(dev)
+                dev.status = val
+                dev.save()
             any_save = True
     sn = (serial or "").strip()
     if sn and hasattr(dev, "serial") and (dev.serial or "") != sn[:50]:
-        _netbox_changelog_snapshot(dev)
-        dev.serial = sn[:50]
-        dev.save()
+        with transaction.atomic(using=_ab()):
+            _netbox_changelog_snapshot(dev)
+            dev.serial = sn[:50]
+            dev.save()
         any_save = True
     if platform_obj is not None and hasattr(dev, "platform_id"):
         if getattr(dev, "platform_id", None) != platform_obj.pk:
-            _netbox_changelog_snapshot(dev)
-            dev.platform = platform_obj
-            dev.save()
+            with transaction.atomic(using=_ab()):
+                _netbox_changelog_snapshot(dev)
+                dev.platform = platform_obj
+                dev.save()
             any_save = True
     if tag_cell and _merge_device_tags(dev, tag_cell):
-        _netbox_changelog_snapshot(dev)
-        dev.save()
+        with transaction.atomic(using=_ab()):
+            _netbox_changelog_snapshot(dev)
+            dev.save()
         any_save = True
     cf_changed, _ = _merge_new_device_row_into_custom_fields(dev, cells)
     if cf_changed:
-        _netbox_changelog_snapshot(dev)
-        dev.save()
+        with transaction.atomic(using=_ab()):
+            _netbox_changelog_snapshot(dev)
+            dev.save()
         any_save = True
     return any_save
 
@@ -1559,21 +1595,25 @@ def apply_create_vlan(op: dict[str, Any]) -> tuple[str, str]:
             detail = detail[:1997] + "..."
         return "failed", "failed_validation_save", detail
 
-    # Phase 2: one save per metadata field so each shows as a separate delta in branch diff.
+    # Phase 2: one save per metadata field, each in its own savepoint so netbox_branching
+    # cannot collapse them into a single diff row (status / site / tenant show separately).
     st_f = vlan._meta.get_field("status")
     st_val = _pick_choice_value(st_f, status_name)
     if st_val is not None and vlan.status != st_val:
-        _netbox_changelog_snapshot(vlan)
-        vlan.status = st_val
-        vlan.save()
+        with transaction.atomic(using=_ab()):
+            _netbox_changelog_snapshot(vlan)
+            vlan.status = st_val
+            vlan.save()
     if site_obj is not None and hasattr(vlan, "site_id") and getattr(vlan, "site_id", None) != site_obj.pk:
-        _netbox_changelog_snapshot(vlan)
-        vlan.site = site_obj
-        vlan.save()
+        with transaction.atomic(using=_ab()):
+            _netbox_changelog_snapshot(vlan)
+            vlan.site = site_obj
+            vlan.save()
     if tenant is not None and hasattr(vlan, "tenant_id") and getattr(vlan, "tenant_id", None) != tenant.pk:
-        _netbox_changelog_snapshot(vlan)
-        vlan.tenant = tenant
-        vlan.save()
+        with transaction.atomic(using=_ab()):
+            _netbox_changelog_snapshot(vlan)
+            vlan.tenant = tenant
+            vlan.save()
     return "created", "ok_created"
 
 
@@ -2082,9 +2122,10 @@ def _floating_ip_apply_row_stepwise(
     if status_name:
         val = _pick_choice_value(ip_obj._meta.get_field("status"), status_name)
         if val is not None and ip_obj.status != val:
-            _netbox_changelog_snapshot(ip_obj)
-            ip_obj.status = val
-            ip_obj.save()
+            with transaction.atomic(using=_ab()):
+                _netbox_changelog_snapshot(ip_obj)
+                ip_obj.status = val
+                ip_obj.save()
             any_save = True
     if role_value is not None and hasattr(ip_obj, "role"):
         role_field = ip_obj._meta.get_field("role")
@@ -2096,21 +2137,24 @@ def _floating_ip_apply_row_stepwise(
         else:
             role_changed = getattr(ip_obj, "role", None) != role_value
         if role_changed:
-            _netbox_changelog_snapshot(ip_obj)
-            ip_obj.role = role_value
-            ip_obj.save()
+            with transaction.atomic(using=_ab()):
+                _netbox_changelog_snapshot(ip_obj)
+                ip_obj.role = role_value
+                ip_obj.save()
             any_save = True
     if tenant_obj is not None and hasattr(ip_obj, "tenant_id") and ip_obj.tenant_id != tenant_obj.pk:
-        _netbox_changelog_snapshot(ip_obj)
-        ip_obj.tenant = tenant_obj
-        ip_obj.save()
+        with transaction.atomic(using=_ab()):
+            _netbox_changelog_snapshot(ip_obj)
+            ip_obj.tenant = tenant_obj
+            ip_obj.save()
         any_save = True
     if hasattr(ip_obj, "description"):
         cur = (ip_obj.description or "").strip()
         if cur != full_descr.strip():
-            _netbox_changelog_snapshot(ip_obj)
-            ip_obj.description = full_descr
-            ip_obj.save()
+            with transaction.atomic(using=_ab()):
+                _netbox_changelog_snapshot(ip_obj)
+                ip_obj.description = full_descr
+                ip_obj.save()
             any_save = True
     inside_raw = _cell(
         cells,
@@ -2119,15 +2163,17 @@ def _floating_ip_apply_row_stepwise(
     )
     inner = _resolve_nat_inside_ipaddress(inside_raw, vrf)
     if inner is not None and getattr(ip_obj, "nat_inside_id", None) != inner.pk:
+        with transaction.atomic(using=_ab()):
+            _netbox_changelog_snapshot(ip_obj)
+            ip_obj.nat_inside = inner
+            ip_obj.save()
+        any_save = True
+    with transaction.atomic(using=_ab()):
         _netbox_changelog_snapshot(ip_obj)
-        ip_obj.nat_inside = inner
-        ip_obj.save()
-        any_save = True
-    _netbox_changelog_snapshot(ip_obj)
-    cf_ch, _ = _merge_ip_address_row_into_custom_fields(ip_obj, cells)
-    if cf_ch:
-        ip_obj.save()
-        any_save = True
+        cf_ch, _ = _merge_ip_address_row_into_custom_fields(ip_obj, cells)
+        if cf_ch:
+            ip_obj.save()
+            any_save = True
     return any_save
 
 
@@ -2493,36 +2539,41 @@ def apply_update_openstack_vm(op: dict[str, Any]) -> tuple[str, str]:
     if name_new and name_new not in {"—", "-"}:
         name_new = name_new[:nmax] if nmax > 0 else name_new
         if vm.name != name_new:
-            _netbox_changelog_snapshot(vm)
-            vm.name = name_new
+            with transaction.atomic(using=_ab()):
+                _netbox_changelog_snapshot(vm)
+                vm.name = name_new
+                vm.save()
+            changed = True
+    with transaction.atomic(using=_ab()):
+        _netbox_changelog_snapshot(vm)
+        if _apply_vm_primary_ip_from_projection(vm, proj, cells):
             vm.save()
             changed = True
-    _netbox_changelog_snapshot(vm)
-    if _apply_vm_primary_ip_from_projection(vm, proj, cells):
-        vm.save()
-        changed = True
     cluster_name = (proj.get("cluster") or "").strip()
     if cluster_name and cluster_name not in {"—", "-"}:
         cl = Cluster.objects.filter(name=cluster_name).first()
         if cl is not None and vm.cluster_id != cl.pk:
-            _netbox_changelog_snapshot(vm)
-            vm.cluster = cl
-            vm.save()
+            with transaction.atomic(using=_ab()):
+                _netbox_changelog_snapshot(vm)
+                vm.cluster = cl
+                vm.save()
             changed = True
     site_name = (proj.get("site") or "").strip()
     if site_name and site_name not in {"—", "-"} and hasattr(vm, "site_id"):
         site = _resolve_by_name(Site, site_name)
         if site is not None and getattr(vm, "site_id", None) != site.pk:
-            _netbox_changelog_snapshot(vm)
-            vm.site = site
-            vm.save()
+            with transaction.atomic(using=_ab()):
+                _netbox_changelog_snapshot(vm)
+                vm.site = site
+                vm.save()
             changed = True
     tenant_name = (proj.get("tenant") or "").strip()
     if not tenant_name or tenant_name in {"—", "-"}:
         if getattr(vm, "tenant_id", None):
-            _netbox_changelog_snapshot(vm)
-            vm.tenant = None
-            vm.save()
+            with transaction.atomic(using=_ab()):
+                _netbox_changelog_snapshot(vm)
+                vm.tenant = None
+                vm.save()
             changed = True
     else:
         tenant = _resolve_tenant(tenant_name)
@@ -2531,17 +2582,19 @@ def apply_update_openstack_vm(op: dict[str, Any]) -> tuple[str, str]:
                 f'Tenant "{tenant_name}" not found in NetBox (create it or fix NB Proposed Tenant).'
             )
         if getattr(vm, "tenant_id", None) != tenant.pk:
-            _netbox_changelog_snapshot(vm)
-            vm.tenant = tenant
-            vm.save()
+            with transaction.atomic(using=_ab()):
+                _netbox_changelog_snapshot(vm)
+                vm.tenant = tenant
+                vm.save()
             changed = True
     status_name = (proj.get("status") or "").strip()
     if status_name and status_name not in {"—", "-"}:
         val = _pick_choice_value(vm._meta.get_field("status"), status_name)
         if val is not None and vm.status != val:
-            _netbox_changelog_snapshot(vm)
-            vm.status = val
-            vm.save()
+            with transaction.atomic(using=_ab()):
+                _netbox_changelog_snapshot(vm)
+                vm.status = val
+                vm.save()
             changed = True
     dev = None
     device_cell = (proj.get("device") or "").strip()
@@ -2549,16 +2602,17 @@ def apply_update_openstack_vm(op: dict[str, Any]) -> tuple[str, str]:
         dev = Device.objects.filter(name=device_cell).first()
     if dev is not None and hasattr(vm, "device_id"):
         if getattr(vm, "device_id", None) != dev.pk:
-            _netbox_changelog_snapshot(vm)
-            vm.device = dev
+            with transaction.atomic(using=_ab()):
+                _netbox_changelog_snapshot(vm)
+                vm.device = dev
+                vm.save()
+            changed = True
+    with transaction.atomic(using=_ab()):
+        _netbox_changelog_snapshot(vm)
+        vm_cf_ch, _ = _merge_vm_row_into_custom_fields(vm, cells, proj)
+        if vm_cf_ch:
             vm.save()
             changed = True
-
-    _netbox_changelog_snapshot(vm)
-    vm_cf_ch, _ = _merge_vm_row_into_custom_fields(vm, cells, proj)
-    if vm_cf_ch:
-        vm.save()
-        changed = True
     merge_ch = _merge_audit_residual_onto_object(
         vm, cells, consumed, attr_names=("description",), max_len=8000
     )
@@ -4203,7 +4257,12 @@ def apply_row_operation(
     sk = str(op.get("selection_key") or "").strip()
     op_use = dict(op)
     op_use["cells"] = _cells_scoped_for_apply(sk, op.get("cells"))
-    raw = fn(op_use)
+    # Publish branch_db so all handlers and helpers can open correctly-aliased savepoints.
+    _bdb_token = _APPLY_BRANCH_DB.set(str(op.get("branch_db") or "default"))
+    try:
+        raw = fn(op_use)
+    finally:
+        _APPLY_BRANCH_DB.reset(_bdb_token)
     if not isinstance(raw, tuple):
         return "failed", "failed_bad_apply_return", None, None
     if len(raw) == 2:
