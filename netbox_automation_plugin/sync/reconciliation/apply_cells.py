@@ -1507,7 +1507,7 @@ def apply_create_vlan(op: dict[str, Any]) -> tuple[str, str]:
             "NB proposed VLAN group is empty — pick a VLAN group scoped to the site/location for this VID."
         )
 
-    grp = VLANGroup.objects.filter(name__iexact=group_name).first()
+    grp = VLANGroup.objects.using(_ab()).filter(name__iexact=group_name).first()
     if grp is None:
         return _skip_missing_prereq(f'VLAN group "{group_name}" not found in NetBox.')
 
@@ -1540,7 +1540,7 @@ def apply_create_vlan(op: dict[str, Any]) -> tuple[str, str]:
             )
 
     gfk = "group" if any(f.name == "group" for f in VLAN._meta.fields) else "vlan_group"
-    existing = VLAN.objects.filter(**{gfk: grp, "vid": vid_i}).first()
+    existing = VLAN.objects.using(_ab()).filter(**{gfk: grp, "vid": vid_i}).first()
     if existing is not None:
         return "skipped", "skipped_already_desired"
 
@@ -1551,7 +1551,7 @@ def apply_create_vlan(op: dict[str, Any]) -> tuple[str, str]:
         name = f"VLAN-{vid_i}"
 
     dup_name = (
-        VLAN.objects.filter(**{gfk: grp}).filter(name__iexact=name).exclude(vid=vid_i).first()
+        VLAN.objects.using(_ab()).filter(**{gfk: grp}).filter(name__iexact=name).exclude(vid=vid_i).first()
     )
     if dup_name is not None:
         return _skip_missing_prereq(
@@ -1575,7 +1575,7 @@ def apply_create_vlan(op: dict[str, Any]) -> tuple[str, str]:
     setattr(vlan, gfk, grp)
     try:
         vlan.full_clean()
-        vlan.save()
+        vlan.save(using=_ab())
     except DjangoValidationError as e:
         detail = _format_django_validation_error(e)
         logger.info("apply_create_vlan validation (vid=%s group=%s): %s", vid_i, group_name, detail)
@@ -3161,11 +3161,11 @@ def _resolve_vlan_by_group_name_and_vid(group_name: str, vid: int):
         return None
     if vid_i < 1 or vid_i > _NETBOX_IEEE_VLAN_VID_MAX:
         return None
-    grp = VLANGroup.objects.filter(name__iexact=gn).first()
+    grp = VLANGroup.objects.using(_ab()).filter(name__iexact=gn).first()
     if grp is None:
         return None
     gfk = "group" if any(f.name == "group" for f in VLAN._meta.fields) else "vlan_group"
-    return VLAN.objects.filter(**{gfk: grp, "vid": vid_i}).first()
+    return VLAN.objects.using(_ab()).filter(**{gfk: grp, "vid": vid_i}).first()
 
 
 def _resolve_vlan_for_device(device, vid: int):
@@ -3190,7 +3190,7 @@ def _resolve_vlan_for_device(device, vid: int):
     try:
         gfd = getattr(VLAN.objects, "get_for_device", None)
         if callable(gfd):
-            dev_qs = gfd(device).filter(vid=vid_i)
+            dev_qs = gfd(device).using(_ab()).filter(vid=vid_i)
             hits = list(dev_qs[:2])
             if len(hits) == 1:
                 return hits[0]
@@ -3220,13 +3220,13 @@ def _resolve_vlan_for_device(device, vid: int):
         logger.debug("_resolve_vlan_for_device: get_for_device failed", exc_info=True)
 
     if device.site_id:
-        hit = VLAN.objects.filter(site_id=device.site_id, vid=vid_i).first()
+        hit = VLAN.objects.using(_ab()).filter(site_id=device.site_id, vid=vid_i).first()
         if hit is not None:
             return hit
         site = getattr(device, "site", None)
         if site is not None:
             try:
-                site_qs = VLAN.objects.get_for_site(site)
+                site_qs = VLAN.objects.get_for_site(site).using(_ab())
                 hit = site_qs.filter(vid=vid_i).first()
                 if hit is not None:
                     return hit
@@ -3234,7 +3234,7 @@ def _resolve_vlan_for_device(device, vid: int):
                 pass
             try:
                 ct_site = ContentType.objects.get_by_natural_key("dcim", "site")
-                hit = VLAN.objects.filter(
+                hit = VLAN.objects.using(_ab()).filter(
                     group__scope_type=ct_site,
                     group__scope_id=device.site_id,
                     vid=vid_i,
@@ -3249,7 +3249,7 @@ def _resolve_vlan_for_device(device, vid: int):
         try:
             ct_loc = ContentType.objects.get_by_natural_key("dcim", "location")
             anc_ids = list(loc.get_ancestors(include_self=True).values_list("id", flat=True))
-            hit = VLAN.objects.filter(
+            hit = VLAN.objects.using(_ab()).filter(
                 group__scope_type=ct_loc,
                 group__scope_id__in=anc_ids,
                 vid=vid_i,
@@ -3259,7 +3259,7 @@ def _resolve_vlan_for_device(device, vid: int):
         except Exception:
             pass
         if getattr(loc, "site_id", None):
-            hit = VLAN.objects.filter(site_id=loc.site_id, vid=vid_i).first()
+            hit = VLAN.objects.using(_ab()).filter(site_id=loc.site_id, vid=vid_i).first()
             if hit is not None:
                 return hit
             try:
@@ -3267,7 +3267,7 @@ def _resolve_vlan_for_device(device, vid: int):
 
                 s = Site.objects.filter(pk=loc.site_id).first()
                 if s is not None:
-                    site_qs = VLAN.objects.get_for_site(s)
+                    site_qs = VLAN.objects.get_for_site(s).using(_ab())
                     hit = site_qs.filter(vid=vid_i).first()
                     if hit is not None:
                         return hit
@@ -3281,7 +3281,7 @@ def _resolve_vlan_for_device(device, vid: int):
             anc_r = list(
                 reg.get_ancestors(include_self=True).values_list("id", flat=True)
             )
-            hit = VLAN.objects.filter(
+            hit = VLAN.objects.using(_ab()).filter(
                 group__scope_type=ct_reg,
                 group__scope_id__in=anc_r,
                 vid=vid_i,
@@ -3291,11 +3291,11 @@ def _resolve_vlan_for_device(device, vid: int):
         except Exception:
             pass
 
-    dup = list(VLAN.objects.filter(vid=vid_i)[:2])
+    dup = list(VLAN.objects.using(_ab()).filter(vid=vid_i)[:2])
     if len(dup) == 1:
         return dup[0]
     if len(dup) > 1 and device.site_id:
-        hit = VLAN.objects.filter(vid=vid_i, site_id=device.site_id).first()
+        hit = VLAN.objects.using(_ab()).filter(vid=vid_i, site_id=device.site_id).first()
         if hit is not None:
             return hit
     return None
@@ -3308,7 +3308,7 @@ def _reuse_iface_untagged_vlan_if_vid_matches(iface: Any, vid: int) -> Any | Non
     uid = getattr(iface, "untagged_vlan_id", None)
     if not uid:
         return None
-    cur = VLAN.objects.filter(pk=uid).first()
+    cur = VLAN.objects.using(_ab()).filter(pk=uid).first()
     if cur is None or getattr(cur, "vid", None) != vid:
         return None
     return cur
