@@ -1234,7 +1234,13 @@ def build_frozen_operations(
                 meta = stable_index.get((safe, ri_int))
             if not meta:
                 detail = rk or f"row_index={ri_int}"
-                raise ValueError(f"Unknown row under {sk}: {detail}")
+                raise ValueError(
+                    f"Unknown row under {sk}: {detail}. "
+                    "That checkbox id is not in the current drift snapshot — common after "
+                    "regenerating the audit, changing row order, or updating NetBox so cells "
+                    "no longer match. Regenerate the report and select rows again (or clear "
+                    "saved reconciliation selection)."
+                )
             if _safe_selection_key(str(meta["selection_key"])) != safe:
                 raise ValueError(
                     f"Row {detail} belongs to section {meta['selection_key']}, not {sk}"
