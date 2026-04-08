@@ -1301,15 +1301,19 @@ _NEW_PREFIX_DRIFT_TO_CF_KEYS: tuple[tuple[str, tuple[str, ...]], ...] = (
 )
 
 
-@lru_cache(maxsize=1)
-def _prefix_custom_field_keys_cached() -> frozenset[str]:
+@lru_cache(maxsize=16)
+def _prefix_custom_field_keys_cached(router_key: str) -> frozenset[str]:
     try:
         from ipam.models import Prefix
         from extras.models import CustomField
     except Exception:
         return frozenset()
     keys: set[str] = set()
-    for cf in CustomField.objects.iterator():
+    if router_key == "__router__":
+        qs = CustomField.objects
+    else:
+        qs = CustomField.objects.using(router_key)
+    for cf in qs.iterator():
         if not _custom_field_targets_model(cf, Prefix):
             continue
         k = getattr(cf, "key", None)
@@ -1320,7 +1324,7 @@ def _prefix_custom_field_keys_cached() -> frozenset[str]:
 
 def _merge_prefix_row_into_custom_fields(prefix_obj: Any, cells: dict[str, str]) -> tuple[bool, set[str]]:
     """Map drift columns into Prefix.custom_field_data when matching Custom Field keys exist."""
-    valid = _prefix_custom_field_keys_cached()
+    valid = _prefix_custom_field_keys_cached(_orm_cache_key_for_cf_lists())
     if not valid or not hasattr(prefix_obj, "custom_field_data"):
         return False, set()
     data = dict(prefix_obj.custom_field_data or {})
@@ -1798,6 +1802,12 @@ def apply_create_prefix(op: dict[str, Any]) -> tuple[str, str]:
         return "skipped", "skipped_already_desired"
     obj = Prefix(prefix=cidr, vrf=vrf)
     try:
+        obj.full_clean(validate_unique=False)
+    except DjangoValidationError as e:
+        return _skip_missing_prereq(
+            f"NetBox rejected the prefix: {_format_django_validation_error(e)}"
+        )
+    try:
         obj.save(**_save_branch())
     except Exception:
         logger.debug(
@@ -1806,6 +1816,12 @@ def apply_create_prefix(op: dict[str, Any]) -> tuple[str, str]:
             exc_info=True,
         )
         pfx = Prefix(prefix=cidr, vrf=vrf)
+        try:
+            pfx.full_clean(validate_unique=False)
+        except DjangoValidationError as e:
+            return _skip_missing_prereq(
+                f"NetBox rejected the prefix: {_format_django_validation_error(e)}"
+            )
         try:
             pfx.save(**_save_branch())
         except Exception:
@@ -1830,6 +1846,12 @@ def apply_create_prefix(op: dict[str, Any]) -> tuple[str, str]:
             if hasattr(pfx, "description"):
                 pfx.description = full_descr
             _merge_prefix_row_into_custom_fields(pfx, cells)
+            try:
+                pfx.full_clean(validate_unique=False)
+            except DjangoValidationError as e:
+                return _skip_missing_prereq(
+                    f"NetBox rejected the prefix: {_format_django_validation_error(e)}"
+                )
             pfx.save(**_save_branch())
             return "created", "ok_created"
         _prefix_apply_row_stepwise_changelog(

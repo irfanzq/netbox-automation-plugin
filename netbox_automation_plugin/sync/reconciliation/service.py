@@ -27,6 +27,7 @@ import secrets
 from datetime import datetime, timezone as dt_timezone
 from typing import Any
 
+from django.conf import settings
 from django.core import signing
 from django.db import connections, transaction
 from django.utils import timezone
@@ -91,6 +92,30 @@ _APPLY_EXCEPTION_MESSAGE_MAX = 4000
 _APPLY_SKIP_REASON_DETAIL_MAX = 2000
 # Cap NetBox write preview string per apply row (matches recon preview projection).
 _WRITE_PREVIEW_MAX = 4000
+
+
+def _warn_if_netbox_branch_router_missing() -> None:
+    """
+    Reconciliation apply depends on netbox-branching's router + ``activate_branch``.
+
+    If ``BranchAwareRouter`` is not installed, ORM writes can hit NetBox **main** while the UI
+    shows an active branch — operators may see new prefixes/VLAN links on main without merging.
+    """
+    try:
+        routers = list(getattr(settings, "DATABASE_ROUTERS", None) or [])
+        joined = " ".join(str(r) for r in routers)
+        if "netbox_branching.database.BranchAwareRouter" in joined:
+            return
+        if "BranchAwareRouter" in joined:
+            return
+        logger.warning(
+            "Reconciliation apply: DATABASE_ROUTERS should include "
+            "'netbox_branching.database.BranchAwareRouter'. Without DynamicSchemaDict + this "
+            "router, ORM saves may write NetBox main even under activate_branch. Also ensure "
+            "'netbox_branching' is the **last** PLUGINS entry so branching is registered."
+        )
+    except Exception:
+        return
 
 
 def _recon_explicit_orm_using(db_alias: str) -> str | None:
@@ -1882,6 +1907,12 @@ def apply_reconciliation_run(
     use NetBox’s global branch picker; it resolves ``Branch`` via
     :func:`get_netbox_branch` and opens :func:`branch_write_context` for that instance.
 
+    If prefixes or VLANs show up on **main** without merging the branch, that is **not**
+    expected from this plugin’s intent: verify NetBox has ``DynamicSchemaDict``,
+    ``DATABASE_ROUTERS`` includes ``BranchAwareRouter``, and ``netbox_branching`` is **last**
+    in ``PLUGINS`` (per netbox-branching docs). A warning is logged at apply time if the
+    router is missing.
+
     Operations are sorted by ``AUDIT_REPORT_APPLY_ORDER`` (same as reconciliation preview
     tables): new devices, MAAS review hosts, proposed missing VLANs (IPAM), placement, new VMs,
     new/drift interfaces, OpenStack prefixes/ranges/FIPs, existing VM drift, BMC, serial review.
@@ -2000,6 +2031,7 @@ def apply_reconciliation_run(
                     )
             else:
                 try:
+                    _warn_if_netbox_branch_router_missing()
                     with branch_write_context(branch=branch_obj):
                         with reconciliation_apply_guard(branch_obj, branch_db):
                             for seq_num, op in enumerate(target_ops, start=1):
