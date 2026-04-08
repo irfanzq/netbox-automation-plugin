@@ -68,13 +68,14 @@
   <div class="card mb-3">
     <h5 class="card-header">{% trans "Apply row results (comprehensive)" %}</h5>
     <div class="card-body py-2">
-      <p class="small text-body-secondary mb-0">{% trans "All frozen rows with their latest merged status. Order: failed and skips that need action first, then updates and creates, then already-in-sync skips." %}</p>
+      <p class="small text-body-secondary mb-0">{% trans "All frozen rows with their latest merged status. Table order is by severity (not execution order). Run # is the 1-based execution index from the apply that last updated each row; partial re-applies only number rows in that batch — untouched rows may show a prior Run # or —." %}</p>
     </div>
     <div class="card-body p-0 border-top">
       <div class="table-responsive">
         <table class="table table-sm table-striped mb-0">
           <thead>
             <tr>
+              <th>{% trans "Run #" %}</th>
               <th>{% trans "Status" %}</th>
               <th>{% trans "Reason" %}</th>
               <th>{% trans "Row key" %}</th>
@@ -88,6 +89,7 @@
           <tbody>
             {% for row in comprehensive_rows %}
               <tr>
+                <td class="small text-monospace text-body-secondary">{% if row.apply_sequence %}{{ row.apply_sequence }}{% else %}—{% endif %}</td>
                 <td class="small"><span class="badge text-bg-secondary">{{ row.status|default:"—" }}</span></td>
                 <td class="small text-monospace">{{ row.reason|default:"—" }}</td>
                 <td class="small text-monospace text-break">{{ row.row_key|default:"—" }}</td>
@@ -121,6 +123,7 @@
         <table class="table table-sm table-striped mb-0">
           <thead>
             <tr>
+              <th>{% trans "Run #" %}</th>
               <th>{% trans "Status" %}</th>
               <th>{% trans "Reason" %}</th>
               <th>{% trans "Row key" %}</th>
@@ -134,6 +137,7 @@
           <tbody>
             {% for row in apply_results.last_attempt_rows %}
               <tr>
+                <td class="small text-monospace text-body-secondary">{% if row.apply_sequence %}{{ row.apply_sequence }}{% else %}—{% endif %}</td>
                 <td class="small"><span class="badge text-bg-secondary">{{ row.status|default:"—" }}</span></td>
                 <td class="small text-monospace">{{ row.reason|default:"—" }}</td>
                 <td class="small text-monospace text-break">{{ row.row_key|default:"—" }}</td>

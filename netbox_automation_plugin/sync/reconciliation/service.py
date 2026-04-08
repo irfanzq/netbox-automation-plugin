@@ -203,6 +203,12 @@ def _finalize_apply_row(op: dict[str, Any], result: dict[str, Any]) -> dict[str,
     return result
 
 
+def _with_apply_sequence(row: dict[str, Any], sequence: int) -> dict[str, Any]:
+    """1-based position of this row in the current apply request's ``target_ops`` (execution order)."""
+    row["apply_sequence"] = int(sequence)
+    return row
+
+
 def _apply_result_row_shell(op: dict[str, Any]) -> dict[str, Any]:
     row_key = str(op.get("row_key") or "").strip()
     return {
@@ -1975,23 +1981,29 @@ def apply_reconciliation_run(
                     "requires a branch-scoped DB connection so writes do not hit NetBox main. "
                     "Wait until the branch is ready / provisioned, then retry."
                 )
-                for op in target_ops:
+                for seq_num, op in enumerate(target_ops, start=1):
                     applied_rows.append(
-                        _apply_branch_prereq_failed_row(
-                            op,
-                            reason="failed_branch_connection_alias",
-                            detail=bd_msg,
+                        _with_apply_sequence(
+                            _apply_branch_prereq_failed_row(
+                                op,
+                                reason="failed_branch_connection_alias",
+                                detail=bd_msg,
+                            ),
+                            seq_num,
                         )
                     )
             else:
                 try:
                     with branch_write_context(branch=branch_obj):
                         with reconciliation_apply_guard(branch_obj, branch_db):
-                            for op in target_ops:
+                            for seq_num, op in enumerate(target_ops, start=1):
                                 try:
                                     applied_rows.append(
-                                        _execute_branch_apply_in_branch_transaction(
-                                            branch_db, op
+                                        _with_apply_sequence(
+                                            _execute_branch_apply_in_branch_transaction(
+                                                branch_db, op
+                                            ),
+                                            seq_num,
                                         )
                                     )
                                 except Exception as exc:
@@ -2000,24 +2012,26 @@ def apply_reconciliation_run(
                                         str(op.get("row_key") or ""),
                                         str(op.get("action") or ""),
                                     )
-                                    applied_rows.append(_failed_apply_row(op, exc))
+                                    applied_rows.append(
+                                        _with_apply_sequence(_failed_apply_row(op, exc), seq_num)
+                                    )
                 except Exception as e:
                     et = type(e).__name__
                     em = _truncate_exc_message(str(e).strip() or repr(e))
-                    for op in target_ops:
+                    for seq_num, op in enumerate(target_ops, start=1):
                         row = _apply_result_from_operation(op, branch_context_ready=False)
                         row["exception_type"] = et
                         row["exception_message"] = em
                         row["reason_detail"] = _truncate_exc_message(
                             f"{et}: {em}", max_len=_APPLY_EXCEPTION_MESSAGE_MAX + 64
                         )
-                        applied_rows.append(row)
+                        applied_rows.append(_with_apply_sequence(row, seq_num))
         else:
-            for op in target_ops:
+            for seq_num, op in enumerate(target_ops, start=1):
                 row = _apply_result_from_operation(op, branch_context_ready=False)
                 if branch_err:
                     row["reason_detail"] = branch_err
-                applied_rows.append(row)
+                applied_rows.append(_with_apply_sequence(row, seq_num))
         merged_rows = []
         seen_retry: set[str] = set()
         if partial_retry:
