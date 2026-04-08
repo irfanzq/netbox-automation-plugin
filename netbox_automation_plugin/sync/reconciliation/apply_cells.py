@@ -1534,18 +1534,9 @@ def apply_create_vlan(op: dict[str, Any]) -> tuple[str, str]:
                 f'Tenant "{tenant_name}" not resolved — fix NB Proposed Tenant or create the tenant.'
             )
 
+    # Phase 1: minimal identity save — NetBox branching records "Created" with VID/name/group.
     vlan = VLAN(vid=vid_i, name=name)
     setattr(vlan, gfk, grp)
-    st_f = vlan._meta.get_field("status")
-    st_val = _pick_choice_value(st_f, status_name)
-    if st_val is not None:
-        vlan.status = st_val
-    if tenant is not None and hasattr(vlan, "tenant_id"):
-        vlan.tenant = tenant
-
-    if site_obj is not None:
-        vlan.site = site_obj
-
     try:
         vlan.full_clean()
         vlan.save()
@@ -1566,8 +1557,23 @@ def apply_create_vlan(op: dict[str, Any]) -> tuple[str, str]:
         detail = f"{et}: {em}"
         if len(detail) > 2000:
             detail = detail[:1997] + "..."
-        # Third element becomes apply row ``reason_detail`` (2-tuple would leave UI empty).
         return "failed", "failed_validation_save", detail
+
+    # Phase 2: one save per metadata field so each shows as a separate delta in branch diff.
+    st_f = vlan._meta.get_field("status")
+    st_val = _pick_choice_value(st_f, status_name)
+    if st_val is not None and vlan.status != st_val:
+        _netbox_changelog_snapshot(vlan)
+        vlan.status = st_val
+        vlan.save()
+    if site_obj is not None and hasattr(vlan, "site_id") and getattr(vlan, "site_id", None) != site_obj.pk:
+        _netbox_changelog_snapshot(vlan)
+        vlan.site = site_obj
+        vlan.save()
+    if tenant is not None and hasattr(vlan, "tenant_id") and getattr(vlan, "tenant_id", None) != tenant.pk:
+        _netbox_changelog_snapshot(vlan)
+        vlan.tenant = tenant
+        vlan.save()
     return "created", "ok_created"
 
 
@@ -2209,29 +2215,11 @@ def apply_create_floating_ip(op: dict[str, Any]) -> tuple[str, str]:
             ip_fb.save()
         except Exception:
             logger.debug(
-                "Floating IP minimal save failed again; single create with all fields (address=%s)",
+                "Floating IP minimal save failed again; giving up on two-phase create (address=%s)",
                 address,
                 exc_info=True,
             )
-            ip_fb = IPAddress(address=address, vrf=vrf)
-            if status_name:
-                val = _pick_choice_value(ip_fb._meta.get_field("status"), status_name)
-                if val is not None:
-                    ip_fb.status = val
-            if role_value is not None and hasattr(ip_fb, "role"):
-                ip_fb.role = role_value
-            if tenant_obj is not None and hasattr(ip_fb, "tenant"):
-                ip_fb.tenant = tenant_obj
-            if hasattr(ip_fb, "description"):
-                ip_fb.description = full_descr
-            _apply_fip_nat_inside(ip_fb, cells, vrf)
-            _merge_ip_address_row_into_custom_fields(ip_fb, cells)
-            ip_fb.save()
-            if _merge_audit_residual_onto_object(
-                ip_fb, cells, consumed, attr_names=("description",), max_len=max(dmax, 8000)
-            ):
-                ip_fb.save()
-            return "created", "ok_created"
+            return "failed", "failed_validation_save"
         _floating_ip_apply_row_stepwise(
             ip_fb,
             status_name=status_name,
@@ -2241,6 +2229,7 @@ def apply_create_floating_ip(op: dict[str, Any]) -> tuple[str, str]:
             cells=cells,
             vrf=vrf,
         )
+        _netbox_changelog_snapshot(ip_fb)
         _merge_audit_residual_onto_object(
             ip_fb, cells, consumed, attr_names=("description",), max_len=max(dmax, 8000)
         )
@@ -2255,6 +2244,7 @@ def apply_create_floating_ip(op: dict[str, Any]) -> tuple[str, str]:
         cells=cells,
         vrf=vrf,
     )
+    _netbox_changelog_snapshot(ip_obj)
     _merge_audit_residual_onto_object(
         ip_obj, cells, consumed, attr_names=("description",), max_len=max(dmax, 8000)
     )
@@ -2425,6 +2415,7 @@ def apply_create_openstack_vm(op: dict[str, Any]) -> tuple[str, str]:
     vm_cf_ch, _ = _merge_vm_row_into_custom_fields(vm, cells, proj)
     if vm_cf_ch:
         vm.save()
+    _netbox_changelog_snapshot(vm)
     _merge_audit_residual_onto_object(
         vm, cells, consumed, attr_names=("description",), max_len=8000
     )
@@ -3421,11 +3412,21 @@ def _assign_ips_to_interface(iface, ip_blob: str, vrf) -> tuple[bool, bool, bool
                     ip_fb.save()
                 except Exception:
                     logger.debug(
-                        "IPAddress minimal save failed again; single create+assign (address=%s)",
+                        "IPAddress minimal save failed again; attempting two-phase create+assign (address=%s)",
                         addr,
                         exc_info=True,
                     )
                     ip_fb2 = IPAddress(address=addr, vrf=vrf)
+                    try:
+                        ip_fb2.save()
+                    except Exception:
+                        logger.debug(
+                            "IPAddress two-phase fallback: minimal save failed; skipping address=%s",
+                            addr,
+                            exc_info=True,
+                        )
+                        continue
+                    _netbox_changelog_snapshot(ip_fb2)
                     if hasattr(ip_fb2, "assigned_object"):
                         ip_fb2.assigned_object = iface
                     elif hasattr(ip_fb2, "interface"):

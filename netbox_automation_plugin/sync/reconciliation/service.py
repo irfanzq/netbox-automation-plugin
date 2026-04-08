@@ -93,8 +93,8 @@ _APPLY_SKIP_REASON_DETAIL_MAX = 2000
 _WRITE_PREVIEW_MAX = 4000
 
 
-def _apply_result_write_preview(op: dict[str, Any]) -> str:
-    """Human-readable NetBox-oriented fields for apply logs (same projection as recon tables)."""
+def _apply_result_projection_dict(op: dict[str, Any]) -> dict[str, str]:
+    """NetBox write projection (resolved FK labels) for one frozen op — same basis as preview tables."""
     sk = str(op.get("selection_key") or "").strip()
     raw = op.get("cells")
     cells: dict[str, str] = {}
@@ -105,8 +105,12 @@ def _apply_result_write_preview(op: dict[str, Any]) -> str:
     try:
         proj = netbox_write_projection_for_op({"selection_key": sk, "cells": cells})
     except Exception:
-        logger.debug("apply row write_preview projection failed", exc_info=True)
-        return ""
+        logger.debug("apply row projection dict failed", exc_info=True)
+        return {}
+    return _resolve_fk_labels_in_proj(proj, sk)
+
+
+def _apply_result_write_preview_from_proj(proj: dict[str, str]) -> str:
     parts: list[str] = []
     for k, v in proj.items():
         vv = (v or "").strip()
@@ -119,10 +123,77 @@ def _apply_result_write_preview(op: dict[str, Any]) -> str:
     return s
 
 
+def _apply_result_write_preview(op: dict[str, Any]) -> str:
+    """Human-readable NetBox-oriented fields for apply logs (same projection as recon tables)."""
+    return _apply_result_write_preview_from_proj(_apply_result_projection_dict(op))
+
+
+def _field_changes_nonempty_scalar(v: Any) -> bool:
+    s = "" if v is None else str(v).strip()
+    return bool(s) and s not in ("—", "-")
+
+
+def _build_field_changes_from_proj_and_snapshot(
+    st: str,
+    proj: dict[str, str],
+    snap: dict[str, str] | None,
+) -> list[dict[str, str]]:
+    snap = snap or {}
+    out: list[dict[str, str]] = []
+    if st == "created":
+        seen: set[str] = set()
+        for k, v in proj.items():
+            if not _field_changes_nonempty_scalar(v):
+                continue
+            after = str(snap.get(k, v) or "").strip() or str(v).strip()
+            out.append({"header": k, "before": "", "after": after})
+            seen.add(k)
+        for k, v in snap.items():
+            if k in seen or not _field_changes_nonempty_scalar(v):
+                continue
+            out.append({"header": k, "before": "", "after": str(v).strip()})
+        return out
+    if st == "updated":
+        if not snap:
+            return [
+                {"header": k, "before": "—", "after": str(v).strip()}
+                for k, v in proj.items()
+                if _field_changes_nonempty_scalar(v)
+            ]
+        keys = sorted(set(proj.keys()) | set(snap.keys()))
+        for k in keys:
+            pb = str(proj.get(k, "") or "").strip()
+            sa = str(snap.get(k, "") or "").strip()
+            if pb == sa:
+                continue
+            out.append(
+                {
+                    "header": k,
+                    "before": pb if pb else "—",
+                    "after": sa if sa else "—",
+                }
+            )
+        return out
+    return []
+
+
 def _finalize_apply_row(op: dict[str, Any], result: dict[str, Any]) -> dict[str, Any]:
-    wp = _apply_result_write_preview(op)
+    proj = _apply_result_projection_dict(op)
+    wp = _apply_result_write_preview_from_proj(proj)
     if wp:
         result["write_preview"] = wp
+    st = str(result.get("status") or "")
+    raw_snap = result.get("field_snapshot")
+    if isinstance(raw_snap, dict):
+        snap_n = {
+            str(k): ("" if v is None else str(v).strip()) for k, v in raw_snap.items()
+        }
+    else:
+        snap_n = None
+    if st in ("created", "updated"):
+        fc = _build_field_changes_from_proj_and_snapshot(st, proj, snap_n)
+        if fc:
+            result["field_changes"] = fc
     return result
 
 
@@ -171,6 +242,186 @@ def _failed_apply_row(op: dict[str, Any], exc: Exception) -> dict[str, Any]:
     return _finalize_apply_row(op, result)
 
 
+def _load_netbox_model_instance(label: str, pk: int, using: str) -> Any | None:
+    from django.apps import apps
+
+    try:
+        Model = apps.get_model(label)
+    except (LookupError, ValueError, TypeError):
+        return None
+    try:
+        return Model.objects.using(using).filter(pk=int(pk)).first()
+    except Exception:
+        return None
+
+
+def _interface_assigned_ip_blob(iface: Any, using: str) -> str:
+    try:
+        from django.contrib.contenttypes.models import ContentType
+        from ipam.models import IPAddress
+
+        ct = ContentType.objects.get_for_model(iface.__class__)
+        qs = IPAddress.objects.using(using).filter(
+            assigned_object_type_id=ct.pk, assigned_object_id=iface.pk
+        )
+        parts = sorted(str(x.address) for x in qs if getattr(x, "address", None))
+        if parts:
+            return ", ".join(parts)
+    except Exception:
+        pass
+    try:
+        from ipam.models import IPAddress
+
+        qs = IPAddress.objects.using(using).filter(interface_id=getattr(iface, "pk", None))
+        return ", ".join(
+            sorted(str(x.address) for x in qs if getattr(x, "address", None))
+        )
+    except Exception:
+        return ""
+
+
+def _orm_instance_field_snapshot(obj: Any, *, selection_key: str, using: str) -> dict[str, str]:
+    out: dict[str, str] = {}
+    try:
+        opts = obj._meta
+        n = 0
+        for f in opts.concrete_fields:
+            if n >= 48:
+                break
+            name = f.name
+            if name == "id":
+                continue
+            if f.is_relation:
+                if f.many_to_many:
+                    continue
+                try:
+                    robj = getattr(obj, name, None)
+                except Exception:
+                    continue
+                if robj is None:
+                    continue
+                disp = str(getattr(robj, "name", None) or "").strip()
+                if not disp:
+                    disp = str(robj).strip()
+                if disp:
+                    out[name] = disp
+                    n += 1
+                if name == "untagged_vlan" and robj is not None:
+                    vid = getattr(robj, "vid", None)
+                    if vid is not None:
+                        out["untagged_vlan_vid"] = str(vid)
+                continue
+            try:
+                val = getattr(obj, f.attname)
+            except Exception:
+                continue
+            if val is None or val == "":
+                continue
+            s = str(val).strip()
+            if not s:
+                continue
+            out[name] = s
+            n += 1
+        if str(opts.label_lower) == "dcim.interface":
+            ips = _interface_assigned_ip_blob(obj, using)
+            if ips:
+                out["assigned_ips"] = ips
+    except Exception:
+        return {}
+    sk = str(selection_key or "")
+    return _resolve_fk_labels_in_proj(out, sk)
+
+
+def _fetch_written_object_fallback(op: dict[str, Any], using: str) -> Any | None:
+    action = str(op.get("action") or "").strip()
+    sk = str(op.get("selection_key") or "").strip()
+    cells = op.get("cells") if isinstance(op.get("cells"), dict) else {}
+    try:
+        proj = netbox_write_projection_for_op({"selection_key": sk, "cells": cells})
+    except Exception:
+        proj = {}
+    try:
+        if action == "create_vlan":
+            from ipam.models import VLAN
+
+            vid_s = str(proj.get("vid") or "").strip()
+            if not vid_s.isdigit():
+                return None
+            vid_i = int(vid_s)
+            grp = str(proj.get("vlan_group") or "").strip()
+            qs = VLAN.objects.using(using).filter(vid=vid_i)
+            if grp:
+                qs = qs.filter(group__name=grp)
+            return qs.first()
+        if action in ("create_prefix",):
+            from ipam.models import Prefix, VRF
+
+            cidr = str(proj.get("prefix") or "").strip()
+            if not cidr:
+                return None
+            vrf_name = str(proj.get("vrf") or "").strip()
+            vrf = None
+            if vrf_name:
+                vrf = VRF.objects.using(using).filter(name=vrf_name).first()
+            qs = Prefix.objects.using(using).filter(prefix=cidr)
+            if vrf is not None:
+                qs = qs.filter(vrf=vrf)
+            elif not vrf_name:
+                qs = qs.filter(vrf__isnull=True)
+            return qs.first()
+        if action in ("create_device", "review_device", "placement_alignment"):
+            from dcim.models import Device
+
+            host = str(proj.get("name") or "").strip()
+            if host:
+                return Device.objects.using(using).filter(name=host).first()
+        if action in (
+            "create_interface",
+            "update_interface",
+            "bmc_documentation",
+            "bmc_alignment",
+        ):
+            from dcim.models import Device, Interface
+
+            host = str(proj.get("device") or "").strip()
+            if_name = str(proj.get("name") or "").strip()
+            if not host or not if_name:
+                return None
+            dev = Device.objects.using(using).filter(name=host).first()
+            if not dev:
+                return None
+            return Interface.objects.using(using).filter(device=dev, name=if_name).first()
+        if action == "update_openstack_vm":
+            from virtualization.models import VirtualMachine
+
+            raw_id = str(proj.get("id") or "").strip()
+            if raw_id.isdigit():
+                return VirtualMachine.objects.using(using).filter(pk=int(raw_id)).first()
+    except Exception:
+        return None
+    return None
+
+
+def _capture_applied_object_snapshot(
+    op: dict[str, Any], result: dict[str, Any], branch_db: str
+) -> None:
+    try:
+        obj: Any | None = None
+        wo = result.get("written_object")
+        if isinstance(wo, dict) and wo.get("label") and wo.get("pk") is not None:
+            obj = _load_netbox_model_instance(str(wo["label"]), int(wo["pk"]), branch_db)
+        if obj is None:
+            obj = _fetch_written_object_fallback(op, branch_db)
+        if obj is None:
+            return
+        sk = str(op.get("selection_key") or "")
+        snap = _orm_instance_field_snapshot(obj, selection_key=sk, using=branch_db)
+        if snap:
+            result["field_snapshot"] = snap
+    except Exception:
+        return
+
+
 def _execute_branch_apply_in_branch_transaction(branch_db: str, op: dict[str, Any]) -> dict[str, Any]:
     """
     Run one branch apply with a per-row transaction only when needed.
@@ -186,21 +437,21 @@ def _execute_branch_apply_in_branch_transaction(branch_db: str, op: dict[str, An
         conn = connections[branch_db]
     except KeyError:
         with transaction.atomic(using=branch_db):
-            return _execute_branch_apply(op)
+            return _execute_branch_apply(op, branch_db)
     if getattr(conn, "in_atomic_block", False):
         sid = transaction.savepoint(using=branch_db)
         try:
-            out = _execute_branch_apply(op)
+            out = _execute_branch_apply(op, branch_db)
             transaction.savepoint_commit(sid, using=branch_db)
             return out
         except Exception:
             transaction.savepoint_rollback(sid, using=branch_db)
             raise
     with transaction.atomic(using=branch_db):
-        return _execute_branch_apply(op)
+        return _execute_branch_apply(op, branch_db)
 
 
-def _execute_branch_apply(op: dict[str, Any]) -> dict[str, Any]:
+def _execute_branch_apply(op: dict[str, Any], branch_db: str | None = None) -> dict[str, Any]:
     """Run one apply; optional per-row ``atomic(using=…)`` is applied by the caller / helper above."""
     result = _apply_result_row_shell(op)
     action = result["action"]
@@ -208,13 +459,17 @@ def _execute_branch_apply(op: dict[str, Any]) -> dict[str, Any]:
         result["status"] = "failed"
         result["reason"] = "failed_not_implemented"
         return _finalize_apply_row(op, result)
-    st, reason, skip_detail = apply_row_operation(op)
+    st, reason, skip_detail, written_meta = apply_row_operation(op)
     result["status"] = st
     result["reason"] = reason
+    if written_meta:
+        result["written_object"] = written_meta
     if skip_detail:
         result["reason_detail"] = _truncate_exc_message(
             skip_detail, max_len=_APPLY_SKIP_REASON_DETAIL_MAX
         )
+    if branch_db and st in ("created", "updated"):
+        _capture_applied_object_snapshot(op, result, branch_db)
     return _finalize_apply_row(op, result)
 
 
