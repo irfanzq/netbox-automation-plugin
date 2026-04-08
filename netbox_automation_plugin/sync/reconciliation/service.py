@@ -984,6 +984,68 @@ def group_reconciliation_operation_tables(
     return tables
 
 
+_RE_BARE_INT = re.compile(r"^\d+$")
+
+# Maps projection field name → list of (module_path, model_name, label_attr) to try in order.
+# For "vlan" the formatter receives the object; for others only label_attr is used.
+_FK_FIELD_RESOLVERS: dict[str, list[tuple[str, str, str]]] = {
+    "role": [
+        ("ipam.models", "Role", "name"),
+        ("dcim.models", "DeviceRole", "name"),
+    ],
+    "vlan": [
+        ("ipam.models", "VLAN", "__vlan__"),
+    ],
+    "scope": [
+        ("dcim.models", "Site", "name"),
+        ("dcim.models", "Location", "name"),
+    ],
+    "tenant": [
+        ("tenancy.models", "Tenant", "name"),
+    ],
+    "vrf": [
+        ("ipam.models", "VRF", "name"),
+    ],
+}
+
+
+def _resolve_fk_labels_in_proj(proj: dict[str, str]) -> dict[str, str]:
+    """Return a copy of *proj* with bare-integer FK IDs replaced by human-readable labels.
+
+    Only fields listed in ``_FK_FIELD_RESOLVERS`` are touched. All model imports and
+    ORM queries are wrapped in broad try/except so failures are fully silent.
+    """
+    out = dict(proj)
+    for field, resolvers in _FK_FIELD_RESOLVERS.items():
+        raw = str(out.get(field) or "").strip()
+        if not raw or not _RE_BARE_INT.match(raw):
+            continue
+        pk = int(raw)
+        resolved: str | None = None
+        for mod_path, model_name, label_attr in resolvers:
+            try:
+                mod = __import__(mod_path, fromlist=[model_name])
+                Model = getattr(mod, model_name, None)
+                if Model is None:
+                    continue
+                obj = Model.objects.filter(pk=pk).first()
+                if obj is None:
+                    continue
+                if label_attr == "__vlan__":
+                    vid = getattr(obj, "vid", None)
+                    name = getattr(obj, "name", None) or ""
+                    resolved = f"{vid} ({name})" if vid is not None else name
+                else:
+                    resolved = str(getattr(obj, label_attr, "") or "").strip() or None
+                if resolved:
+                    break
+            except Exception:
+                continue
+        if resolved:
+            out[field] = resolved
+    return out
+
+
 def _row_diffs_vs_baseline(
     frozen: list[dict[str, Any]],
     stable_baseline: dict[tuple[str, int], dict[str, Any]],
@@ -998,7 +1060,7 @@ def _row_diffs_vs_baseline(
         cells_a = dict(op.get("cells") or {})
         if msk in NEW_NIC_SELECTION_KEYS:
             cells_a = new_nic_cells_for_reconciliation(cells_a)
-        proj_a = netbox_write_preview_cells(msk, cells_a)
+        proj_a = _resolve_fk_labels_in_proj(netbox_write_preview_cells(msk, cells_a))
         fieldnames = list(netbox_write_preview_ordered_fieldnames(msk))
         if not fieldnames:
             fieldnames = sorted(proj_a.keys())
@@ -1019,7 +1081,7 @@ def _row_diffs_vs_baseline(
         cells_b = _cells_dict(bmeta["headers"], bmeta["row"])
         if msk in NEW_NIC_SELECTION_KEYS:
             cells_b = new_nic_cells_for_reconciliation(cells_b)
-        proj_b = netbox_write_preview_cells(msk, cells_b)
+        proj_b = _resolve_fk_labels_in_proj(netbox_write_preview_cells(msk, cells_b))
         _ord = list(netbox_write_preview_ordered_fieldnames(msk))
         _seen = set(_ord)
         for _k in sorted(set(proj_a.keys()) | set(proj_b.keys())):
