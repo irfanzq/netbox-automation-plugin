@@ -35,6 +35,7 @@ from netbox_automation_plugin.sync.reporting.drift_report.drift_nb_picker_catalo
 )
 from netbox_automation_plugin.sync.reconciliation.branch import (
     check_reconciliation_apply_safe_to_mutate,
+    get_reconciliation_apply_guard_context,
 )
 from netbox_automation_plugin.sync.reconciliation.netbox_write_projection import (
     netbox_write_projection_for_op,
@@ -134,8 +135,22 @@ _APPLY_BRANCH_DB: ContextVar[str] = ContextVar(
 
 
 def _ab() -> str:
-    """Current branch DB alias for per-save savepoints (short alias for readability)."""
-    return _APPLY_BRANCH_DB.get()
+    """
+    Active reconciliation branch DB alias.
+
+    Prefer the apply guard (set for the whole batch) so helpers still target the branch
+    even if the ContextVar is wrong in edge cases; then the per-row ContextVar from
+    ``apply_row_operation``.
+    """
+    try:
+        ctx = get_reconciliation_apply_guard_context()
+        if ctx:
+            bd = str(ctx.get("branch_db") or "").strip()
+            if bd:
+                return bd
+    except Exception:
+        pass
+    return str(_APPLY_BRANCH_DB.get() or "default").strip() or "default"
 
 
 def _netbox_changelog_snapshot(instance: Any) -> None:
@@ -273,7 +288,7 @@ def _resolve_device_type(raw: str | None) -> Any:
     return None
 
 
-def _resolve_tenant(raw: str | None) -> Any:
+def _resolve_tenant(raw: str | None, *, using: str | None = None) -> Any:
     """
     Resolve ``Tenant`` from drift / recon cells.
 
@@ -281,12 +296,15 @@ def _resolve_tenant(raw: str | None) -> Any:
     while NetBox stores a shorter ``name`` (e.g. ``whitefiber``). Try slug and a unique
     prefix before the first hyphen when the full string does not match. Hierarchical picker
     labels ``Parent / Child`` (or ``Group / Tenant`` on NetBox 4.x) match hierarchy names.
+
+    Pass ``using`` during reconciliation apply so lookups hit the active branch schema.
     """
     from tenancy.models import Tenant
 
     s = str(raw or "").strip()
     if not s or s in ("—", "-"):
         return None
+    mgr = Tenant.objects.using(using) if using else Tenant.objects
     if " / " in s:
         parent_part, child_part = s.split(" / ", 1)
         parent_part = (parent_part or "").strip()
@@ -295,7 +313,7 @@ def _resolve_tenant(raw: str | None) -> Any:
             rel = tenant_hierarchy_fk()
             if rel == "parent":
                 try:
-                    for cand in Tenant.objects.filter(name__iexact=child_part).select_related(
+                    for cand in mgr.filter(name__iexact=child_part).select_related(
                         "parent"
                     ).iterator():
                         par = getattr(cand, "parent", None)
@@ -306,7 +324,7 @@ def _resolve_tenant(raw: str | None) -> Any:
                     pass
             elif rel == "group":
                 try:
-                    hit = Tenant.objects.filter(
+                    hit = mgr.filter(
                         name__iexact=child_part,
                         group__name__iexact=parent_part,
                     ).first()
@@ -314,23 +332,23 @@ def _resolve_tenant(raw: str | None) -> Any:
                         return hit
                 except Exception:
                     pass
-    t = _resolve_by_name(Tenant, s)
+    t = _resolve_by_name(Tenant, s, using=using)
     if t is not None:
         return t
     slug = slugify(s)
     if slug:
-        t = Tenant.objects.filter(slug__iexact=slug).first()
+        t = mgr.filter(slug__iexact=slug).first()
         if t is not None:
             return t
     if "-" in s:
         head = s.split("-", 1)[0].strip()
         if head and head.lower() != s.lower():
-            q = Tenant.objects.filter(name__iexact=head)
+            q = mgr.filter(name__iexact=head)
             if q.count() == 1:
                 return q.first()
             hs = slugify(head)
             if hs:
-                q2 = Tenant.objects.filter(slug__iexact=hs)
+                q2 = mgr.filter(slug__iexact=hs)
                 if q2.count() == 1:
                     return q2.first()
     return None
@@ -870,7 +888,7 @@ def _interface_scrub_audit_description_stepwise(iface: Any) -> bool:
         return False
     _netbox_changelog_snapshot(iface)
     iface.description = None
-    iface.save()
+    iface.save(using=_ab())
     return True
 
 
@@ -900,7 +918,8 @@ def _interface_description_from_cells(cells: dict[str, str]) -> str:
 
 def _interface_refresh_safe(iface: Any) -> None:
     try:
-        iface.refresh_from_db()
+        db = getattr(getattr(iface, "_state", None), "db", None) or _ab()
+        iface.refresh_from_db(using=db)
     except Exception:
         logger.debug(
             "interface refresh_from_db failed (pk=%s)",
@@ -947,7 +966,7 @@ def _interface_apply_physical_fields_batched(
             iface.description = ds
             changed = True
     if changed:
-        iface.save()
+        iface.save(using=_ab())
     return changed
 
 
@@ -973,19 +992,19 @@ def _interface_apply_physical_fields_stepwise(
     if m and str(iface.mac_address or "").upper() != m.upper():
         _netbox_changelog_snapshot(iface)
         iface.mac_address = mac
-        iface.save()
+        iface.save(using=_ab())
         any_save = True
         _interface_refresh_safe(iface)
     if untagged is not None and iface.untagged_vlan_id != untagged.pk:
         _netbox_changelog_snapshot(iface)
         iface.untagged_vlan = untagged
-        iface.save()
+        iface.save(using=_ab())
         any_save = True
         _interface_refresh_safe(iface)
     if type_slug is not None and getattr(iface, "type", None) != type_slug:
         _netbox_changelog_snapshot(iface)
         iface.type = type_slug
-        iface.save()
+        iface.save(using=_ab())
         any_save = True
         _interface_refresh_safe(iface)
     ds = (description or "").strip()
@@ -997,7 +1016,7 @@ def _interface_apply_physical_fields_stepwise(
         if cur != ds:
             _netbox_changelog_snapshot(iface)
             iface.description = ds
-            iface.save()
+            iface.save(using=_ab())
             any_save = True
     return any_save
 
@@ -1011,7 +1030,7 @@ def _interface_apply_role_tag_changelog(iface: Any, role_label: str | None) -> b
     _netbox_changelog_snapshot(iface)
     if not _merge_interface_role_tag(iface, rl):
         return False
-    iface.save()
+    iface.save(using=_ab())
     return True
 
 
@@ -1291,7 +1310,7 @@ def _prefix_apply_row_stepwise_changelog(
         with transaction.atomic(using=_ab()):
             _netbox_changelog_snapshot(prefix_obj)
             prefix_obj.vrf = vrf
-            prefix_obj.save()
+            prefix_obj.save(using=_ab())
         any_save = True
     if status_name:
         val = _pick_choice_value(prefix_obj._meta.get_field("status"), status_name)
@@ -1299,20 +1318,20 @@ def _prefix_apply_row_stepwise_changelog(
             with transaction.atomic(using=_ab()):
                 _netbox_changelog_snapshot(prefix_obj)
                 prefix_obj.status = val
-                prefix_obj.save()
+                prefix_obj.save(using=_ab())
             any_save = True
     if role is not None and getattr(prefix_obj, "role_id", None) != role.pk:
         with transaction.atomic(using=_ab()):
             _netbox_changelog_snapshot(prefix_obj)
             prefix_obj.role = role
-            prefix_obj.save()
+            prefix_obj.save(using=_ab())
         any_save = True
     if tenant is not None and hasattr(prefix_obj, "tenant_id"):
         if prefix_obj.tenant_id != tenant.pk:
             with transaction.atomic(using=_ab()):
                 _netbox_changelog_snapshot(prefix_obj)
                 prefix_obj.tenant = tenant
-                prefix_obj.save()
+                prefix_obj.save(using=_ab())
             any_save = True
     if scope_obj is not None and hasattr(prefix_obj, "scope"):
         cur = getattr(prefix_obj, "scope", None)
@@ -1320,14 +1339,14 @@ def _prefix_apply_row_stepwise_changelog(
             with transaction.atomic(using=_ab()):
                 _netbox_changelog_snapshot(prefix_obj)
                 prefix_obj.scope = scope_obj
-                prefix_obj.save()
+                prefix_obj.save(using=_ab())
             any_save = True
     if vlan_obj is not None and hasattr(prefix_obj, "vlan_id"):
         if prefix_obj.vlan_id != vlan_obj.pk:
             with transaction.atomic(using=_ab()):
                 _netbox_changelog_snapshot(prefix_obj)
                 prefix_obj.vlan = vlan_obj
-                prefix_obj.save()
+                prefix_obj.save(using=_ab())
             any_save = True
     if hasattr(prefix_obj, "description"):
         want = (full_descr or "").strip()
@@ -1335,13 +1354,13 @@ def _prefix_apply_row_stepwise_changelog(
             with transaction.atomic(using=_ab()):
                 _netbox_changelog_snapshot(prefix_obj)
                 prefix_obj.description = full_descr
-                prefix_obj.save()
+                prefix_obj.save(using=_ab())
             any_save = True
     cf_ch, _ = _merge_prefix_row_into_custom_fields(prefix_obj, cells)
     if cf_ch:
         with transaction.atomic(using=_ab()):
             _netbox_changelog_snapshot(prefix_obj)
-            prefix_obj.save()
+            prefix_obj.save(using=_ab())
         any_save = True
     return any_save
 
@@ -1374,25 +1393,25 @@ def _device_apply_row_stepwise_changelog(
             with transaction.atomic(using=_ab()):
                 _netbox_changelog_snapshot(dev)
                 dev.site = site
-                dev.save()
+                dev.save(using=_ab())
             any_save = True
         if location is not None and getattr(dev, "location_id", None) != location.pk:
             with transaction.atomic(using=_ab()):
                 _netbox_changelog_snapshot(dev)
                 dev.location = location
-                dev.save()
+                dev.save(using=_ab())
             any_save = True
         if role is not None and dev.role_id != role.pk:
             with transaction.atomic(using=_ab()):
                 _netbox_changelog_snapshot(dev)
                 dev.role = role
-                dev.save()
+                dev.save(using=_ab())
             any_save = True
         if dtype is not None and dev.device_type_id != dtype.pk:
             with transaction.atomic(using=_ab()):
                 _netbox_changelog_snapshot(dev)
                 dev.device_type = dtype
-                dev.save()
+                dev.save(using=_ab())
             any_save = True
     if status_name:
         val = _pick_choice_value(dev._meta.get_field("status"), status_name)
@@ -1400,32 +1419,32 @@ def _device_apply_row_stepwise_changelog(
             with transaction.atomic(using=_ab()):
                 _netbox_changelog_snapshot(dev)
                 dev.status = val
-                dev.save()
+                dev.save(using=_ab())
             any_save = True
     sn = (serial or "").strip()
     if sn and hasattr(dev, "serial") and (dev.serial or "") != sn[:50]:
         with transaction.atomic(using=_ab()):
             _netbox_changelog_snapshot(dev)
             dev.serial = sn[:50]
-            dev.save()
+            dev.save(using=_ab())
         any_save = True
     if platform_obj is not None and hasattr(dev, "platform_id"):
         if getattr(dev, "platform_id", None) != platform_obj.pk:
             with transaction.atomic(using=_ab()):
                 _netbox_changelog_snapshot(dev)
                 dev.platform = platform_obj
-                dev.save()
+                dev.save(using=_ab())
             any_save = True
     if tag_cell and _merge_device_tags(dev, tag_cell):
         with transaction.atomic(using=_ab()):
             _netbox_changelog_snapshot(dev)
-            dev.save()
+            dev.save(using=_ab())
         any_save = True
     cf_changed, _ = _merge_new_device_row_into_custom_fields(dev, cells)
     if cf_changed:
         with transaction.atomic(using=_ab()):
             _netbox_changelog_snapshot(dev)
-            dev.save()
+            dev.save(using=_ab())
         any_save = True
     return any_save
 
@@ -1534,7 +1553,7 @@ def apply_create_vlan(op: dict[str, Any]) -> tuple[str, str]:
                 "VLAN is created with the same Site as your devices (needed for interface "
                 "untagged VLAN resolution)."
             )
-        site_obj = _resolve_by_name(Site, raw_site)
+        site_obj = _resolve_by_name(Site, raw_site, using=_ab())
         if site_obj is None:
             return _skip_missing_prereq(
                 f'NB site "{raw_site}" not found in NetBox — create the Site or fix the cell.'
@@ -1565,7 +1584,7 @@ def apply_create_vlan(op: dict[str, Any]) -> tuple[str, str]:
 
     tenant = None
     if tenant_name and tenant_name not in {"—", "-"}:
-        tenant = _resolve_tenant(tenant_name)
+        tenant = _resolve_tenant(tenant_name, using=_ab())
         if tenant is None:
             return _skip_missing_prereq(
                 f'Tenant "{tenant_name}" not resolved — fix NB Proposed Tenant or create the tenant.'
@@ -1641,16 +1660,16 @@ def apply_create_prefix(op: dict[str, Any]) -> tuple[str, str]:
     # Drift columns map to typed fields / CF; description is editable column only (no audit dump).
     if not cidr:
         return _skip_missing_prereq("Prefix/CIDR empty in row projection (expected from drift NB/OS prefix columns).")
-    vrf = _resolve_by_name(VRF, vrf_name) if vrf_name else None
+    vrf = _resolve_by_name(VRF, vrf_name, using=_ab()) if vrf_name else None
     if vrf_name and vrf is None:
         return _skip_missing_prereq(f'VRF "{vrf_name}" not found in NetBox (create it or fix NB proposed VRF).')
-    role = _resolve_by_name(Role, role_name) if role_name else None
+    role = _resolve_by_name(Role, role_name, using=_ab()) if role_name else None
     if role_name and role is None:
         return _skip_missing_prereq(f'IPAM role "{role_name}" not found in NetBox (create it or fix NB proposed role).')
     # NetBox: Prefix.tenant is optional; only resolve when the audit cell is non-empty.
     tenant = None
     if tenant_name and tenant_name not in {"—", "-"}:
-        tenant = _resolve_tenant(tenant_name)
+        tenant = _resolve_tenant(tenant_name, using=_ab())
         if tenant is None:
             return _skip_missing_prereq(f'Tenant "{tenant_name}" not found in NetBox (create it or fix NB Proposed Tenant).')
     scope_obj = None
@@ -1658,7 +1677,7 @@ def apply_create_prefix(op: dict[str, Any]) -> tuple[str, str]:
         try:
             from dcim.models import Location
 
-            scope_obj = _resolve_by_name(Location, scope_name)
+            scope_obj = _resolve_by_name(Location, scope_name, using=_ab())
         except Exception:
             scope_obj = None
         if scope_obj is None:
@@ -1794,10 +1813,10 @@ def apply_create_ip_range(op: dict[str, Any]) -> tuple[str, str]:
     }
     if not start_addr or not end_addr:
         return _skip_missing_prereq("IP range start/end address empty in row projection.")
-    vrf = _resolve_by_name(VRF, vrf_name) if vrf_name else None
+    vrf = _resolve_by_name(VRF, vrf_name, using=_ab()) if vrf_name else None
     if vrf_name and vrf is None:
         return _skip_missing_prereq(f'VRF "{vrf_name}" not found in NetBox (NB proposed VRF).')
-    role = _resolve_by_name(Role, role_name) if role_name else None
+    role = _resolve_by_name(Role, role_name, using=_ab()) if role_name else None
     if role_name and role is None:
         return _skip_missing_prereq(f'IPAM role "{role_name}" not found in NetBox (NB proposed role).')
     existing = IPRange.objects.using(_ab()).filter(
@@ -2052,7 +2071,7 @@ def _resolve_nat_inside_ipaddress(inside_raw: str, vrf_preferred: Any) -> Any:
         inside_addr = _normalize_ip_for_netbox(inside_raw)
     except ValueError:
         return None
-    qs = IPAddress.objects.filter(address=inside_addr)
+    qs = IPAddress.objects.using(_ab()).filter(address=inside_addr)
     if vrf_preferred is not None:
         hit = qs.filter(vrf=vrf_preferred).first()
         if hit is not None:
@@ -2107,7 +2126,7 @@ def _resolve_floating_ip_role_value(role_name: str) -> tuple[Any | None, str | N
         from ipam.models import Role as IpamRole
     except Exception:
         return None, "ipam.Role could not be imported for legacy IP address role FK."
-    obj = _resolve_by_name(IpamRole, s)
+    obj = _resolve_by_name(IpamRole, s, using=_ab())
     if obj is None:
         return None, f'IPAM role "{s}" not found in NetBox (NB proposed role).'
     return obj, None
@@ -2131,7 +2150,7 @@ def _floating_ip_apply_row_stepwise(
             with transaction.atomic(using=_ab()):
                 _netbox_changelog_snapshot(ip_obj)
                 ip_obj.status = val
-                ip_obj.save()
+                ip_obj.save(using=_ab())
             any_save = True
     if role_value is not None and hasattr(ip_obj, "role"):
         role_field = ip_obj._meta.get_field("role")
@@ -2146,13 +2165,13 @@ def _floating_ip_apply_row_stepwise(
             with transaction.atomic(using=_ab()):
                 _netbox_changelog_snapshot(ip_obj)
                 ip_obj.role = role_value
-                ip_obj.save()
+                ip_obj.save(using=_ab())
             any_save = True
     if tenant_obj is not None and hasattr(ip_obj, "tenant_id") and ip_obj.tenant_id != tenant_obj.pk:
         with transaction.atomic(using=_ab()):
             _netbox_changelog_snapshot(ip_obj)
             ip_obj.tenant = tenant_obj
-            ip_obj.save()
+            ip_obj.save(using=_ab())
         any_save = True
     if hasattr(ip_obj, "description"):
         cur = (ip_obj.description or "").strip()
@@ -2160,7 +2179,7 @@ def _floating_ip_apply_row_stepwise(
             with transaction.atomic(using=_ab()):
                 _netbox_changelog_snapshot(ip_obj)
                 ip_obj.description = full_descr
-                ip_obj.save()
+                ip_obj.save(using=_ab())
             any_save = True
     inside_raw = _cell(
         cells,
@@ -2172,13 +2191,13 @@ def _floating_ip_apply_row_stepwise(
         with transaction.atomic(using=_ab()):
             _netbox_changelog_snapshot(ip_obj)
             ip_obj.nat_inside = inner
-            ip_obj.save()
+            ip_obj.save(using=_ab())
         any_save = True
     with transaction.atomic(using=_ab()):
         _netbox_changelog_snapshot(ip_obj)
         cf_ch, _ = _merge_ip_address_row_into_custom_fields(ip_obj, cells)
         if cf_ch:
-            ip_obj.save()
+            ip_obj.save(using=_ab())
             any_save = True
     return any_save
 
@@ -2217,7 +2236,7 @@ def apply_create_floating_ip(op: dict[str, Any]) -> tuple[str, str]:
         address = _normalize_ip_for_netbox(raw_ip)
     except ValueError:
         return "failed", "failed_validation_bad_ip"
-    vrf = _resolve_by_name(VRF, vrf_name) if vrf_name else None
+    vrf = _resolve_by_name(VRF, vrf_name, using=_ab()) if vrf_name else None
     if vrf_name and vrf is None:
         return _skip_missing_prereq(f'VRF "{vrf_name}" not found in NetBox (NB proposed VRF for floating IP).')
     role_value = None
@@ -2227,7 +2246,7 @@ def apply_create_floating_ip(op: dict[str, Any]) -> tuple[str, str]:
             return _skip_missing_prereq(role_err)
     tenant_obj = None
     if tenant_name and tenant_name not in {"—", "-"}:
-        tenant_obj = _resolve_tenant(tenant_name)
+        tenant_obj = _resolve_tenant(tenant_name, using=_ab())
         if tenant_obj is None:
             return _skip_missing_prereq(f'Tenant "{tenant_name}" not found in NetBox (NB Proposed Tenant).')
     existing = IPAddress.objects.using(_ab()).filter(address=address, vrf=vrf).first()
@@ -2379,7 +2398,7 @@ def _openstack_vm_apply_site_tenant_status_device_stepwise(vm: Any, proj: dict[s
 
     site_name = (proj.get("site") or "").strip()
     if site_name and site_name not in {"—", "-"}:
-        site = _resolve_by_name(Site, site_name)
+        site = _resolve_by_name(Site, site_name, using=_ab())
         if site is not None and hasattr(vm, "site_id") and getattr(vm, "site_id", None) != site.pk:
             with transaction.atomic(using=_ab()):
                 _netbox_changelog_snapshot(vm)
@@ -2387,7 +2406,7 @@ def _openstack_vm_apply_site_tenant_status_device_stepwise(vm: Any, proj: dict[s
                 vm.save(using=_ab())
     tenant_name = (proj.get("tenant") or "").strip()
     if tenant_name and tenant_name not in {"—", "-"}:
-        tenant = _resolve_tenant(tenant_name)
+        tenant = _resolve_tenant(tenant_name, using=_ab())
         if tenant is not None and hasattr(vm, "tenant_id") and getattr(vm, "tenant_id", None) != tenant.pk:
             with transaction.atomic(using=_ab()):
                 _netbox_changelog_snapshot(vm)
@@ -2436,7 +2455,7 @@ def apply_create_openstack_vm(op: dict[str, Any]) -> tuple[str, str]:
             f"Create the cluster or align NB proposed cluster in drift."
         )
     tenant_name = (proj.get("tenant") or "").strip()
-    if tenant_name and tenant_name not in {"—", "-"} and _resolve_tenant(tenant_name) is None:
+    if tenant_name and tenant_name not in {"—", "-"} and _resolve_tenant(tenant_name, using=_ab()) is None:
         return _skip_missing_prereq(
             f'Tenant "{tenant_name}" not found in NetBox (create it or fix NB Proposed Tenant).'
         )
@@ -2573,7 +2592,7 @@ def apply_update_openstack_vm(op: dict[str, Any]) -> tuple[str, str]:
             changed = True
     site_name = (proj.get("site") or "").strip()
     if site_name and site_name not in {"—", "-"} and hasattr(vm, "site_id"):
-        site = _resolve_by_name(Site, site_name)
+        site = _resolve_by_name(Site, site_name, using=_ab())
         if site is not None and getattr(vm, "site_id", None) != site.pk:
             with transaction.atomic(using=_ab()):
                 _netbox_changelog_snapshot(vm)
@@ -2589,7 +2608,7 @@ def apply_update_openstack_vm(op: dict[str, Any]) -> tuple[str, str]:
                 vm.save(using=_ab())
             changed = True
     else:
-        tenant = _resolve_tenant(tenant_name)
+        tenant = _resolve_tenant(tenant_name, using=_ab())
         if tenant is None:
             return _skip_missing_prereq(
                 f'Tenant "{tenant_name}" not found in NetBox (create it or fix NB Proposed Tenant).'
@@ -2749,7 +2768,7 @@ def _apply_device_core(cells: dict[str, str], *, create_if_missing: bool) -> tup
     }
     if not hostname:
         return _skip_missing_prereq("Device hostname empty (Hostname / Host after scoping).")
-    site = _resolve_by_name(Site, site_name) if site_name else None
+    site = _resolve_by_name(Site, site_name, using=_ab()) if site_name else None
     role = _resolve_by_name(DeviceRole, role_name) if role_name else None
     dtype = _resolve_device_type(dtype_name) if dtype_name else None
     location = None
@@ -3111,7 +3130,7 @@ def apply_serial_review(op: dict[str, Any]) -> tuple[str, str]:
         dev, cells, consumed_sr, attr_names=("description",), max_len=8000
     )
     if changed or merge_ch:
-        dev.save()
+        dev.save(using=_ab())
         return "updated", "ok_updated"
     return "skipped", "skipped_already_desired"
 
@@ -3140,7 +3159,7 @@ def _sync_site_region(site_obj, region_name: str) -> tuple[bool, bool]:
         from dcim.models import Region, Site
     except Exception:
         return False, False
-    reg = _resolve_by_name(Region, rn)
+    reg = _resolve_by_name(Region, rn, using=_ab())
     if reg is None:
         return False, False
     site_db = Site.objects.using(_ab()).filter(pk=site_obj.pk).first()
@@ -3151,7 +3170,7 @@ def _sync_site_region(site_obj, region_name: str) -> tuple[bool, bool]:
     with transaction.atomic(using=_ab()):
         _netbox_changelog_snapshot(site_db)
         site_db.region = reg
-        site_db.save()
+        site_db.save(using=_ab())
     return True, True
 
 
@@ -3200,10 +3219,14 @@ def _resolve_vlan_for_device(device, vid: int):
     except (TypeError, ValueError):
         return None
 
+    # db_manager so NetBox VLANManager helpers (get_for_device / get_for_site) query the
+    # branch schema — chaining .using() after get_for_* can still hit the wrong DB.
+    vlan_mgr = VLAN.objects.db_manager(_ab())
+
     try:
-        gfd = getattr(VLAN.objects, "get_for_device", None)
+        gfd = getattr(vlan_mgr, "get_for_device", None)
         if callable(gfd):
-            dev_qs = gfd(device).using(_ab()).filter(vid=vid_i)
+            dev_qs = gfd(device).filter(vid=vid_i)
             hits = list(dev_qs[:2])
             if len(hits) == 1:
                 return hits[0]
@@ -3233,13 +3256,13 @@ def _resolve_vlan_for_device(device, vid: int):
         logger.debug("_resolve_vlan_for_device: get_for_device failed", exc_info=True)
 
     if device.site_id:
-        hit = VLAN.objects.using(_ab()).filter(site_id=device.site_id, vid=vid_i).first()
+        hit = vlan_mgr.filter(site_id=device.site_id, vid=vid_i).first()
         if hit is not None:
             return hit
         site = getattr(device, "site", None)
         if site is not None:
             try:
-                site_qs = VLAN.objects.get_for_site(site).using(_ab())
+                site_qs = vlan_mgr.get_for_site(site)
                 hit = site_qs.filter(vid=vid_i).first()
                 if hit is not None:
                     return hit
@@ -3247,7 +3270,7 @@ def _resolve_vlan_for_device(device, vid: int):
                 pass
             try:
                 ct_site = ContentType.objects.get_by_natural_key("dcim", "site")
-                hit = VLAN.objects.using(_ab()).filter(
+                hit = vlan_mgr.filter(
                     group__scope_type=ct_site,
                     group__scope_id=device.site_id,
                     vid=vid_i,
@@ -3262,7 +3285,7 @@ def _resolve_vlan_for_device(device, vid: int):
         try:
             ct_loc = ContentType.objects.get_by_natural_key("dcim", "location")
             anc_ids = list(loc.get_ancestors(include_self=True).values_list("id", flat=True))
-            hit = VLAN.objects.using(_ab()).filter(
+            hit = vlan_mgr.filter(
                 group__scope_type=ct_loc,
                 group__scope_id__in=anc_ids,
                 vid=vid_i,
@@ -3272,15 +3295,15 @@ def _resolve_vlan_for_device(device, vid: int):
         except Exception:
             pass
         if getattr(loc, "site_id", None):
-            hit = VLAN.objects.using(_ab()).filter(site_id=loc.site_id, vid=vid_i).first()
+            hit = vlan_mgr.filter(site_id=loc.site_id, vid=vid_i).first()
             if hit is not None:
                 return hit
             try:
                 from dcim.models import Site
 
-                s = Site.objects.filter(pk=loc.site_id).first()
+                s = Site.objects.using(_ab()).filter(pk=loc.site_id).first()
                 if s is not None:
-                    site_qs = VLAN.objects.get_for_site(s).using(_ab())
+                    site_qs = vlan_mgr.get_for_site(s)
                     hit = site_qs.filter(vid=vid_i).first()
                     if hit is not None:
                         return hit
@@ -3294,7 +3317,7 @@ def _resolve_vlan_for_device(device, vid: int):
             anc_r = list(
                 reg.get_ancestors(include_self=True).values_list("id", flat=True)
             )
-            hit = VLAN.objects.using(_ab()).filter(
+            hit = vlan_mgr.filter(
                 group__scope_type=ct_reg,
                 group__scope_id__in=anc_r,
                 vid=vid_i,
@@ -3304,11 +3327,11 @@ def _resolve_vlan_for_device(device, vid: int):
         except Exception:
             pass
 
-    dup = list(VLAN.objects.using(_ab()).filter(vid=vid_i)[:2])
+    dup = list(vlan_mgr.filter(vid=vid_i)[:2])
     if len(dup) == 1:
         return dup[0]
     if len(dup) > 1 and device.site_id:
-        hit = VLAN.objects.using(_ab()).filter(vid=vid_i, site_id=device.site_id).first()
+        hit = vlan_mgr.filter(vid=vid_i, site_id=device.site_id).first()
         if hit is not None:
             return hit
     return None
@@ -3373,6 +3396,7 @@ def _skip_untagged_vlan_unresolved(
 
 
 def _resolve_vlan_for_prefix_scope(vlan_name: str, scope_obj) -> Any | None:
+    from dcim.models import Site
     from ipam.models import VLAN
 
     raw = str(vlan_name or "").strip()
@@ -3392,7 +3416,8 @@ def _resolve_vlan_for_prefix_scope(vlan_name: str, scope_obj) -> Any | None:
         except Exception:
             candidate_vid = None
 
-    q = VLAN.objects.using(_ab()).all()
+    vlan_mgr = VLAN.objects.db_manager(_ab())
+    q = vlan_mgr.all()
     if scope_obj is not None:
         try:
             from django.contrib.contenttypes.models import ContentType
@@ -3401,25 +3426,27 @@ def _resolve_vlan_for_prefix_scope(vlan_name: str, scope_obj) -> Any | None:
             anc_ids = list(
                 scope_obj.get_ancestors(include_self=True).values_list("id", flat=True)
             )
-            q_loc = VLAN.objects.using(_ab()).filter(
+            q_loc = vlan_mgr.filter(
                 group__scope_type=ct_loc,
                 group__scope_id__in=anc_ids,
             )
-            q_site = VLAN.objects.using(_ab()).none()
+            q_site = vlan_mgr.none()
             if getattr(scope_obj, "site_id", None):
                 try:
-                    q_site = VLAN.objects.get_for_site(scope_obj.site).using(_ab())
+                    site_br = Site.objects.using(_ab()).filter(pk=scope_obj.site_id).first()
+                    if site_br is not None:
+                        q_site = vlan_mgr.get_for_site(site_br)
                 except Exception:
-                    q_site = VLAN.objects.using(_ab()).none()
+                    q_site = vlan_mgr.none()
             q = (q_loc | q_site).distinct()
         except Exception:
-            q = VLAN.objects.using(_ab()).all()
+            q = vlan_mgr.all()
 
     if candidate_vid is not None:
         by_vid = q.filter(vid=candidate_vid).first()
         if by_vid is not None:
             return by_vid
-        by_vid_any = VLAN.objects.using(_ab()).filter(vid=candidate_vid).first()
+        by_vid_any = vlan_mgr.filter(vid=candidate_vid).first()
         if by_vid_any is not None:
             return by_vid_any
 
@@ -3440,7 +3467,7 @@ def _vrf_for_ip_from_row_cells(cells: dict[str, str] | None) -> Any:
     ).strip()
     if not raw or raw in ("—", "-"):
         return None
-    return _resolve_by_name(VRF, raw)
+    return _resolve_by_name(VRF, raw, using=_ab())
 
 
 def _assign_ips_to_interface(iface, ip_blob: str, vrf) -> tuple[bool, bool, bool]:
@@ -3643,7 +3670,7 @@ def _try_bootstrap_device_for_new_interface_apply(
 
 
 def apply_create_interface(op: dict[str, Any]) -> tuple[str, str]:
-    from dcim.models import Interface, Location, Site
+    from dcim.models import Device, Interface, Location, Site
 
     branch_db: str = (op.get("branch_db") or "default")
     cells = op.get("cells") or {}
@@ -3689,21 +3716,32 @@ def apply_create_interface(op: dict[str, Any]) -> tuple[str, str]:
         )
     dev_geom_dirty = False
     if site_hint:
-        site_obj = _resolve_by_name(Site, site_hint)
+        site_obj = _resolve_by_name(Site, site_hint, using=_ab())
         if site_obj and dev.site_id != site_obj.pk:
             _netbox_changelog_snapshot(dev)
             dev.site = site_obj
             dev.save(using=_ab())
             dev_geom_dirty = True
     if loc_hint:
-        loc_obj = _resolve_by_name(Location, loc_hint)
+        loc_obj = _resolve_by_name(Location, loc_hint, using=_ab())
         if loc_obj and getattr(dev, "location_id", None) != loc_obj.pk:
             _netbox_changelog_snapshot(dev)
             dev.location = loc_obj
             dev.save(using=_ab())
             dev_geom_dirty = True
     if dev_geom_dirty:
-        dev.refresh_from_db()
+        dev = (
+            Device.objects.using(_ab())
+            .filter(pk=dev.pk)
+            .select_related("site", "location")
+            .first()
+        )
+        if dev is None:
+            return _skip_missing_prereq(
+                f'Device "{host}" not found in NetBox after site/location update.'
+            )
+    else:
+        dev.refresh_from_db(using=_ab())
     iface = Interface.objects.using(_ab()).filter(device=dev, name=if_name).first()
     untagged = _resolve_untagged_vlan_for_apply(
         dev, iface, vid, vlan_group_name=vlan_group_hint or None
@@ -3769,7 +3807,7 @@ def apply_create_interface(op: dict[str, Any]) -> tuple[str, str]:
 
 
 def apply_update_interface(op: dict[str, Any]) -> tuple[str, str]:
-    from dcim.models import Interface, Location, Site
+    from dcim.models import Device, Interface, Location, Site
 
     branch_db: str = (op.get("branch_db") or "default")
     cells = op.get("cells") or {}
@@ -3800,21 +3838,32 @@ def apply_update_interface(op: dict[str, Any]) -> tuple[str, str]:
     # get_for_site / scoped group resolution sees the same scope as recon-created IPAM VLANs.
     dev_geom_dirty = False
     if site_hint:
-        site_obj = _resolve_by_name(Site, site_hint)
+        site_obj = _resolve_by_name(Site, site_hint, using=_ab())
         if site_obj and dev.site_id != site_obj.pk:
             _netbox_changelog_snapshot(dev)
             dev.site = site_obj
             dev.save(using=_ab())
             dev_geom_dirty = True
     if loc_hint:
-        loc_obj = _resolve_by_name(Location, loc_hint)
+        loc_obj = _resolve_by_name(Location, loc_hint, using=_ab())
         if loc_obj and getattr(dev, "location_id", None) != loc_obj.pk:
             _netbox_changelog_snapshot(dev)
             dev.location = loc_obj
             dev.save(using=_ab())
             dev_geom_dirty = True
     if dev_geom_dirty:
-        dev.refresh_from_db()
+        dev = (
+            Device.objects.using(_ab())
+            .filter(pk=dev.pk)
+            .select_related("site", "location")
+            .first()
+        )
+        if dev is None:
+            return _skip_missing_prereq(
+                f'Device "{host}" not found in NetBox after site/location update.'
+            )
+    else:
+        dev.refresh_from_db(using=_ab())
     iface = None
     if nb_name:
         iface = (
