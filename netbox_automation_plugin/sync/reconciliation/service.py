@@ -459,7 +459,14 @@ def _execute_branch_apply(op: dict[str, Any], branch_db: str | None = None) -> d
         result["status"] = "failed"
         result["reason"] = "failed_not_implemented"
         return _finalize_apply_row(op, result)
-    st, reason, skip_detail, written_meta = apply_row_operation(op)
+    # Accept 3- or 4-tuple from ``apply_row_operation`` (older plugin wheels / mixed deploys).
+    _ar = apply_row_operation(op)
+    if not isinstance(_ar, tuple) or len(_ar) not in (3, 4):
+        result["status"] = "failed"
+        result["reason"] = "failed_bad_apply_return"
+        return _finalize_apply_row(op, result)
+    st, reason, skip_detail = _ar[0], _ar[1], _ar[2]
+    written_meta = _ar[3] if len(_ar) == 4 and isinstance(_ar[3], dict) else None
     result["status"] = st
     result["reason"] = reason
     if written_meta:
