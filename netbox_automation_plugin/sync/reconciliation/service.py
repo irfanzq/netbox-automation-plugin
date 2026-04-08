@@ -52,6 +52,7 @@ from .apply_cells import (
     NEW_NIC_SELECTION_KEYS,
     SUPPORTED_APPLY_ACTIONS,
     _interface_mac_vlan_ip_from_cells,
+    _norm_header,
     apply_row_operation,
     netbox_write_preview_cells,
     netbox_write_preview_fieldnames,
@@ -966,7 +967,7 @@ def group_reconciliation_operation_tables(
                 continue
             o2 = dict(op)
             c = o2.get("cells") if isinstance(o2.get("cells"), dict) else {}
-            proj = netbox_write_preview_cells(sk, c)
+            proj = _resolve_fk_labels_in_proj(netbox_write_preview_cells(sk, c), sk)
             projections.append(proj)
             display_rows.append(o2)
         headers = list(netbox_write_preview_table_headers(sk, projections))
@@ -1001,6 +1002,7 @@ _FK_FIELD_RESOLVERS: dict[str, list[tuple[str, str, str]]] = {
     "scope": [
         ("dcim.models", "Site", "name"),
         ("dcim.models", "Location", "name"),
+        ("dcim.models", "Region", "name"),
     ],
     "tenant": [
         ("tenancy.models", "Tenant", "name"),
@@ -1008,46 +1010,153 @@ _FK_FIELD_RESOLVERS: dict[str, list[tuple[str, str, str]]] = {
     "vrf": [
         ("ipam.models", "VRF", "name"),
     ],
+    "site": [
+        ("dcim.models", "Site", "name"),
+    ],
+    "cluster": [
+        ("virtualization.models", "Cluster", "name"),
+    ],
+    "device": [
+        ("dcim.models", "Device", "name"),
+    ],
+    "platform": [
+        ("dcim.models", "Platform", "name"),
+    ],
+    "device_type": [
+        ("dcim.models", "DeviceType", "__device_type__"),
+    ],
+    "nat_inside": [
+        ("ipam.models", "IPAddress", "__ipaddress__"),
+    ],
+}
+
+# Drift / apply-snapshot column headers (normalized) → same resolver family as *_FK_FIELD_RESOLVERS.
+# Omit ``nb proposed vlan`` / ``nb proposed vlan id`` — values are often VIDs, not VLAN pks.
+_AUDIT_HEADER_FK_CANON: dict[str, str] = {
+    "nb proposed role": "role",
+    "nb proposed vrf": "vrf",
+    "nb proposed tenant": "tenant",
+    "nb proposed scope": "scope",
+    "nb current role": "role",
+    "nb current vrf": "vrf",
+    "nb current tenant": "tenant",
 }
 
 
-def _resolve_fk_labels_in_proj(proj: dict[str, str]) -> dict[str, str]:
-    """Return a copy of *proj* with bare-integer FK IDs replaced by human-readable labels.
+def _ci_dict_keys(d: dict[str, str]) -> dict[str, str]:
+    return {str(k).strip().lower(): k for k in d if str(k).strip()}
 
-    Keys are matched case-insensitively against ``_FK_FIELD_RESOLVERS``. All model imports
-    and ORM queries are wrapped in broad try/except so failures are fully silent.
-    """
+
+def _apply_scope_gfk_to_dict(out: dict[str, str]) -> None:
+    """In-place: resolve ``scope_type`` (ContentType pk) + ``scope_id`` (GFK pk) to labels."""
+    km = _ci_dict_keys(out)
+    k_sid = km.get("scope_id")
+    k_st = km.get("scope_type")
+    if not k_sid or not k_st:
+        return
+    raw_sid = str(out.get(k_sid) or "").strip()
+    raw_st = str(out.get(k_st) or "").strip()
+    if not _RE_BARE_INT.match(raw_sid) or not _RE_BARE_INT.match(raw_st):
+        return
+    try:
+        from django.contrib.contenttypes.models import ContentType
+
+        ct = ContentType.objects.filter(pk=int(raw_st)).first()
+        if ct is None:
+            return
+        model = ct.model_class()
+        out[k_st] = f"{ct.app_label}.{ct.model}"
+        if model is None:
+            return
+        obj = model.objects.filter(pk=int(raw_sid)).first()
+        if obj is None:
+            return
+        name = str(getattr(obj, "name", None) or "").strip()
+        out[k_sid] = name or str(obj).strip() or out[k_sid]
+    except Exception:
+        return
+
+
+def _fk_resolve_scalar(raw: str, resolvers: list[tuple[str, str, str]]) -> str | None:
+    if not raw or not _RE_BARE_INT.match(raw):
+        return None
+    pk = int(raw)
+    for mod_path, model_name, label_attr in resolvers:
+        try:
+            mod = __import__(mod_path, fromlist=[model_name])
+            Model = getattr(mod, model_name, None)
+            if Model is None:
+                continue
+            obj = Model.objects.filter(pk=pk).first()
+            if obj is None:
+                continue
+            if label_attr == "__vlan__":
+                vid = getattr(obj, "vid", None)
+                name = getattr(obj, "name", None) or ""
+                resolved = f"{vid} ({name})" if vid is not None else name
+            elif label_attr == "__device_type__":
+                man = getattr(obj, "manufacturer", None)
+                mname = str(getattr(man, "name", None) or "").strip()
+                model = str(getattr(obj, "model", None) or "").strip()
+                resolved = f"{mname} {model}".strip() or str(obj).strip()
+            elif label_attr == "__ipaddress__":
+                addr = getattr(obj, "address", None)
+                resolved = (str(addr).strip() if addr else "") or str(obj).strip()
+            else:
+                resolved = str(getattr(obj, label_attr, "") or "").strip()
+            if resolved:
+                return resolved
+        except Exception:
+            continue
+    return None
+
+
+def _resolve_fk_labels_in_proj(proj: dict[str, str], selection_key: str = "") -> dict[str, str]:
+    """Copy of *proj* with bare-integer FK IDs replaced by human-readable labels."""
     out = dict(proj)
+    sk = str(selection_key or "").strip()
+    _apply_scope_gfk_to_dict(out)
+
     for field_key in list(out.keys()):
-        resolvers = _FK_FIELD_RESOLVERS.get(str(field_key).strip().lower())
+        lk = str(field_key).strip().lower()
+        if lk in ("scope_id", "scope_type"):
+            continue
+        resolvers = _FK_FIELD_RESOLVERS.get(lk)
         if not resolvers:
             continue
         raw = str(out.get(field_key) or "").strip()
-        if not raw or not _RE_BARE_INT.match(raw):
-            continue
-        pk = int(raw)
-        resolved: str | None = None
-        for mod_path, model_name, label_attr in resolvers:
-            try:
-                mod = __import__(mod_path, fromlist=[model_name])
-                Model = getattr(mod, model_name, None)
-                if Model is None:
-                    continue
-                obj = Model.objects.filter(pk=pk).first()
-                if obj is None:
-                    continue
-                if label_attr == "__vlan__":
-                    vid = getattr(obj, "vid", None)
-                    name = getattr(obj, "name", None) or ""
-                    resolved = f"{vid} ({name})" if vid is not None else name
-                else:
-                    resolved = str(getattr(obj, label_attr, "") or "").strip() or None
-                if resolved:
-                    break
-            except Exception:
-                continue
+        resolved = _fk_resolve_scalar(raw, resolvers)
         if resolved:
             out[field_key] = resolved
+
+    if sk == "detail_existing_vms":
+        km = _ci_dict_keys(out)
+        id_km = km.get("id")
+        if id_km:
+            raw_id = str(out.get(id_km) or "").strip()
+            vm_res = [("virtualization.models", "VirtualMachine", "name")]
+            got = _fk_resolve_scalar(raw_id, vm_res)
+            if got:
+                out[id_km] = got
+
+    return out
+
+
+def _resolve_fk_labels_in_audit_snap(snap: dict[str, str]) -> dict[str, str]:
+    """Resolve numeric FKs in apply-snapshot dict keys (audit column titles)."""
+    out = dict(snap)
+    _apply_scope_gfk_to_dict(out)
+    for k in list(out.keys()):
+        canon = _AUDIT_HEADER_FK_CANON.get(_norm_header(k))
+        if not canon:
+            continue
+        resolvers = _FK_FIELD_RESOLVERS.get(canon)
+        if not resolvers:
+            continue
+        raw = str(out.get(k) or "").strip()
+        resolved = _fk_resolve_scalar(raw, resolvers)
+        if resolved:
+            out[k] = resolved
     return out
 
 
@@ -1065,7 +1174,7 @@ def _row_diffs_vs_baseline(
         cells_a = dict(op.get("cells") or {})
         if msk in NEW_NIC_SELECTION_KEYS:
             cells_a = new_nic_cells_for_reconciliation(cells_a)
-        proj_a = _resolve_fk_labels_in_proj(netbox_write_preview_cells(msk, cells_a))
+        proj_a = _resolve_fk_labels_in_proj(netbox_write_preview_cells(msk, cells_a), msk)
         fieldnames = list(netbox_write_preview_ordered_fieldnames(msk))
         if not fieldnames:
             fieldnames = sorted(proj_a.keys())
@@ -1086,7 +1195,7 @@ def _row_diffs_vs_baseline(
         cells_b = _cells_dict(bmeta["headers"], bmeta["row"])
         if msk in NEW_NIC_SELECTION_KEYS:
             cells_b = new_nic_cells_for_reconciliation(cells_b)
-        proj_b = _resolve_fk_labels_in_proj(netbox_write_preview_cells(msk, cells_b))
+        proj_b = _resolve_fk_labels_in_proj(netbox_write_preview_cells(msk, cells_b), msk)
         _ord = list(netbox_write_preview_ordered_fieldnames(msk))
         _seen = set(_ord)
         for _k in sorted(set(proj_a.keys()) | set(proj_b.keys())):
@@ -1153,7 +1262,9 @@ def frozen_operations_apply_snapshots(frozen: list[dict[str, Any]]) -> list[dict
     out: list[dict[str, Any]] = []
     for op in ordered:
         sk = str(op.get("selection_key") or "")
-        snap = reconciliation_apply_snapshot_cells(sk, dict(op.get("cells") or {}))
+        snap = _resolve_fk_labels_in_audit_snap(
+            reconciliation_apply_snapshot_cells(sk, dict(op.get("cells") or {}))
+        )
         out.append(
             {
                 "selection_key": sk,
@@ -1199,7 +1310,7 @@ def group_apply_snapshot_tables(
                     cells[k] = "" if v is None else str(v).strip()
                 elif isinstance(item, (list, tuple)) and len(item) == 1:
                     cells[str(item[0]).strip()] = ""
-            projected.append(netbox_write_preview_cells(sk, cells))
+            projected.append(_resolve_fk_labels_in_proj(netbox_write_preview_cells(sk, cells), sk))
         headers = list(netbox_write_preview_ordered_fieldnames(sk))
         _seen_h = set(headers)
         for p in projected:

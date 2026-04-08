@@ -147,6 +147,54 @@ def _ac():
     return ac
 
 
+def _ci_key_map(cells: dict[str, str]) -> dict[str, str]:
+    """Lowercase header → original key spelling in *cells*."""
+    return {str(k).strip().lower(): str(k).strip() for k in cells if str(k).strip()}
+
+
+def _scope_label_from_gfk_audit_cells(cells: dict[str, str]) -> str:
+    """
+    When ``NB Proposed Scope`` is empty, some exports store GenericFK components as
+    ``scope_id`` + ``scope_type`` (ContentType pk). Resolve to the scoped object's label.
+    """
+    try:
+        from django.contrib.contenttypes.models import ContentType
+    except Exception:
+        return ""
+    km = _ci_key_map(cells)
+    k_sid = km.get("scope_id")
+    k_st = km.get("scope_type")
+    if not k_sid or not k_st:
+        return ""
+    raw_sid = str(cells.get(k_sid) or "").strip()
+    raw_st = str(cells.get(k_st) or "").strip()
+    if not raw_sid.isdigit() or not raw_st.isdigit():
+        return ""
+    try:
+        ct = ContentType.objects.filter(pk=int(raw_st)).first()
+        if ct is None:
+            return ""
+        model = ct.model_class()
+        if model is None:
+            return f"{ct.app_label}.{ct.model} #{raw_sid}"
+        obj = model.objects.filter(pk=int(raw_sid)).first()
+        if obj is None:
+            return f"{ct.app_label}.{ct.model} #{raw_sid}"
+        name = str(getattr(obj, "name", None) or "").strip()
+        if name:
+            return name
+        return str(obj).strip() or f"{ct.app_label}.{ct.model} #{raw_sid}"
+    except Exception:
+        return ""
+
+
+def _prefix_scope_cell(cells: dict[str, str], _cell) -> str:
+    direct = (_cell(cells, "NB Proposed Scope") or "").strip()
+    if direct and direct not in ("—", "-"):
+        return direct
+    return _scope_label_from_gfk_audit_cells(cells)
+
+
 def netbox_write_projection_cells(selection_key: str, cells: dict[str, str] | None) -> dict[str, str]:
     """
     NetBox-style attribute dict for one recon row (preview = apply contract for listed keys).
@@ -285,7 +333,7 @@ def netbox_write_projection_cells(selection_key: str, cells: dict[str, str] | No
                 "status": _cell(c, "NB proposed status"),
                 "role": _cell(c, "NB proposed role"),
                 "tenant": coerce_nb_proposed_tenant_cell(_cell(c, "NB Proposed Tenant")),
-                "scope": _cell(c, "NB Proposed Scope"),
+                "scope": _prefix_scope_cell(c, _cell),
                 "vlan": _cell(c, "NB Proposed VLAN"),
                 "description": ac._prefix_description_from_cells(c, max_len=pd),
             }
@@ -299,7 +347,7 @@ def netbox_write_projection_cells(selection_key: str, cells: dict[str, str] | No
                 "status": _cell(c, "NB proposed status"),
                 "role": _cell(c, "NB proposed role"),
                 "tenant": coerce_nb_proposed_tenant_cell(_cell(c, "NB Proposed Tenant")),
-                "scope": _cell(c, "NB Proposed Scope"),
+                "scope": _prefix_scope_cell(c, _cell),
                 "vlan": _cell(c, "NB Proposed VLAN"),
                 "description": ac._prefix_description_from_cells(c, max_len=pd),
             }
