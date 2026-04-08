@@ -2034,15 +2034,25 @@ _VM_CF_DRIFT_FALLBACK: dict[str, str] = {
 }
 
 
-@lru_cache(maxsize=1)
-def _vm_custom_field_keys_cached() -> frozenset[str]:
+def _orm_cache_key_for_cf_lists() -> str:
+    """Stable cache key for branch-scoped extras queries (matches ``_orm_alias()`` routing)."""
+    a = _orm_alias()
+    return "__router__" if a is None else a
+
+
+@lru_cache(maxsize=16)
+def _vm_custom_field_keys_cached(router_key: str) -> frozenset[str]:
     try:
         from extras.models import CustomField
         from virtualization.models import VirtualMachine
     except Exception:
         return frozenset()
     keys: set[str] = set()
-    for cf in CustomField.objects.iterator():
+    if router_key == "__router__":
+        qs = CustomField.objects
+    else:
+        qs = CustomField.objects.using(router_key)
+    for cf in qs.iterator():
         if not _custom_field_targets_model(cf, VirtualMachine):
             continue
         k = getattr(cf, "key", None)
@@ -2055,7 +2065,7 @@ def _merge_vm_row_into_custom_fields(
     vm: Any, cells: dict[str, str], proj: dict[str, str]
 ) -> tuple[bool, set[str]]:
     """Write VM custom fields from ``proj`` (preferred) with drift fallback; keys from ``_VM_PROJECTION_CF_KEYS``."""
-    valid = _vm_custom_field_keys_cached()
+    valid = _vm_custom_field_keys_cached(_orm_cache_key_for_cf_lists())
     if not valid or not hasattr(vm, "custom_field_data"):
         return False, set()
     data = dict(vm.custom_field_data or {})
@@ -2560,9 +2570,30 @@ def apply_create_openstack_vm(op: dict[str, Any]) -> tuple[str, str]:
         _norm_header("Proposed Action"),
     }
 
+    # Match apply_create_vlan: validate_unique=False avoids full_clean() uniqueness checks
+    # against NetBox main while the row is valid on the active branch schema.
     vm = VirtualMachine(name=name, cluster=cluster)
-    with _tx_branch():
+    try:
+        vm.full_clean(validate_unique=False)
         vm.save(**_save_branch())
+    except DjangoValidationError as e:
+        detail = _format_django_validation_error(e)
+        logger.info("apply_create_openstack_vm validation (name=%s): %s", name, detail)
+        return _skip_missing_prereq(f"NetBox rejected the VM: {detail}")
+    except IntegrityError as e:
+        em = str(e).strip() or repr(e)
+        logger.info("apply_create_openstack_vm integrity (name=%s): %s", name, em)
+        return _skip_missing_prereq(
+            f"VM save hit a database constraint (often duplicate name in cluster): {em}"
+        )
+    except Exception as e:
+        logger.exception("apply_create_openstack_vm: save failed (name=%s)", name)
+        et = type(e).__name__
+        em = (str(e) or "").strip() or et
+        detail = f"{et}: {em}"
+        if len(detail) > 2000:
+            detail = detail[:1997] + "..."
+        return "failed", "failed_validation_save", detail
     _openstack_vm_apply_site_tenant_status_device_stepwise(vm, proj)
     _netbox_changelog_snapshot(vm)
     pri_ch = _apply_vm_primary_ip_from_projection(vm, proj, cells)
@@ -2655,6 +2686,7 @@ def apply_update_openstack_vm(op: dict[str, Any]) -> tuple[str, str]:
             with _tx_branch():
                 _netbox_changelog_snapshot(vm)
                 vm.name = name_new
+                vm.full_clean(validate_unique=False)
                 vm.save(**_save_branch())
             changed = True
     with _tx_branch():
