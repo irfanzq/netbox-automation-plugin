@@ -25,7 +25,7 @@ from typing import Any
 
 from django.core.exceptions import FieldDoesNotExist
 from django.core.exceptions import ValidationError as DjangoValidationError
-from django.db import IntegrityError
+from django.db import IntegrityError, transaction
 from django.db import models as django_models
 from django.utils.text import slugify
 
@@ -3577,6 +3577,7 @@ def _try_bootstrap_device_for_new_interface_apply(
 def apply_create_interface(op: dict[str, Any]) -> tuple[str, str]:
     from dcim.models import Interface, Location, Site
 
+    branch_db: str = (op.get("branch_db") or "default")
     cells = op.get("cells") or {}
     if (reason := skip_reason_from_row_guides(cells)) is not None:
         return "skipped", reason
@@ -3654,18 +3655,22 @@ def apply_create_interface(op: dict[str, Any]) -> tuple[str, str]:
                 f"no valid IP parsed from row (MAAS IPs / OS runtime IP / Proposed Action)."
             )
     if iface is None:
-        # Minimal create row, then one batched save for type/MAC/VLAN/description so branch
-        # Diff shows all scalar deltas together (multiple saves in one tx often collapse in UI).
-        iface = Interface(device=dev, name=if_name, type=_iface_type_default())
-        iface.save()
-        _interface_apply_physical_fields_batched(
-            iface,
-            mac=mac or "",
-            untagged=untagged,
-            type_slug=type_slug,
-            description=if_desc,
-        )
-        _interface_apply_role_tag_changelog(iface, role_label)
+        # Each save block gets its own transaction.atomic() savepoint so netbox_branching
+        # cannot collapse them into a single diff row (which would show only the last
+        # mutation — e.g. tags — and hide MAC / VLAN / type changes).
+        with transaction.atomic(using=branch_db):
+            iface = Interface(device=dev, name=if_name, type=_iface_type_default())
+            iface.save()
+        with transaction.atomic(using=branch_db):
+            _interface_apply_physical_fields_batched(
+                iface,
+                mac=mac or "",
+                untagged=untagged,
+                type_slug=type_slug,
+                description=if_desc,
+            )
+        with transaction.atomic(using=branch_db):
+            _interface_apply_role_tag_changelog(iface, role_label)
         ip_vrf = _vrf_for_ip_from_row_cells(cells)
         if ip_blob:
             _assign_ips_to_interface(iface, ip_blob, ip_vrf)
@@ -3698,6 +3703,7 @@ def apply_create_interface(op: dict[str, Any]) -> tuple[str, str]:
 def apply_update_interface(op: dict[str, Any]) -> tuple[str, str]:
     from dcim.models import Interface, Location, Site
 
+    branch_db: str = (op.get("branch_db") or "default")
     cells = op.get("cells") or {}
     if (reason := skip_reason_from_row_guides(cells)) is not None:
         return "skipped", reason
@@ -3770,17 +3776,20 @@ def apply_update_interface(op: dict[str, Any]) -> tuple[str, str]:
         return _skip_untagged_vlan_unresolved(host, vnum, iface_name=iface.name or nb_name or ma_name)
     if_desc = _interface_description_from_cells(cells)
     changed = _interface_scrub_audit_description_stepwise(iface)
-    # One batched save for MAC / untagged VLAN / type / description so branch Diff is not
-    # collapsed into a misleading single delta (wrong "before" VLAN vs audit / NetBox UI).
-    changed |= _interface_apply_physical_fields_batched(
-        iface,
-        mac=mac or "",
-        untagged=untagged,
-        type_slug=type_slug,
-        description=if_desc,
-    )
-    if _interface_apply_role_tag_changelog(iface, role_label):
-        changed = True
+    # Each save block gets its own transaction.atomic() savepoint so netbox_branching
+    # cannot collapse them into a single diff row (which would show only the last
+    # mutation — e.g. tags — and hide MAC / VLAN / type changes).
+    with transaction.atomic(using=branch_db):
+        changed |= _interface_apply_physical_fields_batched(
+            iface,
+            mac=mac or "",
+            untagged=untagged,
+            type_slug=type_slug,
+            description=if_desc,
+        )
+    with transaction.atomic(using=branch_db):
+        if _interface_apply_role_tag_changelog(iface, role_label):
+            changed = True
     ip_vrf = _vrf_for_ip_from_row_cells(cells)
     ip_ch, ip_tok, ip_parse = _assign_ips_to_interface(iface, ip_blob or "", ip_vrf)
     if ip_tok and not ip_parse:

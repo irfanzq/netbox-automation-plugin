@@ -459,6 +459,12 @@ def _execute_branch_apply(op: dict[str, Any], branch_db: str | None = None) -> d
         result["status"] = "failed"
         result["reason"] = "failed_not_implemented"
         return _finalize_apply_row(op, result)
+    # Thread branch_db into the op dict so handlers can open per-save atomic() savepoints
+    # that force netbox_branching to treat each save as a separate transaction boundary,
+    # preventing the diff UI from collapsing multiple saves on the same object into one row
+    # that shows only the last mutation (e.g. tags swallowing MAC/VLAN).
+    if branch_db:
+        op = {**op, "branch_db": branch_db}
     # Accept 3- or 4-tuple from ``apply_row_operation`` (older plugin wheels / mixed deploys).
     _ar = apply_row_operation(op)
     if not isinstance(_ar, tuple) or len(_ar) not in (3, 4):
