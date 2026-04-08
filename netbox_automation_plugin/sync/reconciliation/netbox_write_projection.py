@@ -15,13 +15,15 @@ keys ``name``, ``id`` (existing only), ``primary_ip4``, ``primary_ip6``, ``clust
 ``tenant``, ``status``, ``device``, and ``nova_compute_host`` (VM custom field when defined
 in NetBox; see ``apply_cells._VM_PROJECTION_CF_KEYS``).
 
-**Proposed missing VLANs** (``detail_proposed_missing_vlans``): projection lists attributes
-that ``apply_create_vlan`` persists on ``ipam.VLAN``: ``vid``, ``vlan_group``, ``site`` (NB site
-cell or inferred from group scope—same logic as apply), ``name``, ``tenant`` (optional),
-``status``. ``NB location`` stays on the audit row only; NetBox VLANs have no Location field.
+**Proposed missing VLANs** (``detail_proposed_missing_vlans``): projection keys ``vid``,
+``vlan_group``, ``site``, ``location``, ``name``, ``tenant`` (optional when empty or ``—``),
+``status`` — same cells contract as ``apply_create_vlan`` (``location`` is drift context only;
+NetBox VLAN has no Location field; ``apply_create_vlan`` requires **NB site** and sets
+``VLAN.site`` when the model has a ``site`` field).
 
-**NIC drift / new NIC interfaces**: projection includes ``untagged_vlan_vid`` and optional
-``vlan_group`` (``NB proposed VLAN group``) for apply resolution; values are not raw VLAN PKs.
+**New / NIC drift interfaces**: projection uses ``untagged_vlan_vid`` (802.1Q tag parsed from
+audit cells), not NetBox ``ipam.VLAN`` database ``id`` — avoids confusing VID with VLAN pk in
+apply logs and preview tables.
 
 Imports from ``apply_cells`` are deferred inside functions to avoid import cycles while
 ``apply_cells`` is still loading.
@@ -103,6 +105,7 @@ _NETBOX_PREVIEW_FULL_KEY_ORDER: dict[str, tuple[str, ...]] = {
         "vid",
         "vlan_group",
         "site",
+        "location",
         "name",
         "tenant",
         "status",
@@ -231,7 +234,6 @@ def netbox_write_projection_cells(selection_key: str, cells: dict[str, str] | No
             "type": _cell(cc, "NB Proposed intf Type"),
             "mac_address": mac or "—",
             "untagged_vlan_vid": str(vid) if vid else "—",
-            "vlan_group": _cell(cc, "NB proposed VLAN group"),
             "description": if_desc or "—",
             "tags": _cell(cc, "NB Proposed intf Label"),
             "IPAddress.address": ip_blob or "—",
@@ -381,12 +383,12 @@ def netbox_write_projection_cells(selection_key: str, cells: dict[str, str] | No
     if sk == "detail_bmc_existing":
         return _netbox_write_bmc_preview(c, existing_oob=True)
     if sk == "detail_proposed_missing_vlans":
-        site_disp = ac.create_vlan_netbox_site_write_preview(c)
         return _drop_empty_tenant(
             {
                 "vid": _cell(c, "NB Proposed VLAN ID", "Target VID"),
                 "vlan_group": _cell(c, "NB proposed VLAN group"),
-                "site": site_disp,
+                "site": _cell(c, "NB site"),
+                "location": _cell(c, "NB location"),
                 "name": _cell(c, "NB proposed VLAN name (editable)", "NB proposed VLAN name"),
                 "tenant": coerce_nb_proposed_tenant_cell(_cell(c, "NB Proposed Tenant")),
                 "status": _cell(c, "NB proposed status"),

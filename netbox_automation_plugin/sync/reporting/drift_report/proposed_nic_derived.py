@@ -17,7 +17,7 @@ from typing import Any
 
 # Authority column (0-based): Host → … → Authority → …
 # Must match HEADERS_DETAIL_NEW_NICS / HEADERS_DETAIL_NIC_DRIFT "Authority" position.
-NIC_DRIFT_AUTHORITY_COL_INDEX = 21
+NIC_DRIFT_AUTHORITY_COL_INDEX = 20
 NIC_NEW_AUTHORITY_COL_INDEX = 20
 # "OS MAC" column (same index in new-NIC and NIC-drift detail tables).
 NIC_OS_MAC_COL_INDEX = 11

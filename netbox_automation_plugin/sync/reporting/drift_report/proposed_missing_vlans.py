@@ -30,7 +30,7 @@ from netbox_automation_plugin.sync.reporting.drift_report.proposed_action_format
 )
 from netbox_automation_plugin.sync.reconciliation.apply_cells import (
     _interface_mac_vlan_ip_from_cells,
-    _resolve_vlan_by_group_and_vid,
+    _resolve_vlan_by_group_name_and_vid,
     _resolve_vlan_for_device,
     _resolve_vlan_for_prefix_scope,
 )
@@ -363,9 +363,9 @@ def _disambiguate_vlan_display_name(base: str, vid: int, attempt: int) -> str:
 def _ensure_unique_proposed_missing_vlan_names(rows: list[list[Any]]) -> None:
     """
     NetBox enforces unique (vlan_group, name) regardless of VID. Rows often inherit the same
-    display name from :func:`_defaults_for_vlan_group` (first VLAN in the group) or OpenStack labels,
-    which duplicates across VIDs. De-duplicate proposed names against existing IPAM VLANs and within
-    this batch (stable order).
+    display name from :func:`_defaults_for_vlan_group` or OpenStack labels, which duplicates
+    across VIDs. De-duplicate proposed names against existing IPAM VLANs per **NB proposed VLAN group**
+    and within this batch.
     """
     if not rows:
         return
@@ -725,9 +725,9 @@ def build_proposed_missing_vlan_rows(
     update_prefixes: list | None = None,
 ) -> list[list[Any]]:
     """
-    One row per (suggested VLAN group, VID) where NIC drift / new-NIC proposals reference a tagged
-    VID that does not resolve for the device (or device absent — placement from NB site/location),
-    or where new/update prefix rows reference ``NB Proposed VLAN`` that
+    One row per (suggested **NB proposed VLAN group**, VID) where NIC drift / new-NIC proposals
+    reference a tagged VID that does not resolve for the device (or device absent — placement
+    from NB site/location), or where prefix rows reference ``NB Proposed VLAN`` that
     :func:`_resolve_vlan_for_prefix_scope` cannot satisfy (same as ``apply_create_prefix``).
     """
     prefix_v4, prefix_v6 = _build_prefix_vlan_lookup()
@@ -758,6 +758,9 @@ def build_proposed_missing_vlan_rows(
         if dev is not None and _resolve_vlan_for_device(dev, vid) is not None:
             return
         group = _suggest_vlan_group_name(device=dev, nb_site=nb_site, nb_location=nb_location)
+        if group and group not in {"—", "-"}:
+            if _resolve_vlan_by_group_name_and_vid(group, vid) is not None:
+                return
         dfl = _defaults_for_vlan_group(group)
         site_disp = nb_site.strip() if (nb_site or "").strip() not in {"", "—", "-"} else ""
         if not site_disp and dev is not None and getattr(dev, "site", None):
@@ -851,10 +854,6 @@ def build_proposed_missing_vlan_rows(
             continue
         vid_src = "OS runtime" if "[OS]" in auth else "MAAS"
         for vid in vids:
-            grp_cell = (cells.get("NB proposed VLAN group") or "").strip()
-            if grp_cell and grp_cell not in {"—", "-"}:
-                if _resolve_vlan_by_group_and_vid(grp_cell, vid) is not None:
-                    continue
             maybe_append(
                 host=host,
                 dev=dev,
@@ -897,10 +896,6 @@ def build_proposed_missing_vlan_rows(
             continue
         vid_src = "OS runtime" if "[OS]" in auth else "MAAS"
         for vid in vids:
-            grp_cell = (cells.get("NB proposed VLAN group") or "").strip()
-            if grp_cell and grp_cell not in {"—", "-"}:
-                if _resolve_vlan_by_group_and_vid(grp_cell, vid) is not None:
-                    continue
             maybe_append(
                 host=host,
                 dev=dev,

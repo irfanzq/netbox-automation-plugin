@@ -1,10 +1,8 @@
 """Preview, signed acknowledgement, and frozen operations for branch reconciliation.
 
 Each frozen op carries full audit ``cells`` for apply. The recon UI shows
-``netbox_write_preview_cells`` per section: NetBox-oriented keys whose values match what apply
-handlers persist (e.g. proposed-missing-VLAN ``site`` is ``VLAN.site`` from the NB site cell or
-group-scope inference, not ``NB location``—VLANs have no Location field). Apply row ``write_preview``
-uses the same projection. See ``group_reconciliation_operation_tables`` and ``AUDIT_REPORT_APPLY_ORDER``.
+``netbox_write_preview_cells`` per section: NetBox model field names (values from audit cells)
+(see ``group_reconciliation_operation_tables`` and ``AUDIT_REPORT_APPLY_ORDER``).
 
 New-NIC sections store a minimal frozen row (``new_nic_cells_for_reconciliation``); preview
 still shows resolved MAC/VLAN/IP columns aligned with ``apply_create_interface``.
@@ -48,6 +46,7 @@ from .branch import (
     delete_netbox_branch_instance,
     get_netbox_branch,
     netbox_branch_exists,
+    reconciliation_apply_guard,
 )
 from .apply_cells import (
     NEW_NIC_SELECTION_KEYS,
@@ -143,6 +142,19 @@ def _truncate_exc_message(msg: str, *, max_len: int = _APPLY_EXCEPTION_MESSAGE_M
     if len(s) > max_len:
         return s[: max_len - 3] + "..."
     return s
+
+
+def _apply_branch_prereq_failed_row(
+    op: dict[str, Any], *, reason: str, detail: str
+) -> dict[str, Any]:
+    """Row result when apply cannot start (e.g. missing branch DB alias)."""
+    result = _apply_result_row_shell(op)
+    result["status"] = "failed"
+    result["reason"] = reason
+    result["reason_detail"] = _truncate_exc_message(
+        detail, max_len=_APPLY_EXCEPTION_MESSAGE_MAX + 64
+    )
+    return _finalize_apply_row(op, result)
 
 
 def _failed_apply_row(op: dict[str, Any], exc: Exception) -> dict[str, Any]:
@@ -387,7 +399,8 @@ def _operation_summary(meta: dict[str, Any]) -> str:
     if sk == "detail_proposed_missing_vlans":
         vid = (cells.get("NB Proposed VLAN ID") or cells.get("Target VID") or "").strip()
         grp = (cells.get("NB proposed VLAN group") or "").strip()
-        return f"Create VLAN VID {vid or '—'} in group {grp or '—'}"
+        site = (cells.get("NB site") or "").strip()
+        return f"Create VLAN VID {vid or '—'} in group {grp or '—'} (site {site or '—'})"
     if sk == "detail_new_prefixes":
         cidr = cells.get("CIDR") or "—"
         vrf = cells.get("NB proposed VRF") or "—"
@@ -1266,31 +1279,11 @@ def create_reconciliation_run(
 
 
 def _apply_result_from_operation(op: dict[str, Any], *, branch_context_ready: bool) -> dict[str, Any]:
-    """Apply one row without an inner savepoint (fallback when branch DB alias is unknown)."""
-    action = str(op.get("action") or "unknown").strip()
+    """Row shell when apply cannot run (no branch / branch activation failed). Never calls ORM apply."""
+    _ = branch_context_ready
     result = _apply_result_row_shell(op)
     result["status"] = "failed"
-    result["reason"] = "failed_not_implemented"
-    if not branch_context_ready:
-        result["reason"] = "failed_branch_context_unavailable"
-        return _finalize_apply_row(op, result)
-    if action in SUPPORTED_APPLY_ACTIONS:
-        try:
-            st, reason, skip_detail = apply_row_operation(op)
-        except Exception as exc:
-            logger.exception(
-                "Reconciliation apply exception (no per-row savepoint): row_key=%s action=%s",
-                result.get("row_key"),
-                action,
-            )
-            return _failed_apply_row(op, exc)
-        result["status"] = st
-        result["reason"] = reason
-        if skip_detail:
-            result["reason_detail"] = _truncate_exc_message(
-                skip_detail, max_len=_APPLY_SKIP_REASON_DETAIL_MAX
-            )
-        return _finalize_apply_row(op, result)
+    result["reason"] = "failed_branch_context_unavailable"
     return _finalize_apply_row(op, result)
 
 
@@ -1402,37 +1395,50 @@ def apply_reconciliation_run(
         )
         applied_rows: list[dict[str, Any]] = []
         if branch_obj is not None:
-            try:
-                branch_db = getattr(branch_obj, "connection_name", None) or None
-                with branch_write_context(branch=branch_obj):
-                    for op in target_ops:
-                        if branch_db:
-                            try:
-                                applied_rows.append(
-                                    _execute_branch_apply_in_branch_transaction(branch_db, op)
-                                )
-                            except Exception as exc:
-                                logger.exception(
-                                    "Reconciliation apply row failed: row_key=%s action=%s",
-                                    str(op.get("row_key") or ""),
-                                    str(op.get("action") or ""),
-                                )
-                                applied_rows.append(_failed_apply_row(op, exc))
-                        else:
-                            applied_rows.append(
-                                _apply_result_from_operation(op, branch_context_ready=True)
-                            )
-            except Exception as e:
-                et = type(e).__name__
-                em = _truncate_exc_message(str(e).strip() or repr(e))
+            branch_db = str(getattr(branch_obj, "connection_name", None) or "").strip()
+            if not branch_db:
+                bd_msg = (
+                    "Branch has no connection_name (database alias). Reconciliation apply "
+                    "requires a branch-scoped DB connection so writes do not hit NetBox main. "
+                    "Wait until the branch is ready / provisioned, then retry."
+                )
                 for op in target_ops:
-                    row = _apply_result_from_operation(op, branch_context_ready=False)
-                    row["exception_type"] = et
-                    row["exception_message"] = em
-                    row["reason_detail"] = _truncate_exc_message(
-                        f"{et}: {em}", max_len=_APPLY_EXCEPTION_MESSAGE_MAX + 64
+                    applied_rows.append(
+                        _apply_branch_prereq_failed_row(
+                            op,
+                            reason="failed_branch_connection_alias",
+                            detail=bd_msg,
+                        )
                     )
-                    applied_rows.append(row)
+            else:
+                try:
+                    with branch_write_context(branch=branch_obj):
+                        with reconciliation_apply_guard(branch_obj, branch_db):
+                            for op in target_ops:
+                                try:
+                                    applied_rows.append(
+                                        _execute_branch_apply_in_branch_transaction(
+                                            branch_db, op
+                                        )
+                                    )
+                                except Exception as exc:
+                                    logger.exception(
+                                        "Reconciliation apply row failed: row_key=%s action=%s",
+                                        str(op.get("row_key") or ""),
+                                        str(op.get("action") or ""),
+                                    )
+                                    applied_rows.append(_failed_apply_row(op, exc))
+                except Exception as e:
+                    et = type(e).__name__
+                    em = _truncate_exc_message(str(e).strip() or repr(e))
+                    for op in target_ops:
+                        row = _apply_result_from_operation(op, branch_context_ready=False)
+                        row["exception_type"] = et
+                        row["exception_message"] = em
+                        row["reason_detail"] = _truncate_exc_message(
+                            f"{et}: {em}", max_len=_APPLY_EXCEPTION_MESSAGE_MAX + 64
+                        )
+                        applied_rows.append(row)
         else:
             for op in target_ops:
                 row = _apply_result_from_operation(op, branch_context_ready=False)

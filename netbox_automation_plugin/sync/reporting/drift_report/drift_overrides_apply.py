@@ -241,7 +241,6 @@ HEADERS_DETAIL_NIC_DRIFT: list[str] = [
     "NB MAC",
     "NB IPs",
     "NB VLAN",
-    "NB proposed VLAN group",
     "NB Proposed intf Label",
     "NB Proposed intf Type",
     "Authority",

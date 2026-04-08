@@ -21,7 +21,6 @@ def _build_update_nic_rows(interface_audit):
             notes = row.get("notes") or ""
             maas_vlan = str(row.get("maas_vlan") or "—")
             nb_vlan = str(row.get("nb_vlan") or "—")
-            nb_vlan_group = str(row.get("nb_vlan_group") or "—").strip() or "—"
             os_vlan = str(row.get("os_runtime_vlan") or "—")
             os_ip = row.get("os_ip") or "—"
             os_mac = row.get("os_mac") or "—"
@@ -105,7 +104,6 @@ def _build_update_nic_rows(interface_audit):
                 row.get("nb_mac") or "—",
                 row.get("nb_ips") or "—",
                 nb_vlan,
-                nb_vlan_group,
                 ex["nb_proposed_intf_label"],
                 ex["nb_proposed_intf_type"],
                 authority_badge,

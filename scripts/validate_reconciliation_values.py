@@ -60,6 +60,11 @@ def _validate_run(run_id: int, *, verbose: bool = False) -> dict[str, Any]:
         SUPPORTED_APPLY_ACTIONS,
         apply_row_operation,
     )
+    from netbox_automation_plugin.sync.reconciliation.branch import (
+        branch_write_context,
+        get_netbox_branch,
+        reconciliation_apply_guard,
+    )
     from netbox_automation_plugin.sync.reconciliation.service import (
         SK_TO_ACTION,
     )
@@ -67,6 +72,20 @@ def _validate_run(run_id: int, *, verbose: bool = False) -> dict[str, Any]:
     run = MAASOpenStackReconciliationRun.objects.filter(pk=run_id).first()
     if run is None:
         raise SystemExit(f"Reconciliation run not found: {run_id}")
+
+    branch_obj, branch_resolve_err = get_netbox_branch(
+        branch_id=run.branch_id,
+        branch_name=(run.branch_name or "").strip(),
+    )
+    if branch_obj is None:
+        raise SystemExit(
+            f"Cannot validate: NetBox branch not resolved ({branch_resolve_err or 'unknown'})."
+        )
+    branch_db = str(getattr(branch_obj, "connection_name", None) or "").strip()
+    if not branch_db:
+        raise SystemExit(
+            "Cannot validate: branch has no connection_name (wait until branch is ready)."
+        )
 
     frozen = run.frozen_operations if isinstance(run.frozen_operations, list) else []
     result_rows: list[dict[str, Any]] = []
@@ -116,11 +135,15 @@ def _validate_run(run_id: int, *, verbose: bool = False) -> dict[str, Any]:
             status = "unsupported_action"
             reason = "action_not_supported"
         else:
-            # Run real apply logic with forced rollback (no persistent writes).
+            # Same branch stack as production apply: activate branch + guard + branch DB txn + rollback.
             try:
-                with transaction.atomic():
-                    status, reason, _skip_detail = apply_row_operation(op)
-                    transaction.set_rollback(True)
+                with branch_write_context(branch=branch_obj):
+                    with reconciliation_apply_guard(branch_obj, branch_db):
+                        sid = transaction.savepoint(using=branch_db)
+                        try:
+                            status, reason, _skip_detail = apply_row_operation(op)
+                        finally:
+                            transaction.savepoint_rollback(sid, using=branch_db)
             except Exception as e:
                 status = "failed_exception"
                 reason = f"{type(e).__name__}: {e}"

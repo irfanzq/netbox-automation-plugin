@@ -3,12 +3,94 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+from contextvars import ContextVar
 import logging
+import os
 from typing import Any, Iterator
 
 from django.db import transaction
 
 logger = logging.getLogger(__name__)
+
+# Set only during reconciliation apply (and branch-scoped validators) so ORM mutations
+# cannot run against NetBox main by accident.
+_RECONCILIATION_APPLY_GUARD: ContextVar[dict[str, Any] | None] = ContextVar(
+    "netbox_automation_reconciliation_apply_guard",
+    default=None,
+)
+
+
+@contextmanager
+def reconciliation_apply_guard(branch: Any, branch_db: str) -> Iterator[None]:
+    """
+    Mark this thread as executing a reconciliation apply against ``branch`` / ``branch_db``.
+
+    :func:`apply_cells.apply_row_operation` refuses to mutate NetBox unless this guard is
+    active and ``netbox_branching``'s active-branch context matches ``branch``.
+    """
+    bdb = (branch_db or "").strip()
+    if not bdb:
+        raise ValueError("reconciliation_apply_guard requires a non-empty branch_db alias.")
+    token = _RECONCILIATION_APPLY_GUARD.set(
+        {"branch_pk": getattr(branch, "pk", None), "branch_db": bdb}
+    )
+    try:
+        yield
+    finally:
+        _RECONCILIATION_APPLY_GUARD.reset(token)
+
+
+def get_reconciliation_apply_guard_context() -> dict[str, Any] | None:
+    return _RECONCILIATION_APPLY_GUARD.get()
+
+
+def get_netbox_plugin_active_branch() -> Any | None:
+    """Branch instance from netbox_branching contextvars, if any (unset outside activate_branch)."""
+    try:
+        from netbox_branching.contextvars import active_branch as _ab
+    except ImportError:
+        return None
+    try:
+        return _ab.get()
+    except LookupError:
+        return None
+
+
+def check_reconciliation_apply_safe_to_mutate(op: dict[str, Any] | None = None) -> str | None:
+    """
+    Return an error message if :func:`apply_row_operation` must not run; otherwise ``None``.
+
+    Escape hatch: set env ``NETBOX_AUTOMATION_ALLOW_UNSCOPED_APPLY=1`` for controlled tooling
+    only (writes may hit NetBox main).
+    """
+    if op and op.get("_allow_unscoped_apply"):
+        return None
+    flag = (os.environ.get("NETBOX_AUTOMATION_ALLOW_UNSCOPED_APPLY") or "").strip().lower()
+    if flag in ("1", "true", "yes"):
+        return None
+
+    ctx = _RECONCILIATION_APPLY_GUARD.get()
+    if not ctx:
+        return (
+            "Reconciliation apply is not running inside a branch-scoped guard (missing "
+            "reconciliation_apply_guard). Refusing ORM writes to avoid mutating NetBox main."
+        )
+
+    active = get_netbox_plugin_active_branch()
+    if active is None:
+        return (
+            "No active NetBox branch in context (netbox_branching). Refusing apply ORM writes "
+            "against the default database."
+        )
+
+    exp_pk = ctx.get("branch_pk")
+    act_pk = getattr(active, "pk", None)
+    if exp_pk is not None and act_pk is not None and int(exp_pk) != int(act_pk):
+        return (
+            f"Active branch (pk={act_pk}) does not match reconciliation run branch (pk={exp_pk}). "
+            "Refusing apply."
+        )
+    return None
 
 
 def create_netbox_branch(*, name: str, description: str = "") -> tuple[Any | None, str | None, str | None]:
@@ -104,7 +186,26 @@ def branch_write_context(*, branch: Any) -> Iterator[None]:
     transaction.atomic(using=branch.connection_name). If no API fits, raises so
     callers do not write branch-aware models to main by accident.
     """
-    # 1) Branch instance may provide a context manager method.
+    # Prefer netboxlabs/netbox-branching first: never call activate_branch without
+    # transaction.atomic(using=connection_name) — without it, ORM can hit NetBox main.
+    try:
+        from netbox_branching.utilities import activate_branch as _nb_activate_branch
+    except ImportError:
+        _nb_activate_branch = None
+    if callable(_nb_activate_branch):
+        using_raw = getattr(branch, "connection_name", None)
+        using = str(using_raw or "").strip()
+        if not using:
+            raise RuntimeError(
+                "NetBox branch has no connection_name (database alias). Cannot open "
+                "transaction.atomic(using=…) for the branch schema — refusing ORM writes "
+                "(would risk NetBox main). Wait until the branch is provisioned and ready."
+            )
+        with _nb_activate_branch(branch), transaction.atomic(using=using):
+            yield
+        return
+
+    # 1) Branch instance may provide a context manager method (non-netbox_branching).
     for method_name in ("as_context", "activate", "as_active", "scope"):
         fn = getattr(branch, method_name, None)
         if not callable(fn):
@@ -120,22 +221,6 @@ def branch_write_context(*, branch: Any) -> Iterator[None]:
             continue
         except Exception:
             continue
-
-    # 2) NetBox Labs netbox-branching: same stack as models.Branch.sync — activate_branch plus
-    # transaction.atomic(using=branch.connection_name) so ORM hits the branch schema reliably.
-    try:
-        from netbox_branching.utilities import activate_branch as _nb_activate_branch
-    except ImportError:
-        _nb_activate_branch = None
-    if callable(_nb_activate_branch):
-        using = getattr(branch, "connection_name", None)
-        if using:
-            with _nb_activate_branch(branch), transaction.atomic(using=using):
-                yield
-        else:
-            with _nb_activate_branch(branch):
-                yield
-        return
 
     # 3) Legacy / alternate module paths.
     for mod_path, func_name in (
