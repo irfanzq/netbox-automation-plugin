@@ -413,6 +413,18 @@ def _capture_applied_object_snapshot(
         return
 
 
+def _apply_tx_using(db_alias: str) -> str | None:
+    """
+    Match apply_cells._orm_alias: explicit ``using`` for the default DB alias on nested
+    transactions can bypass netbox_branching routing; use plain ``transaction.atomic()`` /
+    ``savepoint()`` instead.
+    """
+    u = (db_alias or "").strip()
+    if not u or u.lower() == "default":
+        return None
+    return u
+
+
 def _execute_branch_apply_in_branch_transaction(branch_db: str, op: dict[str, Any]) -> dict[str, Any]:
     """
     Run one branch apply with a per-row transaction only when needed.
@@ -424,21 +436,38 @@ def _execute_branch_apply_in_branch_transaction(branch_db: str, op: dict[str, An
     explicit **savepoint** so rows still share one branch transaction (visibility) but a
     failing row can roll back without aborting the whole apply batch.
     """
+    txu = _apply_tx_using(branch_db)
+    conn_key = txu if txu is not None else "default"
     try:
-        conn = connections[branch_db]
+        conn = connections[conn_key]
     except KeyError:
-        with transaction.atomic(using=branch_db):
+        if txu is not None:
+            with transaction.atomic(using=txu):
+                return _execute_branch_apply(op, branch_db)
+        with transaction.atomic():
             return _execute_branch_apply(op, branch_db)
     if getattr(conn, "in_atomic_block", False):
-        sid = transaction.savepoint(using=branch_db)
+        if txu is not None:
+            sid = transaction.savepoint(using=txu)
+        else:
+            sid = transaction.savepoint()
         try:
             out = _execute_branch_apply(op, branch_db)
-            transaction.savepoint_commit(sid, using=branch_db)
+            if txu is not None:
+                transaction.savepoint_commit(sid, using=txu)
+            else:
+                transaction.savepoint_commit(sid)
             return out
         except Exception:
-            transaction.savepoint_rollback(sid, using=branch_db)
+            if txu is not None:
+                transaction.savepoint_rollback(sid, using=txu)
+            else:
+                transaction.savepoint_rollback(sid)
             raise
-    with transaction.atomic(using=branch_db):
+    if txu is not None:
+        with transaction.atomic(using=txu):
+            return _execute_branch_apply(op, branch_db)
+    with transaction.atomic():
         return _execute_branch_apply(op, branch_db)
 
 
