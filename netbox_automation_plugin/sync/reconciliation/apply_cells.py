@@ -3634,7 +3634,7 @@ def apply_create_interface(op: dict[str, Any]) -> tuple[str, str]:
             dev.save()
             dev_geom_dirty = True
     if dev_geom_dirty:
-        dev.refresh_from_db(fields=["site_id", "location_id"])
+        dev.refresh_from_db()
     iface = Interface.objects.filter(device=dev, name=if_name).first()
     untagged = _resolve_untagged_vlan_for_apply(
         dev, iface, vid, vlan_group_name=vlan_group_hint or None
@@ -3696,7 +3696,7 @@ def apply_create_interface(op: dict[str, Any]) -> tuple[str, str]:
 
 
 def apply_update_interface(op: dict[str, Any]) -> tuple[str, str]:
-    from dcim.models import Interface
+    from dcim.models import Interface, Location, Site
 
     cells = op.get("cells") or {}
     if (reason := skip_reason_from_row_guides(cells)) is not None:
@@ -3709,6 +3709,8 @@ def apply_update_interface(op: dict[str, Any]) -> tuple[str, str]:
     role_label = _cell(cells, "NB Proposed intf Label")
     if not host:
         return _skip_missing_prereq("NIC drift row missing Host.")
+    site_hint = _cell(cells, "NB site", "NetBox site")
+    loc_hint = _cell(cells, "NB location", "NetBox location")
     vlan_group_hint = _cell(cells, "NB proposed VLAN group")
     mac_intent = _nic_mac_intent_raw(cells, include_nb_fallback=True)
     if mac_intent and not mac:
@@ -3720,6 +3722,25 @@ def apply_update_interface(op: dict[str, Any]) -> tuple[str, str]:
     dev = _device_for_reconciliation_apply(host)
     if not dev:
         return _skip_missing_prereq(f'Device "{host}" not found in NetBox.')
+    # Match apply_create_interface: align device site/location from drift row so VLAN
+    # get_for_site / scoped group resolution sees the same scope as recon-created IPAM VLANs.
+    dev_geom_dirty = False
+    if site_hint:
+        site_obj = _resolve_by_name(Site, site_hint)
+        if site_obj and dev.site_id != site_obj.pk:
+            _netbox_changelog_snapshot(dev)
+            dev.site = site_obj
+            dev.save()
+            dev_geom_dirty = True
+    if loc_hint:
+        loc_obj = _resolve_by_name(Location, loc_hint)
+        if loc_obj and getattr(dev, "location_id", None) != loc_obj.pk:
+            _netbox_changelog_snapshot(dev)
+            dev.location = loc_obj
+            dev.save()
+            dev_geom_dirty = True
+    if dev_geom_dirty:
+        dev.refresh_from_db()
     iface = None
     if nb_name:
         iface = (
@@ -4051,6 +4072,10 @@ def _netbox_preview_source_header_norms(selection_key: str) -> frozenset[str] | 
             "Host",
             "NB intf",
             "MAAS intf",
+            "NB site",
+            "NetBox site",
+            "NB location",
+            "NetBox location",
             "NB Proposed intf Label",
             "NB Proposed intf Type",
             "MAAS MAC",

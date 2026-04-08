@@ -284,6 +284,8 @@ def netbox_write_projection_cells(selection_key: str, cells: dict[str, str] | No
             "untagged_vlan_vid": str(vid) if vid else "—",
             "description": if_desc or "—",
             "tags": _cell(cc, "NB Proposed intf Label"),
+            "device.site": _cell(cc, "NB site", "NetBox site"),
+            "device.location": _cell(cc, "NB location", "NetBox location"),
             "IPAddress.address": ip_blob or "—",
         }
 

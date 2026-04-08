@@ -12,6 +12,21 @@ from netbox_automation_plugin.sync.reporting.drift_report.proposed_nic_helpers i
 )
 
 
+def _drift_row_nb_placement_cells(row: dict) -> tuple[str, str, str]:
+    """NetBox site / location / VLAN group from interface audit (for apply + missing-VLAN hints)."""
+    _sentinel = frozenset({"", "—", "-", "(none)", "None", "none"})
+
+    def _clean(x: str) -> str:
+        s = str(x or "").strip()
+        return "" if s in _sentinel else s
+
+    return (
+        _clean(row.get("nb_site")),
+        _clean(row.get("nb_location")),
+        _clean(row.get("nb_proposed_vlan_group")),
+    )
+
+
 def _build_update_nic_rows(interface_audit):
     update_nic = []
     for b in (interface_audit or {}).get("hosts") or []:
@@ -85,6 +100,7 @@ def _build_update_nic_rows(interface_audit):
             ex = derive_nic_proposed_columns(
                 hn, row, bmc_mac=str(row.get("host_bmc_mac") or "")
             )
+            nb_site_c, nb_loc_c, nb_vg_c = _drift_row_nb_placement_cells(row)
             update_nic.append([
                 hn,
                 row.get("maas_if") or "",
@@ -100,6 +116,9 @@ def _build_update_nic_rows(interface_audit):
                 os_mac,
                 os_ip,
                 os_vlan,
+                nb_site_c,
+                nb_loc_c,
+                nb_vg_c,
                 row.get("nb_if") or "—",
                 row.get("nb_mac") or "—",
                 row.get("nb_ips") or "—",

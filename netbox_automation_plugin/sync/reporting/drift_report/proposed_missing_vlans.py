@@ -837,12 +837,13 @@ def build_proposed_missing_vlan_rows(
             continue
         host = str(r[_IDX_DRIFT["Host"]] or "").strip()
         dev = _device_for_host(host)
-        nb_site = ""
-        nb_loc = ""
+        nb_site = str(r[_IDX_DRIFT["NB site"]] or "").strip()
+        nb_loc = str(r[_IDX_DRIFT["NB location"]] or "").strip()
         if dev is not None:
-            if getattr(dev, "site", None):
+            if not nb_site and getattr(dev, "site", None):
                 nb_site = (dev.site.name or "").strip()
-            nb_loc = _netbox_location_object_name(getattr(dev, "location", None))
+            if not nb_loc:
+                nb_loc = _netbox_location_object_name(getattr(dev, "location", None))
         maas_vlan = str(r[_IDX_DRIFT["MAAS VLAN"]] or "—")
         os_vlan = str(r[_IDX_DRIFT["OS runtime VLAN"]] or "—")
         maas_ips = str(r[_IDX_DRIFT["MAAS IPs"]] or "")
