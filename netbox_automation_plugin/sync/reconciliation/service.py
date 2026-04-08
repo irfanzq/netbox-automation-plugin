@@ -986,8 +986,10 @@ def group_reconciliation_operation_tables(
 
 _RE_BARE_INT = re.compile(r"^\d+$")
 
-# Maps projection field name → list of (module_path, model_name, label_attr) to try in order.
-# For "vlan" the formatter receives the object; for others only label_attr is used.
+# Canonical (lowercase) projection **keys** from ``netbox_write_projection_cells`` /
+# ``netbox_write_preview_cells`` — *not* drift audit column titles like "NB proposed role".
+# Those headers are read by projection into short keys: ``proj.get("role")``, etc.
+# (see ``apply_create_prefix`` in ``apply_cells.py`` and ``netbox_write_projection.py``).
 _FK_FIELD_RESOLVERS: dict[str, list[tuple[str, str, str]]] = {
     "role": [
         ("ipam.models", "Role", "name"),
@@ -1012,12 +1014,15 @@ _FK_FIELD_RESOLVERS: dict[str, list[tuple[str, str, str]]] = {
 def _resolve_fk_labels_in_proj(proj: dict[str, str]) -> dict[str, str]:
     """Return a copy of *proj* with bare-integer FK IDs replaced by human-readable labels.
 
-    Only fields listed in ``_FK_FIELD_RESOLVERS`` are touched. All model imports and
-    ORM queries are wrapped in broad try/except so failures are fully silent.
+    Keys are matched case-insensitively against ``_FK_FIELD_RESOLVERS``. All model imports
+    and ORM queries are wrapped in broad try/except so failures are fully silent.
     """
     out = dict(proj)
-    for field, resolvers in _FK_FIELD_RESOLVERS.items():
-        raw = str(out.get(field) or "").strip()
+    for field_key in list(out.keys()):
+        resolvers = _FK_FIELD_RESOLVERS.get(str(field_key).strip().lower())
+        if not resolvers:
+            continue
+        raw = str(out.get(field_key) or "").strip()
         if not raw or not _RE_BARE_INT.match(raw):
             continue
         pk = int(raw)
@@ -1042,7 +1047,7 @@ def _resolve_fk_labels_in_proj(proj: dict[str, str]) -> dict[str, str]:
             except Exception:
                 continue
         if resolved:
-            out[field] = resolved
+            out[field_key] = resolved
     return out
 
 
