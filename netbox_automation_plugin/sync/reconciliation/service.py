@@ -217,7 +217,7 @@ def _assert_branch_write_alias_not_on_public_or_raise(alias: str) -> str:
     a = (alias or "").strip()
     if not a or a.lower() == "default":
         raise ValueError(_("Invalid branch Django alias for write-context schema check."))
-    cur, is_pg, err = _read_postgresql_current_schema_for_alias(a)
+    cur, is_pg, err, _sp = _read_postgresql_current_schema_for_alias(a)
     if err:
         raise ValueError(err)
     if not is_pg:
@@ -237,12 +237,17 @@ def _assert_branch_write_alias_not_on_public_or_raise(alias: str) -> str:
     return cur or ""
 
 
-def _read_postgresql_current_schema_for_alias(alias: str) -> tuple[str, bool, str | None]:
+def _read_postgresql_current_schema_for_alias(alias: str) -> tuple[str, bool, str | None, str]:
     """
-    Return ``(current_schema, is_postgresql, error)``.
+    Return ``(current_schema, is_postgresql, error, search_path)``.
 
     ``error`` is set when the DB connection or ``SELECT current_schema()`` fails and
     ``is_postgresql`` is True.
+
+    ``search_path`` is ``current_setting('search_path', true)`` on PostgreSQL after a successful
+    ``current_schema()`` query (same cursor). When ``current_schema()`` is SQL NULL, an empty
+    ``search_path`` or one with no resolvable first schema is a common explanation — surfacing
+    it in staging JSON avoids mistaking NULL for a string mismatch bug.
     """
     try:
         conn = connections[alias]
@@ -250,14 +255,21 @@ def _read_postgresql_current_schema_for_alias(alias: str) -> tuple[str, bool, st
         inner = getattr(conn, "connection", None)
         vendor = (getattr(inner, "vendor", None) or "").lower()
         if vendor != "postgresql":
-            return "", False, None
+            return "", False, None, ""
+        sp = ""
         with conn.cursor() as cursor:
             cursor.execute("SELECT current_schema()")
             row = cursor.fetchone()
-        cur = (row[0] or "").strip() if row else ""
-        return cur, True, None
+            cur = (row[0] or "").strip() if row else ""
+            try:
+                cursor.execute("SELECT current_setting('search_path', true)")
+                row_sp = cursor.fetchone()
+                sp = (row_sp[0] or "").strip() if row_sp else ""
+            except Exception:
+                sp = ""
+        return cur, True, None, sp
     except Exception as exc:
-        return "", True, f"{type(exc).__name__}: {exc}"
+        return "", True, f"{type(exc).__name__}: {exc}", ""
 
 
 def _postgresql_branch_schema_session_name_ok(raw: str) -> bool:
@@ -270,9 +282,11 @@ def _postgresql_branch_schema_session_name_ok(raw: str) -> bool:
     return bool(s) and s != "public"
 
 
-def branch_django_alias_pg_ready_for_writes(branch_obj: Any, django_alias: str) -> tuple[bool, str, str]:
+def branch_django_alias_pg_ready_for_writes(
+    branch_obj: Any, django_alias: str
+) -> tuple[bool, str, str, str]:
     """
-    Return ``(ok, error_message, last_schema_read)``.
+    Return ``(ok, error_message, last_schema_read, postgresql_search_path)``.
 
     On PostgreSQL, ``ok`` is True only when ``current_schema()`` is not ``public`` — matching
     :func:`apply_cells._assert_row_apply_targets_branch_db`. Uses
@@ -281,34 +295,34 @@ def branch_django_alias_pg_ready_for_writes(branch_obj: Any, django_alias: str) 
     """
     alias = (django_alias or "").strip()
     if not alias or alias.lower() == "default":
-        return False, str(_("Invalid branch Django alias for schema probe.")), ""
+        return False, str(_("Invalid branch Django alias for schema probe.")), "", ""
 
-    def probe() -> tuple[bool, str, str]:
-        cur, is_pg, err = _read_postgresql_current_schema_for_alias(alias)
+    def probe() -> tuple[bool, str, str, str]:
+        cur, is_pg, err, sp = _read_postgresql_current_schema_for_alias(alias)
         if err:
-            return False, err, cur
+            return False, err, cur, sp
         if not is_pg:
-            return True, "", cur
+            return True, "", cur, sp
         if not _postgresql_branch_schema_session_name_ok(cur):
-            return False, "", cur
-        return True, "", cur
+            return False, "", cur, sp
+        return True, "", cur, sp
 
     try:
         from netbox_branching.utilities import activate_branch as _nb_activate_branch
     except ImportError:
         _nb_activate_branch = None
 
-    ok, err, sch = (False, "", "")
+    ok, err, sch, search_path = (False, "", "", "")
     if branch_obj is not None and callable(_nb_activate_branch):
         with _nb_activate_branch(branch_obj):
-            ok, err, sch = probe()
+            ok, err, sch, search_path = probe()
     else:
-        ok, err, sch = probe()
+        ok, err, sch, search_path = probe()
 
     if ok:
-        return True, "", sch
+        return True, "", sch, search_path
     if err:
-        return False, err, sch
+        return False, err, sch, search_path
     hint = ""
     try:
         sn = getattr(branch_obj, "schema_name", None)
@@ -328,6 +342,7 @@ def branch_django_alias_pg_ready_for_writes(branch_obj: Any, django_alias: str) 
             % {"alias": alias, "hint": hint or "—"}
         ),
         sch,
+        search_path,
     )
 
 
@@ -559,7 +574,7 @@ def check_branch_schema_ready(branch_obj: Any, branch_db: str) -> tuple[bool, st
     alias, err = resolve_branch_django_database_alias(branch_db, branch=branch_obj)
     if not alias:
         return (False, err)
-    ok_pg, msg_pg, _sch = branch_django_alias_pg_ready_for_writes(branch_obj, alias)
+    ok_pg, msg_pg, _sch, _sp = branch_django_alias_pg_ready_for_writes(branch_obj, alias)
     if not ok_pg:
         return (False, (msg_pg or "").strip() or str(_("Branch schema session not ready.")))
     return (True, "")
@@ -691,32 +706,6 @@ def branch_pg_schema_status_probe_for_polling(
     return False, last_reason or ""
 
 
-def _staging_poll_schema_read_with_activate(
-    run: MAASOpenStackReconciliationRun,
-) -> tuple[str, str]:
-    """Return ``(django_alias, postgresql_current_schema)`` for staging JSON (one-shot read)."""
-    alias = reconciliation_run_resolved_django_alias(run)
-    if not alias:
-        return "", ""
-    branch_obj, _err = get_netbox_branch(
-        branch_id=run.branch_id,
-        branch_name=run.branch_name or "",
-    )
-    if branch_obj is None:
-        return alias, ""
-    try:
-        from netbox_branching.utilities import activate_branch as _ab
-    except ImportError:
-        _ab = None
-    cur = ""
-    if callable(_ab):
-        with _ab(branch_obj):
-            cur, _is_pg, _e = _read_postgresql_current_schema_for_alias(alias)
-    else:
-        cur, _is_pg, _e = _read_postgresql_current_schema_for_alias(alias)
-    return alias, (cur or "").strip()
-
-
 def _branch_expected_postgresql_schema_name(run: MAASOpenStackReconciliationRun) -> str:
     branch_obj, _ = get_netbox_branch(
         branch_id=run.branch_id,
@@ -739,19 +728,57 @@ def branch_pg_schema_status_snapshot_for_staging_poll(
     """
     Lightweight probe for browser-driven post-create polling (several spaced requests).
 
-    Returns JSON-friendly fields including ``postgresql_current_schema`` for error UI. When the
-    branch model exposes ``schema_name``, ``ready`` also requires ``current_schema()`` to match
-    it (case-insensitive); otherwise ``ready`` follows :func:`reconciliation_run_live_branch_pg_schema_ready`.
+    Returns JSON-friendly fields including ``postgresql_current_schema`` for error UI. Uses a
+    **single** ``activate_branch`` + read (same as :func:`branch_django_alias_pg_ready_for_writes`)
+    so the displayed schema matches the readiness decision — a second probe could otherwise
+    disagree after connection teardown or context exit.
+
+    ``ready`` is True when that probe reports the branch alias is off PostgreSQL ``public`` and
+    ``current_schema()`` is non-empty (same rule as apply guards). ``expected_branch_schema`` is
+    NetBox's ``Branch.schema_name`` for human comparison when ``current_schema()`` is NULL/empty.
     """
     reconciliation_run_close_branch_orm_connection(run)
-    ok, reason = reconciliation_run_live_branch_pg_schema_ready(run)
-    alias, cur = _staging_poll_schema_read_with_activate(run)
     expected = _branch_expected_postgresql_schema_name(run)
+    if not run.branch_id and not (run.branch_name or "").strip():
+        return {
+            "ready": False,
+            "reason": str(_("Run has no branch to probe.")),
+            "postgresql_current_schema": "",
+            "postgresql_search_path": "",
+            "django_orm_alias": "",
+            "expected_branch_schema": expected,
+        }
+    branch_obj, berr = get_netbox_branch(
+        branch_id=run.branch_id,
+        branch_name=run.branch_name or "",
+    )
+    if branch_obj is None:
+        return {
+            "ready": False,
+            "reason": (berr or _("Branch not found.")).strip(),
+            "postgresql_current_schema": "",
+            "postgresql_search_path": "",
+            "django_orm_alias": "",
+            "expected_branch_schema": expected,
+        }
+    cn = str(getattr(branch_obj, "connection_name", None) or "").strip()
+    alias, res_err = resolve_branch_django_database_alias(cn, branch=branch_obj)
+    if not alias:
+        return {
+            "ready": False,
+            "reason": (res_err or "").strip(),
+            "postgresql_current_schema": "",
+            "postgresql_search_path": "",
+            "django_orm_alias": "",
+            "expected_branch_schema": expected,
+        }
+    ok, reason, cur, search_path = branch_django_alias_pg_ready_for_writes(branch_obj, alias)
     ready = bool(ok) and _postgresql_branch_schema_session_name_ok(cur)
     out: dict[str, Any] = {
         "ready": ready,
         "reason": (reason or "").strip(),
         "postgresql_current_schema": cur,
+        "postgresql_search_path": search_path,
         "django_orm_alias": alias,
         "expected_branch_schema": expected,
     }

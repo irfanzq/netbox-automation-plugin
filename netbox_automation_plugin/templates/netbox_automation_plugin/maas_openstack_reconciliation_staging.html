@@ -103,19 +103,39 @@
   </div>
 </div>
 
-<div id="maas-recon-post-create-overlay" class="d-none align-items-center justify-content-center flex-column" style="position:fixed;inset:0;z-index:2000;background:var(--bs-body-bg);opacity:0.97;padding:2rem;">
-  <div class="text-center" style="max-width:36rem;">
-    <div class="spinner-border text-primary mb-3" id="maas-recon-post-create-spinner" role="status" aria-hidden="true"></div>
-    <p class="visually-hidden" id="maas-recon-post-create-aria">{% trans "Branch provisioning" %}</p>
-    <h2 class="h4 mb-2" id="maas-recon-post-create-title">{% trans "Branch created" %}</h2>
-    <p class="small text-muted mb-2" id="maas-recon-post-create-sub">
-      {% blocktrans trimmed %}Please wait before schema checks run. The run page will open only after the last check confirms the branch session is not on PostgreSQL <code>public</code>.{% endblocktrans %}
-    </p>
-    <p class="small text-body-secondary mt-2 mb-0 font-monospace d-none" id="maas-recon-post-create-overlay-status"></p>
-    <div class="alert alert-danger mt-3 mb-0 py-2 small text-start d-none text-break" id="maas-recon-post-create-error" role="alert"></div>
-    <button type="button" class="btn btn-warning btn-sm mt-3 d-none" id="maas-recon-post-create-retry">{% trans "Retry schema polling" %}</button>
+{# Full-screen layer: mounted under document.body in JS so position:fixed is viewport-wide (avoids transformed ancestors in NetBox layout). #}
+<div id="maas-recon-post-create-overlay" class="d-none align-items-center justify-content-center flex-column maas-recon-post-create-overlay-root" role="dialog" aria-modal="true" aria-labelledby="maas-recon-post-create-title">
+  <div class="card shadow-lg border maas-recon-post-create-overlay-card text-center" style="max-width:36rem;width:100%;">
+    <div class="card-body p-4">
+      <div class="spinner-border text-primary mb-3" id="maas-recon-post-create-spinner" role="status" aria-hidden="true"></div>
+      <p class="visually-hidden" id="maas-recon-post-create-aria">{% trans "Branch provisioning" %}</p>
+      <h2 class="h4 mb-2" id="maas-recon-post-create-title">{% trans "Branch created" %}</h2>
+      <p class="small text-muted mb-2" id="maas-recon-post-create-sub">
+        {% blocktrans trimmed %}Please wait before schema checks run. The run page will open only after the last check confirms the branch session is not on PostgreSQL <code>public</code>.{% endblocktrans %}
+      </p>
+      <p class="small text-body-secondary mt-2 mb-0 font-monospace d-none" id="maas-recon-post-create-overlay-status"></p>
+      <div class="alert alert-danger mt-3 mb-0 py-2 small text-start d-none text-break" id="maas-recon-post-create-error" role="alert"></div>
+      <button type="button" class="btn btn-warning btn-sm mt-3 d-none" id="maas-recon-post-create-retry">{% trans "Retry schema polling" %}</button>
+    </div>
   </div>
 </div>
+<style>
+  .maas-recon-post-create-overlay-root {
+    position: fixed;
+    inset: 0;
+    width: 100vw;
+    min-height: 100vh;
+    z-index: 10050;
+    padding: 1.5rem;
+    overflow: auto;
+    box-sizing: border-box;
+    /* Opaque scrim — do not use opacity on this node (it fades children and tables show through). */
+    background-color: var(--bs-body-bg);
+  }
+  .maas-recon-post-create-overlay-card {
+    background-color: var(--bs-body-bg) !important;
+  }
+</style>
 
 {{ selected|json_script:"maas-recon-selected-data" }}
 {{ posted_review_overrides|json_script:"maas-recon-posted-overrides-data" }}
@@ -140,6 +160,7 @@
     var msgObserved = "{% filter escapejs %}{% trans 'Observed PostgreSQL current_schema()' %}{% endfilter %}";
     var msgExpected = "{% filter escapejs %}{% trans 'Expected branch schema (from NetBox)' %}{% endfilter %}";
     var msgOrmAlias = "{% filter escapejs %}{% trans 'Django ORM alias' %}{% endfilter %}";
+    var msgSearchPath = "{% filter escapejs %}{% trans 'PostgreSQL search_path (diagnostic)' %}{% endfilter %}";
     var loadingBtnHtml = '<span class="spinner-border spinner-border-sm me-1" role="status" aria-hidden="true"></span>{% filter escapejs %}{% trans "Creating branch…" %}{% endfilter %}';
     function csrf() {
       var el = document.querySelector("#recon-action-csrf input[name=csrfmiddlewaretoken]");
@@ -205,7 +226,14 @@
             var errEl = document.getElementById("maas-recon-post-create-error");
             var retryEl = document.getElementById("maas-recon-post-create-retry");
             var spinEl = document.getElementById("maas-recon-post-create-spinner");
+            function ensurePostCreateOverlayOnBody() {
+              if (!overlay || overlay.parentNode === document.body) {
+                return;
+              }
+              document.body.appendChild(overlay);
+            }
             function showPostCreateLoading() {
+              ensurePostCreateOverlayOnBody();
               if (overlay) {
                 overlay.classList.remove("d-none");
                 overlay.classList.add("d-flex");
@@ -238,6 +266,9 @@
               var parts = [];
               parts.push("<strong>" + msgErrTitle + "</strong>");
               parts.push("<div class=\"mt-2 font-monospace\">" + msgObserved + ": <code>" + escapeHtml(String(d.postgresql_current_schema != null && d.postgresql_current_schema !== "" ? d.postgresql_current_schema : "(empty)")) + "</code></div>");
+              if (d.postgresql_search_path) {
+                parts.push("<div class=\"mt-1 font-monospace small\">" + msgSearchPath + ": <code>" + escapeHtml(String(d.postgresql_search_path)) + "</code></div>");
+              }
               if (d.expected_branch_schema) {
                 parts.push("<div class=\"mt-1 font-monospace\">" + msgExpected + ": <code>" + escapeHtml(String(d.expected_branch_schema)) + "</code></div>");
               }
@@ -249,6 +280,9 @@
               }
               if (d.schema_mismatch_detail) {
                 parts.push("<div class=\"mt-1 small text-body-secondary font-monospace\">" + escapeHtml(String(d.schema_mismatch_detail)) + "</div>");
+              }
+              if (d.schema_name_compare_note) {
+                parts.push("<div class=\"mt-1 small text-body-secondary font-monospace\">" + escapeHtml(String(d.schema_name_compare_note)) + "</div>");
               }
               if (errEl) {
                 errEl.innerHTML = parts.join("");
