@@ -28,7 +28,7 @@
         </div>
       {% elif apply_results.routing_confirmation.preflight_ok %}
         <div class="alert alert-success mb-2 py-2">
-          {% blocktrans trimmed %}Preflight passed: branch ORM alias is not PostgreSQL public, and strict router checks (if enabled) passed. Per-row creates/updates still use save(using= this alias). For Docker, ensure NetBox LOGGING enables INFO for logger netbox_automation_plugin (see plugin docs), then grep reconciliation_netbox_write and reconciliation apply preflight.{% endblocktrans %}
+          {% blocktrans trimmed %}Preflight passed: branch ORM alias is not PostgreSQL public, and strict router checks (if enabled) passed. Per-row creates/updates still use save(using= this alias). For Docker, ensure NetBox LOGGING enables INFO for logger netbox_automation_plugin (see plugin docs), then grep reconciliation_row_schema_audit (every row), reconciliation_netbox_write (mutations), and reconciliation apply preflight.{% endblocktrans %}
         </div>
       {% endif %}
       {% if apply_results.routing_confirmation_text %}
@@ -118,6 +118,7 @@
               <th>{% trans "Action" %}</th>
               <th>{% trans "Summary" %}</th>
               <th>{% trans "NetBox write (preview)" %}</th>
+              <th>{% trans "Schema audit (same as Docker log line)" %}</th>
               <th>{% trans "Detail (exceptions, skip reasons, routing)" %}</th>
             </tr>
           </thead>
@@ -132,6 +133,12 @@
                 <td class="small">{{ row.action|default:"—" }}</td>
                 <td class="small">{{ row.summary|default:"—" }}</td>
                 <td class="small text-break font-monospace" style="min-width: 14rem; max-width: 36rem;">{% if row.write_preview %}{{ row.write_preview }}{% else %}—{% endif %}</td>
+                <td class="small text-break font-monospace" style="min-width: 12rem; max-width: 28rem;">
+                  {% if row.schema_audit_log_line %}
+                    {% if row.schema_audit and row.schema_audit.is_public_main %}<span class="badge text-bg-danger me-1">public</span>{% endif %}
+                    {{ row.schema_audit_log_line }}
+                  {% else %}—{% endif %}
+                </td>
                 <td class="small text-break" style="min-width: 12rem; max-width: 28rem;">
                   {% if row.reason_detail %}<div class="mb-0">{{ row.reason_detail }}</div>{% endif %}
                   {% if row.exception_type or row.exception_message %}
@@ -166,6 +173,7 @@
               <th>{% trans "Action" %}</th>
               <th>{% trans "Summary" %}</th>
               <th>{% trans "NetBox write (preview)" %}</th>
+              <th>{% trans "Schema audit (same as Docker log line)" %}</th>
               <th>{% trans "Detail (exceptions, skip reasons, routing)" %}</th>
             </tr>
           </thead>
@@ -180,6 +188,12 @@
                 <td class="small">{{ row.action|default:"—" }}</td>
                 <td class="small">{{ row.summary|default:"—" }}</td>
                 <td class="small text-break font-monospace" style="min-width: 14rem; max-width: 36rem;">{% if row.write_preview %}{{ row.write_preview }}{% else %}—{% endif %}</td>
+                <td class="small text-break font-monospace" style="min-width: 12rem; max-width: 28rem;">
+                  {% if row.schema_audit_log_line %}
+                    {% if row.schema_audit and row.schema_audit.is_public_main %}<span class="badge text-bg-danger me-1">public</span>{% endif %}
+                    {{ row.schema_audit_log_line }}
+                  {% else %}—{% endif %}
+                </td>
                 <td class="small text-break" style="min-width: 12rem; max-width: 28rem;">
                   {% if row.reason_detail %}<div class="mb-0">{{ row.reason_detail }}</div>{% endif %}
                   {% if row.exception_type or row.exception_message %}

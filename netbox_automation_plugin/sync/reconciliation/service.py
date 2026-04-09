@@ -58,6 +58,7 @@ from .apply_cells import (
     NEW_NIC_SELECTION_KEYS,
     SUPPORTED_APPLY_ACTIONS,
     _cell,
+    _clear_row_schema_probe_tls,
     _interface_mac_vlan_ip_from_cells,
     _merge_apply_extra_debug,
     _norm_header,
@@ -65,6 +66,7 @@ from .apply_cells import (
     _resolve_tenant,
     apply_row_operation,
     consume_apply_extra_debug,
+    consume_apply_row_schema_audit,
     consume_apply_routing_debug_snapshot,
     netbox_write_preview_cells,
     netbox_write_preview_fieldnames,
@@ -411,6 +413,25 @@ def _attach_apply_extra_debug_to_result(result: dict[str, Any]) -> None:
     )
 
 
+def _attach_schema_audit_to_apply_result(result: dict[str, Any], op: dict[str, Any]) -> None:
+    """Per-row PostgreSQL schema / ORM alias audit for UI and Docker (``reconciliation_row_schema_audit``)."""
+    audit = consume_apply_row_schema_audit(op)
+    result["schema_audit"] = audit
+    result["schema_audit_log_line"] = audit.get("schema_audit_log_line", "")
+    if not bool(getattr(settings, "RECONCILIATION_LOG_ROW_SCHEMA_AUDIT", True)):
+        return
+    logger.info(
+        "reconciliation_row_schema_audit row_key=%s selection_key=%s action=%s status=%s "
+        "reason=%s %s",
+        str(result.get("row_key") or ""),
+        str(result.get("selection_key") or ""),
+        str(result.get("action") or ""),
+        str(result.get("status") or ""),
+        str(result.get("reason") or ""),
+        audit.get("schema_audit_log_line", ""),
+    )
+
+
 def _finalize_apply_row(op: dict[str, Any], result: dict[str, Any]) -> dict[str, Any]:
     proj = _apply_result_projection_dict(op)
     wp = _apply_result_write_preview_from_proj(proj)
@@ -466,6 +487,7 @@ def _failed_apply_row(op: dict[str, Any], exc: Exception) -> dict[str, Any]:
     result["exception_type"] = et
     result["exception_message"] = em
     result["reason_detail"] = _truncate_exc_message(f"{et}: {em}", max_len=_APPLY_EXCEPTION_MESSAGE_MAX + 64)
+    _attach_schema_audit_to_apply_result(result, op)
     return _finalize_apply_row(op, result)
 
 
@@ -931,11 +953,13 @@ def _execute_branch_apply_in_branch_transaction(branch_db: str, op: dict[str, An
 
 def _execute_branch_apply(op: dict[str, Any], branch_db: str | None = None) -> dict[str, Any]:
     """Run one apply; optional per-row ``atomic(using=…)`` is applied by the caller / helper above."""
+    _clear_row_schema_probe_tls()
     result = _apply_result_row_shell(op)
     action = result["action"]
     if action not in SUPPORTED_APPLY_ACTIONS:
         result["status"] = "failed"
         result["reason"] = "failed_not_implemented"
+        _attach_schema_audit_to_apply_result(result, op)
         return _finalize_apply_row(op, result)
     # Thread branch_db into the op dict so handlers and ``_ab()`` / savepoints stay aligned.
     # Always copy the op dict; set branch_db whenever the caller passed it (including the
@@ -950,6 +974,7 @@ def _execute_branch_apply(op: dict[str, Any], branch_db: str | None = None) -> d
         result["reason"] = "failed_bad_apply_return"
         _attach_routing_debug_to_apply_result(result)
         _attach_apply_extra_debug_to_result(result)
+        _attach_schema_audit_to_apply_result(result, op)
         if branch_db:
             _build_leak_debug_paste_bundle(op, result, branch_db)
         return _finalize_apply_row(op, result)
@@ -967,6 +992,7 @@ def _execute_branch_apply(op: dict[str, Any], branch_db: str | None = None) -> d
         _capture_applied_object_snapshot(op, result, branch_db)
     _attach_routing_debug_to_apply_result(result)
     _attach_apply_extra_debug_to_result(result)
+    _attach_schema_audit_to_apply_result(result, op)
     if branch_db:
         _build_leak_debug_paste_bundle(op, result, branch_db)
     return _finalize_apply_row(op, result)
@@ -2489,6 +2515,7 @@ def _apply_result_from_operation(op: dict[str, Any], *, branch_context_ready: bo
     result = _apply_result_row_shell(op)
     result["status"] = "failed"
     result["reason"] = "failed_branch_context_unavailable"
+    _attach_schema_audit_to_apply_result(result, op)
     return _finalize_apply_row(op, result)
 
 

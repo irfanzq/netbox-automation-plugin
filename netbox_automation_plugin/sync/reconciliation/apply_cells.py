@@ -86,9 +86,13 @@ def _maybe_log_reconciliation_netbox_write(
     """
     One INFO line per reconciliation row that mutates NetBox (``created`` / ``updated``).
 
-    Grep Docker logs for ``reconciliation_netbox_write``; ``postgresql_current_schema``
-    must not be ``public`` (NetBox main). Disable with
-    ``RECONCILIATION_LOG_EACH_NETBOX_WRITE = False`` in NetBox configuration.
+    Grep Docker logs for ``reconciliation_netbox_write``. The branch alias line shows
+    ``postgresql_current_schema`` (effective branch schema); ``default_current_schema`` is the
+    Django ``default`` connection at the same moment (usually ``public`` on NetBox main). If
+    objects still appear on main while the branch line shows a branch schema, trace handlers for
+    ``save()`` without ``using=`` or side effects on ``default``. Disable with
+    ``RECONCILIATION_LOG_EACH_NETBOX_WRITE = False``. Disable the extra ``default`` probe with
+    ``RECONCILIATION_LOG_DEFAULT_CONNECTION_SCHEMA_IN_ROW_AUDIT = False``.
     """
     if not bool(getattr(settings, "RECONCILIATION_LOG_EACH_NETBOX_WRITE", True)):
         return
@@ -103,23 +107,34 @@ def _maybe_log_reconciliation_netbox_write(
     bd = str(op.get("branch_db") or "").strip()
     probe_alias, probe_schema = _row_schema_probe_for_log()
     django_alias = probe_alias or bd
-    pg_schema = probe_schema or "(not_probed)"
+    post_w = _row_schema_probe_after_write_for_log().strip()
+    pg_effective = post_w or probe_schema or "(not_probed)"
+    pre_tail = probe_schema or "(not_probed)"
+    post_tail = post_w or ""
     wo_tail = ""
     if len(raw) >= 4 and isinstance(raw[3], dict):
         wo = raw[3]
         lbl, pk = wo.get("label"), wo.get("pk")
         if lbl is not None and pk is not None:
             wo_tail = f" written_object={lbl}:{pk}"
+    default_snap = ""
+    if bool(getattr(settings, "RECONCILIATION_LOG_DEFAULT_CONNECTION_SCHEMA_IN_ROW_AUDIT", True)):
+        default_snap = _postgresql_current_schema_probe("default")
     logger.info(
         "reconciliation_netbox_write row_status=%s reason=%s netbox_action=%s row_key=%s "
-        "selection_key=%s django_orm_alias=%s postgresql_current_schema=%s%s",
+        "selection_key=%s django_orm_alias=%s postgresql_current_schema=%s "
+        "pre_apply_current_schema=%s post_write_current_schema=%s "
+        "default_django_alias=default default_current_schema=%s%s",
         st,
         reason,
         netbox_action,
         rk,
         sk,
         django_alias,
-        pg_schema,
+        pg_effective,
+        pre_tail,
+        post_tail,
+        default_snap,
         wo_tail,
     )
 
@@ -340,7 +355,11 @@ _apply_row_schema_probe_tls = threading.local()
 
 
 def _clear_row_schema_probe_tls() -> None:
-    for attr in ("orm_alias", "postgresql_current_schema"):
+    for attr in (
+        "orm_alias",
+        "postgresql_current_schema",
+        "postgresql_current_schema_after_write",
+    ):
         try:
             delattr(_apply_row_schema_probe_tls, attr)
         except AttributeError:
@@ -359,6 +378,136 @@ def _row_schema_probe_for_log() -> tuple[str, str]:
     )
 
 
+def _row_schema_probe_after_write_for_log() -> str:
+    return str(
+        getattr(_apply_row_schema_probe_tls, "postgresql_current_schema_after_write", "") or ""
+    )
+
+
+def _postgresql_current_schema_probe(orm_u: str) -> str:
+    """
+    Return ``SELECT current_schema()`` for this Django DB alias.
+
+    NetBox Branching often uses dynamic ``schema_*`` aliases whose wrapper does **not** set
+    ``DatabaseWrapper.vendor`` to ``postgresql``, so checking ``conn.vendor`` falsely logs
+    ``(non_postgresql)`` while real writes still hit Postgres. We probe with SQL instead.
+    """
+    ou = (orm_u or "").strip()
+    if not ou:
+        return "(no_alias)"
+    try:
+        conn = connections[ou]
+        conn.ensure_connection()
+        with conn.cursor() as cursor:
+            cursor.execute("SELECT current_schema()")
+            row = cursor.fetchone()
+        return (row[0] or "").strip() if row else "(empty)"
+    except Exception as exc:
+        logger.warning(
+            "current_schema() probe failed for ORM alias %s: %s",
+            ou,
+            exc,
+            exc_info=True,
+        )
+        return f"(schema_probe_failed:{type(exc).__name__})"
+
+
+def _schema_probe_result_is_pg_schema_name(raw: str) -> bool:
+    """True if ``raw`` looks like a real schema identifier (not an error / marker token)."""
+    s = (raw or "").strip()
+    return bool(s) and not s.startswith("(")
+
+
+def _snapshot_pg_schema_after_write(op: dict[str, Any]) -> None:
+    """
+    Re-read ``current_schema()`` on the branch ORM connection after a handler reports
+    ``created`` / ``updated`` (still inside ``apply_row_operation``'s try, before
+    ``_APPLY_BRANCH_DB`` is reset).
+
+    Every mutation row then carries an observed schema in the UI audit line and in Docker
+    (``post_write_current_schema=`` / primary ``postgresql_current_schema=`` in netbox_write logs).
+    """
+    op_db = str(op.get("branch_db") or "").strip()
+    try:
+        orm_u = (_orm_alias() or op_db or "").strip()
+    except RuntimeError:
+        orm_u = op_db
+    if not orm_u or orm_u.lower() == "default":
+        _apply_row_schema_probe_tls.postgresql_current_schema_after_write = "(no_alias)"
+        return
+    val = _postgresql_current_schema_probe(orm_u)
+    _apply_row_schema_probe_tls.postgresql_current_schema_after_write = val
+    if _schema_probe_result_is_pg_schema_name(val) and val.lower() == "public":
+        logger.error(
+            "reconciliation_write_observed_on_public_schema row_key=%s action=%s "
+            "django_orm_alias=%s postgresql_current_schema=%s",
+            str(op.get("row_key") or ""),
+            str(op.get("action") or ""),
+            orm_u,
+            val,
+        )
+
+
+def consume_apply_row_schema_audit(op: dict[str, Any]) -> dict[str, Any]:
+    """
+    Read per-row PostgreSQL schema probes (pre-handler from assert, optional post-write for
+    mutations), then clear thread-local state.
+
+    Call once per reconciliation apply row after :func:`apply_row_operation` returns (or on
+    exception paths) so the UI and ``reconciliation_row_schema_audit`` logs stay aligned with
+    Docker greps and the next row cannot inherit a stale probe.
+    """
+    probe_alias, probe_schema = _row_schema_probe_for_log()
+    post_write = _row_schema_probe_after_write_for_log().strip()
+    try:
+        op_db = str(op.get("branch_db") or "").strip()
+        django_alias = (probe_alias or op_db).strip()
+        pg = (probe_schema or "").strip()
+        if not pg:
+            pre_log = "(not_probed)"
+        else:
+            pre_log = pg
+        effective = (post_write or pg).strip()
+        if not effective:
+            eff_log = "(not_probed)"
+            is_public_main: bool | None = None
+        else:
+            eff_log = effective
+            low = effective.lower()
+            is_public_main = low == "public"
+        if is_public_main is None:
+            ipm = "unknown"
+        else:
+            ipm = "true" if is_public_main else "false"
+        default_schema = ""
+        if bool(getattr(settings, "RECONCILIATION_LOG_DEFAULT_CONNECTION_SCHEMA_IN_ROW_AUDIT", True)):
+            default_schema = _postgresql_current_schema_probe("default")
+        parts = [
+            f"django_orm_alias={django_alias or '(none)'}",
+            f"postgresql_current_schema={eff_log}",
+            f"pre_apply_current_schema={pre_log}",
+        ]
+        if post_write:
+            parts.append(f"post_write_current_schema={post_write}")
+        parts.append(f"is_public_main={ipm}")
+        parts.append("default_django_alias=default")
+        parts.append(f"default_current_schema={default_schema or '(not_probed)'}")
+        line = " ".join(parts)
+        return {
+            "django_orm_alias": django_alias,
+            "postgresql_current_schema": pg,
+            "postgresql_current_schema_after_write": post_write,
+            "postgresql_current_schema_effective": eff_log,
+            "default_django_alias": "default",
+            "default_postgresql_current_schema": default_schema,
+            "op_branch_db": op_db,
+            "is_public_main": is_public_main,
+            "schema_audit_log_line": line,
+        }
+    finally:
+        _clear_row_schema_probe_tls()
+
+
 def _assert_row_apply_targets_branch_db(op: dict[str, Any]) -> None:
     """
     Run immediately before each reconciliation handler (VLAN, VM, prefix, …).
@@ -374,70 +523,66 @@ def _assert_row_apply_targets_branch_db(op: dict[str, Any]) -> None:
 
     Also records ORM alias + ``current_schema()`` on a thread-local for
     ``reconciliation_netbox_write`` logging after successful creates/updates.
+
+    When the reconciliation guard context is missing (unscoped tooling only), we still probe
+    ``op['branch_db']`` / :func:`_orm_alias` so **every** apply row can show a schema line in
+    the UI — we do not skip recording solely because the guard ContextVar is unset.
     """
     ctx = get_reconciliation_apply_guard_context()
-    if ctx is None:
-        return
     op_db = str(op.get("branch_db") or "").strip()
-    guard_db = str(ctx.get("branch_db") or "").strip()
-    if not guard_db or guard_db.lower() == "default":
-        raise RuntimeError(
-            "reconciliation_apply_guard has empty or 'default' branch_db — refusing row apply."
+    if ctx is not None:
+        guard_db = str(ctx.get("branch_db") or "").strip()
+        if not guard_db or guard_db.lower() == "default":
+            raise RuntimeError(
+                "reconciliation_apply_guard has empty or 'default' branch_db — refusing row apply."
+            )
+        if not op_db or op_db.lower() == "default":
+            raise RuntimeError(
+                "op['branch_db'] is empty or 'default' under apply guard — refusing row apply."
+            )
+        if op_db != guard_db:
+            raise RuntimeError(
+                f"branch_db mismatch: reconciliation guard expects {guard_db!r} but op has {op_db!r}."
+            )
+        orm_u = _orm_alias()
+        if not orm_u or orm_u.lower() == "default":
+            raise RuntimeError("_orm_alias() resolved to empty or 'default' under apply guard.")
+        if orm_u != op_db:
+            raise RuntimeError(
+                f"ORM alias mismatch: _orm_alias()={orm_u!r} vs op['branch_db']={op_db!r}."
+            )
+        guarded = True
+    else:
+        logger.warning(
+            "reconciliation_apply_no_guard_context row_key=%s action=%s — probing schema from op only",
+            str(op.get("row_key") or ""),
+            str(op.get("action") or ""),
         )
-    if not op_db or op_db.lower() == "default":
-        raise RuntimeError(
-            "op['branch_db'] is empty or 'default' under apply guard — refusing row apply."
-        )
-    if op_db != guard_db:
-        raise RuntimeError(
-            f"branch_db mismatch: reconciliation guard expects {guard_db!r} but op has {op_db!r}."
-        )
-    orm_u = _orm_alias()
-    if not orm_u or orm_u.lower() == "default":
-        raise RuntimeError("_orm_alias() resolved to empty or 'default' under apply guard.")
-    if orm_u != op_db:
-        raise RuntimeError(
-            f"ORM alias mismatch: _orm_alias()={orm_u!r} vs op['branch_db']={op_db!r}."
-        )
+        try:
+            orm_u = (_orm_alias() or "").strip()
+        except RuntimeError:
+            orm_u = ""
+        if not orm_u or orm_u.lower() == "default":
+            orm_u = op_db
+        if not orm_u or orm_u.lower() == "default":
+            _set_row_schema_probe_for_log(
+                orm_alias="(none)",
+                postgresql_current_schema="(no_branch_alias)",
+            )
+            return
+        guarded = False
     if not bool(getattr(settings, "RECONCILIATION_PG_SCHEMA_CHECK_EACH_ROW", True)):
         _set_row_schema_probe_for_log(
             orm_alias=orm_u,
             postgresql_current_schema="(pg_schema_check_disabled)",
         )
         return
-    try:
-        conn = connections[orm_u]
-        conn.ensure_connection()
-        inner = getattr(conn, "connection", None)
-        vendor = (getattr(inner, "vendor", None) or "").lower()
-        if vendor != "postgresql":
-            _set_row_schema_probe_for_log(
-                orm_alias=orm_u,
-                postgresql_current_schema="(non_postgresql)",
-            )
-            return
-        with conn.cursor() as cursor:
-            cursor.execute("SELECT current_schema()")
-            row = cursor.fetchone()
-        cur_raw = (row[0] or "").strip() if row else ""
-        cur = cur_raw.lower()
-        _set_row_schema_probe_for_log(
-            orm_alias=orm_u,
-            postgresql_current_schema=cur_raw or "(empty)",
-        )
-        if cur == "public":
-            raise RuntimeError(
-                f"PostgreSQL current_schema() is 'public' on ORM alias {orm_u!r} — "
-                "refusing row apply (would hit NetBox main)."
-            )
-    except RuntimeError:
-        raise
-    except Exception as exc:
-        logger.warning(
-            "Per-row branch schema check skipped for alias %s: %s",
-            orm_u,
-            exc,
-            exc_info=True,
+    cur_raw = _postgresql_current_schema_probe(orm_u)
+    _set_row_schema_probe_for_log(orm_alias=orm_u, postgresql_current_schema=cur_raw)
+    if _schema_probe_result_is_pg_schema_name(cur_raw) and cur_raw.lower() == "public" and guarded:
+        raise RuntimeError(
+            f"PostgreSQL current_schema() is 'public' on ORM alias {orm_u!r} — "
+            "refusing row apply (would hit NetBox main)."
         )
 
 
@@ -5374,6 +5519,8 @@ def apply_row_operation(
     try:
         _assert_row_apply_targets_branch_db(op_use)
         raw = fn(op_use)
+        if isinstance(raw, tuple) and len(raw) >= 2 and str(raw[0]) in ("created", "updated"):
+            _snapshot_pg_schema_after_write(op_use)
     finally:
         _APPLY_BRANCH_DB.reset(_bdb_token)
     if raw is not None:
