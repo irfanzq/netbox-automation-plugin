@@ -2,25 +2,6 @@
 <div class="card mb-3">
   <h5 class="card-header">{% trans "Lifecycle" %}</h5>
   <div class="card-body">
-    {% if not hide_lifecycle_help %}
-    <p class="text-body-secondary small mb-2">
-      {% if hide_merge_to_main %}
-        {% blocktrans trimmed %}Apply saves your selected changes into the branch. Discard cancels the run and removes the branch — it does not roll back individual rows already applied.{% endblocktrans %}
-      {% else %}
-        {% blocktrans trimmed %}Apply saves your selected changes into the branch. Discard cancels the run and removes the branch — it does not roll back individual rows already applied.{% endblocktrans %}
-      {% endif %}
-    </p>
-    <p class="text-body-secondary small mb-2">
-      {% blocktrans trimmed %}After applying, use the re-apply buttons to retry only the rows that failed or were skipped. If a device row exists for the same host, it is automatically included so the device is created before its interfaces or BMC.{% endblocktrans %}
-    </p>
-    {% if run.branch_id %}
-    <p class="small mb-2 text-body-secondary border-start border-3 ps-2">
-      {% blocktrans with bname=run.branch_name bid=run.branch_id trimmed %}
-      “Apply selected changes to branch” always writes to the NetBox branch for this run (“{{ bname }}”, pk {{ bid }}), not to Main. To browse VMs, VLANs, and other objects created here, select that same branch in NetBox’s branch selector (or use Open branch page above).
-      {% endblocktrans %}
-    </p>
-    {% endif %}
-    {% endif %}
     {% if branch_schema_blocked %}
     <p class="small mb-2 text-warning-emphasis border-start border-3 border-warning ps-2">
       {% blocktrans trimmed %}The NetBox branch exists, but its database alias is not usable yet (or apply was blocked). Use “Recheck branch & retry” when the branch is ready. Apply and re-apply actions stay disabled until then.{% endblocktrans %}
