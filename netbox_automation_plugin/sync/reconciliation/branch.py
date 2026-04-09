@@ -199,6 +199,11 @@ def reconciliation_apply_guard(branch: Any, branch_db: str) -> Iterator[None]:
     bdb = (branch_db or "").strip()
     if not bdb:
         raise ValueError("reconciliation_apply_guard requires a non-empty branch_db alias.")
+    if bdb.lower() == "default":
+        raise ValueError(
+            "reconciliation_apply_guard refuses the literal 'default' database alias — "
+            "use a resolved schema_* branch alias so writes cannot target NetBox main."
+        )
     token = _RECONCILIATION_APPLY_GUARD.set(
         {"branch_pk": getattr(branch, "pk", None), "branch_db": bdb}
     )
@@ -350,9 +355,13 @@ def branch_write_context(*, branch: Any) -> Iterator[None]:
     """
     Activate NetBox Branching context for ORM writes.
 
-    For netboxlabs/netbox-branching: activate_branch plus a DB transaction. When
-    ``connection_name`` is a dedicated branch alias, use ``atomic(using=…)``; when it is
-    the literal ``default``, use plain ``atomic()`` so ORM routing stays branch-scoped.
+    For netboxlabs/netbox-branching: activate_branch plus a DB transaction. Prefer
+    ``atomic(using=<schema_* alias>)`` whenever that alias exists (including when the
+    model's ``connection_name`` is still the literal ``default`` but
+    :func:`resolve_branch_django_database_alias` can derive ``schema_<schema_name>``).
+    If no ``schema_*`` alias can be resolved (including when ``connection_name`` is still
+    the literal ``default``), raises — we do **not** fall back to plain ``atomic()`` on the
+    default connection (that path can write NetBox main if the router is misconfigured).
     If no API fits, raises so callers do not write branch-aware models to main by accident.
     """
     # Prefer netboxlabs/netbox-branching: always pair activate_branch with atomic; avoid
@@ -382,17 +391,34 @@ def branch_write_context(*, branch: Any) -> Iterator[None]:
                     rerr
                     or f"Branch database alias {using_raw!r} is not defined in Django DATABASES."
                 )
-        # NetBox Branching often reports connection_name as the literal "default". Pairing
-        # activate_branch with transaction.atomic(using="default") pins Django to the default
-        # connection and can bypass branching routers — writes then land in main. Use a plain
-        # atomic() on the default connection so routing matches NetBox UI/API under activate_branch.
-        with _nb_activate_branch(branch):
-            if using.lower() == "default":
-                with transaction.atomic():
-                    yield
+        # Reconcile outer transaction with the same schema_* alias apply uses: when the Branch
+        # row still says connection_name "default", resolve_branch_django_database_alias still
+        # returns schema_<schema_name> from schema_id / schema_name. Plain atomic() here while
+        # handlers use save(using=schema_*) was a mismatch; router misconfig then risks main writes.
+        tx_using = using
+        if tx_using.lower() == "default":
+            schema_alias, rerr = resolve_branch_django_database_alias(tx_using, branch=branch)
+            if schema_alias:
+                tx_using = schema_alias
             else:
-                with transaction.atomic(using=using):
-                    yield
+                raise RuntimeError(
+                    rerr
+                    or _(
+                        "Branch schema is not ready: connection_name is still 'default' and no "
+                        "schema_* Django database alias could be resolved. Wait for "
+                        "netbox-branching to finish provisioning, then retry."
+                    )
+                )
+        if tx_using.lower() == "default":
+            raise RuntimeError(
+                _(
+                    "Refusing branch ORM writes: Django database alias is still the literal "
+                    "'default'. Use a resolved schema_* alias only."
+                )
+            )
+        with _nb_activate_branch(branch):
+            with transaction.atomic(using=tx_using):
+                yield
         return
 
     # 1) Branch instance may provide a context manager method (non-netbox_branching).

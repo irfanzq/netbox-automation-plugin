@@ -117,6 +117,8 @@
     var createUrl = "{{ create_url|escapejs }}";
     var driftRunId = {{ drift_run.pk }};
     var loadingBtnHtml = '<span class="spinner-border spinner-border-sm me-1" role="status" aria-hidden="true"></span>{% filter escapejs %}{% trans "Creating branch…" %}{% endfilter %}';
+    var waitingBtnHtml = '<span class="spinner-border spinner-border-sm me-1" role="status" aria-hidden="true"></span>{% filter escapejs %}{% trans "Waiting for branch database…" %}{% endfilter %}';
+    var minCreateUiMs = 5000;
     function csrf() {
       var el = document.querySelector("#recon-action-csrf input[name=csrfmiddlewaretoken]");
       return el ? el.value : "";
@@ -144,6 +146,7 @@
         }
       }
       var origBtnHtml = btn.innerHTML;
+      var t0 = Date.now();
       btn.innerHTML = loadingBtnHtml;
       btn.disabled = true;
       if (msg) msg.textContent = "";
@@ -169,7 +172,21 @@
         })
         .then(function(res) {
           if (res.body && res.body.redirect_url) {
-            window.location.href = res.body.redirect_url;
+            var dest = res.body.redirect_url;
+            var elapsed = Date.now() - t0;
+            var waitMore = Math.max(0, minCreateUiMs - elapsed);
+            function go() {
+              window.location.href = dest;
+            }
+            if (waitMore > 0) {
+              btn.innerHTML = waitingBtnHtml;
+              if (msg) {
+                msg.textContent = "{% filter escapejs %}{% trans "The server is finishing branch setup. This page will redirect in a moment (at least a few seconds)." %}{% endfilter %}";
+              }
+              window.setTimeout(go, waitMore);
+            } else {
+              go();
+            }
             return;
           }
           btn.innerHTML = origBtnHtml;

@@ -441,8 +441,11 @@ def netbox_write_projection_cells(selection_key: str, cells: dict[str, str] | No
     if sk == "detail_bmc_existing":
         return _netbox_write_bmc_preview(c, existing_oob=True)
     if sk == "detail_proposed_missing_vlans":
+        raw_vid = _cell(c, "NB Proposed VLAN ID", "Target VID")
+        pv = ac._parse_vlan_vid(raw_vid)
+        vid_disp = str(pv) if pv is not None else raw_vid.strip()
         return {
-            "vid": _cell(c, "NB Proposed VLAN ID", "Target VID"),
+            "vid": vid_disp,
             "vlan_group": _cell(c, "NB proposed VLAN group"),
             "site": _cell(c, "NB site"),
             "location": _cell(c, "NB location"),

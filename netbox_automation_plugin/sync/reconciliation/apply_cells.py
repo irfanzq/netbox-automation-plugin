@@ -218,9 +218,8 @@ def _build_reconciliation_apply_routing_snapshot(op: dict[str, Any]) -> dict[str
         out["guard_matches_netbox_active_branch"] = False
     if orm_u is None:
         out["how_writes_route"] = (
-            "save() omits using=; ORM uses default manager. Under activate_branch, "
-            "BranchAwareRouter should send branching models to the active branch schema "
-            f"(connection_name={rab!r}). Literal 'default' here is normal for many installs."
+            "save() omits using=; ORM uses default manager (no reconciliation_apply_guard). "
+            "Guarded reconciliation apply always uses an explicit schema_* alias."
         )
     else:
         out["how_writes_route"] = (
@@ -253,14 +252,18 @@ def _orm_alias() -> str | None:
     """
     Django ORM ``using=`` value for reconciliation writes.
 
-    NetBox Branching often sets ``Branch.connection_name`` to the string ``default``.
-    Forcing ``.using("default")`` or ``save(using="default")`` can bypass
-    ``activate_branch`` routing and hit unscoped main tables. When the active alias is
-    ``default``, return ``None`` so querysets/saves use the default manager and the
-    database router (same as NetBox UI/API under an active branch).
+    With an active :func:`reconciliation_apply_guard`, the alias must be a non-default
+    ``schema_*`` key — we never return ``None`` in that mode (unscoped saves can hit NetBox main).
+
+    Without a guard (e.g. unscoped tooling env), ``default`` still maps to ``None`` for reads.
     """
     u = (_ab() or "").strip()
     if not u or u.lower() == "default":
+        if get_reconciliation_apply_guard_context() is not None:
+            raise RuntimeError(
+                "Reconciliation apply requires a non-default Django database alias (schema_*); "
+                "resolved branch_db is empty or 'default' — refusing unscoped ORM writes."
+            )
         return None
     return u
 
@@ -422,7 +425,7 @@ def _vlan_resolution_snapshot_for_prefix(
 
 
 def _save_branch() -> dict[str, str]:
-    """Keyword args for ``save()`` — empty when branch uses ``default`` alias."""
+    """Keyword args for ``save()`` — includes ``using=`` whenever :func:`_orm_alias` returns an alias."""
     a = _orm_alias()
     return {"using": a} if a is not None else {}
 
@@ -434,7 +437,7 @@ def _refresh_branch() -> dict[str, str]:
 
 @contextmanager
 def _tx_branch():
-    """``transaction.atomic(using=…)`` only when branch has a non-default alias."""
+    """``transaction.atomic(using=…)`` on the branch schema alias (required under apply guard)."""
     a = _orm_alias()
     if a is not None:
         with transaction.atomic(using=a):
@@ -448,6 +451,11 @@ def _tx_branch():
 def _tx_op(alias: str):
     """Per-row transaction from ``op["branch_db"]`` (interface create/update)."""
     raw = (alias or "").strip()
+    if get_reconciliation_apply_guard_context() is not None:
+        if not raw or raw.lower() == "default":
+            raise RuntimeError(
+                "Interface apply requires op['branch_db'] to be a non-default schema_* alias."
+            )
     if not raw or raw.lower() == "default":
         with transaction.atomic():
             yield
@@ -458,6 +466,11 @@ def _tx_op(alias: str):
 
 def _iface_save_on_op(alias: str, iface: Any) -> None:
     raw = (alias or "").strip()
+    if get_reconciliation_apply_guard_context() is not None:
+        if not raw or raw.lower() == "default":
+            raise RuntimeError(
+                "Interface apply requires op['branch_db'] to be a non-default schema_* alias."
+            )
     if not raw or raw.lower() == "default":
         iface.save()
     else:
@@ -1889,9 +1902,9 @@ def apply_create_vlan(op: dict[str, Any]) -> tuple[str, str]:
 
     group_name = _cell(cells, "NB proposed VLAN group").strip()
     vid_raw = _cell(cells, "NB Proposed VLAN ID", "Target VID").strip()
-    if not vid_raw.isdigit():
+    vid_i = _parse_vlan_vid(vid_raw)
+    if vid_i is None:
         return _skip_missing_prereq("NB Proposed VLAN ID missing or not an integer (1–4094).")
-    vid_i = int(vid_raw)
     if vid_i < 1 or vid_i > _NETBOX_IEEE_VLAN_VID_MAX:
         return _skip_missing_prereq(
             f"NB Proposed VLAN ID {vid_i} is outside IEEE 802.1Q 1–{_NETBOX_IEEE_VLAN_VID_MAX}."
@@ -4303,8 +4316,10 @@ def synthetic_create_vlan_cells_from_interface_prereq(
     selection_key: str | None = None,
 ) -> dict[str, str] | None:
     """
-    Build ``detail_proposed_missing_vlans``-shaped cells so ``create_vlan`` can run before
-    ``create_interface`` / ``update_interface`` without the operator hand-picking a VLAN row.
+    Build ``detail_proposed_missing_vlans``-shaped cells (for tooling or copy/paste).
+
+    Reconciliation freeze no longer injects these automatically: the recon preview only includes
+    VLAN rows explicitly selected from the audit "Proposed missing VLANs" table.
 
     Returns ``None`` when VID/site/group cannot be inferred safely.
     """
@@ -5039,6 +5054,15 @@ def apply_row_operation(
         return "failed", "failed_reconciliation_branch_guard", gerr, None
 
     branch_db_val = str(op.get("branch_db") or "").strip()
+    if get_reconciliation_apply_guard_context() is not None:
+        bdl = branch_db_val.lower()
+        if not branch_db_val or bdl == "default":
+            return (
+                "failed",
+                "failed_invalid_branch_db",
+                "branch_db must be a non-default schema_* Django alias; empty or 'default' is not allowed.",
+                None,
+            )
     if not branch_db_val and not _reconciliation_apply_unscoped_allowed(op):
         logger.error(
             "apply_row_operation missing branch_db in op (ContextVar would fall back to "

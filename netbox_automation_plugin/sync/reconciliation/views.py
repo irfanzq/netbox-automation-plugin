@@ -416,7 +416,7 @@ class ReconciliationRetryFailedView(LoginRequiredMixin, View):
 
 @method_decorator(never_cache, name="dispatch")
 class ReconciliationRecheckBranchView(LoginRequiredMixin, View):
-    """POST JSON {} — verify branch DB alias, then retry failed rows only."""
+    """POST JSON {} — verify branch DB alias; clear ``branch_not_ready`` or retry failed rows."""
 
     http_method_names = ["post"]
 

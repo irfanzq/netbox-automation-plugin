@@ -8,18 +8,15 @@ New-NIC sections store a minimal frozen row (``new_nic_cells_for_reconciliation`
 still shows resolved MAC/VLAN/IP columns aligned with ``apply_create_interface``.
 
 When any interface row is selected, ``build_frozen_operations`` auto-appends **every**
-``detail_new_devices``, ``detail_review_only_devices``, and ``detail_proposed_missing_vlans``
-row present in that audit index. For interface hosts that still have no ``create_device`` op,
-it also injects a synthetic ``create_device`` from **placement** (NetBox site on the placement
-row) when available — **only if** no ``dcim.Device`` with that host name already exists (matched
-hosts are omitted; they are not listed under New devices but do not need a create op).
-
-When a NIC row has an untagged VID and **NB site** but no ``create_vlan`` op yet, a synthetic
-``create_vlan`` may be injected (VLAN group from **NB proposed VLAN group**, or the sole
-site/location-scoped ``VLANGroup`` that allows the VID). Partial retries use the same rule.
+``detail_new_devices`` and ``detail_review_only_devices`` row from that audit index for affected
+hosts. **Proposed missing VLANs** are **not** auto-added: only VLAN rows the operator explicitly
+included from the audit (same snapshot) appear on the recon preview — NIC prerequisite logic
+does not synthesize extra ``create_vlan`` ops. For interface hosts that still have no
+``create_device`` op, a synthetic ``create_device`` may be injected from **placement** (or the
+NIC row) when available — **only if** no ``dcim.Device`` with that host name already exists.
 
 Ops are sorted by ``AUDIT_REPORT_APPLY_ORDER`` so device + VLAN creates run before
-``create_interface`` / ``update_interface`` without ticking those sections manually.
+``create_interface`` / ``update_interface`` when those rows were selected.
 """
 
 from __future__ import annotations
@@ -29,6 +26,7 @@ import json
 import logging
 import re
 import secrets
+import time
 from datetime import datetime, timezone as dt_timezone
 from typing import Any
 
@@ -58,9 +56,11 @@ from .branch import (
 from .apply_cells import (
     NEW_NIC_SELECTION_KEYS,
     SUPPORTED_APPLY_ACTIONS,
+    _cell,
     _interface_mac_vlan_ip_from_cells,
     _merge_apply_extra_debug,
     _norm_header,
+    _parse_vlan_vid,
     _resolve_tenant,
     apply_row_operation,
     consume_apply_extra_debug,
@@ -71,7 +71,6 @@ from .apply_cells import (
     new_nic_cells_for_reconciliation,
     recon_operation_display_cells,
     reconciliation_apply_snapshot_cells,
-    synthetic_create_vlan_cells_from_interface_prereq,
     synthetic_device_cells_from_new_nic_for_prereq,
     synthetic_device_cells_from_placement_for_nic_prereq,
     validate_preview_mandatory_audit_fields,
@@ -131,12 +130,12 @@ def _warn_if_netbox_branch_router_missing() -> None:
 
 def _recon_explicit_orm_using(db_alias: str) -> str | None:
     """
-    Django ``using=`` for reconciliation ORM only when the alias is not the literal ``default``.
+    Map a reconciliation branch DB string to a Django ``using=`` alias.
 
-    NetBox Branching often sets ``Branch.connection_name`` to the literal name ``default``.
-    Passing that
-    to ``.using()`` / ``save(using=)`` can bypass branching routers; return ``None`` to use
-    the default manager so ``activate_branch`` routes like NetBox UI/API.
+    Returns ``None`` for empty or the literal ``default`` so read helpers can fall back to the
+    default manager. **Apply** paths require a non-default ``schema_*`` alias upstream
+    (:func:`apply_reconciliation_run`, :func:`reconciliation_apply_guard`,
+    :func:`branch_write_context`); they must not call apply with ``default``.
     """
     u = (db_alias or "").strip()
     if not u or u.lower() == "default":
@@ -156,6 +155,55 @@ def check_branch_schema_ready(_branch_obj: Any, branch_db: str) -> tuple[bool, s
     if alias:
         return (True, "")
     return (False, err)
+
+
+def _reconciliation_branch_schema_wait_sec() -> float:
+    """
+    Seconds to poll for a branch Django DB alias after create (and during apply preflight).
+
+    Override in NetBox ``configuration.py``: ``RECONCILIATION_BRANCH_SCHEMA_WAIT_SEC = 30``.
+    """
+    raw = getattr(settings, "RECONCILIATION_BRANCH_SCHEMA_WAIT_SEC", 15.0)
+    try:
+        v = float(raw)
+    except (TypeError, ValueError):
+        return 15.0
+    return max(0.5, v)
+
+
+def wait_for_branch_schema_ready(
+    *,
+    branch_id: int | None,
+    branch_name: str = "",
+    timeout_sec: float = 15.0,
+    interval_sec: float = 0.4,
+) -> tuple[bool, str]:
+    """
+    Poll until NetBox Branching exposes a connectable Django DB alias for the branch, or time out.
+
+    Branch creation returns quickly while schema provisioning and ``DynamicSchemaDict`` wiring
+    can lag well beyond a few seconds under load; without this, users hit Apply or recheck
+    immediately and see failures. Default timeout is 15s; set
+    ``RECONCILIATION_BRANCH_SCHEMA_WAIT_SEC`` to tune.
+    """
+    if branch_id is None:
+        return False, _("Branch has no id.")
+    deadline = time.monotonic() + max(0.1, timeout_sec)
+    step = max(0.1, interval_sec)
+    last_reason = ""
+    while time.monotonic() < deadline:
+        branch_obj, err = get_netbox_branch(branch_id=branch_id, branch_name=branch_name or "")
+        if branch_obj is None:
+            last_reason = (err or _("Branch not found.")).strip()
+            time.sleep(step)
+            continue
+        cn = str(getattr(branch_obj, "connection_name", None) or "").strip()
+        ok, reason = check_branch_schema_ready(branch_obj, cn)
+        if ok:
+            return True, ""
+        last_reason = (reason or "").strip() or _("Branch database alias is not ready.")
+        time.sleep(step)
+    return False, last_reason
 
 
 def _apply_result_projection_dict(op: dict[str, Any]) -> dict[str, str]:
@@ -751,37 +799,26 @@ def _execute_branch_apply_in_branch_transaction(branch_db: str, op: dict[str, An
     failing row can roll back without aborting the whole apply batch.
     """
     txu = _recon_explicit_orm_using(branch_db)
-    conn_key = txu if txu is not None else "default"
+    if not txu:
+        raise RuntimeError(
+            "Reconciliation row apply requires a non-default Django database alias (schema_*). "
+            "Literal 'default' is not allowed."
+        )
     try:
-        conn = connections[conn_key]
+        conn = connections[txu]
     except KeyError:
-        if txu is not None:
-            with transaction.atomic(using=txu):
-                return _execute_branch_apply(op, branch_db)
-        with transaction.atomic():
-            return _execute_branch_apply(op, branch_db)
-    if getattr(conn, "in_atomic_block", False):
-        if txu is not None:
-            sid = transaction.savepoint(using=txu)
-        else:
-            sid = transaction.savepoint()
-        try:
-            out = _execute_branch_apply(op, branch_db)
-            if txu is not None:
-                transaction.savepoint_commit(sid, using=txu)
-            else:
-                transaction.savepoint_commit(sid)
-            return out
-        except Exception:
-            if txu is not None:
-                transaction.savepoint_rollback(sid, using=txu)
-            else:
-                transaction.savepoint_rollback(sid)
-            raise
-    if txu is not None:
         with transaction.atomic(using=txu):
             return _execute_branch_apply(op, branch_db)
-    with transaction.atomic():
+    if getattr(conn, "in_atomic_block", False):
+        sid = transaction.savepoint(using=txu)
+        try:
+            out = _execute_branch_apply(op, branch_db)
+            transaction.savepoint_commit(sid, using=txu)
+            return out
+        except Exception:
+            transaction.savepoint_rollback(sid, using=txu)
+            raise
+    with transaction.atomic(using=txu):
         return _execute_branch_apply(op, branch_db)
 
 
@@ -1107,9 +1144,11 @@ def _operation_summary(meta: dict[str, Any]) -> str:
     if sk in ("detail_new_devices", "detail_review_only_devices"):
         return f"Device row: {host or '—'}"
     if sk == "detail_proposed_missing_vlans":
-        vid = (cells.get("NB Proposed VLAN ID") or cells.get("Target VID") or "").strip()
-        grp = (cells.get("NB proposed VLAN group") or "").strip()
-        site = (cells.get("NB site") or "").strip()
+        raw_vid = _cell(cells, "NB Proposed VLAN ID", "Target VID").strip()
+        pv = _parse_vlan_vid(raw_vid)
+        vid = str(pv) if pv is not None else raw_vid
+        grp = _cell(cells, "NB proposed VLAN group").strip()
+        site = _cell(cells, "NB site").strip()
         return f"Create VLAN VID {vid or '—'} in group {grp or '—'} (site {site or '—'})"
     if sk == "detail_proposed_missing_tenants":
         tn = (cells.get("NB proposed tenant name") or cells.get("OpenStack project") or "").strip()
@@ -1244,9 +1283,7 @@ def _expand_partial_retry_ops_with_device_creates(
       synthetic ``create_device`` op (same idea as NIC prerequisite inject at freeze time).
     - If the batch includes ``create_interface`` / ``update_interface``, also pull **every**
       frozen ``create_vlan`` row already present in **this run's** ``all_ops`` (not the whole
-      drift index), then :func:`_append_synthetic_create_vlan_prereqs_for_interface_ops` — same
-      as first apply after ``build_frozen_operations`` — so partial retry does not run
-      interfaces before a needed VLAN exists in IPAM.
+      drift index). No synthetic VLAN rows are added beyond what was frozen on the run.
 
     Final sort uses ``AUDIT_REPORT_APPLY_ORDER`` so devices, VLANs, and interfaces run in the
     correct relative order.
@@ -1389,7 +1426,6 @@ def _expand_partial_retry_ops_with_device_creates(
             if rk and rk not in have_rk2:
                 have_rk2.add(rk)
                 out.append(o)
-    _append_synthetic_create_vlan_prereqs_for_interface_ops(out, set())
     allowed_sk = all_registered_selection_keys()
     out.sort(key=lambda o: _operation_apply_sort_key(o, allowed=allowed_sk))
     return out
@@ -1446,115 +1482,6 @@ def _netbox_existing_device_host_keys_lower(host_keys: set[str]) -> set[str]:
     )
 
 
-def _create_vlan_prereq_tuple(op: dict[str, Any]) -> tuple[int, str, str] | None:
-    """(vid, group name lower, site lower) for deduping synthetic VLAN prerequisite ops."""
-    if str(op.get("action") or "") != "create_vlan":
-        return None
-    cells = op.get("cells") if isinstance(op.get("cells"), dict) else {}
-    c = {str(k): "" if v is None else str(v).strip() for k, v in cells.items()}
-    vid_s = str(c.get("NB Proposed VLAN ID") or c.get("Target VID") or "").strip()
-    if not vid_s.isdigit():
-        return None
-    grp = str(c.get("NB proposed VLAN group") or "").strip().lower()
-    site = str(c.get("NB site") or "").strip().lower()
-    if not grp or not site:
-        return None
-    return (int(vid_s), grp, site)
-
-
-def _create_vlan_vid_site_from_op(op: dict[str, Any]) -> tuple[int, str] | None:
-    """
-    (vid, site lower) for any ``create_vlan`` op, ignoring VLAN group.
-
-    Drift rows often use **Birch VLANs** while :func:`synthetic_create_vlan_cells_from_interface_prereq`
-    may infer **B52 VLANs** for the same VID. Both are valid NetBox tuples but duplicate real intent;
-    skip synthetic when any create for `(vid, site)` is already scheduled.
-    """
-    if str(op.get("action") or "") != "create_vlan":
-        return None
-    cells = op.get("cells") if isinstance(op.get("cells"), dict) else {}
-    c = {str(k): "" if v is None else str(v).strip() for k, v in cells.items()}
-    vid_s = str(c.get("NB Proposed VLAN ID") or c.get("Target VID") or "").strip()
-    site = str(c.get("NB site") or "").strip().lower()
-    if not vid_s.isdigit() or not site:
-        return None
-    try:
-        return (int(vid_s), site)
-    except ValueError:
-        return None
-
-
-def _append_synthetic_create_vlan_prereqs_for_interface_ops(
-    ops: list[dict[str, Any]],
-    seen: set[str],
-) -> None:
-    """
-    When an interface row requests an untagged VID but no ``create_vlan`` op covers
-    (vid, group, site), inject a synthetic ``detail_proposed_missing_vlans`` / ``create_vlan``
-    op (same shape as audit VLAN rows) so apply order creates IPAM VLAN before the interface.
-
-    Group comes from **NB proposed VLAN group** or a **unique** site/location-scoped VLAN group
-    in NetBox that contains the VID in its ranges (see
-    :func:`apply_cells.synthetic_create_vlan_cells_from_interface_prereq`).
-
-    If a ``create_vlan`` for the same **VID** and **NB site** already exists (any group — e.g.
-    audit **Birch VLANs** vs inferred **B52 VLANs**), do not add a second synthetic row.
-    """
-    covered = {t for o in ops if (t := _create_vlan_prereq_tuple(o)) is not None}
-    covered_vid_site = {
-        pair for o in ops if (pair := _create_vlan_vid_site_from_op(o)) is not None
-    }
-    iface_src = NEW_NIC_SELECTION_KEYS | NIC_DRIFT_SELECTION_KEYS
-    for o in ops:
-        if str(o.get("action") or "") not in ("create_interface", "update_interface"):
-            continue
-        sk = str(o.get("selection_key") or "")
-        if sk not in iface_src:
-            continue
-        raw = o.get("cells")
-        if not isinstance(raw, dict):
-            continue
-        c = {str(k): "" if v is None else str(v).strip() for k, v in raw.items()}
-        synth_cells = synthetic_create_vlan_cells_from_interface_prereq(c, selection_key=sk)
-        if not synth_cells:
-            continue
-        try:
-            vid_i = int(str(synth_cells.get("NB Proposed VLAN ID") or "").strip())
-        except (TypeError, ValueError):
-            continue
-        grp = str(synth_cells.get("NB proposed VLAN group") or "").strip().lower()
-        site = str(synth_cells.get("NB site") or "").strip().lower()
-        key = (vid_i, grp, site)
-        if key in covered:
-            continue
-        if (vid_i, site) in covered_vid_site:
-            continue
-        host = _host_key_from_recon_cells(c) or "host"
-        if_name = (
-            (c.get("NB intf") or c.get("Suggested NB name") or "").strip() or "iface"
-        )
-        rk_raw = f"nic-prereq-vlan|{host}|{if_name}|{vid_i}|{grp}|{site}"
-        rk = hashlib.sha1(rk_raw.encode("utf-8", errors="ignore")).hexdigest()[:16]
-        if rk in seen:
-            continue
-        seen.add(rk)
-        covered.add(key)
-        covered_vid_site.add((vid_i, site))
-        ops.append(
-            {
-                "row_key": rk,
-                "selection_key": "detail_proposed_missing_vlans",
-                "prop_list_key": None,
-                "row_index": 10**9 - 1,
-                "cells": synth_cells,
-                "summary": (
-                    f"Create VLAN VID {vid_i} (auto: NIC prerequisite for {host} / {if_name})"
-                ),
-                "action": "create_vlan",
-            }
-        )
-
-
 def _inject_interface_prerequisite_ops(
     ops: list[dict[str, Any]],
     seen: set[str],
@@ -1564,10 +1491,10 @@ def _inject_interface_prerequisite_ops(
     If the operator selected any new-interface or NIC-drift row, pull in **every** device /
     review-only device row from this snapshot that matches affected hosts (via row index).
 
-    **Proposed missing VLANs** are *not* bulk-pulled here: that made the recon preview list every
-    VLAN gap in the report whenever a single NIC was selected, even when the operator had only
-    checked a subset in the audit. VLAN prerequisites for interfaces are covered by (a) VLAN rows
-    the operator already selected and (b) :func:`_append_synthetic_create_vlan_prereqs_for_interface_ops`.
+    **Proposed missing VLANs** are *not* pulled or synthesized here: the recon preview lists only
+    VLAN rows explicitly selected in the audit. If an interface apply needs a VLAN that was not
+    selected, apply may skip or fail that row until the operator adds the matching missing-VLAN
+    row to the reconciliation selection.
 
     Also synthesize placement-based ``create_device`` when a host still has no device op.
     Final order is ``AUDIT_REPORT_APPLY_ORDER``.
@@ -1615,8 +1542,6 @@ def _inject_interface_prerequisite_ops(
                 }
             )
             break
-
-    _append_synthetic_create_vlan_prereqs_for_interface_ops(ops, seen)
 
 
 def _normalize_selected(raw: Any) -> dict[str, list[dict[str, Any]]]:
@@ -2428,6 +2353,26 @@ def create_reconciliation_run(
         run.status = MAASOpenStackReconciliationRun.STATUS_BRANCH_CREATED
         run.save()
 
+    if run.status == MAASOpenStackReconciliationRun.STATUS_BRANCH_CREATED:
+        provision_wait_sec = _reconciliation_branch_schema_wait_sec()
+        ready, wait_reason = wait_for_branch_schema_ready(
+            branch_id=run.branch_id,
+            branch_name=run.branch_name or "",
+            timeout_sec=provision_wait_sec,
+            interval_sec=0.4,
+        )
+        if not ready:
+            logger.info(
+                "Reconciliation run %s: branch DB alias not ready after %.1fs wait: %s",
+                run.pk,
+                provision_wait_sec,
+                wait_reason,
+            )
+            run.status = MAASOpenStackReconciliationRun.STATUS_BRANCH_NOT_READY
+            fallback = str(_("Branch schema not ready after provisioning wait."))
+            run.error_message = str(wait_reason or "").strip() or fallback
+            run.save(update_fields=["status", "error_message", "last_updated"])
+
     return run
 
 
@@ -2570,8 +2515,35 @@ def apply_reconciliation_run(
             branch=branch_obj,
         )
         if not django_db_alias:
+            wait_for_branch_schema_ready(
+                branch_id=run.branch_id,
+                branch_name=run.branch_name or "",
+                timeout_sec=_reconciliation_branch_schema_wait_sec(),
+                interval_sec=0.4,
+            )
+            branch_obj, branch_err = get_netbox_branch(
+                branch_id=run.branch_id,
+                branch_name=run.branch_name or "",
+            )
+            if branch_obj is None:
+                raise ValueError((branch_err or _("Branch not found.")).strip())
+            connection_name_raw = str(
+                getattr(branch_obj, "connection_name", None) or ""
+            ).strip()
+            django_db_alias, resolve_err = resolve_branch_django_database_alias(
+                connection_name_raw,
+                branch=branch_obj,
+            )
+        if not django_db_alias:
             raise ValueError(
                 (resolve_err or _("Branch database alias is not ready.")).strip()
+            )
+        if str(django_db_alias).strip().lower() == "default":
+            raise ValueError(
+                _(
+                    "Reconciliation apply requires a dedicated branch schema alias (schema_*); "
+                    "the literal Django alias 'default' is not permitted — it can write NetBox main."
+                )
             )
 
         branch_db_for_payload = django_db_alias
@@ -2696,10 +2668,23 @@ def check_and_reapply_if_branch_ready(
     *, run: MAASOpenStackReconciliationRun, actor
 ) -> tuple[bool, str, MAASOpenStackReconciliationRun]:
     """
-    UI entry point: re-resolve the NetBox branch, verify ``connection_name``, then retry failed rows.
+    UI entry point: re-resolve the NetBox branch and verify ``connection_name``.
+
+    If the run is ``branch_not_ready`` (e.g. create-time schema wait timed out) and the alias is
+    now ready, transition to ``branch_created`` so Apply is allowed.
+
+    Otherwise, when the schema is ready and the run already had an apply attempt, retry failed
+    rows only (same as before).
     """
     run.refresh_from_db(
-        fields=["status", "frozen_operations", "apply_results", "branch_name", "branch_id"]
+        fields=[
+            "status",
+            "frozen_operations",
+            "apply_results",
+            "branch_name",
+            "branch_id",
+            "error_message",
+        ]
     )
     branch_obj, err = get_netbox_branch(
         branch_id=run.branch_id,
@@ -2711,6 +2696,11 @@ def check_and_reapply_if_branch_ready(
     ready, reason = check_branch_schema_ready(branch_obj, connection_name_raw)
     if not ready:
         return False, reason, run
+    if run.status == MAASOpenStackReconciliationRun.STATUS_BRANCH_NOT_READY:
+        run.status = MAASOpenStackReconciliationRun.STATUS_BRANCH_CREATED
+        run.error_message = ""
+        run.save(update_fields=["status", "error_message", "last_updated"])
+        return True, "", run
     run = apply_reconciliation_run(run=run, actor=actor, retry_failed_only=True)
     return True, "", run
 
