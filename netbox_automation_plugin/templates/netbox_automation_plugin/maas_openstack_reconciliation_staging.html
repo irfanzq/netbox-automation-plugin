@@ -104,14 +104,16 @@
 </div>
 
 <div id="maas-recon-post-create-overlay" class="d-none align-items-center justify-content-center flex-column" style="position:fixed;inset:0;z-index:2000;background:var(--bs-body-bg);opacity:0.97;padding:2rem;">
-  <div class="text-center" style="max-width:32rem;">
-    <div class="spinner-border text-primary mb-3" role="status" aria-hidden="true"></div>
-    <p class="visually-hidden" id="maas-recon-post-create-aria">{% trans "Loading changes" %}</p>
-    <h2 class="h4 mb-2">{% trans "Loading changes…" %}</h2>
-    <p class="small text-muted mb-0">
-      {% trans "Waiting on the server until the branch database session leaves the main (public) schema. You will be sent to the run page when it is safe to continue." %}
+  <div class="text-center" style="max-width:36rem;">
+    <div class="spinner-border text-primary mb-3" id="maas-recon-post-create-spinner" role="status" aria-hidden="true"></div>
+    <p class="visually-hidden" id="maas-recon-post-create-aria">{% trans "Branch provisioning" %}</p>
+    <h2 class="h4 mb-2" id="maas-recon-post-create-title">{% trans "Branch created" %}</h2>
+    <p class="small text-muted mb-2" id="maas-recon-post-create-sub">
+      {% blocktrans trimmed %}Please wait before schema checks run. The run page will open only after the last check confirms the branch session is not on PostgreSQL <code>public</code>.{% endblocktrans %}
     </p>
     <p class="small text-body-secondary mt-2 mb-0 font-monospace d-none" id="maas-recon-post-create-overlay-status"></p>
+    <div class="alert alert-danger mt-3 mb-0 py-2 small text-start d-none text-break" id="maas-recon-post-create-error" role="alert"></div>
+    <button type="button" class="btn btn-warning btn-sm mt-3 d-none" id="maas-recon-post-create-retry">{% trans "Retry schema polling" %}</button>
   </div>
 </div>
 
@@ -128,10 +130,16 @@
     var tokEl = document.getElementById("maas-recon-preview-token");
     var createUrl = "{{ create_url|escapejs }}";
     var driftRunId = {{ drift_run.pk }};
-    var postCreatePollMs = {{ recon_post_create_poll_interval_ms|default:5000 }};
-    var postCreatePollMaxTicks = {{ recon_post_create_poll_max_ticks|default:36 }};
-    var postCreateMinOverlayMs = {{ recon_post_create_min_overlay_ms|default:2500 }};
-    var postCreateReadyPollsRequired = {{ recon_post_create_ready_polls_required|default:2 }};
+    var postCreateInitialDelayMs = {{ recon_post_create_initial_delay_ms|default:30000 }};
+    var postCreateProbeIntervalMs = {{ recon_post_create_schema_probe_interval_ms|default:5000 }};
+    var postCreateProbeCount = {{ recon_post_create_schema_probe_count|default:6 }};
+    var msgPhaseWait = "{% filter escapejs %}{% blocktrans trimmed %}Branch created successfully. Waiting before schema checks…{% endblocktrans %}{% endfilter %}";
+    var msgPhaseProbe = "{% filter escapejs %}{% trans 'Checking branch schema on server…' %}{% endfilter %}";
+    var msgLoadingRun = "{% filter escapejs %}{% trans 'Loading changes…' %}{% endfilter %}";
+    var msgErrTitle = "{% filter escapejs %}{% trans 'Branch schema is still not safe for apply.' %}{% endfilter %}";
+    var msgObserved = "{% filter escapejs %}{% trans 'Observed PostgreSQL current_schema()' %}{% endfilter %}";
+    var msgExpected = "{% filter escapejs %}{% trans 'Expected branch schema (from NetBox)' %}{% endfilter %}";
+    var msgOrmAlias = "{% filter escapejs %}{% trans 'Django ORM alias' %}{% endfilter %}";
     var loadingBtnHtml = '<span class="spinner-border spinner-border-sm me-1" role="status" aria-hidden="true"></span>{% filter escapejs %}{% trans "Creating branch…" %}{% endfilter %}';
     function csrf() {
       var el = document.querySelector("#recon-action-csrf input[name=csrfmiddlewaretoken]");
@@ -190,8 +198,13 @@
             var overlayStatus = document.getElementById("maas-recon-post-create-overlay-status");
             function branchSchemaPollUrl(detailUrl) {
               var base = (detailUrl || "").replace(/\/?$/, "/");
-              return base + "branch-pg-schema-status/";
+              return base + "branch-pg-schema-status/?light=1";
             }
+            var titleEl = document.getElementById("maas-recon-post-create-title");
+            var subEl = document.getElementById("maas-recon-post-create-sub");
+            var errEl = document.getElementById("maas-recon-post-create-error");
+            var retryEl = document.getElementById("maas-recon-post-create-retry");
+            var spinEl = document.getElementById("maas-recon-post-create-spinner");
             function showPostCreateLoading() {
               if (overlay) {
                 overlay.classList.remove("d-none");
@@ -200,58 +213,134 @@
               if (msg) {
                 msg.textContent = "";
               }
+              if (errEl) {
+                errEl.classList.add("d-none");
+                errEl.innerHTML = "";
+              }
+              if (retryEl) {
+                retryEl.classList.add("d-none");
+              }
+              if (spinEl) {
+                spinEl.classList.remove("d-none");
+              }
             }
             function redirectToRun() {
               window.location.href = dest;
             }
+            function showSchemaFailure(data) {
+              var d = data || {};
+              if (spinEl) {
+                spinEl.classList.add("d-none");
+              }
+              if (overlayStatus) {
+                overlayStatus.classList.add("d-none");
+              }
+              var parts = [];
+              parts.push("<strong>" + msgErrTitle + "</strong>");
+              parts.push("<div class=\"mt-2 font-monospace\">" + msgObserved + ": <code>" + escapeHtml(String(d.postgresql_current_schema != null && d.postgresql_current_schema !== "" ? d.postgresql_current_schema : "(empty)")) + "</code></div>");
+              if (d.expected_branch_schema) {
+                parts.push("<div class=\"mt-1 font-monospace\">" + msgExpected + ": <code>" + escapeHtml(String(d.expected_branch_schema)) + "</code></div>");
+              }
+              if (d.django_orm_alias) {
+                parts.push("<div class=\"mt-1 font-monospace\">" + msgOrmAlias + ": <code>" + escapeHtml(String(d.django_orm_alias)) + "</code></div>");
+              }
+              if (d.reason) {
+                parts.push("<div class=\"mt-2 small text-body-secondary\">" + escapeHtml(String(d.reason)) + "</div>");
+              }
+              if (d.schema_mismatch_detail) {
+                parts.push("<div class=\"mt-1 small text-body-secondary font-monospace\">" + escapeHtml(String(d.schema_mismatch_detail)) + "</div>");
+              }
+              if (errEl) {
+                errEl.innerHTML = parts.join("");
+                errEl.classList.remove("d-none");
+              }
+              if (retryEl) {
+                retryEl.classList.remove("d-none");
+              }
+            }
+            function escapeHtml(s) {
+              return String(s)
+                .replace(/&/g, "&amp;")
+                .replace(/</g, "&lt;")
+                .replace(/>/g, "&gt;")
+                .replace(/\"/g, "&quot;");
+            }
             if (res.ok) {
               showPostCreateLoading();
               var pollUrl = branchSchemaPollUrl(dest);
-              var tick = 0;
-              var overlayStarted = Date.now();
-              var consecutiveReady = 0;
-              function runPoll() {
-                tick += 1;
-                if (tick > postCreatePollMaxTicks) {
-                  redirectToRun();
-                  return;
+              function setPhaseWait() {
+                if (titleEl) {
+                  titleEl.textContent = "{% filter escapejs %}{% trans 'Branch created' %}{% endfilter %}";
                 }
-                if (overlayStatus) {
-                  overlayStatus.classList.remove("d-none");
-                  overlayStatus.textContent = "{% filter escapejs %}{% trans "Checking branch schema on server…" %}{% endfilter %} (" + tick + "/" + postCreatePollMaxTicks + ")";
+                if (subEl) {
+                  subEl.textContent = msgPhaseWait;
                 }
-                fetch(pollUrl, {
-                  credentials: "same-origin",
-                  headers: { Accept: "application/json" }
-                })
-                  .then(function(r) { return r.json(); })
-                  .then(function(data) {
-                    var elapsed = Date.now() - overlayStarted;
-                    if (data && data.ready) {
-                      consecutiveReady += 1;
-                    } else {
-                      consecutiveReady = 0;
-                    }
-                    if (
-                      data && data.ready
-                      && consecutiveReady >= postCreateReadyPollsRequired
-                      && elapsed >= postCreateMinOverlayMs
-                    ) {
-                      redirectToRun();
-                      return;
-                    }
-                    var delay = postCreatePollMs;
-                    if (data && data.ready) {
-                      delay = Math.max(delay, postCreateMinOverlayMs - elapsed);
-                    }
-                    window.setTimeout(runPoll, Math.max(200, delay));
-                  })
-                  .catch(function() {
-                    consecutiveReady = 0;
-                    window.setTimeout(runPoll, postCreatePollMs);
-                  });
               }
-              runPoll();
+              function setPhaseProbe() {
+                if (titleEl) {
+                  titleEl.textContent = msgLoadingRun;
+                }
+                if (subEl) {
+                  subEl.textContent =
+                    "{% filter escapejs %}{% trans 'Running schema checks five seconds apart; only the last result opens the run page.' %}{% endfilter %} " +
+                    "(" + postCreateProbeCount + ")";
+                }
+              }
+              function runProbePhase() {
+                if (errEl) {
+                  errEl.classList.add("d-none");
+                  errEl.innerHTML = "";
+                }
+                if (retryEl) {
+                  retryEl.classList.add("d-none");
+                }
+                if (spinEl) {
+                  spinEl.classList.remove("d-none");
+                }
+                setPhaseProbe();
+                var probeNum = 0;
+                var lastData = null;
+                function step() {
+                  probeNum += 1;
+                  if (overlayStatus) {
+                    overlayStatus.classList.remove("d-none");
+                    overlayStatus.textContent = msgPhaseProbe + " (" + probeNum + "/" + postCreateProbeCount + ")";
+                  }
+                  fetch(pollUrl, {
+                    credentials: "same-origin",
+                    headers: { Accept: "application/json" }
+                  })
+                    .then(function(r) { return r.json().then(function(j) { return { ok: r.ok, body: j }; }); })
+                    .then(function(res2) {
+                      lastData = res2.body || {};
+                      if (probeNum < postCreateProbeCount) {
+                        window.setTimeout(step, postCreateProbeIntervalMs);
+                        return;
+                      }
+                      if (lastData && lastData.ready) {
+                        redirectToRun();
+                        return;
+                      }
+                      showSchemaFailure(lastData);
+                    })
+                    .catch(function() {
+                      if (probeNum < postCreateProbeCount) {
+                        window.setTimeout(step, postCreateProbeIntervalMs);
+                        return;
+                      }
+                      showSchemaFailure(lastData || { reason: "Network or server error during last schema check." });
+                    });
+                }
+                step();
+              }
+              setPhaseWait();
+              window.setTimeout(runProbePhase, postCreateInitialDelayMs);
+              if (retryEl) {
+                retryEl.onclick = function() {
+                  showPostCreateLoading();
+                  runProbePhase();
+                };
+              }
             } else {
               redirectToRun();
             }

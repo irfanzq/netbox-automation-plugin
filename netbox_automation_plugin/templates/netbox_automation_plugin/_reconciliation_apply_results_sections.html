@@ -1,23 +1,33 @@
 {% load i18n %}
 {% if apply_results.routing_confirmation %}
-  <div class="card mb-3 {% if apply_results.routing_confirmation.entire_batch_aborted_no_row_handlers %}border-danger{% elif apply_results.routing_confirmation.preflight_ok %}border-success{% else %}border-warning{% endif %}">
+  <div class="card mb-3 {% if apply_results.routing_confirmation.entire_batch_aborted_no_row_handlers or apply_results.routing_confirmation.apply_rows_observed_branch_schema_public %}border-danger{% elif apply_results.routing_confirmation.preflight_ok %}border-success{% else %}border-warning{% endif %}">
     <h5 class="card-header">{% trans "Branch routing confirmation (this apply)" %}</h5>
     <div class="card-body py-2 small">
       <p class="mb-2 text-body-secondary">
-        {% trans "Intended Django ORM database alias for reconciliation writes (must be a schema_* key, not default). PostgreSQL current_schema should not be public on that alias." %}
+        {% blocktrans trimmed %}Intended Django ORM database alias for reconciliation writes (must be a schema_* key, not default). <strong>Preflight</strong> probes run before the branch write transaction; <strong>per-row</strong> probes run inside handlers — they can disagree if pooled connections are out of sync. Trust the row table if they conflict.{% endblocktrans %}
       </p>
       <dl class="row mb-2">
         <dt class="col-sm-4">{% trans "branch_db_used" %}</dt>
         <dd class="col-sm-8 text-monospace">{{ apply_results.routing_confirmation.branch_db_used|default:"—" }}</dd>
         <dt class="col-sm-4">{% trans "django_database_alias" %}</dt>
         <dd class="col-sm-8 text-monospace">{{ apply_results.routing_confirmation.django_database_alias|default:"—" }}</dd>
-        <dt class="col-sm-4">{% trans "PostgreSQL current_schema" %}</dt>
+        <dt class="col-sm-4">{% trans "Preflight: SELECT current_schema()" %}</dt>
         <dd class="col-sm-8 text-monospace">{{ apply_results.routing_confirmation.postgresql_current_schema|default:"—" }}</dd>
+        {% if apply_results.routing_confirmation.write_context_postgresql_current_schema %}
+        <dt class="col-sm-4">{% trans "Write transaction start: SELECT current_schema()" %}</dt>
+        <dd class="col-sm-8 text-monospace">{{ apply_results.routing_confirmation.write_context_postgresql_current_schema }}</dd>
+        {% endif %}
         <dt class="col-sm-4">{% trans "BranchAwareRouter in DATABASE_ROUTERS" %}</dt>
         <dd class="col-sm-8">{% if apply_results.routing_confirmation.branch_aware_router_configured %}<span class="text-success">{% trans "yes" %}</span>{% else %}<span class="text-danger">{% trans "no" %}</span>{% endif %}</dd>
         <dt class="col-sm-4">{% trans "Preflight OK" %}</dt>
         <dd class="col-sm-8">{% if apply_results.routing_confirmation.preflight_ok %}<span class="text-success">{% trans "yes" %}</span>{% else %}<span class="text-warning">{% trans "no" %}</span>{% endif %}</dd>
       </dl>
+      {% if apply_results.routing_confirmation.apply_rows_observed_branch_schema_public and apply_results.routing_confirmation.preflight_ok %}
+        <div class="alert alert-danger mb-2 py-2">
+          <strong>{% trans "Schema mismatch" %}</strong> —
+          {% blocktrans trimmed %}Preflight saw a non-public branch session, but at least one row in this apply still observed PostgreSQL schema public on the branch ORM alias (see Schema audit column). The green preflight line above describes an earlier connection, not what row handlers used. Retry apply after the branch session stabilizes, or inspect netbox-branching / connection pooling.{% endblocktrans %}
+        </div>
+      {% endif %}
       {% if apply_results.routing_confirmation.entire_batch_aborted_no_row_handlers %}
         <div class="alert alert-danger mb-2 py-2">
           <strong>{% trans "Entire batch aborted" %}</strong> —
@@ -26,9 +36,9 @@
             <div class="mt-2 font-monospace text-break">{{ apply_results.routing_confirmation.preflight_error }}</div>
           {% endif %}
         </div>
-      {% elif apply_results.routing_confirmation.preflight_ok %}
+      {% elif apply_results.routing_confirmation.preflight_ok and not apply_results.routing_confirmation.apply_rows_observed_branch_schema_public %}
         <div class="alert alert-success mb-2 py-2">
-          {% blocktrans trimmed %}Preflight passed: branch ORM alias is not PostgreSQL public, and strict router checks (if enabled) passed. Per-row creates/updates still use save(using= this alias). For Docker, ensure NetBox LOGGING enables INFO for logger netbox_automation_plugin (see plugin docs), then grep reconciliation_row_schema_audit (every row), reconciliation_netbox_write (mutations), and reconciliation apply preflight.{% endblocktrans %}
+          {% blocktrans trimmed %}Preflight passed and no row in this apply reported public on the branch alias. Per-row creates/updates use save(using= this alias). Optional Docker greps: reconciliation_row_schema_audit, reconciliation_netbox_write (when those log lines are enabled in settings).{% endblocktrans %}
         </div>
       {% endif %}
       {% if apply_results.routing_confirmation_text %}

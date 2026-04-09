@@ -36,6 +36,7 @@ from .service import (
     discard_reconciliation_run,
     preview_reconciliation,
     branch_pg_schema_status_probe_for_polling,
+    branch_pg_schema_status_snapshot_for_staging_poll,
     reconciliation_run_resolved_django_alias,
     reconciliation_run_live_branch_pg_schema_ready,
 )
@@ -64,23 +65,33 @@ def _reconciliation_branch_pg_browser_poll_max_sec() -> float:
     return max(5.0, v)
 
 
-def _reconciliation_post_create_schema_overlay_min_ms() -> int:
-    """Minimum time the post-create overlay stays up before redirect-on-ready (UX + avoids one-shot false positives)."""
-    raw = getattr(settings, "RECONCILIATION_POST_CREATE_SCHEMA_OVERLAY_MIN_MS", 2500)
+def _reconciliation_post_create_browser_poll_interval_sec() -> float:
+    """Seconds between branch-schema polls on the staging “Create branch” overlay (default 5s)."""
+    raw = getattr(settings, "RECONCILIATION_POST_CREATE_BROWSER_POLL_INTERVAL_SEC", 5.0)
+    try:
+        v = float(raw)
+    except (TypeError, ValueError):
+        return 5.0
+    return max(0.5, v)
+
+
+def _reconciliation_post_create_initial_delay_ms() -> int:
+    """After create-branch succeeds, wait this long before schema polling (default 30s)."""
+    raw = getattr(settings, "RECONCILIATION_POST_CREATE_INITIAL_DELAY_MS", 30_000)
     try:
         v = int(float(raw))
     except (TypeError, ValueError):
-        return 2500
-    return max(0, min(v, 120_000))
+        return 30_000
+    return max(0, min(v, 300_000))
 
 
-def _reconciliation_post_create_schema_ready_polls_required() -> int:
-    """Consecutive JSON poll responses with ready=true required before redirect (after create branch)."""
-    raw = getattr(settings, "RECONCILIATION_POST_CREATE_SCHEMA_READY_POLLS_REQUIRED", 2)
+def _reconciliation_post_create_schema_probe_count() -> int:
+    """Number of lightweight schema polls after the initial delay (default 6); only the last decides."""
+    raw = getattr(settings, "RECONCILIATION_POST_CREATE_SCHEMA_PROBE_COUNT", 6)
     try:
         v = int(raw)
     except (TypeError, ValueError):
-        return 2
+        return 6
     return max(1, min(v, 20))
 
 
@@ -428,16 +439,28 @@ class ReconciliationBranchPgSchemaStatusView(LoginRequiredMixin, View):
     ``public``. Each request closes the branch connection first so a stale pooled session is not
     mistaken for readiness.
 
-    This endpoint always runs the real probe. ``RECONCILIATION_CHECK_BRANCH_PG_SCHEMA_ON_RUN_PAGE_GET``
-    only skips the live check on **HTML** run-detail GET (to save work per page view); disabling
-    it must not short-circuit post-create polling or the overlay would dismiss instantly.
+    Query ``?light=1`` returns a **single** snapshot (for staging post-create: several browser
+    polls spaced apart). The default (no ``light``) runs the longer in-request stable probe for
+    the run-page lifecycle overlay.
+
+    ``RECONCILIATION_CHECK_BRANCH_PG_SCHEMA_ON_RUN_PAGE_GET`` only skips the live check on **HTML**
+    run-detail GET; it does not affect this endpoint.
     """
 
     http_method_names = ["get"]
 
     def get(self, request, run_id: int):
         run = get_object_or_404(MAASOpenStackReconciliationRun, pk=run_id)
+        light = (request.GET.get("light") or "").strip().lower() in (
+            "1",
+            "true",
+            "yes",
+            "on",
+        )
         try:
+            if light:
+                detail = branch_pg_schema_status_snapshot_for_staging_poll(run)
+                return JsonResponse(detail)
             ok, reason = branch_pg_schema_status_probe_for_polling(run)
         except Exception as exc:
             logger.exception(
@@ -700,18 +723,11 @@ class ReconciliationStagingView(LoginRequiredMixin, View):
                 "posted_review_overrides": data.get("posted_review_overrides")
                 if isinstance(data.get("posted_review_overrides"), dict)
                 else {},
-                "recon_post_create_poll_interval_ms": int(
-                    _reconciliation_branch_pg_browser_poll_interval_sec() * 1000
+                "recon_post_create_initial_delay_ms": _reconciliation_post_create_initial_delay_ms(),
+                "recon_post_create_schema_probe_interval_ms": int(
+                    _reconciliation_post_create_browser_poll_interval_sec() * 1000
                 ),
-                "recon_post_create_poll_max_ticks": max(
-                    1,
-                    int(
-                        _reconciliation_branch_pg_browser_poll_max_sec()
-                        / _reconciliation_branch_pg_browser_poll_interval_sec()
-                    ),
-                ),
-                "recon_post_create_min_overlay_ms": _reconciliation_post_create_schema_overlay_min_ms(),
-                "recon_post_create_ready_polls_required": _reconciliation_post_create_schema_ready_polls_required(),
+                "recon_post_create_schema_probe_count": _reconciliation_post_create_schema_probe_count(),
             },
         )
 

@@ -90,11 +90,11 @@ def _maybe_log_reconciliation_netbox_write(
     ``postgresql_current_schema`` (effective branch schema); ``default_current_schema`` is the
     Django ``default`` connection at the same moment (usually ``public`` on NetBox main). If
     objects still appear on main while the branch line shows a branch schema, trace handlers for
-    ``save()`` without ``using=`` or side effects on ``default``. Disable with
-    ``RECONCILIATION_LOG_EACH_NETBOX_WRITE = False``. Disable the extra ``default`` probe with
-    ``RECONCILIATION_LOG_DEFAULT_CONNECTION_SCHEMA_IN_ROW_AUDIT = False``.
+    ``save()`` without ``using=`` or side effects on ``default``. Per-row INFO logging is **off**
+    by default; set ``RECONCILIATION_LOG_EACH_NETBOX_WRITE = True`` to enable. Disable the extra
+    ``default`` probe with ``RECONCILIATION_LOG_DEFAULT_CONNECTION_SCHEMA_IN_ROW_AUDIT = False``.
     """
-    if not bool(getattr(settings, "RECONCILIATION_LOG_EACH_NETBOX_WRITE", True)):
+    if not bool(getattr(settings, "RECONCILIATION_LOG_EACH_NETBOX_WRITE", False)):
         return
     if not isinstance(raw, tuple) or len(raw) < 2:
         return
@@ -579,11 +579,17 @@ def _assert_row_apply_targets_branch_db(op: dict[str, Any]) -> None:
         return
     cur_raw = _postgresql_current_schema_probe(orm_u)
     _set_row_schema_probe_for_log(orm_alias=orm_u, postgresql_current_schema=cur_raw)
-    if _schema_probe_result_is_pg_schema_name(cur_raw) and cur_raw.lower() == "public" and guarded:
-        raise RuntimeError(
-            f"PostgreSQL current_schema() is 'public' on ORM alias {orm_u!r} — "
-            "refusing row apply (would hit NetBox main)."
-        )
+    if guarded:
+        if not _schema_probe_result_is_pg_schema_name(cur_raw):
+            raise RuntimeError(
+                f"PostgreSQL current_schema() not usable on ORM alias {orm_u!r} (got {cur_raw!r}) — "
+                "refusing row apply (empty, failed probe, or not a branch schema session)."
+            )
+        if cur_raw.strip().lower() == "public":
+            raise RuntimeError(
+                f"PostgreSQL current_schema() is 'public' on ORM alias {orm_u!r} — "
+                "refusing row apply (would hit NetBox main)."
+            )
 
 
 def _orm_qs(model_cls: Any):

@@ -1,5 +1,9 @@
 """Preview, signed acknowledgement, and frozen operations for branch reconciliation.
 
+Reconciliation timing, schema stability, and log verbosity use **code defaults** via
+``getattr(settings, "RECONCILIATION_*", default)``. Deployments do not need NetBox ``extra.py``
+changes unless operators want to override a specific knob.
+
 Each frozen op carries full audit ``cells`` for apply. The recon UI shows
 ``netbox_write_preview_cells`` per section: NetBox model field names (values from audit cells)
 (see ``group_reconciliation_operation_tables`` and ``AUDIT_REPORT_APPLY_ORDER``).
@@ -154,6 +158,85 @@ def _reconciliation_pg_schema_poll_interval_sec() -> float:
     return max(0.1, v)
 
 
+def _reconciliation_preflight_schema_stable_passes() -> int:
+    """
+    After ``current_schema()`` first reads non-``public``, require this many successive
+    close+reconnect+probe cycles (with sleep between) so preflight matches durable sessions.
+    """
+    raw = getattr(settings, "RECONCILIATION_PREFLIGHT_SCHEMA_STABLE_PASSES", 3)
+    try:
+        v = int(raw)
+    except (TypeError, ValueError):
+        return 3
+    return max(1, min(v, 10))
+
+
+def _reconciliation_preflight_schema_stable_sleep_sec() -> float:
+    """Seconds to sleep between stability probes (default 5s)."""
+    raw = getattr(settings, "RECONCILIATION_PREFLIGHT_SCHEMA_STABLE_SLEEP_SEC", 5.0)
+    try:
+        v = float(raw)
+    except (TypeError, ValueError):
+        return 5.0
+    return max(0.0, min(v, 60.0))
+
+
+def _close_django_db_alias_if_safe(alias: str) -> None:
+    """Close pooled connection for alias when not inside an atomic block (fresh session on reconnect)."""
+    a = (alias or "").strip()
+    if not a:
+        return
+    try:
+        conn = connections[a]
+        if getattr(conn, "in_atomic_block", False):
+            return
+        conn.close()
+    except Exception:
+        logger.debug(
+            "reconciliation: close Django DB alias failed alias=%s",
+            a,
+            exc_info=True,
+        )
+
+
+def _close_django_db_alias_for_branch_object(branch_obj: Any) -> None:
+    """Close the resolved branch schema alias for this NetBox Branch (when safe)."""
+    cn = str(getattr(branch_obj, "connection_name", None) or "").strip()
+    alias, _ = resolve_branch_django_database_alias(cn, branch=branch_obj)
+    if alias:
+        _close_django_db_alias_if_safe(alias)
+
+
+def _assert_branch_write_alias_not_on_public_or_raise(alias: str) -> str:
+    """
+    Read ``current_schema()`` on the branch alias **inside** ``branch_write_context`` (no close).
+
+    Raises ``ValueError`` if PostgreSQL schema is still ``public`` so apply aborts before row
+    handlers instead of failing every row.
+    """
+    a = (alias or "").strip()
+    if not a or a.lower() == "default":
+        raise ValueError(_("Invalid branch Django alias for write-context schema check."))
+    cur, is_pg, err = _read_postgresql_current_schema_for_alias(a)
+    if err:
+        raise ValueError(err)
+    if not is_pg:
+        return cur or ""
+    if not _postgresql_branch_schema_session_name_ok(cur):
+        raise ValueError(
+            str(
+                _(
+                    "Reconciliation aborted: ORM alias %(alias)s reports PostgreSQL "
+                    "current_schema()=%(sch)r inside the branch write transaction (empty or "
+                    "'public' means NetBox main risk — out of sync with preflight). Retry apply "
+                    "after the branch session stabilizes."
+                )
+                % {"alias": a, "sch": (cur or "").strip() or "(empty)"}
+            )
+        )
+    return cur or ""
+
+
 def _read_postgresql_current_schema_for_alias(alias: str) -> tuple[str, bool, str | None]:
     """
     Return ``(current_schema, is_postgresql, error)``.
@@ -177,6 +260,16 @@ def _read_postgresql_current_schema_for_alias(alias: str) -> tuple[str, bool, st
         return "", True, f"{type(exc).__name__}: {exc}"
 
 
+def _postgresql_branch_schema_session_name_ok(raw: str) -> bool:
+    """
+    True when ``SELECT current_schema()`` looks like a real, non-main schema session.
+
+    Empty/whitespace reads are **not** OK (avoids preflight passing on a bad probe).
+    """
+    s = (raw or "").strip().lower()
+    return bool(s) and s != "public"
+
+
 def branch_django_alias_pg_ready_for_writes(branch_obj: Any, django_alias: str) -> tuple[bool, str, str]:
     """
     Return ``(ok, error_message, last_schema_read)``.
@@ -196,7 +289,7 @@ def branch_django_alias_pg_ready_for_writes(branch_obj: Any, django_alias: str) 
             return False, err, cur
         if not is_pg:
             return True, "", cur
-        if cur.lower() == "public":
+        if not _postgresql_branch_schema_session_name_ok(cur):
             return False, "", cur
         return True, "", cur
 
@@ -247,6 +340,11 @@ def collect_branch_routing_confirmation_or_raise(branch_obj: Any, django_db_alia
     until ``RECONCILIATION_BRANCH_SCHEMA_WAIT_SEC`` elapses (same window as post-create wait),
     then raises — no row handlers execute, so the batch cannot partially apply.
 
+    After the first non-``public`` read, runs **stability** passes: ``close``, sleep
+    (``RECONCILIATION_PREFLIGHT_SCHEMA_STABLE_SLEEP_SEC``, default 5s), reconnect, and re-probe,
+    ``RECONCILIATION_PREFLIGHT_SCHEMA_STABLE_PASSES`` times total — so a single lucky read cannot
+    pass preflight while pooled connections are still on ``public``.
+
     **Do not call this while inside ``transaction.atomic(using=<branch_alias>)``** if the retry
     loop may call ``connection.close()`` — that can desync the atomic block's connection from the
     branch schema and produce “preflight passed” while per-row probes still see ``public``.
@@ -291,6 +389,8 @@ def collect_branch_routing_confirmation_or_raise(branch_obj: Any, django_db_alia
         if vendor == "postgresql":
             wait_deadline = time.monotonic() + _reconciliation_branch_schema_wait_sec()
             poll_step = _reconciliation_pg_schema_poll_interval_sec()
+            stable_passes = _reconciliation_preflight_schema_stable_passes()
+            stable_sleep = _reconciliation_preflight_schema_stable_sleep_sec()
             attempts = 0
             current_raw = ""
             while True:
@@ -300,7 +400,86 @@ def collect_branch_routing_confirmation_or_raise(branch_obj: Any, django_db_alia
                     row = cursor.fetchone()
                 current_raw = (row[0] or "").strip() if row else ""
                 out["postgresql_current_schema"] = current_raw
-                if current_raw.lower() != "public":
+                if not _postgresql_branch_schema_session_name_ok(current_raw):
+                    if time.monotonic() >= wait_deadline:
+                        hint = ""
+                        try:
+                            sn = getattr(branch_obj, "schema_name", None)
+                            if callable(sn):
+                                sn = sn()
+                            hint = str(sn or "").strip().lower()
+                        except Exception:
+                            pass
+                        msg = _(
+                            "Reconciliation aborted: ORM alias %(alias)s still reports PostgreSQL "
+                            "current_schema() as 'public', empty, or unset (NetBox main) after waiting "
+                            "%(sec).1fs. No apply rows were executed. Try “Recheck branch” or retry apply; "
+                            "tune RECONCILIATION_BRANCH_SCHEMA_WAIT_SEC if provisioning is slow. "
+                            "Expected branch schema hint: %(hint)s."
+                        ) % {
+                            "alias": alias,
+                            "sec": float(_reconciliation_branch_schema_wait_sec()),
+                            "hint": hint or "—",
+                        }
+                        out["preflight_error"] = str(msg)
+                        out["preflight_pg_schema_poll_attempts"] = attempts
+                        raise ValueError(str(msg))
+                    try:
+                        if not getattr(conn, "in_atomic_block", False):
+                            conn.close()
+                        else:
+                            logger.debug(
+                                "reconciliation apply preflight: skip conn.close (inside atomic) "
+                                "alias=%s",
+                                alias,
+                            )
+                    except Exception:
+                        logger.debug(
+                            "reconciliation apply preflight: close branch conn failed alias=%s",
+                            alias,
+                            exc_info=True,
+                        )
+                    time.sleep(poll_step)
+                    conn.ensure_connection()
+                    continue
+                # First read non-public — verify stability across reconnects + delays.
+                stable_failed = False
+                for si in range(1, stable_passes):
+                    if stable_sleep > 0:
+                        time.sleep(stable_sleep)
+                    if time.monotonic() >= wait_deadline:
+                        msg = _(
+                            "Reconciliation aborted: timed out while verifying branch schema stability "
+                            "for ORM alias %(alias)s (after %(sec).1fs). No apply rows were executed."
+                        ) % {
+                            "alias": alias,
+                            "sec": float(_reconciliation_branch_schema_wait_sec()),
+                        }
+                        out["preflight_error"] = str(msg)
+                        out["preflight_pg_schema_poll_attempts"] = attempts
+                        raise ValueError(str(msg))
+                    try:
+                        if not getattr(conn, "in_atomic_block", False):
+                            conn.close()
+                    except Exception:
+                        logger.debug(
+                            "reconciliation apply preflight: stability close failed alias=%s",
+                            alias,
+                            exc_info=True,
+                        )
+                    conn.ensure_connection()
+                    with conn.cursor() as cursor:
+                        cursor.execute("SELECT current_schema()")
+                        row = cursor.fetchone()
+                    cr = (row[0] or "").strip() if row else ""
+                    out["postgresql_current_schema"] = cr
+                    if not _postgresql_branch_schema_session_name_ok(cr):
+                        stable_failed = True
+                        break
+                if not stable_failed:
+                    out["preflight_pg_schema_stable_passes"] = stable_passes
+                    out["preflight_pg_schema_stable_sleep_sec"] = stable_sleep
+                    out["preflight_pg_schema_poll_attempts"] = attempts
                     break
                 if time.monotonic() >= wait_deadline:
                     hint = ""
@@ -312,36 +491,24 @@ def collect_branch_routing_confirmation_or_raise(branch_obj: Any, django_db_alia
                     except Exception:
                         pass
                     msg = _(
-                        "Reconciliation aborted: ORM alias %(alias)s still uses PostgreSQL schema "
-                        "'public' (NetBox main) after waiting %(sec).1fs. No apply rows were executed. "
-                        "Try “Recheck branch” or retry apply; tune RECONCILIATION_BRANCH_SCHEMA_WAIT_SEC "
-                        "if provisioning is slow. Expected branch schema hint: %(hint)s."
-                    ) % {
-                        "alias": alias,
-                        "sec": float(_reconciliation_branch_schema_wait_sec()),
-                        "hint": hint or "—",
-                    }
+                        "Reconciliation aborted: ORM alias %(alias)s returned a usable branch schema once but "
+                        "then read as PostgreSQL 'public' or empty during stability checks. No apply rows "
+                        "were executed. Expected branch schema hint: %(hint)s."
+                    ) % {"alias": alias, "hint": hint or "—"}
                     out["preflight_error"] = str(msg)
                     out["preflight_pg_schema_poll_attempts"] = attempts
                     raise ValueError(str(msg))
                 try:
                     if not getattr(conn, "in_atomic_block", False):
                         conn.close()
-                    else:
-                        logger.debug(
-                            "reconciliation apply preflight: skip conn.close (inside atomic) "
-                            "alias=%s",
-                            alias,
-                        )
                 except Exception:
                     logger.debug(
-                        "reconciliation apply preflight: close branch conn failed alias=%s",
+                        "reconciliation apply preflight: post-stability close failed alias=%s",
                         alias,
                         exc_info=True,
                     )
                 time.sleep(poll_step)
                 conn.ensure_connection()
-            out["preflight_pg_schema_poll_attempts"] = attempts
         out["preflight_ok"] = True
         out["entire_batch_aborted_no_row_handlers"] = False
         logger.info(
@@ -478,47 +645,141 @@ def branch_pg_schema_status_probe_for_polling(
 ) -> tuple[bool, str]:
     """
     One status-check for the browser poll endpoint: close branch connection, probe, optionally
-    retry in-process for ``RECONCILIATION_BRANCH_PG_STATUS_REQUEST_WAIT_SEC`` (capped at 15s).
+    retry in-process for ``RECONCILIATION_BRANCH_PG_STATUS_REQUEST_WAIT_SEC`` (default 90s,
+    capped at 120s).
 
-    Keeps polling work on the server side within each request so the client needs fewer round
-    trips while the branch session leaves ``public``.
+    Returns ``ready`` only after ``RECONCILIATION_PREFLIGHT_SCHEMA_STABLE_PASSES`` consecutive
+    successful probes, sleeping ``RECONCILIATION_PREFLIGHT_SCHEMA_STABLE_SLEEP_SEC`` between
+    successes (same semantics as apply preflight stability).
     """
-    raw = getattr(settings, "RECONCILIATION_BRANCH_PG_STATUS_REQUEST_WAIT_SEC", 4.0)
+    raw = getattr(settings, "RECONCILIATION_BRANCH_PG_STATUS_REQUEST_WAIT_SEC", 90.0)
     try:
         budget = float(raw)
     except (TypeError, ValueError):
-        budget = 4.0
-    budget = max(0.0, min(budget, 15.0))
+        budget = 90.0
+    budget = max(0.0, min(budget, 120.0))
+    stable_passes = _reconciliation_preflight_schema_stable_passes()
+    stable_sleep = _reconciliation_preflight_schema_stable_sleep_sec()
     step = _reconciliation_pg_schema_poll_interval_sec()
     if budget <= 0:
         reconciliation_run_close_branch_orm_connection(run)
         return reconciliation_run_live_branch_pg_schema_ready(run)
     deadline = time.monotonic() + budget
     last_reason = ""
-    while True:
+    consecutive_ok = 0
+    while time.monotonic() < deadline:
         reconciliation_run_close_branch_orm_connection(run)
         try:
             ok, last_reason = reconciliation_run_live_branch_pg_schema_ready(run)
         except Exception as exc:
             return False, str(exc)
         if ok:
-            return True, ""
-        if time.monotonic() >= deadline:
-            return False, last_reason or ""
-        time.sleep(step)
+            consecutive_ok += 1
+            if consecutive_ok >= stable_passes:
+                return True, ""
+            # Space out successive OK probes (fresh connection each iteration).
+            nap = stable_sleep
+            if nap > 0:
+                nap = min(nap, max(0.0, deadline - time.monotonic()))
+                if nap > 0:
+                    time.sleep(nap)
+            continue
+        consecutive_ok = 0
+        nap = min(step, max(0.0, deadline - time.monotonic()))
+        if nap > 0:
+            time.sleep(nap)
+    return False, last_reason or ""
+
+
+def _staging_poll_schema_read_with_activate(
+    run: MAASOpenStackReconciliationRun,
+) -> tuple[str, str]:
+    """Return ``(django_alias, postgresql_current_schema)`` for staging JSON (one-shot read)."""
+    alias = reconciliation_run_resolved_django_alias(run)
+    if not alias:
+        return "", ""
+    branch_obj, _err = get_netbox_branch(
+        branch_id=run.branch_id,
+        branch_name=run.branch_name or "",
+    )
+    if branch_obj is None:
+        return alias, ""
+    try:
+        from netbox_branching.utilities import activate_branch as _ab
+    except ImportError:
+        _ab = None
+    cur = ""
+    if callable(_ab):
+        with _ab(branch_obj):
+            cur, _is_pg, _e = _read_postgresql_current_schema_for_alias(alias)
+    else:
+        cur, _is_pg, _e = _read_postgresql_current_schema_for_alias(alias)
+    return alias, (cur or "").strip()
+
+
+def _branch_expected_postgresql_schema_name(run: MAASOpenStackReconciliationRun) -> str:
+    branch_obj, _ = get_netbox_branch(
+        branch_id=run.branch_id,
+        branch_name=run.branch_name or "",
+    )
+    if branch_obj is None:
+        return ""
+    try:
+        sn = getattr(branch_obj, "schema_name", None)
+        if callable(sn):
+            sn = sn()
+        return str(sn or "").strip()
+    except Exception:
+        return ""
+
+
+def branch_pg_schema_status_snapshot_for_staging_poll(
+    run: MAASOpenStackReconciliationRun,
+) -> dict[str, Any]:
+    """
+    Lightweight probe for browser-driven post-create polling (several spaced requests).
+
+    Returns JSON-friendly fields including ``postgresql_current_schema`` for error UI. When the
+    branch model exposes ``schema_name``, ``ready`` also requires ``current_schema()`` to match
+    it (case-insensitive); otherwise ``ready`` follows :func:`reconciliation_run_live_branch_pg_schema_ready`.
+    """
+    reconciliation_run_close_branch_orm_connection(run)
+    ok, reason = reconciliation_run_live_branch_pg_schema_ready(run)
+    alias, cur = _staging_poll_schema_read_with_activate(run)
+    expected = _branch_expected_postgresql_schema_name(run)
+    ready = bool(ok) and _postgresql_branch_schema_session_name_ok(cur)
+    out: dict[str, Any] = {
+        "ready": ready,
+        "reason": (reason or "").strip(),
+        "postgresql_current_schema": cur,
+        "django_orm_alias": alias,
+        "expected_branch_schema": expected,
+    }
+    if (
+        expected
+        and cur
+        and _postgresql_branch_schema_session_name_ok(cur)
+        and cur.lower() != expected.lower()
+    ):
+        out["schema_name_compare_note"] = (
+            f"current_schema()={cur!r} vs Branch.schema_name={expected!r} (ready still uses non-public rule)"
+        )
+    return out
 
 
 def _reconciliation_branch_schema_wait_sec() -> float:
     """
     Seconds to poll for a branch Django DB alias after create (and during apply preflight).
 
-    Override in NetBox ``configuration.py``: ``RECONCILIATION_BRANCH_SCHEMA_WAIT_SEC = …``.
+    Default 60s leaves room for multi-pass stability probes (see
+    ``RECONCILIATION_PREFLIGHT_SCHEMA_STABLE_*``). Optional Django override:
+    ``RECONCILIATION_BRANCH_SCHEMA_WAIT_SEC``.
     """
-    raw = getattr(settings, "RECONCILIATION_BRANCH_SCHEMA_WAIT_SEC", 30.0)
+    raw = getattr(settings, "RECONCILIATION_BRANCH_SCHEMA_WAIT_SEC", 60.0)
     try:
         v = float(raw)
     except (TypeError, ValueError):
-        return 30.0
+        return 60.0
     return max(0.5, v)
 
 
@@ -537,11 +798,17 @@ def wait_for_branch_schema_ready(
     can lag; an alias can exist while connections still sit on ``public``. This wait aligns
     post-create gating with apply preflight / per-row guards. Default timeout is 30s; set
     ``RECONCILIATION_BRANCH_SCHEMA_WAIT_SEC`` to tune.
+
+    When a check first succeeds, repeats ``RECONCILIATION_PREFLIGHT_SCHEMA_STABLE_PASSES - 1``
+    additional probes (close connection, sleep ``RECONCILIATION_PREFLIGHT_SCHEMA_STABLE_SLEEP_SEC``)
+    so provisioning is stable before returning.
     """
     if branch_id is None:
         return False, _("Branch has no id.")
     deadline = time.monotonic() + max(0.1, timeout_sec)
     step = max(0.1, interval_sec)
+    stable_passes = _reconciliation_preflight_schema_stable_passes()
+    stable_sleep = _reconciliation_preflight_schema_stable_sleep_sec()
     last_reason = ""
     while time.monotonic() < deadline:
         branch_obj, err = get_netbox_branch(branch_id=branch_id, branch_name=branch_name or "")
@@ -552,8 +819,26 @@ def wait_for_branch_schema_ready(
         cn = str(getattr(branch_obj, "connection_name", None) or "").strip()
         ok, reason = check_branch_schema_ready(branch_obj, cn)
         if ok:
-            return True, ""
-        last_reason = (reason or "").strip() or _("Branch database alias is not ready.")
+            unstable = False
+            for _si in range(1, stable_passes):
+                if time.monotonic() >= deadline:
+                    return False, str(
+                        _("Branch schema stability check timed out before reconciliation run.")
+                    )
+                if stable_sleep > 0:
+                    time.sleep(min(stable_sleep, max(0.0, deadline - time.monotonic())))
+                _close_django_db_alias_for_branch_object(branch_obj)
+                ok2, reason2 = check_branch_schema_ready(branch_obj, cn)
+                if not ok2:
+                    last_reason = (reason2 or "").strip() or _(
+                        "Branch database alias is not ready."
+                    )
+                    unstable = True
+                    break
+            if not unstable:
+                return True, ""
+        else:
+            last_reason = (reason or "").strip() or _("Branch database alias is not ready.")
         time.sleep(step)
     return False, last_reason
 
@@ -661,11 +946,16 @@ def _attach_apply_extra_debug_to_result(result: dict[str, Any]) -> None:
 
 
 def _attach_schema_audit_to_apply_result(result: dict[str, Any], op: dict[str, Any]) -> None:
-    """Per-row PostgreSQL schema / ORM alias audit for UI and Docker (``reconciliation_row_schema_audit``)."""
+    """
+    Per-row PostgreSQL schema / ORM alias audit for the UI (always stored on ``schema_audit``).
+
+    Docker INFO line ``reconciliation_row_schema_audit`` is **off** by default; set
+    ``RECONCILIATION_LOG_ROW_SCHEMA_AUDIT = True`` to enable.
+    """
     audit = consume_apply_row_schema_audit(op)
     result["schema_audit"] = audit
     result["schema_audit_log_line"] = audit.get("schema_audit_log_line", "")
-    if not bool(getattr(settings, "RECONCILIATION_LOG_ROW_SCHEMA_AUDIT", True)):
+    if not bool(getattr(settings, "RECONCILIATION_LOG_ROW_SCHEMA_AUDIT", False)):
         return
     logger.info(
         "reconciliation_row_schema_audit row_key=%s selection_key=%s action=%s status=%s "
@@ -2756,6 +3046,32 @@ def create_reconciliation_run(
     return run
 
 
+def _routing_confirmation_note_row_level_schema_observations(
+    routing_confirmation: dict[str, Any],
+    attempted_rows: list[dict[str, Any]],
+) -> None:
+    """
+    Align the routing card with per-row reality: preflight can succeed on one connection while
+    row handlers still see ``public``. Sets ``apply_rows_observed_branch_schema_public`` for the UI.
+    """
+    saw_public = False
+    for r in attempted_rows:
+        if not isinstance(r, dict):
+            continue
+        sa = r.get("schema_audit")
+        if isinstance(sa, dict):
+            if sa.get("is_public_main") is True:
+                saw_public = True
+            elif str(sa.get("postgresql_current_schema") or "").strip().lower() == "public":
+                saw_public = True
+            elif str(sa.get("postgresql_current_schema_effective") or "").strip().lower() == "public":
+                saw_public = True
+        em = str(r.get("exception_message") or "")
+        if "current_schema() is 'public'" in em:
+            saw_public = True
+    routing_confirmation["apply_rows_observed_branch_schema_public"] = bool(saw_public)
+
+
 def _apply_result_from_operation(op: dict[str, Any], *, branch_context_ready: bool) -> dict[str, Any]:
     """Row shell when apply cannot run (no branch / branch activation failed). Never calls ORM apply."""
     _ = branch_context_ready
@@ -2967,6 +3283,8 @@ def apply_reconciliation_run(
             except ImportError:
                 _preflight_activate_branch = None
             def _reconciliation_apply_row_loop() -> None:
+                wc_schema = _assert_branch_write_alias_not_on_public_or_raise(django_db_alias)
+                routing_confirmation["write_context_postgresql_current_schema"] = wc_schema
                 with reconciliation_apply_guard(branch_obj, django_db_alias):
                     for seq_num, op in enumerate(target_ops, start=1):
                         try:
@@ -2993,6 +3311,7 @@ def apply_reconciliation_run(
                     routing_confirmation = collect_branch_routing_confirmation_or_raise(
                         branch_obj, django_db_alias
                     )
+                _close_django_db_alias_if_safe(django_db_alias)
                 with branch_write_context(branch=branch_obj):
                     _reconciliation_apply_row_loop()
             else:
@@ -3062,6 +3381,7 @@ def apply_reconciliation_run(
             "failed": failed,
             **({"first_failed_exception": first_fail} if first_fail else {}),
         }
+        _routing_confirmation_note_row_level_schema_observations(routing_confirmation, applied_rows)
         apply_payload: dict[str, Any] = {
             "attempted_at": timezone.now().isoformat(),
             "attempted_by": getattr(actor, "username", None) or "",
