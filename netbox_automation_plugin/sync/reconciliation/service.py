@@ -129,6 +129,59 @@ def _warn_if_netbox_branch_router_missing() -> None:
         return
 
 
+def _verify_branch_orm_alias_uses_non_public_schema(branch_obj: Any, django_db_alias: str) -> None:
+    """
+    Abort apply if ``using=<alias>`` is still on PostgreSQL ``public`` (NetBox main).
+
+    When ``BranchAwareRouter`` / ``DynamicSchemaDict`` are mis-registered, a ``schema_*`` key
+    can exist but not actually repoint the connection — saves would then hit main. This check
+    runs inside :func:`branch_write_context` after ``activate_branch`` so the connection should
+    already reflect the branch schema.
+    """
+    alias = (django_db_alias or "").strip()
+    if not alias or alias.lower() == "default":
+        return
+    try:
+        conn = connections[alias]
+        conn.ensure_connection()
+        inner = getattr(conn, "connection", None)
+        vendor = (getattr(inner, "vendor", None) or "").lower()
+        if vendor != "postgresql":
+            return
+        with conn.cursor() as cursor:
+            cursor.execute("SELECT current_schema()")
+            row = cursor.fetchone()
+        current = (row[0] or "").strip().lower() if row else ""
+        if current != "public":
+            return
+        hint = ""
+        try:
+            sn = getattr(branch_obj, "schema_name", None)
+            if callable(sn):
+                sn = sn()
+            hint = str(sn or "").strip().lower()
+        except Exception:
+            pass
+        raise ValueError(
+            _(
+                "Reconciliation aborted: ORM database alias %(alias)s is using PostgreSQL schema "
+                "'public' (NetBox main), not an isolated branch schema. Check DATABASE_ROUTERS "
+                "includes netbox_branching.database.BranchAwareRouter and that 'netbox_branching' "
+                "is the last PLUGINS entry. Expected branch schema name hint: %(hint)s."
+            )
+            % {"alias": alias, "hint": hint or "—"}
+        )
+    except ValueError:
+        raise
+    except Exception as exc:
+        logger.debug(
+            "Branch schema sanity check skipped for alias %s: %s",
+            alias,
+            exc,
+            exc_info=True,
+        )
+
+
 def _recon_explicit_orm_using(db_alias: str) -> str | None:
     """
     Map a reconciliation branch DB string to a Django ``using=`` alias.
@@ -2568,6 +2621,7 @@ def apply_reconciliation_run(
         try:
             _warn_if_netbox_branch_router_missing()
             with branch_write_context(branch=branch_obj):
+                _verify_branch_orm_alias_uses_non_public_schema(branch_obj, django_db_alias)
                 with reconciliation_apply_guard(branch_obj, django_db_alias):
                     for seq_num, op in enumerate(target_ops, start=1):
                         try:
