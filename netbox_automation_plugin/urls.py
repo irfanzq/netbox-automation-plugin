@@ -21,6 +21,7 @@ from .sync.reconciliation.views import (
     ReconciliationDiscardView,
     ReconciliationNotImplementedPostView,
     ReconciliationPreviewView,
+    ReconciliationRecheckBranchView,
     ReconciliationRetryFailedView,
     ReconciliationRunDetailView,
     ReconciliationRunsListView,
@@ -144,6 +145,11 @@ urlpatterns = [
         "maas-openstack-sync/reconciliation/runs/<int:run_id>/retry-failed/",
         ReconciliationRetryFailedView.as_view(),
         name="maas_openstack_reconciliation_retry_failed",
+    ),
+    path(
+        "maas-openstack-sync/reconciliation/runs/<int:run_id>/recheck-branch/",
+        ReconciliationRecheckBranchView.as_view(),
+        name="maas_openstack_reconciliation_recheck_branch",
     ),
     path(
         "maas-openstack-sync/reconciliation/runs/<int:run_id>/validate/",

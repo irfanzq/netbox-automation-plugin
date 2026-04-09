@@ -31,7 +31,9 @@
     function postAction(url, btn, opts) {
       opts = opts || {};
       if (!url || !btn) return;
-      var msg = document.getElementById("reconApplyMsg");
+      var msg = opts.errorTargetId
+        ? document.getElementById(opts.errorTargetId)
+        : document.getElementById("reconApplyMsg");
       var willNavigate = false;
       if (msg) msg.textContent = "";
       setLifecycleBusy(true, btn);
@@ -133,6 +135,15 @@
     wireRetry(document.querySelector(".js-recon-retry-failed"), { retry: "failed" });
     wireRetry(document.querySelector(".js-recon-retry-skipped"), { retry: "skipped" });
     wireRetry(document.querySelector(".js-recon-retry-both"), { retry: "both" });
+    var recheckBtn = document.querySelector(".js-recon-recheck-branch");
+    if (recheckBtn) {
+      recheckBtn.addEventListener("click", function() {
+        postAction("{{ recheck_branch_url|escapejs }}", recheckBtn, {
+          fallbackRedirect: applyResultsUrl,
+          errorTargetId: "reconRecheckBranchMsg",
+        });
+      });
+    }
     var discardBtn = document.querySelector(".js-recon-discard");
     if (discardBtn) {
       discardBtn.addEventListener("click", function() {

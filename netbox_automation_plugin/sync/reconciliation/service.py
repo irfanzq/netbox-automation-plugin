@@ -143,6 +143,37 @@ def _recon_explicit_orm_using(db_alias: str) -> str | None:
     return u
 
 
+def check_branch_schema_ready(_branch_obj: Any, branch_db: str) -> tuple[bool, str]:
+    """
+    Return (True, "") if reconciliation may safely open ``branch_write_context`` for this alias.
+
+    When ``Branch.connection_name`` is empty or the literal ``default``, NetBox Branching has
+    not assigned a dedicated schema alias yet — applying would risk ORM writes hitting main.
+    """
+    raw = (branch_db or "").strip()
+    low = raw.lower()
+    if not raw or low == "default":
+        return (
+            False,
+            _(
+                "Branch connection_name is empty or 'default' — branch schema is not yet "
+                "provisioned. Wait for NetBox branching to finish creating the branch schema, "
+                "then retry."
+            ),
+        )
+    if raw not in connections:
+        return (
+            False,
+            _("Branch DB alias '%(alias)s' is not registered in Django connections.")
+            % {"alias": raw},
+        )
+    try:
+        connections[raw].ensure_connection()
+    except Exception as exc:
+        return (False, _("Branch DB connection failed: %(err)s") % {"err": str(exc)})
+    return (True, "")
+
+
 def _apply_result_projection_dict(op: dict[str, Any]) -> dict[str, str]:
     """NetBox write projection (resolved FK labels) for one frozen op — same basis as preview tables."""
     sk = str(op.get("selection_key") or "").strip()
@@ -2481,6 +2512,7 @@ def apply_reconciliation_run(
             MAASOpenStackReconciliationRun.STATUS_APPLY_FAILED_PARTIAL,
             MAASOpenStackReconciliationRun.STATUS_APPLY_FAILED,
             MAASOpenStackReconciliationRun.STATUS_APPLIED,
+            MAASOpenStackReconciliationRun.STATUS_BRANCH_NOT_READY,
         }
     else:
         allowed = {
@@ -2557,29 +2589,29 @@ def apply_reconciliation_run(
         )
         applied_rows: list[dict[str, Any]] = []
         run_routing_core: dict[str, Any] | None = None
+        branch_schema_not_ready = False
+        branch_schema_block_reason = ""
+        branch_db_for_payload = ""
         if branch_obj is not None:
+            branch_db = str(getattr(branch_obj, "connection_name", None) or "").strip()
+            branch_db_for_payload = branch_db
             run_routing_core = {
                 "reconciliation_run_branch_id": run.branch_id,
                 "reconciliation_run_branch_name": (run.branch_name or "").strip(),
                 "netbox_branch_model_pk": getattr(branch_obj, "pk", None),
-                "netbox_branch_connection_name": str(
-                    getattr(branch_obj, "connection_name", None) or ""
-                ).strip(),
+                "netbox_branch_connection_name": branch_db,
             }
-            branch_db = str(getattr(branch_obj, "connection_name", None) or "").strip()
-            if not branch_db:
-                bd_msg = (
-                    "Branch has no connection_name (database alias). Reconciliation apply "
-                    "requires a branch-scoped DB connection so writes do not hit NetBox main. "
-                    "Wait until the branch is ready / provisioned, then retry."
-                )
+            schema_ok, schema_msg = check_branch_schema_ready(branch_obj, branch_db)
+            if not schema_ok:
+                branch_schema_not_ready = True
+                branch_schema_block_reason = schema_msg
                 for seq_num, op in enumerate(target_ops, start=1):
                     applied_rows.append(
                         _with_apply_sequence(
                             _apply_branch_prereq_failed_row(
                                 op,
-                                reason="failed_branch_connection_alias",
-                                detail=bd_msg,
+                                reason="failed_branch_not_ready",
+                                detail=schema_msg,
                             ),
                             seq_num,
                         )
@@ -2646,7 +2678,9 @@ def apply_reconciliation_run(
         created = sum(1 for r in applied_rows if r.get("status") == "created")
         updated = sum(1 for r in applied_rows if r.get("status") == "updated")
 
-        if failed == 0:
+        if branch_schema_not_ready:
+            final_status = MAASOpenStackReconciliationRun.STATUS_BRANCH_NOT_READY
+        elif failed == 0:
             final_status = MAASOpenStackReconciliationRun.STATUS_APPLIED
         elif failed == len(applied_rows):
             final_status = MAASOpenStackReconciliationRun.STATUS_APPLY_FAILED
@@ -2671,6 +2705,8 @@ def apply_reconciliation_run(
             "cumulative_summary": _summarize_apply_result_rows(merged_rows),
             "rows": merged_rows,
             "display_rows": _apply_result_rows_for_comprehensive_display(merged_rows),
+            "branch_db_used": branch_db_for_payload,
+            "branch_not_ready": bool(branch_schema_not_ready),
         }
         if run_routing_core is not None:
             apply_payload["run_routing_context"] = run_routing_core
@@ -2682,11 +2718,38 @@ def apply_reconciliation_run(
             apply_payload["last_attempt_rows"] = applied_rows
         run.apply_results = apply_payload
         run.status = final_status
-        if failed > 0:
+        if branch_schema_not_ready:
+            run.error_message = (branch_schema_block_reason or "").strip()
+        elif failed > 0:
             run.error_message = "Apply completed with failures. Review per-row results."
+        else:
+            run.error_message = ""
         run.save(update_fields=["apply_results", "status", "error_message", "last_updated"])
 
     return run
+
+
+def check_and_reapply_if_branch_ready(
+    *, run: MAASOpenStackReconciliationRun, actor
+) -> tuple[bool, str, MAASOpenStackReconciliationRun]:
+    """
+    UI entry point: re-resolve the NetBox branch, verify ``connection_name``, then retry failed rows.
+    """
+    run.refresh_from_db(
+        fields=["status", "frozen_operations", "apply_results", "branch_name", "branch_id"]
+    )
+    branch_obj, err = get_netbox_branch(
+        branch_id=run.branch_id,
+        branch_name=run.branch_name or "",
+    )
+    if branch_obj is None:
+        return False, (err or _("Branch not found.")).strip(), run
+    branch_db = str(getattr(branch_obj, "connection_name", None) or "").strip()
+    ready, reason = check_branch_schema_ready(branch_obj, branch_db)
+    if not ready:
+        return False, reason, run
+    run = apply_reconciliation_run(run=run, actor=actor, retry_failed_only=True)
+    return True, "", run
 
 
 RECONCILIATION_DISCARD_BLOCKED_STATUSES = frozenset(

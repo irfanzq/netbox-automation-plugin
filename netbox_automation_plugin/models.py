@@ -295,6 +295,7 @@ class MAASOpenStackReconciliationRun(NetBoxModel):
     STATUS_APPLIED = "applied"
     STATUS_APPLY_FAILED_PARTIAL = "apply_failed_partial"
     STATUS_APPLY_FAILED = "apply_failed"
+    STATUS_BRANCH_NOT_READY = "branch_not_ready"
     STATUS_VALIDATION_IN_PROGRESS = "validation_in_progress"
     STATUS_VALIDATED = "validated"
     STATUS_VALIDATION_FAILED = "validation_failed"
@@ -312,6 +313,7 @@ class MAASOpenStackReconciliationRun(NetBoxModel):
         (STATUS_APPLIED, "Applied"),
         (STATUS_APPLY_FAILED_PARTIAL, "Apply failed (partial)"),
         (STATUS_APPLY_FAILED, "Apply failed"),
+        (STATUS_BRANCH_NOT_READY, "Branch schema not ready"),
         (STATUS_VALIDATION_IN_PROGRESS, "Validation in progress"),
         (STATUS_VALIDATED, "Validated"),
         (STATUS_VALIDATION_FAILED, "Validation failed"),

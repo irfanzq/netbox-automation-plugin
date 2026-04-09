@@ -24,6 +24,7 @@ from netbox_automation_plugin.workflows.maas_openstack_sync.history_models impor
 )
 from .service import (
     apply_result_row_needs_attention,
+    check_and_reapply_if_branch_ready,
     frozen_operations_apply_snapshots,
     frozen_operations_for_display,
     group_apply_snapshot_tables,
@@ -68,6 +69,7 @@ def _reconciliation_run_page_context(
         MAASOpenStackReconciliationRun.STATUS_APPLY_FAILED_PARTIAL,
         MAASOpenStackReconciliationRun.STATUS_APPLY_FAILED,
         MAASOpenStackReconciliationRun.STATUS_APPLIED,
+        MAASOpenStackReconciliationRun.STATUS_BRANCH_NOT_READY,
     }
     can_retry_partial_base = retry_eligible_status and bool(result_rows)
     detail_url = reverse(
@@ -78,11 +80,19 @@ def _reconciliation_run_page_context(
         "plugins:netbox_automation_plugin:maas_openstack_reconciliation_apply_results",
         args=[run.pk],
     )
+    show_recheck_branch_btn = bool(
+        apply_results.get("branch_not_ready")
+        or run.status == MAASOpenStackReconciliationRun.STATUS_BRANCH_NOT_READY
+    )
     return {
         "run": run,
         "apply_results": apply_results,
         "apply_url": reverse(
             "plugins:netbox_automation_plugin:maas_openstack_reconciliation_apply",
+            args=[run.pk],
+        ),
+        "recheck_branch_url": reverse(
+            "plugins:netbox_automation_plugin:maas_openstack_reconciliation_recheck_branch",
             args=[run.pk],
         ),
         "retry_failed_url": reverse(
@@ -104,6 +114,7 @@ def _reconciliation_run_page_context(
         and (failed_row_n > 0 or skipped_row_n > 0),
         "recon_apply_failed_row_count": failed_row_n,
         "recon_apply_skipped_row_count": skipped_row_n,
+        "show_recheck_branch_btn": show_recheck_branch_btn,
         "nav_active": nav_active,
     }
 
@@ -383,6 +394,53 @@ class ReconciliationRetryFailedView(LoginRequiredMixin, View):
         except Exception as e:
             logger.exception("Reconciliation retry-failed failed for run %s", run_id)
             return JsonResponse({"ok": False, "error": str(e)}, status=500)
+        apply_results_url = reverse(
+            "plugins:netbox_automation_plugin:maas_openstack_reconciliation_apply_results",
+            args=[run.pk],
+        )
+        payload = {
+            "ok": True,
+            "run_id": run.pk,
+            "status": run.status,
+            "apply_results": run.apply_results if isinstance(run.apply_results, dict) else {},
+            "redirect_url": apply_results_url,
+        }
+        bu = _netbox_branching_branch_url(branch_pk=run.branch_id)
+        if bu:
+            payload["branching_branch_url"] = bu
+        return JsonResponse(payload)
+
+
+@method_decorator(never_cache, name="dispatch")
+class ReconciliationRecheckBranchView(LoginRequiredMixin, View):
+    """POST JSON {} — verify branch DB alias, then retry failed rows only."""
+
+    http_method_names = ["post"]
+
+    def post(self, request, run_id: int):
+        run = get_object_or_404(MAASOpenStackReconciliationRun, pk=run_id)
+        try:
+            ok, reason, run = check_and_reapply_if_branch_ready(run=run, actor=request.user)
+        except ValueError as e:
+            return JsonResponse({"ok": False, "error": str(e)}, status=400)
+        except Exception as e:
+            logger.exception("Reconciliation recheck-branch failed for run %s", run_id)
+            return JsonResponse({"ok": False, "error": str(e)}, status=500)
+        if not ok:
+            detail = _("Try again in a few seconds.")
+            err_text = _("Branch schema still not ready: %(reason)s %(detail)s") % {
+                "reason": reason,
+                "detail": detail,
+            }
+            return JsonResponse(
+                {
+                    "ok": False,
+                    "error": err_text,
+                    "branch_not_ready": True,
+                    "reason": reason,
+                },
+                status=422,
+            )
         apply_results_url = reverse(
             "plugins:netbox_automation_plugin:maas_openstack_reconciliation_apply_results",
             args=[run.pk],

@@ -26,6 +26,10 @@
       <button type="button" class="btn btn-outline-primary btn-sm js-recon-retry-failed js-recon-lifecycle-btn" data-initial-disabled="{% if not can_retry_failed %}true{% else %}false{% endif %}" {% if not can_retry_failed %}disabled{% endif %} title="{% trans 'Rows whose latest status is failed' %}">{% trans "Re-apply failed" %} ({{ recon_apply_failed_row_count|default:0 }})</button>
       <button type="button" class="btn btn-outline-primary btn-sm js-recon-retry-skipped js-recon-lifecycle-btn" data-initial-disabled="{% if not can_retry_skipped %}true{% else %}false{% endif %}" {% if not can_retry_skipped %}disabled{% endif %} title="{% trans 'Rows whose latest status is skipped (e.g. missing device); device rows for the same host are included when present' %}">{% trans "Re-apply skipped" %} ({{ recon_apply_skipped_row_count|default:0 }})</button>
       <button type="button" class="btn btn-outline-secondary btn-sm js-recon-retry-both js-recon-lifecycle-btn" data-initial-disabled="{% if not can_retry_failed_or_skipped %}true{% else %}false{% endif %}" {% if not can_retry_failed_or_skipped %}disabled{% endif %} title="{% trans 'Union of failed and skipped rows in one pass' %}">{% trans "Re-apply failed & skipped" %}</button>
+      {% if show_recheck_branch_btn %}
+      <button type="button" class="btn btn-warning btn-sm js-recon-recheck-branch js-recon-lifecycle-btn" data-initial-disabled="false">{% trans "Recheck branch & retry" %}</button>
+      <span id="reconRecheckBranchMsg" class="small text-danger text-break align-middle" role="status"></span>
+      {% endif %}
       <button type="button" class="btn btn-outline-secondary btn-sm" disabled title="{% trans 'Not implemented yet' %}">{% trans "Run validation" %}</button>
       {% if not hide_merge_to_main %}
       <button type="button" class="btn btn-outline-secondary btn-sm" disabled title="{% trans 'Not implemented yet' %}">{% trans "Merge to main" %}</button>
