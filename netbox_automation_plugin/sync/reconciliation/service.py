@@ -129,57 +129,106 @@ def _warn_if_netbox_branch_router_missing() -> None:
         return
 
 
-def _verify_branch_orm_alias_uses_non_public_schema(branch_obj: Any, django_db_alias: str) -> None:
-    """
-    Abort apply if ``using=<alias>`` is still on PostgreSQL ``public`` (NetBox main).
+def _branch_aware_router_configured() -> bool:
+    """True when NetBox branching's router is listed in ``DATABASE_ROUTERS``."""
+    try:
+        routers = list(getattr(settings, "DATABASE_ROUTERS", None) or [])
+        joined = " ".join(str(r) for r in routers)
+        return (
+            "netbox_branching.database.BranchAwareRouter" in joined
+            or "BranchAwareRouter" in joined
+        )
+    except Exception:
+        return False
 
-    When ``BranchAwareRouter`` / ``DynamicSchemaDict`` are mis-registered, a ``schema_*`` key
-    can exist but not actually repoint the connection — saves would then hit main. This check
-    runs inside :func:`branch_write_context` after ``activate_branch`` so the connection should
-    already reflect the branch schema.
+
+def collect_branch_routing_confirmation_or_raise(branch_obj: Any, django_db_alias: str) -> dict[str, Any]:
+    """
+    Run apply preflight **before any frozen op runs**: router check (optional), then PostgreSQL
+    ``current_schema()`` on the branch ORM alias. If the schema is still ``public``, raises —
+    no row handlers execute, so the batch cannot partially apply.
+
+    Returns a JSON-friendly dict stored on ``apply_results.routing_confirmation`` for the UI.
     """
     alias = (django_db_alias or "").strip()
+    strict_router = bool(getattr(settings, "RECONCILIATION_STRICT_BRANCH_ROUTER", True))
+    router_ok = _branch_aware_router_configured()
+    out: dict[str, Any] = {
+        "django_database_alias": alias,
+        "branch_db_used": alias,
+        "netbox_branch_pk": getattr(branch_obj, "pk", None),
+        "branch_name": str(getattr(branch_obj, "name", "") or "").strip(),
+        "branch_aware_router_configured": router_ok,
+        "reconciliation_strict_branch_router_setting": strict_router,
+        "postgresql_current_schema": None,
+        "postgresql_vendor": None,
+        "preflight_ok": False,
+        "preflight_error": None,
+    }
+    if strict_router and not router_ok:
+        msg = _(
+            "Reconciliation aborted: DATABASE_ROUTERS must include "
+            "netbox_branching.database.BranchAwareRouter (without it, ORM can write NetBox main). "
+            "To disable this check (not recommended), set RECONCILIATION_STRICT_BRANCH_ROUTER = False "
+            "in NetBox configuration."
+        )
+        out["preflight_error"] = str(msg)
+        raise ValueError(str(msg))
     if not alias or alias.lower() == "default":
-        return
+        msg = _("Invalid branch Django alias for preflight (empty or 'default').")
+        out["preflight_error"] = str(msg)
+        raise ValueError(str(msg))
     try:
         conn = connections[alias]
         conn.ensure_connection()
         inner = getattr(conn, "connection", None)
         vendor = (getattr(inner, "vendor", None) or "").lower()
-        if vendor != "postgresql":
-            return
-        with conn.cursor() as cursor:
-            cursor.execute("SELECT current_schema()")
-            row = cursor.fetchone()
-        current = (row[0] or "").strip().lower() if row else ""
-        if current != "public":
-            return
-        hint = ""
-        try:
-            sn = getattr(branch_obj, "schema_name", None)
-            if callable(sn):
-                sn = sn()
-            hint = str(sn or "").strip().lower()
-        except Exception:
-            pass
-        raise ValueError(
-            _(
-                "Reconciliation aborted: ORM database alias %(alias)s is using PostgreSQL schema "
-                "'public' (NetBox main), not an isolated branch schema. Check DATABASE_ROUTERS "
-                "includes netbox_branching.database.BranchAwareRouter and that 'netbox_branching' "
-                "is the last PLUGINS entry. Expected branch schema name hint: %(hint)s."
-            )
-            % {"alias": alias, "hint": hint or "—"}
+        out["postgresql_vendor"] = vendor or None
+        if vendor == "postgresql":
+            with conn.cursor() as cursor:
+                cursor.execute("SELECT current_schema()")
+                row = cursor.fetchone()
+            current_raw = (row[0] or "").strip() if row else ""
+            out["postgresql_current_schema"] = current_raw
+            current = current_raw.lower()
+            if current == "public":
+                hint = ""
+                try:
+                    sn = getattr(branch_obj, "schema_name", None)
+                    if callable(sn):
+                        sn = sn()
+                    hint = str(sn or "").strip().lower()
+                except Exception:
+                    pass
+                msg = _(
+                    "Reconciliation aborted: ORM alias %(alias)s uses PostgreSQL schema 'public' "
+                    "(NetBox main). No apply rows were executed. Fix DATABASE_ROUTERS / PLUGINS order. "
+                    "Expected branch schema hint: %(hint)s."
+                ) % {"alias": alias, "hint": hint or "—"}
+                out["preflight_error"] = str(msg)
+                raise ValueError(str(msg))
+        out["preflight_ok"] = True
+        out["entire_batch_aborted_no_row_handlers"] = False
+        logger.info(
+            "reconciliation apply preflight ok branch_pk=%s alias=%s pg_schema=%s router_ok=%s",
+            out["netbox_branch_pk"],
+            alias,
+            out["postgresql_current_schema"] or "(non-pg or n/a)",
+            router_ok,
         )
     except ValueError:
         raise
     except Exception as exc:
         logger.debug(
-            "Branch schema sanity check skipped for alias %s: %s",
+            "Branch routing preflight probe failed for alias %s: %s",
             alias,
             exc,
             exc_info=True,
         )
+        out["preflight_ok"] = True
+        out["entire_batch_aborted_no_row_handlers"] = False
+        out["postgresql_probe_error"] = f"{type(exc).__name__}: {exc}"
+    return out
 
 
 def _recon_explicit_orm_using(db_alias: str) -> str | None:
@@ -2613,6 +2662,22 @@ def apply_reconciliation_run(
             "django_database_alias": django_db_alias,
         }
 
+        routing_confirmation: dict[str, Any] = {
+            "django_database_alias": django_db_alias,
+            "branch_db_used": branch_db_for_payload,
+            "netbox_branch_pk": getattr(branch_obj, "pk", None),
+            "branch_name": (run.branch_name or "").strip(),
+            "branch_aware_router_configured": _branch_aware_router_configured(),
+            "reconciliation_strict_branch_router_setting": bool(
+                getattr(settings, "RECONCILIATION_STRICT_BRANCH_ROUTER", True)
+            ),
+            "postgresql_current_schema": None,
+            "postgresql_vendor": None,
+            "preflight_ok": False,
+            "preflight_error": None,
+            "entire_batch_aborted_no_row_handlers": False,
+        }
+
         run.status = MAASOpenStackReconciliationRun.STATUS_APPLY_IN_PROGRESS
         run.error_message = ""
         run.save(update_fields=["status", "error_message", "last_updated"])
@@ -2621,7 +2686,9 @@ def apply_reconciliation_run(
         try:
             _warn_if_netbox_branch_router_missing()
             with branch_write_context(branch=branch_obj):
-                _verify_branch_orm_alias_uses_non_public_schema(branch_obj, django_db_alias)
+                routing_confirmation = collect_branch_routing_confirmation_or_raise(
+                    branch_obj, django_db_alias
+                )
                 with reconciliation_apply_guard(branch_obj, django_db_alias):
                     for seq_num, op in enumerate(target_ops, start=1):
                         try:
@@ -2645,6 +2712,19 @@ def apply_reconciliation_run(
         except Exception as e:
             et = type(e).__name__
             em = _truncate_exc_message(str(e).strip() or repr(e))
+            routing_confirmation["entire_batch_aborted_no_row_handlers"] = True
+            routing_confirmation["batch_abort_exception_type"] = et
+            routing_confirmation["batch_abort_exception_message"] = em
+            if not routing_confirmation.get("preflight_error"):
+                routing_confirmation["preflight_error"] = f"{et}: {em}"
+            logger.error(
+                "reconciliation apply aborted entire batch (no per-row handlers committed after "
+                "this failure): %s: %s branch_pk=%s alias=%s",
+                et,
+                em,
+                routing_confirmation.get("netbox_branch_pk"),
+                routing_confirmation.get("django_database_alias"),
+            )
             for seq_num, op in enumerate(target_ops, start=1):
                 row = _apply_result_from_operation(op, branch_context_ready=False)
                 row["exception_type"] = et
@@ -2704,6 +2784,10 @@ def apply_reconciliation_run(
             ).strip(),
             "branch_db_used": branch_db_for_payload,
             "branch_not_ready": False,
+            "routing_confirmation": routing_confirmation,
+            "routing_confirmation_text": json.dumps(
+                routing_confirmation, indent=2, sort_keys=True, default=str
+            ),
         }
         apply_payload["run_routing_context"] = run_routing_core
         apply_payload["run_routing_context_text"] = json.dumps(

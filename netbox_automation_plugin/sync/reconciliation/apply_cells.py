@@ -54,6 +54,28 @@ from netbox_automation_plugin.sync.tenancy_netbox_compat import tenant_hierarchy
 
 logger = logging.getLogger(__name__)
 
+
+def _log_reconciliation_orm_write(
+    *,
+    entity: str,
+    apply_action: str,
+    op: dict[str, Any],
+    message: str,
+) -> None:
+    """
+    INFO log for Docker / NetBox logs: which ORM alias each sensitive create/update used.
+
+    Search: ``reconciliation_orm_write``
+    """
+    logger.info(
+        "reconciliation_orm_write entity=%s apply_action=%s row_key=%s branch_db=%s %s",
+        entity,
+        apply_action,
+        str(op.get("row_key") or ""),
+        str(op.get("branch_db") or ""),
+        message,
+    )
+
 _VID_FROM_PARENS_RE = re.compile(r"\((\d+)\)\s*$")
 # Log once per model if snapshot() is missing (branch Diff will lack field deltas).
 _SNAPSHOT_MISSING_LOGGED: set[str] = set()
@@ -2082,6 +2104,12 @@ def apply_create_vlan(op: dict[str, Any]) -> tuple[str, str]:
             _netbox_changelog_snapshot(vlan)
             vlan.tenant = tenant
             vlan.save(**_save_branch())
+    _log_reconciliation_orm_write(
+        entity="vlan",
+        apply_action="create_vlan",
+        op=op,
+        message=f"created pk={getattr(vlan, 'pk', None)} vid={vid_i} name={name!r} group={group_name!r}",
+    )
     return "created", "ok_created"
 
 
@@ -2224,6 +2252,12 @@ def apply_create_prefix(op: dict[str, Any]) -> tuple[str, str]:
             full_descr=full_descr,
             cells=cells,
         ):
+            _log_reconciliation_orm_write(
+                entity="prefix",
+                apply_action="create_prefix",
+                op=op,
+                message=f"updated pk={getattr(existing, 'pk', None)} prefix={cidr!r}",
+            )
             return "updated", "ok_updated"
         return "skipped", "skipped_already_desired"
     obj = Prefix(prefix=cidr, vrf=vrf)
@@ -2277,6 +2311,12 @@ def apply_create_prefix(op: dict[str, Any]) -> tuple[str, str]:
                     f"NetBox rejected the prefix: {_format_django_validation_error(e)}"
                 )
             pfx.save(**_save_branch())
+            _log_reconciliation_orm_write(
+                entity="prefix",
+                apply_action="create_prefix",
+                op=op,
+                message=f"created pk={getattr(pfx, 'pk', None)} prefix={cidr!r} (fallback path)",
+            )
             return "created", "ok_created"
         _prefix_apply_row_stepwise_changelog(
             pfx,
@@ -2287,6 +2327,12 @@ def apply_create_prefix(op: dict[str, Any]) -> tuple[str, str]:
             vlan_obj=vlan_obj,
             full_descr=full_descr,
             cells=cells,
+        )
+        _log_reconciliation_orm_write(
+            entity="prefix",
+            apply_action="create_prefix",
+            op=op,
+            message=f"created pk={getattr(pfx, 'pk', None)} prefix={cidr!r}",
         )
         return "created", "ok_created"
 
@@ -2299,6 +2345,12 @@ def apply_create_prefix(op: dict[str, Any]) -> tuple[str, str]:
         vlan_obj=vlan_obj,
         full_descr=full_descr,
         cells=cells,
+    )
+    _log_reconciliation_orm_write(
+        entity="prefix",
+        apply_action="create_prefix",
+        op=op,
+        message=f"created pk={getattr(obj, 'pk', None)} prefix={cidr!r}",
     )
     return "created", "ok_created"
 
@@ -3075,6 +3127,12 @@ def apply_create_openstack_vm(op: dict[str, Any]) -> tuple[str, str]:
     _merge_audit_residual_onto_object(
         vm, cells, consumed, attr_names=("description",), max_len=8000
     )
+    _log_reconciliation_orm_write(
+        entity="virtual_machine",
+        apply_action="create_openstack_vm",
+        op=op,
+        message=f"created pk={getattr(vm, 'pk', None)} name={name!r} cluster={cluster_name!r}",
+    )
     return "created", "ok_created"
 
 
@@ -3227,6 +3285,12 @@ def apply_update_openstack_vm(op: dict[str, Any]) -> tuple[str, str]:
         vm, cells, consumed, attr_names=("description",), max_len=8000
     )
     if changed or merge_ch:
+        _log_reconciliation_orm_write(
+            entity="virtual_machine",
+            apply_action="update_openstack_vm",
+            op=op,
+            message=f"updated pk={getattr(vm, 'pk', None)} name={getattr(vm, 'name', '')!r}",
+        )
         return "updated", "ok_updated"
     return "skipped", "skipped_already_desired"
 
