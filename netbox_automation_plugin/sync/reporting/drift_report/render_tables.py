@@ -19,7 +19,11 @@ from netbox_automation_plugin.sync.reporting.drift_report.constants import (
 )
 
 def _normalize_ascii_cell(s):
-    return str(s).replace("\n", " ").replace("\r", "") if s is not None else ""
+    if s is None:
+        return ""
+    if isinstance(s, tuple) and len(s) == 2 and all(isinstance(x, str) for x in s):
+        s = s[0]
+    return str(s).replace("\n", " ").replace("\r", "")
 
 
 def _cell(s, w, *, truncate=True):
@@ -151,6 +155,15 @@ def _banner(title, char="=", width=72):
 
 
 def _html_cell_content(s) -> str:
+    if isinstance(s, tuple) and len(s) == 2 and all(isinstance(x, str) for x in s):
+        short, detail = s[0], s[1]
+        raw_short = _normalize_ascii_cell(short)
+        raw_detail = (detail or "").replace("\r", " ").strip()
+        title_esc = html.escape(raw_detail.replace("\n", " "), quote=True)
+        body_esc = html.escape(raw_short, quote=False)
+        return (
+            f'<span class="drift-role-reason-summary" title="{title_esc}">{body_esc}</span>'
+        )
     raw = _normalize_ascii_cell(s)
     return html.escape(raw, quote=False).replace("\n", "<br />")
 
@@ -242,7 +255,7 @@ def _html_col_is_risk(header) -> bool:
 
 
 def _html_col_is_role_reason(header) -> bool:
-    """Long prose in proposed-prefix rows; wrap in HTML (not single-line nowrap)."""
+    """Proposed-prefix rows: one-line summary with full text in the cell title."""
     return str(header or "").strip().lower() == "role reason"
 
 
@@ -287,7 +300,7 @@ def _html_th_class(header) -> str:
     if _html_col_is_maas_fabric(h):
         return "small align-bottom text-nowrap"
     if _html_col_is_role_reason(h):
-        return "small align-bottom drift-col-role-reason"
+        return "small align-bottom drift-col-role-reason text-nowrap"
     base = "small align-bottom text-nowrap"
     if _html_col_is_mac(h):
         return f"{base} text-nowrap font-monospace"
@@ -304,7 +317,7 @@ def _html_td_class(header, col_idx, notes_col_idx=None) -> str:
     if _html_col_is_prefix_description(h):
         parts.extend(["align-top", "drift-col-prefix-description"])
     elif _html_col_is_role_reason(h):
-        parts.extend(["align-top", "drift-col-role-reason"])
+        parts.extend(["align-top", "drift-col-role-reason", "text-nowrap"])
     elif _html_col_is_mac(h):
         parts.extend(["align-top", "text-nowrap", "font-monospace"])
     elif _html_col_is_ip(h):

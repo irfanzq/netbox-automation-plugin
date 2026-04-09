@@ -16,6 +16,30 @@ from netbox_automation_plugin.sync.reporting.drift_report.device_types import (
 from netbox_automation_plugin.sync.reporting.drift_report.drift_nb_picker_catalog import (
     DRIFT_NB_PROPOSED_TENANT_DEFAULT,
 )
+
+
+def _fip_openstack_project_cell(g: dict) -> str:
+    s = str(
+        g.get("project_name")
+        or g.get("project_owner_name")
+        or g.get("project_id")
+        or ""
+    ).strip()
+    if not s or s in {"-", "—"}:
+        return "—"
+    return s
+
+
+def _fip_nb_proposed_tenant_default_for_gap(g: dict) -> str:
+    p = _fip_openstack_project_cell(g)
+    return p if p not in {"—", "-", ""} else DRIFT_NB_PROPOSED_TENANT_DEFAULT
+
+
+def _fip_parent_prefix_cell(g: dict) -> str:
+    s = str(g.get("floating_pool_subnet_cidr") or "").strip()
+    return s if s else "—"
+
+
 from netbox_automation_plugin.sync.reporting.drift_report.new_device_policy import (
     _new_device_candidate_policy,
     _new_device_fabric_display,
@@ -113,8 +137,29 @@ def _first_meaningful_text(*vals: Any) -> str:
     return "-"
 
 
+def _friendly_prefix_role_brief(bucket: str, confidence: str, ports_total: int) -> str:
+    """One-line summary for the Role reason column (table readability)."""
+    b = (bucket or "").lower()
+    bl = {
+        "vm": "Tenant VM network",
+        "public": "Public or external",
+        "storage": "Storage-style",
+        "admin": "Platform / admin",
+    }.get(b, "Unknown pattern")
+    cl = {
+        "high": "likely OK",
+        "medium": "verify role",
+        "low": "low certainty",
+    }.get((confidence or "low").strip().lower(), "low certainty")
+    if ports_total <= 0:
+        p = "no ports seen"
+    else:
+        p = f"{ports_total} Neutron ports"
+    return f"{bl} · {cl} · {p}"
+
+
 def _friendly_prefix_role_summary(bucket: str, confidence: str, ports_total: int, owners: str) -> str:
-    """Short, operator-friendly explanation for the proposed prefix role (HTML/XLSX)."""
+    """Full narrative for hover / exports / custom-field audit (paired with _friendly_prefix_role_brief)."""
     btxt = {
         "vm": (
             "This looks like a tenant VM network: most attachments should be ordinary project VMs "
@@ -624,10 +669,10 @@ def _proposed_changes_rows(
                 continue
         return str(vid)
 
-    def _suggest_prefix_role(g: dict) -> tuple[str, str]:
+    def _suggest_prefix_role(g: dict) -> tuple[str, str, str]:
         """
         Suggest best NetBox Prefix role from runtime consumer analysis.
-        Returns: (role_name, reason)
+        Returns: (role_name, reason_brief, reason_detail)
         """
         roles = netbox_data.get("prefix_roles") or []
         bucket = (g.get("consumer_role_bucket") or "").strip().lower()
@@ -638,12 +683,17 @@ def _proposed_changes_rows(
             tail = ""
             if ports_total or (owners and owners != "-"):
                 tail = f" ({ports_total} ports; top owners: {owners})"
-            return (
-                "REVIEW_REQUIRED",
+            detail = (
                 "OpenStack could not auto-sort this subnet into VM / public / storage / admin from port data. "
-                "Pick a NetBox role manually after checking the network in OpenStack." + tail,
+                "Pick a NetBox role manually after checking the network in OpenStack." + tail
             )
+            brief = (
+                "Uncategorized subnet · pick role manually · "
+                + (f"{ports_total} Neutron ports" if ports_total else "no ports seen")
+            )
+            return "REVIEW_REQUIRED", brief, detail
 
+        brief = _friendly_prefix_role_brief(bucket, confidence, ports_total)
         summary = _friendly_prefix_role_summary(bucket, confidence, ports_total, owners)
 
         wanted_tokens = {
@@ -668,14 +718,14 @@ def _proposed_changes_rows(
         ranked = sorted((r for r in roles), key=_score_role, reverse=True)
         if ranked and _score_role(ranked[0]) > 0:
             role = ranked[0].get("name") or ranked[0].get("slug") or "—"
-            return role, summary
+            return role, brief, summary
         fallback_name = {
             "public": "OpenStack Public",
             "storage": "OpenStack Storage",
             "vm": "OpenStack VM",
             "admin": "OpenStack Admin",
         }.get(bucket, "OpenStack VM")
-        return fallback_name, summary
+        return fallback_name, brief, summary
 
     def _suggest_prefix_status(g: dict) -> str:
         """
@@ -1590,7 +1640,8 @@ def _proposed_changes_rows(
     selected_locations = list(scope_meta.get("selected_locations") or [])
     add_prefixes = []
     for g in (os_subnet_gaps or []):
-        role_name, role_reason = _suggest_prefix_role(g)
+        role_name, role_reason_brief, role_reason_detail = _suggest_prefix_role(g)
+        role_reason_cell = (role_reason_brief, role_reason_detail)
         vrf_name = _suggest_vrf_for_prefix_gap(g, selected_locations)
         # Match CLI: `openstack subnet list` Name column (Neutron subnet name), not network name.
         os_desc = _first_meaningful_text(g.get("subnet_name"), g.get("network_name"))
@@ -1606,9 +1657,9 @@ def _proposed_changes_rows(
             nb_scope,
             nb_vlan,
             role_name,
+            role_reason_cell,
             _suggest_prefix_status(g),
             vrf_name,
-            role_reason,
             "[OS]",
             SET_NETBOX_ACTION_CREATE_PREFIX,
         ])
@@ -1617,6 +1668,7 @@ def _proposed_changes_rows(
     for g in (os_floating_gaps or []):
         fip = g.get("floating_ip", "")
         fip_name = _first_meaningful_text(
+            g.get("floating_pool_subnet_name"),
             g.get("floating_subnet_name"),
             g.get("floating_network_name"),
         )
@@ -1624,13 +1676,15 @@ def _proposed_changes_rows(
         nb_status = "active" if str(g.get("port_id") or "").strip() else "reserved"
         add_fips.append([
             g.get("os_region") or "—",
+            _fip_openstack_project_cell(g),
             fip,
             fip_name,
             g.get("fixed_ip_address", "-"),
-            DRIFT_NB_PROPOSED_TENANT_DEFAULT,
+            _fip_nb_proposed_tenant_default_for_gap(g),
             nb_status,
             "VIP",
             nb_vrf,
+            _fip_parent_prefix_cell(g),
             SET_NETBOX_ACTION_CREATE_FIP,
         ])
 
@@ -1649,7 +1703,8 @@ def _proposed_changes_rows(
             cidr = (g.get("cidr") or "").strip()
             if not cidr:
                 continue
-            role_name, role_reason = _suggest_prefix_role(g)
+            role_name, role_reason_brief, role_reason_detail = _suggest_prefix_role(g)
+            role_reason_cell = (role_reason_brief, role_reason_detail)
             vrf_name = _suggest_vrf_for_prefix_gap(g, selected_locations)
             sugg_status = _suggest_prefix_status(g)
             os_desc = _first_meaningful_text(g.get("subnet_name"), g.get("network_name"))
@@ -1719,10 +1774,10 @@ def _proposed_changes_rows(
                 nb_scope,
                 nb_vlan,
                 role_name,
+                role_reason_cell,
                 sugg_status,
                 vrf_name,
                 drift_summary,
-                role_reason,
                 "[OS]",
                 SET_NETBOX_ACTION_UPDATE_PREFIX,
             ])
@@ -1736,6 +1791,7 @@ def _proposed_changes_rows(
     for d in nat_rows:
         fip = d.get("floating_ip", "")
         fip_name = _first_meaningful_text(
+            d.get("floating_pool_subnet_name"),
             d.get("floating_subnet_name"),
             d.get("floating_network_name"),
         )
@@ -1744,13 +1800,15 @@ def _proposed_changes_rows(
         update_fips.append([
             d.get("nb_current_nat_inside") or "—",
             d.get("os_region") or "—",
+            _fip_openstack_project_cell(d),
             fip,
             fip_name,
             d.get("fixed_ip_address", "-"),
-            DRIFT_NB_PROPOSED_TENANT_DEFAULT,
+            _fip_nb_proposed_tenant_default_for_gap(d),
             nb_status,
             "VIP",
             nb_vrf,
+            _fip_parent_prefix_cell(d),
             SET_NETBOX_ACTION_UPDATE_FIP_NAT,
         ])
 

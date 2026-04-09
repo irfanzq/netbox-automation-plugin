@@ -67,15 +67,16 @@ HEADERS_DETAIL_NEW_PREFIXES: list[str] = [
     "NB Proposed Scope",
     "NB Proposed VLAN",
     "NB proposed role",
+    "Role reason",
     "NB proposed status",
     "NB proposed VRF",
-    "Role reason",
     "Authority",
     "Proposed Action",
 ]
 
 HEADERS_DETAIL_NEW_FIPS: list[str] = [
     "OS region",
+    "Project",
     "Floating IP",
     "Name",
     "NAT inside IP (from OpenStack fixed IP)",
@@ -83,6 +84,7 @@ HEADERS_DETAIL_NEW_FIPS: list[str] = [
     "NB proposed status",
     "NB proposed role",
     "NB proposed VRF",
+    "NB proposed parent prefix",
     "Proposed Action",
 ]
 
@@ -101,10 +103,10 @@ HEADERS_DETAIL_EXISTING_PREFIXES: list[str] = [
     "NB Proposed Scope",
     "NB Proposed VLAN",
     "NB proposed role",
+    "Role reason",
     "NB proposed status",
     "NB proposed VRF",
     "Drift summary",
-    "Role reason",
     "Authority",
     "Proposed Action",
 ]
@@ -112,6 +114,7 @@ HEADERS_DETAIL_EXISTING_PREFIXES: list[str] = [
 HEADERS_DETAIL_EXISTING_FIPS: list[str] = [
     "NB current NAT inside",
     "OS region",
+    "Project",
     "Floating IP",
     "Name",
     "NAT inside IP (from OpenStack fixed IP)",
@@ -119,6 +122,7 @@ HEADERS_DETAIL_EXISTING_FIPS: list[str] = [
     "NB proposed status",
     "NB proposed role",
     "NB proposed VRF",
+    "NB proposed parent prefix",
     "Proposed Action",
 ]
 

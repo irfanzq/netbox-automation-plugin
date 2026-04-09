@@ -40,7 +40,10 @@ def fetch_openstack_data(config: dict):
     Returns a dict with:
       - networks: list of {id, name}
       - subnets: list of {id, cidr, network_id}
-      - floating_ips: list of {floating_ip_address, fixed_ip_address, id, project_id, project_name}
+      - floating_ips: list of dicts including floating_ip_address, fixed_ip_address, id, project_id
+        (Keystone UUID), project_name (Keystone **project name**, same as Horizon—not the CLI’s
+        wrapped/truncated table cell), floating_network_id, and when subnets are present:
+        floating_pool_subnet_cidr (plus optional floating_pool_subnet_id / floating_pool_subnet_name)
       - compute_instances: list of Nova server dicts (instance_id, name, status, hypervisor_hostname
         resolved from hypervisor UUID when Nova reports OS-EXT-SRV-ATTR:host as an id, …)
       - error: str if connection failed
@@ -163,6 +166,100 @@ def _format_os_lldp_from_local_link(ll: dict) -> str:
     return " · ".join(parts)
 
 
+def _enrich_floating_ips_with_pool_subnet(floating_ips: list[dict], subnets: list[dict]) -> None:
+    """
+    For each floating IP, set pool subnet CIDR from Neutron: subnets on ``floating_network_id``
+    whose CIDR contains ``floating_ip_address``. If several subnets match, use the most specific
+    (largest prefix length). If none match but the network has exactly one subnet, use that CIDR.
+    """
+    by_net: dict[str, list[dict]] = defaultdict(list)
+    for sn in subnets or []:
+        nid = str(sn.get("network_id") or "").strip()
+        cid = str(sn.get("cidr") or "").strip()
+        if not nid or not cid:
+            continue
+        try:
+            ipaddress.ip_network(cid, strict=False)
+        except Exception:
+            continue
+        by_net[nid].append(sn)
+
+    for fip in floating_ips or []:
+        fnid = str(fip.get("floating_network_id") or "").strip()
+        raw = str(fip.get("floating_ip_address") or "").strip().split("/", 1)[0]
+        if not fnid or not raw:
+            continue
+        snlist = by_net.get(fnid) or []
+        if not snlist:
+            continue
+        try:
+            ip_a = ipaddress.ip_address(raw)
+        except Exception:
+            continue
+        matching: list[dict] = []
+        for sn in snlist:
+            try:
+                net = ipaddress.ip_network(str(sn.get("cidr") or ""), strict=False)
+            except Exception:
+                continue
+            if ip_a in net:
+                matching.append(sn)
+        chosen: dict | None = None
+        if len(matching) == 1:
+            chosen = matching[0]
+        elif len(matching) > 1:
+
+            def _preflen(sn: dict) -> int:
+                try:
+                    return ipaddress.ip_network(str(sn.get("cidr") or ""), strict=False).prefixlen
+                except Exception:
+                    return -1
+
+            chosen = max(matching, key=_preflen)
+        elif len(snlist) == 1:
+            chosen = snlist[0]
+        if not chosen:
+            continue
+        cidr_s = str(chosen.get("cidr") or "").strip()
+        if cidr_s:
+            fip["floating_pool_subnet_cidr"] = cidr_s
+        sid = str(chosen.get("id") or "").strip()
+        if sid:
+            fip["floating_pool_subnet_id"] = sid
+        sname = str(chosen.get("name") or "").strip()
+        if sname:
+            fip["floating_pool_subnet_name"] = sname
+
+
+def _resolve_keystone_project_name(conn, tid_s: str, project_name_by_id: dict[str, str]) -> str:
+    """
+    Map a tenant/project UUID from Neutron to the Keystone project **name** (same label Horizon shows).
+
+    Uses the in-memory map from ``identity.projects()`` first, then a case-insensitive key match,
+    then ``identity.get_project(id)`` when the bulk list omitted that id (RBAC / visibility).
+    """
+    tid_s = str(tid_s or "").strip()[:36]
+    if not tid_s:
+        return ""
+    name = project_name_by_id.get(tid_s)
+    if name:
+        return name
+    tid_l = tid_s.lower()
+    for k, v in project_name_by_id.items():
+        if str(k).lower() == tid_l:
+            return v
+    try:
+        prj = conn.identity.get_project(tid_s)
+    except Exception:
+        prj = None
+    if prj is not None:
+        n = str(getattr(prj, "name", "") or "").strip()
+        if n:
+            project_name_by_id[tid_s] = n
+            return n
+    return ""
+
+
 def _collect_neutron(
     conn,
     project_label: str,
@@ -217,7 +314,7 @@ def _collect_neutron(
             tid_s = str(net_proj_by_id.get(nid) or "")[:36]
         # Owner project must come from resource/network tenant id + Keystone mapping.
         # Do not fall back to current scan scope label (can be unrelated project).
-        proj_name = project_name_by_id.get(tid_s, "")
+        proj_name = _resolve_keystone_project_name(conn, tid_s, project_name_by_id)
         if want_ids or want_names:
             owner_ok = False
             if tid_s and tid_s in want_ids:
@@ -272,7 +369,7 @@ def _collect_neutron(
             tid_s = str(net_proj_by_id.get(fnid) or "")[:36]
         # Owner project must come from resource/network tenant id + Keystone mapping.
         # Do not fall back to current scan scope label (can be unrelated project).
-        proj_name = project_name_by_id.get(tid_s, "")
+        proj_name = _resolve_keystone_project_name(conn, tid_s, project_name_by_id)
         if want_ids or want_names:
             owner_ok = False
             if tid_s and tid_s in want_ids:
@@ -298,6 +395,7 @@ def _collect_neutron(
             "floating_network_id": getattr(fip, "floating_network_id", "") or "",
         })
 
+    _enrich_floating_ips_with_pool_subnet(floating_ips, subnets)
     return networks, subnets, floating_ips
 
 

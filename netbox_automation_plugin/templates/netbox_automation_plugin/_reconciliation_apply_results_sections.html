@@ -123,6 +123,10 @@
                     <div class="mt-2 pt-2 border-top text-body-secondary small">{% trans "Handler debug — VLAN resolution etc. (copy)" %}</div>
                     <pre class="small mb-0 text-break font-monospace mt-1" style="white-space: pre-wrap; max-height: 14rem; overflow: auto;">{{ row.apply_extra_debug_text }}</pre>
                   {% endif %}
+                  {% if row.leak_debug_paste_text %}
+                    <div class="mt-2 pt-2 border-top text-body-secondary small">{% trans "Main vs branch leak audit — paste this whole block (routing + extra + snapshots)" %}</div>
+                    <pre class="small mb-0 text-break font-monospace mt-1" style="white-space: pre-wrap; max-height: 28rem; overflow: auto;">{{ row.leak_debug_paste_text }}</pre>
+                  {% endif %}
                 </td>
               </tr>
             {% endfor %}
@@ -178,6 +182,10 @@
                   {% if row.apply_extra_debug_text %}
                     <div class="mt-2 pt-2 border-top text-body-secondary small">{% trans "Handler debug — VLAN resolution etc. (copy)" %}</div>
                     <pre class="small mb-0 text-break font-monospace mt-1" style="white-space: pre-wrap; max-height: 14rem; overflow: auto;">{{ row.apply_extra_debug_text }}</pre>
+                  {% endif %}
+                  {% if row.leak_debug_paste_text %}
+                    <div class="mt-2 pt-2 border-top text-body-secondary small">{% trans "Main vs branch leak audit — paste this whole block (routing + extra + snapshots)" %}</div>
+                    <pre class="small mb-0 text-break font-monospace mt-1" style="white-space: pre-wrap; max-height: 28rem; overflow: auto;">{{ row.leak_debug_paste_text }}</pre>
                   {% endif %}
                 </td>
               </tr>

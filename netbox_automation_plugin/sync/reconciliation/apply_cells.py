@@ -674,6 +674,66 @@ def _normalize_ip_for_netbox(raw_ip: str) -> str:
     return f"{s}/32" if ip_obj.version == 4 else f"{s}/128"
 
 
+def _normalize_floating_ip_host_mask(raw_ip: str) -> str:
+    """Floating IPs are single addresses: always /32 (IPv4) or /128 (IPv6), ignoring any stray mask."""
+    s = str(raw_ip or "").strip()
+    if not s:
+        raise ValueError("empty address")
+    host = s.split("/", 1)[0].strip()
+    ip_obj = ipaddress.ip_address(host)
+    return f"{host}/32" if ip_obj.version == 4 else f"{host}/128"
+
+
+def _ipaddress_value_prefixlen(addr_val) -> int | None:
+    s = str(addr_val or "").strip()
+    if "/" not in s:
+        return None
+    try:
+        return ipaddress.ip_interface(s).network.prefixlen
+    except Exception:
+        return None
+
+
+def _find_ipaddress_for_floating_host(
+    host: str,
+    vrf: Any | None,
+    *,
+    normalized_address: str,
+) -> Any | None:
+    """
+    Match IPAddress by host + VRF even when the stored mask differs (e.g. existing /25 vs new /32).
+
+    Prefer an exact ``normalized_address`` hit, else any same-host row with a subnet-style mask,
+    else any same-host row.
+    """
+    from ipam.models import IPAddress
+
+    try:
+        want = ipaddress.ip_interface(normalized_address)
+    except Exception:
+        return None
+    host_max = 32 if want.version == 4 else 128
+    qs = _orm_qs(IPAddress).filter(address__startswith=f"{host}/")
+    if vrf is None:
+        qs = qs.filter(vrf__isnull=True)
+    else:
+        qs = qs.filter(vrf_id=getattr(vrf, "pk", None))
+    exact = qs.filter(address=normalized_address).first()
+    if exact is not None:
+        return exact
+    rows = list(qs.order_by("pk")[:120])
+    if not rows:
+        return None
+    non_host = [
+        r
+        for r in rows
+        if (pl := _ipaddress_value_prefixlen(getattr(r, "address", None))) is not None and pl < host_max
+    ]
+    if non_host:
+        return max(non_host, key=lambda r: _ipaddress_value_prefixlen(r.address) or 0)
+    return rows[0]
+
+
 # NetBox ``VLAN.vid`` / ``Interface.untagged_vlan``: IEEE 802.1Q 1–4094. MAAS NIC rows must
 # carry ``vlan.vid`` only, never ``vlan.id`` (see ``maas_client`` MAAS→NetBox VLAN mapping).
 _NETBOX_IEEE_VLAN_VID_MAX = 4094
@@ -1064,6 +1124,10 @@ NEW_NIC_RECON_PAYLOAD_HEADERS: tuple[str, ...] = (
 # Selection keys for proposed-change "new interface" tables (frozen ops use minimal cells).
 NEW_NIC_SELECTION_KEYS: frozenset[str] = frozenset(
     {"detail_new_nics", "detail_new_nics_os", "detail_new_nics_maas"}
+)
+# NIC drift sections (same as ``service.NIC_DRIFT_SELECTION_KEYS`` — avoid import cycle).
+NIC_DRIFT_SELECTION_KEYS_LOCAL: frozenset[str] = frozenset(
+    {"detail_nic_drift_os", "detail_nic_drift_maas"}
 )
 
 
@@ -1522,9 +1586,9 @@ _NEW_PREFIX_DRIFT_SNAPSHOT_HEADERS: tuple[str, ...] = (
     "NB Proposed Scope",
     "NB Proposed VLAN",
     "NB proposed role",
+    "Role reason",
     "NB proposed status",
     "NB proposed VRF",
-    "Role reason",
     "Authority",
 )
 
@@ -1916,7 +1980,10 @@ def apply_create_vlan(op: dict[str, Any]) -> tuple[str, str]:
         # VLANs that exist in main from a prior bad run but are absent from the branch.
         # The branch DB enforces the real constraint — any true duplicate triggers IntegrityError below.
         vlan.full_clean(validate_unique=False)
-        vlan.save(**_save_branch())
+        # First insert under ``atomic(using=branch)`` like VM/interface creates — matches
+        # netbox-branching expectations for routed writes (bare save was associated with main leaks).
+        with _tx_branch():
+            vlan.save(**_save_branch())
     except DjangoValidationError as e:
         detail = _format_django_validation_error(e)
         logger.info("apply_create_vlan validation (vid=%s group=%s): %s", vid_i, group_name, detail)
@@ -2265,6 +2332,7 @@ def apply_create_ip_range(op: dict[str, Any]) -> tuple[str, str]:
 # Detail — new floating IPs (headers must match format_html_proposed / xlsx_export).
 _NEW_FIP_DRIFT_SNAPSHOT_HEADERS: tuple[str, ...] = (
     "OS region",
+    "Project",
     "Floating IP",
     "Name",
     "NAT inside IP (from OpenStack fixed IP)",
@@ -2272,6 +2340,7 @@ _NEW_FIP_DRIFT_SNAPSHOT_HEADERS: tuple[str, ...] = (
     "NB proposed status",
     "NB proposed role",
     "NB proposed VRF",
+    "NB proposed parent prefix",
 )
 
 _NEW_FIP_DRIFT_TO_CF_KEYS: tuple[tuple[str, tuple[str, ...]], ...] = (
@@ -2279,6 +2348,10 @@ _NEW_FIP_DRIFT_TO_CF_KEYS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("Name", ("floating_ip_name", "fip_name")),
     ("Project", ("openstack_project", "project")),
     ("NAT inside IP (from OpenStack fixed IP)", ("nat_inside_hint", "fixed_ip", "openstack_fixed_ip")),
+    (
+        "NB proposed parent prefix",
+        ("floating_pool_prefix", "openstack_floating_pool_prefix", "parent_prefix", "fip_parent_prefix"),
+    ),
 )
 
 # VM custom fields: projection key -> NetBox custom_field keys (single source with preview + apply).
@@ -2305,19 +2378,22 @@ def _orm_cache_key_for_cf_lists() -> str:
     return "__router__" if a is None else a
 
 
-@lru_cache(maxsize=16)
-def _vm_custom_field_keys_cached(router_key: str) -> frozenset[str]:
+@lru_cache(maxsize=1)
+def _vm_custom_field_keys_cached() -> frozenset[str]:
+    """
+    CustomField definitions are global NetBox metadata; use the default manager.
+
+    Do **not** use ``.using(branch_alias)`` here — ``extras.CustomField`` is not written on
+    branch shards the same way as IPAM/VM rows; a wrong alias can yield empty keys or odd
+    routing side effects during VM apply.
+    """
     try:
         from extras.models import CustomField
         from virtualization.models import VirtualMachine
     except Exception:
         return frozenset()
     keys: set[str] = set()
-    if router_key == "__router__":
-        qs = CustomField.objects
-    else:
-        qs = CustomField.objects.using(router_key)
-    for cf in qs.iterator():
+    for cf in CustomField.objects.iterator():
         if not _custom_field_targets_model(cf, VirtualMachine):
             continue
         k = getattr(cf, "key", None)
@@ -2330,7 +2406,7 @@ def _merge_vm_row_into_custom_fields(
     vm: Any, cells: dict[str, str], proj: dict[str, str]
 ) -> tuple[bool, set[str]]:
     """Write VM custom fields from ``proj`` (preferred) with drift fallback; keys from ``_VM_PROJECTION_CF_KEYS``."""
-    valid = _vm_custom_field_keys_cached(_orm_cache_key_for_cf_lists())
+    valid = _vm_custom_field_keys_cached()
     if not valid or not hasattr(vm, "custom_field_data"):
         return False, set()
     data = dict(vm.custom_field_data or {})
@@ -2583,18 +2659,19 @@ def apply_create_floating_ip(op: dict[str, Any]) -> tuple[str, str]:
         _norm_header("NB proposed status"),
         _norm_header("NB proposed role"),
         _norm_header("NB proposed VRF"),
+        _norm_header("NB proposed parent prefix"),
         # Proposed Action: workflow hint only; consume so it is not merged into description.
         _norm_header("Proposed Action"),
     }
     if not raw_ip:
         return _skip_missing_prereq("Floating IP address empty in row (Floating IP column / projection).")
-    try:
-        address = _normalize_ip_for_netbox(raw_ip)
-    except ValueError:
-        return "failed", "failed_validation_bad_ip"
     vrf = _resolve_by_name(VRF, vrf_name, using=_orm_alias()) if vrf_name else None
     if vrf_name and vrf is None:
         return _skip_missing_prereq(f'VRF "{vrf_name}" not found in NetBox (NB proposed VRF for floating IP).')
+    try:
+        address = _normalize_floating_ip_host_mask(raw_ip)
+    except ValueError:
+        return "failed", "failed_validation_bad_ip"
     role_value = None
     if role_name:
         role_value, role_err = _resolve_floating_ip_role_value(role_name)
@@ -2605,7 +2682,16 @@ def apply_create_floating_ip(op: dict[str, Any]) -> tuple[str, str]:
         tenant_obj = _resolve_tenant(tenant_name, using=_orm_alias())
         if tenant_obj is None:
             return _skip_missing_prereq(f'Tenant "{tenant_name}" not found in NetBox (NB Proposed Tenant).')
-    existing = _orm_qs(IPAddress).filter(address=address, vrf=vrf).first()
+    elif not tenant_name:
+        nb_raw = _cell(cells, "NB Proposed Tenant").strip()
+        if nb_raw and nb_raw not in {"—", "-"}:
+            tenant_obj = _resolve_tenant(nb_raw, using=_orm_alias())
+        if tenant_obj is None:
+            raw_proj = _cell(cells, "Project").strip()
+            if raw_proj and raw_proj not in {"—", "-"}:
+                tenant_obj = _resolve_tenant(raw_proj, using=_orm_alias())
+    host_only = str(ipaddress.ip_interface(address).ip)
+    existing = _find_ipaddress_for_floating_host(host_only, vrf, normalized_address=address)
     if existing is not None:
         merge_ch = _merge_audit_residual_onto_object(
             existing, cells, consumed, attr_names=("description",), max_len=max(dmax, 8000)
@@ -2811,11 +2897,20 @@ def apply_create_openstack_vm(op: dict[str, Any]) -> tuple[str, str]:
             f"Create the cluster or align NB proposed cluster in drift."
         )
     tenant_name = (proj.get("tenant") or "").strip()
-    if tenant_name and tenant_name not in {"—", "-"} and _resolve_tenant(tenant_name, using=_orm_alias()) is None:
-        return _skip_missing_prereq(
-            f'Tenant "{tenant_name}" not found in NetBox (create it or fix NB Proposed Tenant).'
-        )
-    if _orm_qs(VirtualMachine).filter(name=name).exists():
+    tenant_obj = None
+    if tenant_name and tenant_name not in {"—", "-"}:
+        tenant_obj = _resolve_tenant(tenant_name, using=_orm_alias())
+        if tenant_obj is None:
+            return _skip_missing_prereq(
+                f'Tenant "{tenant_name}" not found in NetBox (create it or fix NB Proposed Tenant).'
+            )
+    # NetBox: unique (name, cluster, tenant) / (name, cluster) when tenant is null — not global name.
+    dup = _orm_qs(VirtualMachine).filter(cluster=cluster, name__iexact=name)
+    if tenant_obj is not None:
+        dup = dup.filter(tenant=tenant_obj)
+    else:
+        dup = dup.filter(tenant__isnull=True)
+    if dup.exists():
         return "skipped", "skipped_already_desired"
 
     consumed = {
@@ -2835,16 +2930,16 @@ def apply_create_openstack_vm(op: dict[str, Any]) -> tuple[str, str]:
         _norm_header("Proposed Action"),
     }
 
-    # Match apply_create_vlan: validate_unique=False avoids full_clean() uniqueness checks
-    # against NetBox main while the row is valid on the active branch schema.
+    # First save inside ``_tx_branch()`` like other apply creates (interfaces, etc.): nested
+    # ``atomic()`` pairs with netbox-branching per-save boundaries. Do **not** mirror VLAN's
+    # bare first ``save`` + ``full_clean`` here — ``VirtualMachine`` validation/signals differ
+    # and that pattern was associated with VM rows landing on main in some installs.
     vm = VirtualMachine(name=name, cluster=cluster)
+    if tenant_obj is not None:
+        vm.tenant = tenant_obj
     try:
-        vm.full_clean(validate_unique=False)
-        vm.save(**_save_branch())
-    except DjangoValidationError as e:
-        detail = _format_django_validation_error(e)
-        logger.info("apply_create_openstack_vm validation (name=%s): %s", name, detail)
-        return _skip_missing_prereq(f"NetBox rejected the VM: {detail}")
+        with _tx_branch():
+            vm.save(**_save_branch())
     except IntegrityError as e:
         em = str(e).strip() or repr(e)
         logger.info("apply_create_openstack_vm integrity (name=%s): %s", name, em)
@@ -2951,7 +3046,6 @@ def apply_update_openstack_vm(op: dict[str, Any]) -> tuple[str, str]:
             with _tx_branch():
                 _netbox_changelog_snapshot(vm)
                 vm.name = name_new
-                vm.full_clean(validate_unique=False)
                 vm.save(**_save_branch())
             changed = True
     with _tx_branch():
@@ -3305,6 +3399,7 @@ _PREVIEW_FIELD_LABELS: dict[str, str] = {
     "vid": "VLAN ID",
     "vlan_group": "VLAN group",
     "nat_inside": "NAT inside IP",
+    "parent_prefix": "Parent prefix (OpenStack pool CIDR)",
 }
 
 
@@ -3777,12 +3872,36 @@ def _skip_untagged_vlan_unresolved(
     _merge_apply_extra_debug(vlan_resolution=dbg)
     ifn = (iface_name or "").strip()
     loc = f'interface "{ifn}" on device "{host}"' if ifn else f'device "{host}" (interface)'
-    return _skip_missing_prereq(
-        f"Cannot apply untagged VLAN VID {vid} to {loc}: no IPAM VLAN matches this "
-        f"device's site or location (VLAN groups / get_for_site), or VID {vid} is ambiguous. "
-        f"NetBox stores native VLAN on the interface; the VLAN object must exist in IPAM and "
-        f"be in scope for the device. Create or scope VLAN {vid}, then re-run apply."
-    )
+    n_branch = dbg.get("vlan_rows_with_vid_in_branch_schema")
+    if n_branch == 0:
+        msg = (
+            f"Cannot apply untagged VLAN VID {vid} to {loc}: on the active branch there is "
+            f"no IPAM VLAN with VID {vid} (count=0 in this schema). Routing is fine; the VLAN "
+            f"row is missing. Add Proposed missing VLANs / create_vlan for VID {vid} (VLAN group "
+            f"scoped to this device site/location) and run that row before this interface in apply "
+            f"order (lower Run #). VLANs that exist only on NetBox main are not visible here."
+        )
+    elif n_branch == 1:
+        msg = (
+            f"Cannot apply untagged VLAN VID {vid} to {loc}: one VLAN with this VID exists on the "
+            f"branch but is not in scope for this device (site/location vs VLAN group scope, "
+            f"or VLAN.site). Fix the VLAN's group scope / site, or set NB proposed VLAN group "
+            f"on the drift row if NetBox needs an explicit group+VID match."
+        )
+    elif isinstance(n_branch, int) and n_branch > 1:
+        msg = (
+            f"Cannot apply untagged VLAN VID {vid} to {loc}: {n_branch} VLANs share VID {vid} on "
+            f"this branch; none could be tied unambiguously to this device. Narrow with VLAN "
+            f"group scope, **NB proposed VLAN group**, or VLAN.site aligned to the device."
+        )
+    else:
+        msg = (
+            f"Cannot apply untagged VLAN VID {vid} to {loc}: no IPAM VLAN matches this "
+            f"device's site or location (VLAN groups / get_for_site), or VID {vid} is ambiguous. "
+            f"NetBox stores native VLAN on the interface; the VLAN object must exist in IPAM and "
+            f"be in scope for the device. Create or scope VLAN {vid}, then re-run apply."
+        )
+    return _skip_missing_prereq(msg)
 
 
 def _resolve_vlan_for_prefix_scope(
@@ -4062,6 +4181,121 @@ def synthetic_device_cells_from_new_nic_for_prereq(
     plat = (_cell(cells, "OS region", "OS provision", "OS") or "").strip()
     if plat:
         out["NB proposed platform"] = plat
+    return out
+
+
+def infer_vlan_group_name_for_interface_vlan_prereq(
+    site_name: str,
+    location_name: str,
+    explicit_group: str | None,
+    *,
+    vid: int,
+) -> str | None:
+    """
+    Pick a VLAN group name for a synthetic ``create_vlan`` frozen op.
+
+    1. If the interface row sets **NB proposed VLAN group**, use it when the group exists
+       and allows ``vid`` in its VLAN ID ranges.
+    2. Else if exactly **one** ``ipam.VLANGroup`` is scoped to the **site**, use it (and VID range check).
+    3. Else if **location** is set and exactly one group is scoped to that location (or an
+       ancestor), use it.
+
+    Uses the active DB router (typically main when freezing ops in the UI). If inference fails,
+    returns ``None`` and no synthetic VLAN row is injected — operator can add Proposed missing VLANs.
+    """
+    from django.contrib.contenttypes.models import ContentType
+
+    from dcim.models import Location, Site
+    from ipam.models import VLANGroup
+
+    def _group_ok(grp: Any) -> bool:
+        return grp is not None and _vid_allowed_in_netbox_vlan_group(vid, grp)
+
+    eg = (explicit_group or "").strip()
+    if eg and eg not in {"—", "-"}:
+        grp = VLANGroup.objects.filter(name__iexact=eg).first()
+        if grp is not None:
+            if _group_ok(grp):
+                return str(grp.name)
+            return None
+        # Group name from drift but not visible on this ORM connection (e.g. branch-only): trust it.
+        return eg
+
+    sn = (site_name or "").strip()
+    if not sn or _cell_is_placeholder(sn):
+        return None
+    site = Site.objects.filter(name__iexact=sn).first()
+    if site is None:
+        return None
+    try:
+        ct_site = ContentType.objects.get_by_natural_key("dcim", "site")
+    except Exception:
+        ct_site = None
+    if ct_site is not None:
+        qs = VLANGroup.objects.filter(scope_type=ct_site, scope_id=site.pk)
+        if qs.count() == 1:
+            g = qs.first()
+            if _group_ok(g):
+                return str(g.name)
+    ln = (location_name or "").strip()
+    if not ln or _cell_is_placeholder(ln):
+        return None
+    loc = Location.objects.filter(site=site, name__iexact=ln).first()
+    if loc is None:
+        return None
+    try:
+        ct_loc = ContentType.objects.get_by_natural_key("dcim", "location")
+        anc = list(loc.get_ancestors(include_self=True).values_list("pk", flat=True))
+        qs2 = VLANGroup.objects.filter(scope_type=ct_loc, scope_id__in=anc)
+        if qs2.count() == 1:
+            g2 = qs2.first()
+            if _group_ok(g2):
+                return str(g2.name)
+    except Exception:
+        pass
+    return None
+
+
+def synthetic_create_vlan_cells_from_interface_prereq(
+    cells: dict[str, str],
+    *,
+    selection_key: str | None = None,
+) -> dict[str, str] | None:
+    """
+    Build ``detail_proposed_missing_vlans``-shaped cells so ``create_vlan`` can run before
+    ``create_interface`` / ``update_interface`` without the operator hand-picking a VLAN row.
+
+    Returns ``None`` when VID/site/group cannot be inferred safely.
+    """
+    c = {str(k): "" if v is None else str(v).strip() for k, v in cells.items()}
+    sk = str(selection_key or "").strip()
+    if sk in NEW_NIC_SELECTION_KEYS:
+        c = new_nic_cells_for_reconciliation(c)
+    elif sk and sk not in NIC_DRIFT_SELECTION_KEYS_LOCAL:
+        return None
+    _mac, vid, _ip = _interface_mac_vlan_ip_from_cells(c, include_nb_fallback=True)
+    if vid is None or vid < 1 or vid > _NETBOX_IEEE_VLAN_VID_MAX:
+        return None
+    site = (_cell(c, "NB site", "NetBox site") or "").strip()
+    if not site or _cell_is_placeholder(site):
+        return None
+    loc = (_cell(c, "NB location", "NetBox location") or "").strip()
+    if _cell_is_placeholder(loc):
+        loc = ""
+    explicit_g = (_cell(c, "NB proposed VLAN group") or "").strip()
+    gn = infer_vlan_group_name_for_interface_vlan_prereq(
+        site, loc, explicit_g or None, vid=vid
+    )
+    if not gn:
+        return None
+    out = {
+        "NB site": site,
+        "NB location": loc,
+        "NB Proposed VLAN ID": str(vid),
+        "NB proposed VLAN group": gn,
+        "NB proposed VLAN name (editable)": f"VLAN-{vid}",
+        "NB proposed status": "active",
+    }
     return out
 
 

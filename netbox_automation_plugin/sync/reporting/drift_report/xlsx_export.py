@@ -49,6 +49,13 @@ from netbox_automation_plugin.sync.reporting.drift_report.proposed_changes impor
 )
 
 
+def _xlsx_coerce_cell(v):
+    if isinstance(v, tuple) and len(v) == 2 and all(isinstance(x, str) for x in v):
+        a, b = v[0].strip(), v[1].strip()
+        return f"{a}\n\n{b}" if b and b != a else a
+    return v
+
+
 def _coerce_bmc_row_to_headers(headers: list[str], row: list | tuple) -> list:
     """If a row has one extra value between MAAS BMC MAC and MAAS LLDP switch, drop it (legacy)."""
     rl = list(row) if isinstance(row, (list, tuple)) else [row]
@@ -418,7 +425,8 @@ def build_drift_report_xlsx(
         prop["add_prefixes"],
         note=(
             "NB proposed status: reserved when no Neutron ports were counted on that subnet in this scan; "
-            "active when at least one port was seen (role certainty is only in Role reason). "
+            "active when at least one port was seen. Role reason: one-line summary in the cell; "
+            "full Neutron attachment narrative is on a second line in this export. "
             "NB proposed VRF is inferred from OpenStack naming signals (network/project/region text)."
         ),
     )

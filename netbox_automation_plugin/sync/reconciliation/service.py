@@ -12,9 +12,14 @@ When any interface row is selected, ``build_frozen_operations`` auto-appends **e
 row present in that audit index. For interface hosts that still have no ``create_device`` op,
 it also injects a synthetic ``create_device`` from **placement** (NetBox site on the placement
 row) when available — **only if** no ``dcim.Device`` with that host name already exists (matched
-hosts are omitted; they are not listed under New devices but do not need a create op). Ops are
-sorted by ``AUDIT_REPORT_APPLY_ORDER`` so device + VLAN creates run before ``create_interface``
-/ ``update_interface`` without ticking those sections manually.
+hosts are omitted; they are not listed under New devices but do not need a create op).
+
+When a NIC row has an untagged VID and **NB site** but no ``create_vlan`` op yet, a synthetic
+``create_vlan`` may be injected (VLAN group from **NB proposed VLAN group**, or the sole
+site/location-scoped ``VLANGroup`` that allows the VID). Partial retries use the same rule.
+
+Ops are sorted by ``AUDIT_REPORT_APPLY_ORDER`` so device + VLAN creates run before
+``create_interface`` / ``update_interface`` without ticking those sections manually.
 """
 
 from __future__ import annotations
@@ -53,7 +58,9 @@ from .apply_cells import (
     NEW_NIC_SELECTION_KEYS,
     SUPPORTED_APPLY_ACTIONS,
     _interface_mac_vlan_ip_from_cells,
+    _merge_apply_extra_debug,
     _norm_header,
+    _resolve_tenant,
     apply_row_operation,
     consume_apply_extra_debug,
     consume_apply_routing_debug_snapshot,
@@ -63,6 +70,7 @@ from .apply_cells import (
     new_nic_cells_for_reconciliation,
     recon_operation_display_cells,
     reconciliation_apply_snapshot_cells,
+    synthetic_create_vlan_cells_from_interface_prereq,
     synthetic_device_cells_from_new_nic_for_prereq,
     synthetic_device_cells_from_placement_for_nic_prereq,
     validate_preview_mandatory_audit_fields,
@@ -473,9 +481,236 @@ def _fetch_written_object_fallback(op: dict[str, Any], using: str) -> Any | None
             raw_id = str(proj.get("id") or "").strip()
             if raw_id.isdigit():
                 return _orm(VirtualMachine).filter(pk=int(raw_id)).first()
+        if action == "create_openstack_vm":
+            from virtualization.models import Cluster, VirtualMachine
+
+            vm_name = str(proj.get("name") or "").strip()
+            cl_name = str(proj.get("cluster") or "").strip()
+            if not vm_name or not cl_name:
+                return None
+            cl = _orm(Cluster).filter(name=cl_name).first()
+            if cl is None:
+                return None
+            qs = _orm(VirtualMachine).filter(cluster=cl, name__iexact=vm_name)
+            tenant_s = str(proj.get("tenant") or "").strip()
+            if tenant_s and tenant_s not in {"—", "-"}:
+                ten = _resolve_tenant(tenant_s, using=alias)
+                if ten is not None:
+                    qs = qs.filter(tenant=ten)
+                else:
+                    qs = qs.filter(tenant__isnull=True)
+            else:
+                qs = qs.filter(tenant__isnull=True)
+            return qs.first()
     except Exception:
         return None
     return None
+
+
+def _django_connection_debug(alias: str | None) -> dict[str, Any]:
+    if not alias:
+        return {}
+    try:
+        c = connections[alias]
+        return {
+            "alias": alias,
+            "in_atomic_block": getattr(c, "in_atomic_block", None),
+        }
+    except Exception as et:
+        return {"alias": alias, "connection_error": f"{type(et).__name__}: {et}"}
+
+
+def _finalize_natural_key_probe(
+    *,
+    model_label: str,
+    action: str,
+    branch_alias: str,
+    natural_key: dict[str, Any],
+    branch_qs: Any,
+    default_qs: Any,
+) -> dict[str, Any]:
+    """Attach counts, sample PKs (separate per schema), and leak-oriented flags."""
+    b_cnt = branch_qs.count()
+    d_cnt = default_qs.count()
+    b_pks = list(branch_qs.values_list("pk", flat=True)[:12])
+    d_pks = list(default_qs.values_list("pk", flat=True)[:12])
+    flags: list[str] = []
+    if b_cnt == 0:
+        flags.append("no_row_on_branch_for_natural_key")
+    if d_cnt > 0:
+        flags.append("default_has_at_least_one_row_for_natural_key")
+    if b_cnt > 0 and d_cnt > 0:
+        flags.append("natural_key_visible_on_both_branch_and_default")
+    notes: list[str] = []
+    if b_cnt > 0 and d_cnt > 0:
+        notes.append(
+            "Same logical key appears in both schemas — compare sample PKs (they usually differ "
+            "per schema). If you only created on the branch, an unexpected default row may be a "
+            "leak, merge, or an older duplicate."
+        )
+    if b_cnt > 0 and d_cnt == 0:
+        notes.append(
+            "Natural key only on branch — consistent with branch-only create (routing_debug still "
+            "shows intent only)."
+        )
+    return {
+        "model": model_label,
+        "action": action,
+        "branch_schema_alias": branch_alias,
+        "natural_key": natural_key,
+        "rows_on_branch_db": b_cnt,
+        "rows_on_default_db": d_cnt,
+        "sample_pks_on_branch": b_pks,
+        "sample_pks_on_default": d_pks,
+        "leak_flags": flags,
+        "interpretation_notes": notes,
+    }
+
+
+def _natural_key_persistence_probe(obj: Any, *, branch_db: str, action: str) -> dict[str, Any] | None:
+    """
+    After apply, compare how many rows match the object's NetBox natural key on the branch
+    schema alias vs ``default``.
+
+    ``routing_debug`` only records *intent* (``save(using=…)``). This answers whether the same
+    logical VLAN / VM / prefix is visible on main — useful to distinguish leaks, merges, or
+    pre-existing duplicates (branch PKs are not comparable across schemas).
+    """
+    try:
+        txu = _recon_explicit_orm_using(branch_db)
+        if not txu or str(branch_db).strip().lower() in {"", "default"}:
+            return None
+        opts = getattr(obj, "_meta", None)
+        if opts is None:
+            return None
+        label = str(opts.label_lower)
+        if label == "ipam.vlan":
+            from ipam.models import VLAN
+
+            vid = getattr(obj, "vid", None)
+            gfk = "vlan_group_id" if getattr(obj, "vlan_group_id", None) is not None else None
+            if gfk is None and getattr(obj, "group_id", None) is not None:
+                gfk = "group_id"
+            if vid is None or gfk is None:
+                return None
+            gid = int(getattr(obj, gfk))
+            flt = {"vid": int(vid), gfk: gid}
+            qb = VLAN.objects.using(txu).filter(**flt)
+            qd = VLAN.objects.using("default").filter(**flt)
+            return _finalize_natural_key_probe(
+                model_label=label,
+                action=action,
+                branch_alias=txu,
+                natural_key=dict(flt),
+                branch_qs=qb,
+                default_qs=qd,
+            )
+        if label == "virtualization.virtualmachine":
+            from virtualization.models import VirtualMachine
+
+            cid = getattr(obj, "cluster_id", None)
+            name = getattr(obj, "name", None)
+            if cid is None or not name:
+                return None
+            tid = getattr(obj, "tenant_id", None)
+            qb = VirtualMachine.objects.using(txu).filter(cluster_id=int(cid), name__iexact=str(name))
+            qd = VirtualMachine.objects.using("default").filter(
+                cluster_id=int(cid), name__iexact=str(name)
+            )
+            if tid is not None:
+                qb = qb.filter(tenant_id=int(tid))
+                qd = qd.filter(tenant_id=int(tid))
+            else:
+                qb = qb.filter(tenant__isnull=True)
+                qd = qd.filter(tenant__isnull=True)
+            nk: dict[str, Any] = {"cluster_id": int(cid), "name": str(name), "tenant_id": tid}
+            return _finalize_natural_key_probe(
+                model_label=label,
+                action=action,
+                branch_alias=txu,
+                natural_key=nk,
+                branch_qs=qb,
+                default_qs=qd,
+            )
+        if label == "ipam.prefix":
+            from ipam.models import Prefix
+
+            pfx = getattr(obj, "prefix", None)
+            if pfx is None:
+                return None
+            vrf_id = getattr(obj, "vrf_id", None)
+            qb = Prefix.objects.using(txu).filter(prefix=pfx)
+            qd = Prefix.objects.using("default").filter(prefix=pfx)
+            if vrf_id is not None:
+                qb = qb.filter(vrf_id=int(vrf_id))
+                qd = qd.filter(vrf_id=int(vrf_id))
+            else:
+                qb = qb.filter(vrf__isnull=True)
+                qd = qd.filter(vrf__isnull=True)
+            nk2: dict[str, Any] = {"prefix": str(pfx), "vrf_id": vrf_id}
+            return _finalize_natural_key_probe(
+                model_label=label,
+                action=action,
+                branch_alias=txu,
+                natural_key=nk2,
+                branch_qs=qb,
+                default_qs=qd,
+            )
+    except Exception:
+        return None
+    return None
+
+
+def _build_leak_debug_paste_bundle(op: dict[str, Any], result: dict[str, Any], branch_db: str | None) -> None:
+    """
+    One JSON blob for operators to paste: routing intent + handler debug + persistence probe.
+
+    Populates ``leak_debug_paste`` and ``leak_debug_paste_text`` on ``result`` when not on
+    literal ``default`` (branch reconciliation).
+    """
+    raw = str(branch_db or "").strip().lower()
+    if not raw or raw == "default":
+        return
+    txu = _recon_explicit_orm_using(str(branch_db).strip())
+    probe = None
+    extra = result.get("apply_extra_debug")
+    if isinstance(extra, dict):
+        probe = extra.get("persistence_natural_key_probe")
+    bundle: dict[str, Any] = {
+        "leak_debug_version": 2,
+        "instructions": (
+            "Copy this entire JSON. routing_debug = what the plugin intended (using= alias). "
+            "apply_extra_debug.persistence_natural_key_probe = after a successful create/update, "
+            "row counts for the same NetBox natural key on branch vs default (VLAN, VM, Prefix). "
+            "sample_pks_on_* differ per schema. leak_flags highlight suspicious combinations. "
+            "If persistence_natural_key_probe is absent, the row was not created/updated or the "
+            "object could not be reloaded from the branch for probing."
+        ),
+        "row": {
+            "row_key": result.get("row_key"),
+            "selection_key": result.get("selection_key"),
+            "action": result.get("action"),
+            "status": result.get("status"),
+            "reason": result.get("reason"),
+            "apply_sequence": result.get("apply_sequence"),
+        },
+        "op_branch_db": op.get("branch_db"),
+        "resolved_branch_alias": txu,
+        "django_connection": _django_connection_debug(txu),
+        "routing_debug": result.get("routing_debug"),
+        "apply_extra_debug": result.get("apply_extra_debug"),
+        "written_object": result.get("written_object"),
+        "field_snapshot": result.get("field_snapshot"),
+        "persistence_probe_present": isinstance(probe, dict),
+    }
+    result["leak_debug_paste"] = bundle
+    result["leak_debug_paste_text"] = json.dumps(bundle, indent=2, sort_keys=True, default=str)
+    logger.debug(
+        "reconciliation leak_debug_paste row_key=%s action=%s status=%s",
+        result.get("row_key"),
+        result.get("action"),
+        result.get("status"),
+    )
 
 
 def _capture_applied_object_snapshot(
@@ -494,6 +729,10 @@ def _capture_applied_object_snapshot(
         snap = _orm_instance_field_snapshot(obj, selection_key=sk, using=branch_db)
         if snap:
             result["field_snapshot"] = snap
+        action = str(op.get("action") or "").strip()
+        probe = _natural_key_persistence_probe(obj, branch_db=branch_db, action=action)
+        if probe:
+            _merge_apply_extra_debug(persistence_natural_key_probe=probe)
     except Exception:
         return
 
@@ -565,6 +804,8 @@ def _execute_branch_apply(op: dict[str, Any], branch_db: str | None = None) -> d
         result["reason"] = "failed_bad_apply_return"
         _attach_routing_debug_to_apply_result(result)
         _attach_apply_extra_debug_to_result(result)
+        if branch_db:
+            _build_leak_debug_paste_bundle(op, result, branch_db)
         return _finalize_apply_row(op, result)
     st, reason, skip_detail = _ar[0], _ar[1], _ar[2]
     written_meta = _ar[3] if len(_ar) == 4 and isinstance(_ar[3], dict) else None
@@ -580,6 +821,8 @@ def _execute_branch_apply(op: dict[str, Any], branch_db: str | None = None) -> d
         _capture_applied_object_snapshot(op, result, branch_db)
     _attach_routing_debug_to_apply_result(result)
     _attach_apply_extra_debug_to_result(result)
+    if branch_db:
+        _build_leak_debug_paste_bundle(op, result, branch_db)
     return _finalize_apply_row(op, result)
 
 
@@ -841,7 +1084,12 @@ def _cells_dict(headers: list, row: list) -> dict[str, str]:
         if not key:
             continue
         val = row[i] if i < len(row) else ""
-        out[key] = "" if val is None else str(val).strip()
+        if isinstance(val, tuple) and len(val) == 2 and all(isinstance(x, str) for x in val):
+            a, b = val[0].strip(), val[1].strip()
+            val = f"{a}\n\n{b}" if b and b != a else a
+        else:
+            val = "" if val is None else str(val).strip()
+        out[key] = val
     return out
 
 
@@ -1115,6 +1363,7 @@ def _expand_partial_retry_ops_with_device_creates(
             if rk and rk not in have_rk:
                 have_rk.add(rk)
                 out.append(o)
+    _append_synthetic_create_vlan_prereqs_for_interface_ops(out, set())
     allowed_sk = all_registered_selection_keys()
     out.sort(key=lambda o: _operation_apply_sort_key(o, allowed=allowed_sk))
     return out
@@ -1171,6 +1420,84 @@ def _netbox_existing_device_host_keys_lower(host_keys: set[str]) -> set[str]:
     )
 
 
+def _create_vlan_prereq_tuple(op: dict[str, Any]) -> tuple[int, str, str] | None:
+    """(vid, group name lower, site lower) for deduping synthetic VLAN prerequisite ops."""
+    if str(op.get("action") or "") != "create_vlan":
+        return None
+    cells = op.get("cells") if isinstance(op.get("cells"), dict) else {}
+    c = {str(k): "" if v is None else str(v).strip() for k, v in cells.items()}
+    vid_s = str(c.get("NB Proposed VLAN ID") or c.get("Target VID") or "").strip()
+    if not vid_s.isdigit():
+        return None
+    grp = str(c.get("NB proposed VLAN group") or "").strip().lower()
+    site = str(c.get("NB site") or "").strip().lower()
+    if not grp or not site:
+        return None
+    return (int(vid_s), grp, site)
+
+
+def _append_synthetic_create_vlan_prereqs_for_interface_ops(
+    ops: list[dict[str, Any]],
+    seen: set[str],
+) -> None:
+    """
+    When an interface row requests an untagged VID but no ``create_vlan`` op covers
+    (vid, group, site), inject a synthetic ``detail_proposed_missing_vlans`` / ``create_vlan``
+    op (same shape as audit VLAN rows) so apply order creates IPAM VLAN before the interface.
+
+    Group comes from **NB proposed VLAN group** or a **unique** site/location-scoped VLAN group
+    in NetBox that contains the VID in its ranges (see
+    :func:`apply_cells.synthetic_create_vlan_cells_from_interface_prereq`).
+    """
+    covered = {t for o in ops if (t := _create_vlan_prereq_tuple(o)) is not None}
+    iface_src = NEW_NIC_SELECTION_KEYS | NIC_DRIFT_SELECTION_KEYS
+    for o in ops:
+        if str(o.get("action") or "") not in ("create_interface", "update_interface"):
+            continue
+        sk = str(o.get("selection_key") or "")
+        if sk not in iface_src:
+            continue
+        raw = o.get("cells")
+        if not isinstance(raw, dict):
+            continue
+        c = {str(k): "" if v is None else str(v).strip() for k, v in raw.items()}
+        synth_cells = synthetic_create_vlan_cells_from_interface_prereq(c, selection_key=sk)
+        if not synth_cells:
+            continue
+        try:
+            vid_i = int(str(synth_cells.get("NB Proposed VLAN ID") or "").strip())
+        except (TypeError, ValueError):
+            continue
+        grp = str(synth_cells.get("NB proposed VLAN group") or "").strip().lower()
+        site = str(synth_cells.get("NB site") or "").strip().lower()
+        key = (vid_i, grp, site)
+        if key in covered:
+            continue
+        covered.add(key)
+        host = _host_key_from_recon_cells(c) or "host"
+        if_name = (
+            (c.get("NB intf") or c.get("Suggested NB name") or "").strip() or "iface"
+        )
+        rk_raw = f"nic-prereq-vlan|{host}|{if_name}|{vid_i}|{grp}|{site}"
+        rk = hashlib.sha1(rk_raw.encode("utf-8", errors="ignore")).hexdigest()[:16]
+        if rk in seen:
+            continue
+        seen.add(rk)
+        ops.append(
+            {
+                "row_key": rk,
+                "selection_key": "detail_proposed_missing_vlans",
+                "prop_list_key": None,
+                "row_index": 10**9 - 1,
+                "cells": synth_cells,
+                "summary": (
+                    f"Create VLAN VID {vid_i} (auto: NIC prerequisite for {host} / {if_name})"
+                ),
+                "action": "create_vlan",
+            }
+        )
+
+
 def _inject_interface_prerequisite_ops(
     ops: list[dict[str, Any]],
     seen: set[str],
@@ -1225,6 +1552,8 @@ def _inject_interface_prerequisite_ops(
                 }
             )
             break
+
+    _append_synthetic_create_vlan_prereqs_for_interface_ops(ops, seen)
 
 
 def _normalize_selected(raw: Any) -> dict[str, list[dict[str, Any]]]:

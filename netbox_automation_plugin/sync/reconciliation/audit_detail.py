@@ -756,12 +756,14 @@ def openstack_subnets_missing_prefixes(os_subnet_hints: list):
 def openstack_floating_ips_missing_from_netbox(openstack_data: dict):
     """
     Floating IPs with no matching IPAddress in NetBox (design: runtime allocation visibility).
-    Uses exact /32 or /128 match on address field.
+
+    OpenStack returns host addresses only. NetBox ``IPAddress`` rows are matched by host
+    (``address__startswith "<host>/"``), including legacy subnet-style masks; new apply uses
+    host routes (/32 or /128) from OpenStack data.
     """
     if not openstack_data or openstack_data.get("error"):
         return []
     try:
-        import netaddr as na
         from ipam.models import IPAddress
     except Exception as e:
         logger.warning("Floating IP vs NetBox check skipped: %s", e)
@@ -782,28 +784,26 @@ def openstack_floating_ips_missing_from_netbox(openstack_data: dict):
         ip = (f.get("floating_ip_address") or "").strip()
         if not ip or ip == "-":
             continue
-        try:
-            if ":" in ip:
-                net = na.IPNetwork(f"{ip}/128")
-            else:
-                net = na.IPNetwork(f"{ip}/32")
-        except Exception:
+        host = ip.split("/", 1)[0].strip()
+        if not host:
             continue
         try:
-            exists = IPAddress.objects.filter(address=str(net)).exists()
+            exists = IPAddress.objects.filter(address__startswith=f"{host}/").exists()
         except Exception:
-            exists = IPAddress.objects.filter(address=net).exists()
+            exists = False
         if not exists:
             fnid = f.get("floating_network_id") or ""
             fnet = net_by_id.get(fnid) or {}
-            subnet_name = "-"
-            subnet_ids = fnet.get("subnets") or []
-            if isinstance(subnet_ids, list):
-                for sid in subnet_ids:
-                    sn = subnet_by_id.get(str(sid) or "")
-                    if sn and (sn.get("name") or "").strip():
-                        subnet_name = (sn.get("name") or "").strip()
-                        break
+            subnet_name = str(f.get("floating_pool_subnet_name") or "").strip()
+            if not subnet_name:
+                subnet_name = "-"
+                subnet_ids = fnet.get("subnets") or []
+                if isinstance(subnet_ids, list):
+                    for sid in subnet_ids:
+                        sn = subnet_by_id.get(str(sid) or "")
+                        if sn and (sn.get("name") or "").strip():
+                            subnet_name = (sn.get("name") or "").strip()
+                            break
             missing.append({
                 "floating_ip": ip,
                 "os_region": (f.get("os_region") or openstack_data.get("openstack_region_name") or "—")[:32],
@@ -815,6 +815,9 @@ def openstack_floating_ips_missing_from_netbox(openstack_data: dict):
                 "floating_network_id": fnid,
                 "floating_network_name": fnet.get("name") or "-",
                 "floating_subnet_name": subnet_name,
+                "floating_pool_subnet_cidr": f.get("floating_pool_subnet_cidr") or "",
+                "floating_pool_subnet_id": f.get("floating_pool_subnet_id") or "",
+                "floating_pool_subnet_name": f.get("floating_pool_subnet_name") or "",
             })
     return missing
 
@@ -836,7 +839,6 @@ def openstack_floating_ips_nat_inside_drift(openstack_data: dict) -> list[dict]:
     if not openstack_data or openstack_data.get("error"):
         return []
     try:
-        import netaddr as na
         from ipam.models import IPAddress
     except Exception as e:
         logger.warning("Floating IP NAT drift check skipped: %s", e)
@@ -857,21 +859,18 @@ def openstack_floating_ips_nat_inside_drift(openstack_data: dict) -> list[dict]:
         ip = (f.get("floating_ip_address") or "").strip()
         if not ip or ip == "-":
             continue
-        try:
-            if ":" in ip:
-                net = na.IPNetwork(f"{ip}/128")
-            else:
-                net = na.IPNetwork(f"{ip}/32")
-        except Exception:
+        host = ip.split("/", 1)[0].strip()
+        if not host:
             continue
         try:
-            ip_obj = IPAddress.objects.filter(address=str(net)).select_related(
-                "nat_inside", "vrf"
-            ).first()
+            ip_obj = (
+                IPAddress.objects.filter(address__startswith=f"{host}/")
+                .select_related("nat_inside", "vrf")
+                .order_by("pk")
+                .first()
+            )
         except Exception:
-            ip_obj = IPAddress.objects.filter(address=net).select_related(
-                "nat_inside", "vrf"
-            ).first()
+            ip_obj = None
         if ip_obj is None:
             continue
         os_fixed_raw = str(f.get("fixed_ip_address") or "").strip()
@@ -891,14 +890,16 @@ def openstack_floating_ips_nat_inside_drift(openstack_data: dict) -> list[dict]:
             continue
         fnid = f.get("floating_network_id") or ""
         fnet = net_by_id.get(fnid) or {}
-        subnet_name = "-"
-        subnet_ids = fnet.get("subnets") or []
-        if isinstance(subnet_ids, list):
-            for sid in subnet_ids:
-                sn = subnet_by_id.get(str(sid) or "")
-                if sn and (sn.get("name") or "").strip():
-                    subnet_name = (sn.get("name") or "").strip()
-                    break
+        subnet_name = str(f.get("floating_pool_subnet_name") or "").strip()
+        if not subnet_name:
+            subnet_name = "-"
+            subnet_ids = fnet.get("subnets") or []
+            if isinstance(subnet_ids, list):
+                for sid in subnet_ids:
+                    sn = subnet_by_id.get(str(sid) or "")
+                    if sn and (sn.get("name") or "").strip():
+                        subnet_name = (sn.get("name") or "").strip()
+                        break
         drift.append({
             "floating_ip": ip,
             "os_region": (f.get("os_region") or openstack_data.get("openstack_region_name") or "—")[:32],
@@ -912,6 +913,9 @@ def openstack_floating_ips_nat_inside_drift(openstack_data: dict) -> list[dict]:
             "floating_network_id": fnid,
             "floating_network_name": fnet.get("name") or "-",
             "floating_subnet_name": subnet_name,
+            "floating_pool_subnet_cidr": f.get("floating_pool_subnet_cidr") or "",
+            "floating_pool_subnet_id": f.get("floating_pool_subnet_id") or "",
+            "floating_pool_subnet_name": f.get("floating_pool_subnet_name") or "",
             "netbox_ipaddress_pk": getattr(ip_obj, "pk", "") or "",
         })
     return drift

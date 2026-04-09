@@ -36,6 +36,7 @@ from typing import Any
 
 from netbox_automation_plugin.sync.reporting.drift_report.drift_nb_picker_catalog import (
     coerce_nb_proposed_tenant_cell,
+    coerce_nb_proposed_tenant_cell_with_openstack_project,
 )
 
 # Full projection key order (includes optional ``tenant``) for recon tables when some rows omit tenant.
@@ -69,6 +70,7 @@ _NETBOX_PREVIEW_FULL_KEY_ORDER: dict[str, tuple[str, ...]] = {
         "vrf",
         "tenant",
         "nat_inside",
+        "parent_prefix",
         "description",
     ),
     "detail_existing_fips": (
@@ -78,6 +80,7 @@ _NETBOX_PREVIEW_FULL_KEY_ORDER: dict[str, tuple[str, ...]] = {
         "vrf",
         "tenant",
         "nat_inside",
+        "parent_prefix",
         "description",
     ),
     "detail_new_vms": (
@@ -375,8 +378,12 @@ def netbox_write_projection_cells(selection_key: str, cells: dict[str, str] | No
                 "status": _cell(c, "NB proposed status"),
                 "role": _cell(c, "NB proposed role"),
                 "vrf": _cell(c, "NB proposed VRF"),
-                "tenant": coerce_nb_proposed_tenant_cell(_cell(c, "NB Proposed Tenant")),
+                "tenant": coerce_nb_proposed_tenant_cell_with_openstack_project(
+                    _cell(c, "NB Proposed Tenant"),
+                    _cell(c, "Project"),
+                ),
                 "nat_inside": _cell(c, "NAT inside IP (from OpenStack fixed IP)"),
+                "parent_prefix": _cell(c, "NB proposed parent prefix"),
                 "description": ac._fip_description_from_cells(c, max_len=fd),
             }
         )
@@ -388,8 +395,12 @@ def netbox_write_projection_cells(selection_key: str, cells: dict[str, str] | No
                 "status": _cell(c, "NB proposed status"),
                 "role": _cell(c, "NB proposed role"),
                 "vrf": _cell(c, "NB proposed VRF"),
-                "tenant": coerce_nb_proposed_tenant_cell(_cell(c, "NB Proposed Tenant")),
+                "tenant": coerce_nb_proposed_tenant_cell_with_openstack_project(
+                    _cell(c, "NB Proposed Tenant"),
+                    _cell(c, "Project"),
+                ),
                 "nat_inside": _cell(c, "NAT inside IP (from OpenStack fixed IP)"),
+                "parent_prefix": _cell(c, "NB proposed parent prefix"),
                 "description": ac._fip_description_from_cells(c, max_len=fd),
             }
         )

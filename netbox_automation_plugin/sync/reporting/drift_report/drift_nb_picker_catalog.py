@@ -37,6 +37,28 @@ def coerce_nb_proposed_tenant_cell(raw: str | None) -> str:
     return ""
 
 
+def coerce_nb_proposed_tenant_cell_with_openstack_project(
+    nb_proposed_tenant_cell: str | None,
+    openstack_project_cell: str | None,
+) -> str:
+    """
+    Prefer validated **NB Proposed Tenant**; else use **Project** (OpenStack) when it matches a
+    NetBox tenant label from the drift picker catalog.
+
+    When the OS project name is not in the catalog, apply may still resolve it via
+    :func:`netbox_automation_plugin.sync.reconciliation.apply_cells._resolve_tenant`.
+    """
+    t = coerce_nb_proposed_tenant_cell(nb_proposed_tenant_cell)
+    if t:
+        return t
+    p = (openstack_project_cell or "").strip()
+    if not p or p in _PLACEHOLDER_TENANT:
+        return ""
+    if p in drift_picker_tenant_label_allowlist():
+        return p
+    return ""
+
+
 def _picker_field_values_main_branch(
     model_cls, field_name: str, user, *, restrict_view: bool = True
 ) -> list[str]:

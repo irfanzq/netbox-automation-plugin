@@ -292,7 +292,8 @@ def emit_proposed_change_tables(e, prop):
         e.paragraph(
             "Use each row as NetBox Prefix create input (CIDR + OpenStack network/project context). "
             "NB proposed status: reserved when no Neutron ports were counted on that subnet in this scan; "
-            "active when at least one port was seen (role certainty is only in Role reason). "
+            "active when at least one port was seen. "
+            "Role reason is a short one-line summary; hover the cell for the full OpenStack port narrative. "
             "NB proposed VRF is inferred from OpenStack naming signals (network/project/region text). "
             "Columns marked '(editable)' can be clicked and edited directly."
         )
@@ -313,7 +314,7 @@ def emit_proposed_change_tables(e, prop):
         e.paragraph(
             "Subnet already has an exact matching NetBox Prefix, but OpenStack-derived VRF, status, role, "
             "tenant, or description does not match. Apply matches the Prefix by CIDR and NB proposed VRF "
-            "(same handler as new prefixes)."
+            "(same handler as new prefixes). Role reason uses the same one-line summary + hover detail as new prefixes."
         )
         e.spacer()
         e.table(
@@ -347,6 +348,13 @@ def emit_proposed_change_tables(e, prop):
     if prop["add_fips"]:
         e.spacer()
         e.subtitle("Detail — new floating IPs")
+        e.paragraph(
+            "**Project** is the OpenStack project that owns the floating IP (Horizon). "
+            "**NB Proposed Tenant** defaults to that name; use the tenant picker to choose any NetBox tenant. "
+            "Floating IPs are applied as **/32** (IPv4) or **/128** (IPv6). "
+            "**NB proposed parent prefix** is the Neutron subnet CIDR on the floating external network "
+            "that contains the address (the provider pool), when resolvable from the collected subnets."
+        )
         e.spacer()
         e.table(
             list(HEADERS_DETAIL_NEW_FIPS),
@@ -362,7 +370,9 @@ def emit_proposed_change_tables(e, prop):
         e.subtitle("Detail — existing floating IPs")
         e.paragraph(
             "Floating IP exists in NetBox IPAM but NAT inside does not match OpenStack fixed IP "
-            "(reassignment or first link). Same apply handler as new FIPs."
+            "(reassignment or first link). Same apply handler as new FIPs. "
+            "**Project** is the OpenStack owner; **NB Proposed Tenant** defaults from it and can be overridden with the picker. "
+            "Apply keeps host routes (**/32** / **/128**). **NB proposed parent prefix** is the OpenStack pool CIDR when known."
         )
         e.spacer()
         e.table(

@@ -48,7 +48,12 @@ def _audit_row_to_cells(headers: list[str], row: list[Any]) -> dict[str, str]:
     out: dict[str, str] = {}
     for i, h in enumerate(headers):
         v = row[i] if i < len(row) else ""
-        out[str(h)] = "" if v is None else str(v).strip()
+        if isinstance(v, tuple) and len(v) == 2 and all(isinstance(x, str) for x in v):
+            a, b = v[0].strip(), v[1].strip()
+            v = f"{a}\n\n{b}" if b and b != a else a
+        else:
+            v = "" if v is None else str(v).strip()
+        out[str(h)] = v
     return out
 
 
