@@ -105,7 +105,7 @@
 
 {# Full-screen layer: mounted under document.body in JS so position:fixed is viewport-wide (avoids transformed ancestors in NetBox layout). #}
 <div id="maas-recon-post-create-overlay" class="d-none align-items-center justify-content-center flex-column maas-recon-post-create-overlay-root" role="dialog" aria-modal="true" aria-labelledby="maas-recon-post-create-title">
-  <div class="card shadow-lg border maas-recon-post-create-overlay-card text-center" style="max-width:36rem;width:100%;">
+  <div class="card shadow-lg maas-recon-post-create-overlay-card text-center rounded-3" style="max-width:36rem;width:100%;">
     <div class="card-body p-4">
       <div class="spinner-border text-primary mb-3" id="maas-recon-post-create-spinner" role="status" aria-hidden="true"></div>
       <p class="visually-hidden" id="maas-recon-post-create-aria">{% trans "Branch provisioning" %}</p>
@@ -113,7 +113,6 @@
       <p class="small text-muted mb-2" id="maas-recon-post-create-sub">
         {% blocktrans trimmed %}Please wait before schema checks run. The run page will open only after the last check confirms the branch session is not on PostgreSQL <code>public</code>.{% endblocktrans %}
       </p>
-      <p class="small text-body-secondary mt-2 mb-0 font-monospace d-none" id="maas-recon-post-create-overlay-status"></p>
       <div class="alert alert-danger mt-3 mb-0 py-2 small text-start d-none text-break" id="maas-recon-post-create-error" role="alert"></div>
       <button type="button" class="btn btn-warning btn-sm mt-3 d-none" id="maas-recon-post-create-retry">{% trans "Retry schema polling" %}</button>
     </div>
@@ -129,11 +128,35 @@
     padding: 1.5rem;
     overflow: auto;
     box-sizing: border-box;
-    /* Opaque scrim — do not use opacity on this node (it fades children and tables show through). */
-    background-color: var(--bs-body-bg);
+    /* Dim scrim so payload tables recede; do not lower opacity on children (card stays solid). */
+    background-color: rgba(33, 37, 41, 0.52);
+    backdrop-filter: blur(3px);
+  }
+  [data-bs-theme="dark"] .maas-recon-post-create-overlay-root {
+    background-color: rgba(0, 0, 0, 0.72);
   }
   .maas-recon-post-create-overlay-card {
-    background-color: var(--bs-body-bg) !important;
+    /* Lift panel off page/table grays (body-bg matched striped tables). */
+    background-color: var(--bs-secondary-bg) !important;
+    color: var(--bs-body-color);
+    border: 2px solid var(--bs-border-color) !important;
+    box-shadow:
+      0 0.25rem 0.5rem rgba(0, 0, 0, 0.08),
+      0 1rem 2.5rem rgba(0, 0, 0, 0.14) !important;
+  }
+  [data-bs-theme="dark"] .maas-recon-post-create-overlay-card {
+    box-shadow:
+      0 0.25rem 0.5rem rgba(0, 0, 0, 0.4),
+      0 1rem 2.5rem rgba(0, 0, 0, 0.55) !important;
+  }
+  .maas-recon-probe-json-pre {
+    background-color: var(--bs-tertiary-bg);
+    color: var(--bs-body-color);
+    border-color: var(--bs-border-color) !important;
+  }
+  .maas-recon-hints-box {
+    background-color: var(--bs-tertiary-bg);
+    border-color: var(--bs-border-color) !important;
   }
 </style>
 
@@ -154,13 +177,16 @@
     var postCreateProbeIntervalMs = {{ recon_post_create_schema_probe_interval_ms|default:5000 }};
     var postCreateProbeCount = {{ recon_post_create_schema_probe_count|default:6 }};
     var msgPhaseWait = "{% filter escapejs %}{% blocktrans trimmed %}Branch created successfully. Waiting before schema checks…{% endblocktrans %}{% endfilter %}";
-    var msgPhaseProbe = "{% filter escapejs %}{% trans 'Checking branch schema on server…' %}{% endfilter %}";
     var msgLoadingRun = "{% filter escapejs %}{% trans 'Loading changes…' %}{% endfilter %}";
     var msgErrTitle = "{% filter escapejs %}{% trans 'Branch schema is still not safe for apply.' %}{% endfilter %}";
     var msgObserved = "{% filter escapejs %}{% trans 'Observed PostgreSQL current_schema()' %}{% endfilter %}";
     var msgExpected = "{% filter escapejs %}{% trans 'Expected branch schema (from NetBox)' %}{% endfilter %}";
     var msgOrmAlias = "{% filter escapejs %}{% trans 'Django ORM alias' %}{% endfilter %}";
     var msgSearchPath = "{% filter escapejs %}{% trans 'PostgreSQL search_path (diagnostic)' %}{% endfilter %}";
+    var msgJsonDetails = "{% filter escapejs %}{% trans 'Technical details (server JSON)' %}{% endfilter %}";
+    var msgShortProbeSub = "{% filter escapejs %}{% trans 'Checking branch database session…' %}{% endfilter %}";
+    var msgHintsTitle = "{% filter escapejs %}{% trans 'Troubleshooting hints' %}{% endfilter %}";
+    var msgProbeTimeline = "{% filter escapejs %}{% trans 'All probe attempts (timeline)' %}{% endfilter %}";
     var loadingBtnHtml = '<span class="spinner-border spinner-border-sm me-1" role="status" aria-hidden="true"></span>{% filter escapejs %}{% trans "Creating branch…" %}{% endfilter %}';
     function csrf() {
       var el = document.querySelector("#recon-action-csrf input[name=csrfmiddlewaretoken]");
@@ -216,7 +242,6 @@
           if (res.body && res.body.redirect_url) {
             var dest = res.body.redirect_url;
             var overlay = document.getElementById("maas-recon-post-create-overlay");
-            var overlayStatus = document.getElementById("maas-recon-post-create-overlay-status");
             function branchSchemaPollUrl(detailUrl) {
               var base = (detailUrl || "").replace(/\/?$/, "/");
               return base + "branch-pg-schema-status/?light=1";
@@ -255,20 +280,24 @@
             function redirectToRun() {
               window.location.href = dest;
             }
-            function showSchemaFailure(data) {
+            function showSchemaFailure(data, probeHistory) {
               var d = data || {};
+              var hist = Array.isArray(probeHistory) ? probeHistory : [];
               if (spinEl) {
                 spinEl.classList.add("d-none");
               }
-              if (overlayStatus) {
-                overlayStatus.classList.add("d-none");
+              if (titleEl) {
+                titleEl.textContent = msgErrTitle;
               }
+              if (subEl) {
+                subEl.textContent = "";
+              }
+              var spVal = d.postgresql_search_path;
+              var spDisp = spVal != null && String(spVal) !== "" ? String(spVal) : "(empty)";
               var parts = [];
               parts.push("<strong>" + msgErrTitle + "</strong>");
               parts.push("<div class=\"mt-2 font-monospace\">" + msgObserved + ": <code>" + escapeHtml(String(d.postgresql_current_schema != null && d.postgresql_current_schema !== "" ? d.postgresql_current_schema : "(empty)")) + "</code></div>");
-              if (d.postgresql_search_path) {
-                parts.push("<div class=\"mt-1 font-monospace small\">" + msgSearchPath + ": <code>" + escapeHtml(String(d.postgresql_search_path)) + "</code></div>");
-              }
+              parts.push("<div class=\"mt-1 font-monospace small\">" + msgSearchPath + ": <code>" + escapeHtml(spDisp) + "</code></div>");
               if (d.expected_branch_schema) {
                 parts.push("<div class=\"mt-1 font-monospace\">" + msgExpected + ": <code>" + escapeHtml(String(d.expected_branch_schema)) + "</code></div>");
               }
@@ -278,11 +307,54 @@
               if (d.reason) {
                 parts.push("<div class=\"mt-2 small text-body-secondary\">" + escapeHtml(String(d.reason)) + "</div>");
               }
+              if (Array.isArray(d.troubleshooting_hints) && d.troubleshooting_hints.length) {
+                parts.push("<div class=\"mt-3 text-start border rounded p-2 maas-recon-hints-box\"><div class=\"small fw-semibold mb-1\">" + escapeHtml(msgHintsTitle) + "</div><ul class=\"small mb-0 ps-3\">");
+                d.troubleshooting_hints.forEach(function(h) {
+                  parts.push("<li class=\"mb-1\">" + escapeHtml(String(h)) + "</li>");
+                });
+                parts.push("</ul></div>");
+              }
+              if (hist.length > 0) {
+                parts.push("<details class=\"mt-3 text-start\"><summary class=\"small\" style=\"cursor:pointer;\">" + escapeHtml(msgProbeTimeline) + "</summary>");
+                parts.push("<div class=\"table-responsive mt-2\"><table class=\"table table-sm table-bordered small mb-0 text-start\">");
+                parts.push("<thead><tr><th>#</th><th>HTTP</th><th>ready</th><th>current_schema</th><th>search_path</th><th>SET ok</th><th>repair_detail</th></tr></thead><tbody>");
+                hist.forEach(function(row) {
+                  var b = (row && row.body) ? row.body : {};
+                  var dg = b.schema_session_diagnostics || {};
+                  var cs = b.postgresql_current_schema != null && b.postgresql_current_schema !== "" ? String(b.postgresql_current_schema) : "(empty)";
+                  var sp = b.postgresql_search_path != null && b.postgresql_search_path !== "" ? String(b.postgresql_search_path) : "(empty)";
+                  var setOk = dg.repair_set_ok === true ? "yes" : dg.repair_set_ok === false ? "no" : "—";
+                  var rd = String(dg.repair_detail || "").slice(0, 120);
+                  if (rd.length === 120) {
+                    rd += "…";
+                  }
+                  parts.push(
+                    "<tr><td>" + escapeHtml(String(row.probeIndex)) + "</td><td>" +
+                    (row.httpOk ? "ok" : "err") + "</td><td>" +
+                    escapeHtml(String(b.ready === true ? "true" : b.ready === false ? "false" : "—")) + "</td><td class=\"font-monospace\">" +
+                    escapeHtml(cs) + "</td><td class=\"font-monospace small\">" + escapeHtml(sp) + "</td><td>" +
+                    escapeHtml(setOk) + "</td><td class=\"small font-monospace\">" + escapeHtml(rd || "—") + "</td></tr>"
+                  );
+                });
+                parts.push("</tbody></table></div></details>");
+              }
               if (d.schema_mismatch_detail) {
                 parts.push("<div class=\"mt-1 small text-body-secondary font-monospace\">" + escapeHtml(String(d.schema_mismatch_detail)) + "</div>");
               }
               if (d.schema_name_compare_note) {
                 parts.push("<div class=\"mt-1 small text-body-secondary font-monospace\">" + escapeHtml(String(d.schema_name_compare_note)) + "</div>");
+              }
+              try {
+                var jsonStr = JSON.stringify(d, null, 2);
+                parts.push(
+                  "<details class=\"mt-3 text-start\"><summary class=\"small\" style=\"cursor:pointer;\">" +
+                  escapeHtml(msgJsonDetails) +
+                  "</summary><pre class=\"small mb-0 mt-2 p-2 rounded border text-start overflow-auto maas-recon-probe-json-pre\" style=\"max-height:14rem;\">" +
+                  escapeHtml(jsonStr) +
+                  "</pre></details>"
+                );
+              } catch (e2) {
+                parts.push("<div class=\"mt-2 small text-muted\">(Could not serialize probe response.)</div>");
               }
               if (errEl) {
                 errEl.innerHTML = parts.join("");
@@ -315,9 +387,7 @@
                   titleEl.textContent = msgLoadingRun;
                 }
                 if (subEl) {
-                  subEl.textContent =
-                    "{% filter escapejs %}{% trans 'Running schema checks five seconds apart; only the last result opens the run page.' %}{% endfilter %} " +
-                    "(" + postCreateProbeCount + ")";
+                  subEl.textContent = msgShortProbeSub;
                 }
               }
               function runProbePhase() {
@@ -334,12 +404,9 @@
                 setPhaseProbe();
                 var probeNum = 0;
                 var lastData = null;
+                var probeHistory = [];
                 function step() {
                   probeNum += 1;
-                  if (overlayStatus) {
-                    overlayStatus.classList.remove("d-none");
-                    overlayStatus.textContent = msgPhaseProbe + " (" + probeNum + "/" + postCreateProbeCount + ")";
-                  }
                   fetch(pollUrl, {
                     credentials: "same-origin",
                     headers: { Accept: "application/json" }
@@ -347,6 +414,11 @@
                     .then(function(r) { return r.json().then(function(j) { return { ok: r.ok, body: j }; }); })
                     .then(function(res2) {
                       lastData = res2.body || {};
+                      probeHistory.push({
+                        probeIndex: probeNum,
+                        httpOk: res2.ok,
+                        body: lastData
+                      });
                       if (probeNum < postCreateProbeCount) {
                         window.setTimeout(step, postCreateProbeIntervalMs);
                         return;
@@ -355,14 +427,19 @@
                         redirectToRun();
                         return;
                       }
-                      showSchemaFailure(lastData);
+                      showSchemaFailure(lastData, probeHistory);
                     })
                     .catch(function() {
+                      probeHistory.push({
+                        probeIndex: probeNum,
+                        httpOk: false,
+                        body: { reason: "{% filter escapejs %}{% trans 'Request failed (network or non-JSON response).' %}{% endfilter %}" }
+                      });
                       if (probeNum < postCreateProbeCount) {
                         window.setTimeout(step, postCreateProbeIntervalMs);
                         return;
                       }
-                      showSchemaFailure(lastData || { reason: "Network or server error during last schema check." });
+                      showSchemaFailure(lastData || { reason: "Network or server error during last schema check." }, probeHistory);
                     });
                 }
                 step();

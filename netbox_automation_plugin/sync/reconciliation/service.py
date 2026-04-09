@@ -4,6 +4,10 @@ Reconciliation timing, schema stability, and log verbosity use **code defaults**
 ``getattr(settings, "RECONCILIATION_*", default)``. Deployments do not need NetBox ``extra.py``
 changes unless operators want to override a specific knob.
 
+When ``current_schema()`` is empty or ``public`` on a branch alias, the plugin can run
+``SET search_path TO <Branch.schema_name>, public`` (identifier validated) before re-probing;
+disable via ``RECONCILIATION_REPAIR_SEARCH_PATH_FROM_BRANCH_MODEL = False`` if undesired.
+
 Each frozen op carries full audit ``cells`` for apply. The recon UI shows
 ``netbox_write_preview_cells`` per section: NetBox model field names (values from audit cells)
 (see ``group_reconciliation_operation_tables`` and ``AUDIT_REPORT_APPLY_ORDER``).
@@ -57,6 +61,11 @@ from .branch import (
     netbox_branch_exists,
     reconciliation_apply_guard,
     resolve_branch_django_database_alias,
+)
+from .pg_branch_session import (
+    postgresql_branch_schema_session_name_ok as _postgresql_branch_schema_session_name_ok,
+    preflight_current_schema_after_repair_attempt,
+    read_postgresql_current_schema_for_alias as _read_postgresql_current_schema_for_alias,
 )
 from .apply_cells import (
     NEW_NIC_SELECTION_KEYS,
@@ -207,7 +216,9 @@ def _close_django_db_alias_for_branch_object(branch_obj: Any) -> None:
         _close_django_db_alias_if_safe(alias)
 
 
-def _assert_branch_write_alias_not_on_public_or_raise(alias: str) -> str:
+def _assert_branch_write_alias_not_on_public_or_raise(
+    alias: str, *, branch_obj: Any | None = None
+) -> str:
     """
     Read ``current_schema()`` on the branch alias **inside** ``branch_write_context`` (no close).
 
@@ -217,7 +228,9 @@ def _assert_branch_write_alias_not_on_public_or_raise(alias: str) -> str:
     a = (alias or "").strip()
     if not a or a.lower() == "default":
         raise ValueError(_("Invalid branch Django alias for write-context schema check."))
-    cur, is_pg, err, _sp = _read_postgresql_current_schema_for_alias(a)
+    cur, is_pg, err, _sp, _diag = _read_postgresql_current_schema_for_alias(
+        a, branch_obj=branch_obj
+    )
     if err:
         raise ValueError(err)
     if not is_pg:
@@ -237,92 +250,52 @@ def _assert_branch_write_alias_not_on_public_or_raise(alias: str) -> str:
     return cur or ""
 
 
-def _read_postgresql_current_schema_for_alias(alias: str) -> tuple[str, bool, str | None, str]:
-    """
-    Return ``(current_schema, is_postgresql, error, search_path)``.
-
-    ``error`` is set when the DB connection or ``SELECT current_schema()`` fails and
-    ``is_postgresql`` is True.
-
-    ``search_path`` is ``current_setting('search_path', true)`` on PostgreSQL after a successful
-    ``current_schema()`` query (same cursor). When ``current_schema()`` is SQL NULL, an empty
-    ``search_path`` or one with no resolvable first schema is a common explanation — surfacing
-    it in staging JSON avoids mistaking NULL for a string mismatch bug.
-    """
-    try:
-        conn = connections[alias]
-        conn.ensure_connection()
-        inner = getattr(conn, "connection", None)
-        vendor = (getattr(inner, "vendor", None) or "").lower()
-        if vendor != "postgresql":
-            return "", False, None, ""
-        sp = ""
-        with conn.cursor() as cursor:
-            cursor.execute("SELECT current_schema()")
-            row = cursor.fetchone()
-            cur = (row[0] or "").strip() if row else ""
-            try:
-                cursor.execute("SELECT current_setting('search_path', true)")
-                row_sp = cursor.fetchone()
-                sp = (row_sp[0] or "").strip() if row_sp else ""
-            except Exception:
-                sp = ""
-        return cur, True, None, sp
-    except Exception as exc:
-        return "", True, f"{type(exc).__name__}: {exc}", ""
-
-
-def _postgresql_branch_schema_session_name_ok(raw: str) -> bool:
-    """
-    True when ``SELECT current_schema()`` looks like a real, non-main schema session.
-
-    Empty/whitespace reads are **not** OK (avoids preflight passing on a bad probe).
-    """
-    s = (raw or "").strip().lower()
-    return bool(s) and s != "public"
-
-
 def branch_django_alias_pg_ready_for_writes(
     branch_obj: Any, django_alias: str
-) -> tuple[bool, str, str, str]:
+) -> tuple[bool, str, str, str, dict[str, Any]]:
     """
-    Return ``(ok, error_message, last_schema_read, postgresql_search_path)``.
+    Return ``(ok, error_message, last_schema_read, postgresql_search_path, diagnostics)``.
 
     On PostgreSQL, ``ok`` is True only when ``current_schema()`` is not ``public`` — matching
     :func:`apply_cells._assert_row_apply_targets_branch_db`. Uses
     ``netbox_branching.utilities.activate_branch`` when available so the probe matches apply
     (same as :func:`branch.branch_write_context`).
+
+    ``diagnostics`` matches :func:`pg_branch_session.read_postgresql_current_schema_for_alias`
+    (repair path, for staging JSON).
     """
     alias = (django_alias or "").strip()
     if not alias or alias.lower() == "default":
-        return False, str(_("Invalid branch Django alias for schema probe.")), "", ""
+        return False, str(_("Invalid branch Django alias for schema probe.")), "", "", {}
 
-    def probe() -> tuple[bool, str, str, str]:
-        cur, is_pg, err, sp = _read_postgresql_current_schema_for_alias(alias)
+    def probe() -> tuple[bool, str, str, str, dict[str, Any]]:
+        cur, is_pg, err, sp, diag = _read_postgresql_current_schema_for_alias(
+            alias, branch_obj=branch_obj
+        )
         if err:
-            return False, err, cur, sp
+            return False, err, cur, sp, diag
         if not is_pg:
-            return True, "", cur, sp
+            return True, "", cur, sp, diag
         if not _postgresql_branch_schema_session_name_ok(cur):
-            return False, "", cur, sp
-        return True, "", cur, sp
+            return False, "", cur, sp, diag
+        return True, "", cur, sp, diag
 
     try:
         from netbox_branching.utilities import activate_branch as _nb_activate_branch
     except ImportError:
         _nb_activate_branch = None
 
-    ok, err, sch, search_path = (False, "", "", "")
+    ok, err, sch, search_path, session_diag = (False, "", "", "", {})
     if branch_obj is not None and callable(_nb_activate_branch):
         with _nb_activate_branch(branch_obj):
-            ok, err, sch, search_path = probe()
+            ok, err, sch, search_path, session_diag = probe()
     else:
-        ok, err, sch, search_path = probe()
+        ok, err, sch, search_path, session_diag = probe()
 
     if ok:
-        return True, "", sch, search_path
+        return True, "", sch, search_path, session_diag
     if err:
-        return False, err, sch, search_path
+        return False, err, sch, search_path, session_diag
     hint = ""
     try:
         sn = getattr(branch_obj, "schema_name", None)
@@ -343,6 +316,7 @@ def branch_django_alias_pg_ready_for_writes(
         ),
         sch,
         search_path,
+        session_diag,
     )
 
 
@@ -411,9 +385,9 @@ def collect_branch_routing_confirmation_or_raise(branch_obj: Any, django_db_alia
             while True:
                 attempts += 1
                 with conn.cursor() as cursor:
-                    cursor.execute("SELECT current_schema()")
-                    row = cursor.fetchone()
-                current_raw = (row[0] or "").strip() if row else ""
+                    current_raw = preflight_current_schema_after_repair_attempt(
+                        cursor, branch_obj
+                    )
                 out["postgresql_current_schema"] = current_raw
                 if not _postgresql_branch_schema_session_name_ok(current_raw):
                     if time.monotonic() >= wait_deadline:
@@ -484,9 +458,9 @@ def collect_branch_routing_confirmation_or_raise(branch_obj: Any, django_db_alia
                         )
                     conn.ensure_connection()
                     with conn.cursor() as cursor:
-                        cursor.execute("SELECT current_schema()")
-                        row = cursor.fetchone()
-                    cr = (row[0] or "").strip() if row else ""
+                        cr = preflight_current_schema_after_repair_attempt(
+                            cursor, branch_obj
+                        )
                     out["postgresql_current_schema"] = cr
                     if not _postgresql_branch_schema_session_name_ok(cr):
                         stable_failed = True
@@ -574,7 +548,9 @@ def check_branch_schema_ready(branch_obj: Any, branch_db: str) -> tuple[bool, st
     alias, err = resolve_branch_django_database_alias(branch_db, branch=branch_obj)
     if not alias:
         return (False, err)
-    ok_pg, msg_pg, _sch, _sp = branch_django_alias_pg_ready_for_writes(branch_obj, alias)
+    ok_pg, msg_pg, _sch, _sp, _diag = branch_django_alias_pg_ready_for_writes(
+        branch_obj, alias
+    )
     if not ok_pg:
         return (False, (msg_pg or "").strip() or str(_("Branch schema session not ready.")))
     return (True, "")
@@ -747,32 +723,42 @@ def branch_pg_schema_status_snapshot_for_staging_poll(
             "postgresql_search_path": "",
             "django_orm_alias": "",
             "expected_branch_schema": expected,
+            "schema_session_diagnostics": {},
+            "troubleshooting_hints": [str(_("Run has no branch id or name to load NetBox Branch."))],
         }
     branch_obj, berr = get_netbox_branch(
         branch_id=run.branch_id,
         branch_name=run.branch_name or "",
     )
     if branch_obj is None:
+        br = (berr or _("Branch not found.")).strip()
         return {
             "ready": False,
-            "reason": (berr or _("Branch not found.")).strip(),
+            "reason": br,
             "postgresql_current_schema": "",
             "postgresql_search_path": "",
             "django_orm_alias": "",
             "expected_branch_schema": expected,
+            "schema_session_diagnostics": {},
+            "troubleshooting_hints": [br],
         }
     cn = str(getattr(branch_obj, "connection_name", None) or "").strip()
     alias, res_err = resolve_branch_django_database_alias(cn, branch=branch_obj)
     if not alias:
+        rr = (res_err or "").strip()
         return {
             "ready": False,
-            "reason": (res_err or "").strip(),
+            "reason": rr,
             "postgresql_current_schema": "",
             "postgresql_search_path": "",
             "django_orm_alias": "",
             "expected_branch_schema": expected,
+            "schema_session_diagnostics": {},
+            "troubleshooting_hints": [rr or str(_("No usable branch Django database alias."))],
         }
-    ok, reason, cur, search_path = branch_django_alias_pg_ready_for_writes(branch_obj, alias)
+    ok, reason, cur, search_path, session_diag = branch_django_alias_pg_ready_for_writes(
+        branch_obj, alias
+    )
     ready = bool(ok) and _postgresql_branch_schema_session_name_ok(cur)
     out: dict[str, Any] = {
         "ready": ready,
@@ -781,6 +767,7 @@ def branch_pg_schema_status_snapshot_for_staging_poll(
         "postgresql_search_path": search_path,
         "django_orm_alias": alias,
         "expected_branch_schema": expected,
+        "schema_session_diagnostics": session_diag,
     }
     if (
         expected
@@ -791,7 +778,86 @@ def branch_pg_schema_status_snapshot_for_staging_poll(
         out["schema_name_compare_note"] = (
             f"current_schema()={cur!r} vs Branch.schema_name={expected!r} (ready still uses non-public rule)"
         )
+    out["troubleshooting_hints"] = _staging_schema_troubleshooting_hints(
+        cur, expected, session_diag
+    )
     return out
+
+
+def _staging_schema_troubleshooting_hints(
+    cur: str,
+    expected: str,
+    diag: dict[str, Any],
+) -> list[str]:
+    """Short operator-facing lines for staging overlay after failed schema poll."""
+    hints: list[str] = []
+    if _postgresql_branch_schema_session_name_ok(cur):
+        return hints
+    if not isinstance(diag, dict):
+        return hints
+    if diag.get("vendor_reported") and diag["vendor_reported"] != "postgresql":
+        hints.append(
+            str(
+                _(
+                    "Django reports database vendor %(v)r — schema probes only apply to PostgreSQL."
+                )
+                % {"v": diag.get("vendor_reported") or "unknown"}
+            )
+        )
+    if not diag.get("repair_setting_enabled"):
+        hints.append(
+            str(
+                _(
+                    "Automatic SET search_path from Branch.schema_name is disabled "
+                    "(RECONCILIATION_REPAIR_SEARCH_PATH_FROM_BRANCH_MODEL = False)."
+                )
+            )
+        )
+    raw = (diag.get("branch_schema_name_raw") or "").strip()
+    if raw and not diag.get("repair_attempted"):
+        hints.append(
+            str(
+                _("Branch.schema_name is %(n)r but first current_schema() was already usable or probe skipped repair.")
+                % {"n": raw}
+            )
+        )
+    rd = str(diag.get("repair_detail") or "")
+    if diag.get("repair_attempted") and rd and not diag.get("repair_set_ok"):
+        hints.append(
+            str(
+                _("Search-path repair did not run successfully: %(d)s")
+                % {"d": rd[:500]}
+            )
+        )
+    if diag.get("repair_set_ok"):
+        fc = (diag.get("first_current_schema") or "").strip() or "(empty)"
+        ff = (diag.get("final_current_schema") or "").strip() or "(empty)"
+        hints.append(
+            str(
+                _("After SET search_path: current_schema went from %(a)s to %(b)s.")
+                % {"a": fc, "b": ff}
+            )
+        )
+        if not (diag.get("final_current_schema") or "").strip():
+            hints.append(
+                str(
+                    _(
+                        "SET search_path reported success but current_schema() is still empty — "
+                        "check that schema %(s)s exists in PostgreSQL (information_schema.schemata) "
+                        "and review PgBouncer pooling mode if used."
+                    )
+                    % {"s": expected or raw or "—"}
+                )
+            )
+    if (diag.get("first_search_path") or "").strip() == "" and diag.get("vendor_reported") == "postgresql":
+        hints.append(
+            str(
+                _(
+                    "search_path setting was empty on first read — connection init may not have run."
+                )
+            )
+        )
+    return hints
 
 
 def _reconciliation_branch_schema_wait_sec() -> float:
@@ -3310,7 +3376,9 @@ def apply_reconciliation_run(
             except ImportError:
                 _preflight_activate_branch = None
             def _reconciliation_apply_row_loop() -> None:
-                wc_schema = _assert_branch_write_alias_not_on_public_or_raise(django_db_alias)
+                wc_schema = _assert_branch_write_alias_not_on_public_or_raise(
+                    django_db_alias, branch_obj=branch_obj
+                )
                 routing_confirmation["write_context_postgresql_current_schema"] = wc_schema
                 with reconciliation_apply_guard(branch_obj, django_db_alias):
                     for seq_num, op in enumerate(target_ops, start=1):

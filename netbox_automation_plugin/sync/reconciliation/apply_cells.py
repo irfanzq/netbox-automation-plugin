@@ -48,6 +48,9 @@ from netbox_automation_plugin.sync.reconciliation.branch import (
     get_reconciliation_apply_guard_context,
     get_netbox_plugin_active_branch,
 )
+from netbox_automation_plugin.sync.reconciliation.pg_branch_session import (
+    read_postgresql_current_schema_for_alias,
+)
 from netbox_automation_plugin.sync.reconciliation.netbox_write_projection import (
     netbox_write_projection_for_op,
 )
@@ -391,17 +394,33 @@ def _postgresql_current_schema_probe(orm_u: str) -> str:
     NetBox Branching often uses dynamic ``schema_*`` aliases whose wrapper does **not** set
     ``DatabaseWrapper.vendor`` to ``postgresql``, so checking ``conn.vendor`` falsely logs
     ``(non_postgresql)`` while real writes still hit Postgres. We probe with SQL instead.
+
+    When ``get_netbox_plugin_active_branch()`` returns a branch (inside ``activate_branch`` /
+    ``branch_write_context``), :func:`read_postgresql_current_schema_for_alias` may run
+    ``SET search_path`` from ``Branch.schema_name`` if ``current_schema()`` is empty or
+    ``public`` (see ``RECONCILIATION_REPAIR_SEARCH_PATH_FROM_BRANCH_MODEL``).
     """
     ou = (orm_u or "").strip()
     if not ou:
         return "(no_alias)"
     try:
-        conn = connections[ou]
-        conn.ensure_connection()
-        with conn.cursor() as cursor:
-            cursor.execute("SELECT current_schema()")
-            row = cursor.fetchone()
-        return (row[0] or "").strip() if row else "(empty)"
+        branch = get_netbox_plugin_active_branch()
+        cur, is_pg, err, _sp, _diag = read_postgresql_current_schema_for_alias(
+            ou, branch_obj=branch
+        )
+        if err:
+            logger.warning(
+                "current_schema() probe failed for ORM alias %s: %s",
+                ou,
+                err,
+                exc_info=True,
+            )
+            return f"(schema_probe_failed:{str(err)[:200]})"
+        if not is_pg:
+            return "(non_postgresql)"
+        if not cur:
+            return "(empty)"
+        return cur
     except Exception as exc:
         logger.warning(
             "current_schema() probe failed for ORM alias %s: %s",
