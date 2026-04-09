@@ -1460,6 +1460,28 @@ def _create_vlan_prereq_tuple(op: dict[str, Any]) -> tuple[int, str, str] | None
     return (int(vid_s), grp, site)
 
 
+def _create_vlan_vid_site_from_op(op: dict[str, Any]) -> tuple[int, str] | None:
+    """
+    (vid, site lower) for any ``create_vlan`` op, ignoring VLAN group.
+
+    Drift rows often use **Birch VLANs** while :func:`synthetic_create_vlan_cells_from_interface_prereq`
+    may infer **B52 VLANs** for the same VID. Both are valid NetBox tuples but duplicate real intent;
+    skip synthetic when any create for `(vid, site)` is already scheduled.
+    """
+    if str(op.get("action") or "") != "create_vlan":
+        return None
+    cells = op.get("cells") if isinstance(op.get("cells"), dict) else {}
+    c = {str(k): "" if v is None else str(v).strip() for k, v in cells.items()}
+    vid_s = str(c.get("NB Proposed VLAN ID") or c.get("Target VID") or "").strip()
+    site = str(c.get("NB site") or "").strip().lower()
+    if not vid_s.isdigit() or not site:
+        return None
+    try:
+        return (int(vid_s), site)
+    except ValueError:
+        return None
+
+
 def _append_synthetic_create_vlan_prereqs_for_interface_ops(
     ops: list[dict[str, Any]],
     seen: set[str],
@@ -1472,8 +1494,14 @@ def _append_synthetic_create_vlan_prereqs_for_interface_ops(
     Group comes from **NB proposed VLAN group** or a **unique** site/location-scoped VLAN group
     in NetBox that contains the VID in its ranges (see
     :func:`apply_cells.synthetic_create_vlan_cells_from_interface_prereq`).
+
+    If a ``create_vlan`` for the same **VID** and **NB site** already exists (any group — e.g.
+    audit **Birch VLANs** vs inferred **B52 VLANs**), do not add a second synthetic row.
     """
     covered = {t for o in ops if (t := _create_vlan_prereq_tuple(o)) is not None}
+    covered_vid_site = {
+        pair for o in ops if (pair := _create_vlan_vid_site_from_op(o)) is not None
+    }
     iface_src = NEW_NIC_SELECTION_KEYS | NIC_DRIFT_SELECTION_KEYS
     for o in ops:
         if str(o.get("action") or "") not in ("create_interface", "update_interface"):
@@ -1497,7 +1525,8 @@ def _append_synthetic_create_vlan_prereqs_for_interface_ops(
         key = (vid_i, grp, site)
         if key in covered:
             continue
-        covered.add(key)
+        if (vid_i, site) in covered_vid_site:
+            continue
         host = _host_key_from_recon_cells(c) or "host"
         if_name = (
             (c.get("NB intf") or c.get("Suggested NB name") or "").strip() or "iface"
@@ -1507,6 +1536,8 @@ def _append_synthetic_create_vlan_prereqs_for_interface_ops(
         if rk in seen:
             continue
         seen.add(rk)
+        covered.add(key)
+        covered_vid_site.add((vid_i, site))
         ops.append(
             {
                 "row_key": rk,
