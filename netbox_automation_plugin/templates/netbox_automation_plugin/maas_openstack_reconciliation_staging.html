@@ -105,16 +105,16 @@
 
 {# Full-screen layer: mounted under document.body in JS so position:fixed is viewport-wide (avoids transformed ancestors in NetBox layout). #}
 <div id="maas-recon-post-create-overlay" class="d-none align-items-center justify-content-center flex-column maas-recon-post-create-overlay-root" role="dialog" aria-modal="true" aria-labelledby="maas-recon-post-create-title">
-  <div class="card shadow-lg maas-recon-post-create-overlay-card text-center rounded-3" style="max-width:36rem;width:100%;">
-    <div class="card-body p-4">
-      <div class="spinner-border text-primary mb-3" id="maas-recon-post-create-spinner" role="status" aria-hidden="true"></div>
+  <div class="card shadow-lg maas-recon-post-create-overlay-card text-center rounded-3 w-100" style="max-width:36rem;">
+    <div class="card-body p-4 w-100 d-flex flex-column align-items-stretch">
+      <div class="spinner-border text-primary mb-3 align-self-center" id="maas-recon-post-create-spinner" role="status" aria-hidden="true"></div>
       <p class="visually-hidden" id="maas-recon-post-create-aria">{% trans "Branch provisioning" %}</p>
-      <h2 class="h4 mb-2" id="maas-recon-post-create-title">{% trans "Branch created" %}</h2>
-      <p class="small text-muted mb-2" id="maas-recon-post-create-sub">
+      <h2 class="h4 mb-2 maas-recon-overlay-title" id="maas-recon-post-create-title">{% trans "Branch created" %}</h2>
+      <p class="small mb-2 w-100 maas-recon-overlay-sub" id="maas-recon-post-create-sub">
         {% blocktrans trimmed %}Please wait before schema checks run. The run page will open only after the last check confirms the branch session is not on PostgreSQL <code>public</code>.{% endblocktrans %}
       </p>
-      <div class="alert alert-danger mt-3 mb-0 py-2 small text-start d-none text-break" id="maas-recon-post-create-error" role="alert"></div>
-      <button type="button" class="btn btn-warning btn-sm mt-3 d-none" id="maas-recon-post-create-retry">{% trans "Retry schema polling" %}</button>
+      <div class="alert alert-danger mt-3 mb-0 py-2 small text-start d-none w-100 maas-recon-overlay-error" id="maas-recon-post-create-error" role="alert"></div>
+      <button type="button" class="btn btn-warning btn-sm mt-3 d-none align-self-center" id="maas-recon-post-create-retry">{% trans "Retry schema polling" %}</button>
     </div>
   </div>
 </div>
@@ -135,8 +135,58 @@
   [data-bs-theme="dark"] .maas-recon-post-create-overlay-root {
     background-color: rgba(0, 0, 0, 0.72);
   }
+  .maas-recon-overlay-title {
+    color: var(--bs-emphasis-color);
+  }
+  .maas-recon-overlay-sub {
+    color: var(--bs-emphasis-color);
+    text-align: center;
+  }
+  .maas-recon-overlay-sub code {
+    color: inherit;
+  }
+  .maas-recon-overlay-error {
+    color: var(--bs-danger-text-emphasis);
+    overflow-wrap: break-word;
+    word-break: normal;
+    min-width: 0;
+  }
+  /* Override alert flex row so failure UI is not split into ultra-narrow columns. */
+  #maas-recon-post-create-error.alert {
+    display: block !important;
+    flex-direction: column !important;
+    align-items: stretch !important;
+  }
+  #maas-recon-post-create-error .maas-recon-schema-failure-body {
+    display: block;
+    width: 100%;
+    min-width: 0;
+    text-align: left;
+  }
+  #maas-recon-post-create-error .maas-recon-schema-failure-body > strong {
+    display: block;
+    width: 100%;
+  }
+  #maas-recon-post-create-error details {
+    display: block;
+    width: 100%;
+    max-width: 100%;
+  }
+  #maas-recon-post-create-error summary {
+    width: 100%;
+    max-width: 100%;
+  }
+  #maas-recon-post-create-error .table-responsive {
+    width: 100%;
+    max-width: 100%;
+  }
+  #maas-recon-post-create-error table {
+    width: 100%;
+    table-layout: auto;
+  }
   .maas-recon-post-create-overlay-card {
     /* Lift panel off page/table grays (body-bg matched striped tables). */
+    min-width: min(100%, 18rem);
     background-color: var(--bs-secondary-bg) !important;
     color: var(--bs-body-color);
     border: 2px solid var(--bs-border-color) !important;
@@ -157,6 +207,10 @@
   .maas-recon-hints-box {
     background-color: var(--bs-tertiary-bg);
     border-color: var(--bs-border-color) !important;
+    color: var(--bs-body-color);
+  }
+  .maas-recon-hints-box li {
+    color: var(--bs-emphasis-color);
   }
 </style>
 
@@ -357,7 +411,11 @@
                 parts.push("<div class=\"mt-2 small text-muted\">(Could not serialize probe response.)</div>");
               }
               if (errEl) {
-                errEl.innerHTML = parts.join("");
+                /* One wrapper: NetBox/Bootstrap .alert uses flex row; many siblings = one “column” per node → vertical letters. */
+                errEl.innerHTML =
+                  "<div class=\"maas-recon-schema-failure-body w-100\">" +
+                  parts.join("") +
+                  "</div>";
                 errEl.classList.remove("d-none");
               }
               if (retryEl) {

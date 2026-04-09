@@ -375,7 +375,8 @@ def collect_branch_routing_confirmation_or_raise(branch_obj: Any, django_db_alia
         inner = getattr(conn, "connection", None)
         vendor = (getattr(inner, "vendor", None) or "").lower()
         out["postgresql_vendor"] = vendor or None
-        if vendor == "postgresql":
+        # Branch schema_* aliases may report no vendor on the DB wrapper; still run PG probes.
+        if (not vendor) or (vendor == "postgresql"):
             wait_deadline = time.monotonic() + _reconciliation_branch_schema_wait_sec()
             poll_step = _reconciliation_pg_schema_poll_interval_sec()
             stable_passes = _reconciliation_preflight_schema_stable_passes()
@@ -795,13 +796,14 @@ def _staging_schema_troubleshooting_hints(
         return hints
     if not isinstance(diag, dict):
         return hints
-    if diag.get("vendor_reported") and diag["vendor_reported"] != "postgresql":
+    vr = str(diag.get("vendor_reported") or "")
+    if vr and vr not in ("postgresql", "unset"):
         hints.append(
             str(
                 _(
                     "Django reports database vendor %(v)r — schema probes only apply to PostgreSQL."
                 )
-                % {"v": diag.get("vendor_reported") or "unknown"}
+                % {"v": vr}
             )
         )
     if not diag.get("repair_setting_enabled"):
@@ -849,7 +851,9 @@ def _staging_schema_troubleshooting_hints(
                     % {"s": expected or raw or "—"}
                 )
             )
-    if (diag.get("first_search_path") or "").strip() == "" and diag.get("vendor_reported") == "postgresql":
+    if (diag.get("first_search_path") or "").strip() == "" and str(
+        diag.get("vendor_reported") or ""
+    ) in ("postgresql", "unset"):
         hints.append(
             str(
                 _(

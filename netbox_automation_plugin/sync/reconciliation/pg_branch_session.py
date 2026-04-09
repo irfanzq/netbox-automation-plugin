@@ -118,8 +118,11 @@ def read_postgresql_current_schema_for_alias(
         conn.ensure_connection()
         inner = getattr(conn, "connection", None)
         vendor = (getattr(inner, "vendor", None) or "").lower()
-        diag["vendor_reported"] = vendor or ""
-        if vendor != "postgresql":
+        # NetBox ``schema_*`` dynamic aliases often omit ``vendor`` on the inner wrapper; still
+        # run ``current_schema()`` probes (same as apply row logging). Only skip when vendor is
+        # explicitly a non-PostgreSQL backend.
+        diag["vendor_reported"] = vendor if vendor else "unset"
+        if vendor and vendor != "postgresql":
             diag["final_current_schema"] = ""
             diag["final_search_path"] = ""
             return "", False, None, "", diag
