@@ -62,9 +62,7 @@ HEADERS_DETAIL_NEW_PREFIXES: list[str] = [
     "OS region",
     "CIDR",
     "OS Description",
-    "Project",
     "NB Proposed Prefix description (editable)",
-    "NB Proposed Tenant",
     "NB Proposed Scope",
     "NB Proposed VLAN",
     "NB proposed role",
@@ -92,14 +90,12 @@ HEADERS_DETAIL_EXISTING_PREFIXES: list[str] = [
     "OS region",
     "CIDR",
     "OS Description",
-    "Project",
     "NB current VRF",
     "NB current status",
     "NB current role",
     "NB current tenant",
     "NB current description",
     "NB Proposed Prefix description (editable)",
-    "NB Proposed Tenant",
     "NB Proposed Scope",
     "NB Proposed VLAN",
     "NB proposed role",
@@ -554,6 +550,35 @@ def coerce_add_proposed_missing_vlan_row_lengths(prop: dict) -> None:
         _strip_legacy_proposed_missing_vlan_tenant_status_columns(mv)
 
 
+_LEGACY_NEW_PREFIX_ROW_LEN = 14  # before dropping Project + NB Proposed Tenant (12 cols now)
+_LEGACY_EXISTING_PREFIX_ROW_LEN = 20  # before dropping those two (18 cols now)
+
+
+def coerce_legacy_openstack_prefix_row_lengths(prop: dict) -> None:
+    """
+    In-place: older audit rows included **Project** and **NB Proposed Tenant** on prefix tables.
+    Strip those cells when the row length matches the legacy shape so headers and HTML line up.
+    """
+    ap = prop.get("add_prefixes")
+    if isinstance(ap, list):
+        for i, r in enumerate(ap):
+            if not isinstance(r, (list, tuple)):
+                continue
+            row = list(r)
+            if len(row) != _LEGACY_NEW_PREFIX_ROW_LEN:
+                continue
+            ap[i] = row[:3] + row[4:5] + row[6:]
+    up = prop.get("update_prefixes")
+    if isinstance(up, list):
+        for i, r in enumerate(up):
+            if not isinstance(r, (list, tuple)):
+                continue
+            row = list(r)
+            if len(row) != _LEGACY_EXISTING_PREFIX_ROW_LEN:
+                continue
+            up[i] = row[:3] + row[4:10] + row[11:]
+
+
 def _strip_legacy_proposed_missing_vlan_tenant_status_columns(rows: list) -> None:
     """
     Older drift rows included **NB Proposed Tenant** and **NB proposed status** before
@@ -599,6 +624,7 @@ def merge_drift_review_overrides(
     p = copy.deepcopy(prop)
     a = [list(r) for r in align_rows]
     coerce_add_proposed_missing_vlan_row_lengths(p)
+    coerce_legacy_openstack_prefix_row_lengths(p)
     if not overrides:
         return p, a
     for sel_key, section in overrides.items():

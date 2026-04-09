@@ -6,9 +6,10 @@ there; apply handlers should read those same projected strings where possible so
 writes stay aligned.
 
 ``apply_row_operation`` narrows each row to reconciliation-preview source columns (plus
-workflow fields: Proposed Action, Status, Risk, Authority). Generic columns use
-non-placeholder heuristic; **NB Proposed Tenant** is kept only when the value matches the
-drift tenant picker catalog (otherwise omitted—never derived from free text).
+workflow fields: Proposed Action, Status, Risk, Authority). Generic columns use a
+non-placeholder heuristic. **NB Proposed Tenant** is coerced via the drift tenant picker
+catalog for sections that still expose that column (e.g. floating IPs, VMs); values not in
+the catalog are omitted from scoped cells.
 
 Execution order (new devices → proposed missing VLANs → placement → NICs → IPAM/VMs, etc.)
 is enforced in ``service.apply_reconciliation_run`` via ``AUDIT_REPORT_APPLY_ORDER`` and
@@ -1581,9 +1582,7 @@ _NEW_PREFIX_DRIFT_SNAPSHOT_HEADERS: tuple[str, ...] = (
     "OS region",
     "CIDR",
     "OS Description",
-    "Project",
     "NB Proposed Prefix description (editable)",
-    "NB Proposed Tenant",
     "NB Proposed Scope",
     "NB Proposed VLAN",
     "NB proposed role",
@@ -1596,7 +1595,6 @@ _NEW_PREFIX_DRIFT_SNAPSHOT_HEADERS: tuple[str, ...] = (
 _NEW_PREFIX_DRIFT_TO_CF_KEYS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("OS region", ("openstack_region", "os_region", "region")),
     ("OS Description", ("openstack_description", "os_description", "os_subnet_description")),
-    ("Project", ("openstack_project", "project")),
     ("Role reason", ("role_reason", "drift_role_reason")),
     ("Authority", ("drift_authority", "authority")),
 )
@@ -1672,7 +1670,6 @@ def _prefix_apply_row_stepwise_changelog(
     vrf: Any,
     status_name: str,
     role: Any,
-    tenant: Any,
     scope_obj: Any,
     vlan_obj: Any,
     full_descr: str,
@@ -1680,7 +1677,10 @@ def _prefix_apply_row_stepwise_changelog(
 ) -> bool:
     """
     Apply prefix row fields with one save per changed attribute so netbox-branching diffs
-    list vrf/status/role/tenant/scope/vlan/description (not only the first delta).
+    list vrf/status/role/scope/vlan/description (not only the first delta).
+
+    OpenStack prefix drift does not propose ``Prefix.tenant``; existing tenant on update is
+    left unchanged.
     """
     from ipam.models import Prefix
 
@@ -1707,13 +1707,6 @@ def _prefix_apply_row_stepwise_changelog(
             prefix_obj.role = role
             prefix_obj.save(**_save_branch())
         any_save = True
-    if tenant is not None and hasattr(prefix_obj, "tenant_id"):
-        if prefix_obj.tenant_id != tenant.pk:
-            with _tx_branch():
-                _netbox_changelog_snapshot(prefix_obj)
-                prefix_obj.tenant = tenant
-                prefix_obj.save(**_save_branch())
-            any_save = True
     if scope_obj is not None and hasattr(prefix_obj, "scope"):
         cur = getattr(prefix_obj, "scope", None)
         if cur is None or getattr(cur, "pk", None) != scope_obj.pk:
@@ -2101,7 +2094,6 @@ def apply_create_prefix(op: dict[str, Any]) -> tuple[str, str]:
     vrf_name = (proj.get("vrf") or "").strip()
     status_name = (proj.get("status") or "").strip()
     role_name = (proj.get("role") or "").strip()
-    tenant_name = (proj.get("tenant") or "").strip()
     scope_name = (proj.get("scope") or "").strip()
     vlan_name = (proj.get("vlan") or "").strip()
     full_descr = (proj.get("description") or "").strip()
@@ -2114,12 +2106,6 @@ def apply_create_prefix(op: dict[str, Any]) -> tuple[str, str]:
     role = _resolve_by_name(Role, role_name, using=_orm_alias()) if role_name else None
     if role_name and role is None:
         return _skip_missing_prereq(f'IPAM role "{role_name}" not found in NetBox (create it or fix NB proposed role).')
-    # NetBox: Prefix.tenant is optional; only resolve when the audit cell is non-empty.
-    tenant = None
-    if tenant_name and tenant_name not in {"—", "-"}:
-        tenant = _resolve_tenant(tenant_name, using=_orm_alias())
-        if tenant is None:
-            return _skip_missing_prereq(f'Tenant "{tenant_name}" not found in NetBox (create it or fix NB Proposed Tenant).')
     scope_obj = None
     if scope_name and scope_name not in {"—", "-"}:
         try:
@@ -2167,7 +2153,6 @@ def apply_create_prefix(op: dict[str, Any]) -> tuple[str, str]:
             vrf=vrf,
             status_name=status_name,
             role=role,
-            tenant=tenant,
             scope_obj=scope_obj,
             vlan_obj=vlan_obj,
             full_descr=full_descr,
@@ -2212,8 +2197,6 @@ def apply_create_prefix(op: dict[str, Any]) -> tuple[str, str]:
                     pfx.status = val
             if role is not None:
                 pfx.role = role
-            if tenant is not None and hasattr(pfx, "tenant"):
-                pfx.tenant = tenant
             if scope_obj is not None and hasattr(pfx, "scope"):
                 pfx.scope = scope_obj
             if vlan_obj is not None and hasattr(pfx, "vlan"):
@@ -2234,7 +2217,6 @@ def apply_create_prefix(op: dict[str, Any]) -> tuple[str, str]:
             vrf=None,
             status_name=status_name,
             role=role,
-            tenant=tenant,
             scope_obj=scope_obj,
             vlan_obj=vlan_obj,
             full_descr=full_descr,
@@ -2247,7 +2229,6 @@ def apply_create_prefix(op: dict[str, Any]) -> tuple[str, str]:
         vrf=None,
         status_name=status_name,
         role=role,
-        tenant=tenant,
         scope_obj=scope_obj,
         vlan_obj=vlan_obj,
         full_descr=full_descr,
@@ -4831,7 +4812,6 @@ def _netbox_preview_source_header_norms(selection_key: str) -> frozenset[str] | 
             "NB proposed VRF",
             "NB proposed status",
             "NB proposed role",
-            "NB Proposed Tenant",
             "NB Proposed Scope",
             "NB Proposed VLAN",
             "NB Proposed Prefix description (editable)",
@@ -4843,7 +4823,6 @@ def _netbox_preview_source_header_norms(selection_key: str) -> frozenset[str] | 
             "NB proposed VRF",
             "NB proposed status",
             "NB proposed role",
-            "NB Proposed Tenant",
             "NB Proposed Scope",
             "NB Proposed VLAN",
             "NB Proposed Prefix description (editable)",

@@ -179,9 +179,11 @@ def _html_nb_picker_wrap(
     """Wrap already-escaped cell HTML in a NetBox choice picker (search + scroll)."""
     safe_kind = html.escape(kind, quote=True)
     extra = ""
-    if (
-        kind == "tenant"
-        and selection_key in ("detail_new_fips", "detail_existing_fips")
+    if kind == "tenant" and selection_key in (
+        "detail_new_fips",
+        "detail_existing_fips",
+        "detail_new_vms",
+        "detail_existing_vms",
     ):
         extra += ' data-drift-tenant-allow-unlisted="1"'
     if col_header and selection_key and row_idx != "":
@@ -264,10 +266,14 @@ def _html_col_is_role_reason(header) -> bool:
     return str(header or "").strip().lower() == "role reason"
 
 
+def _html_col_is_os_description(header) -> bool:
+    """OpenStack subnet/network label — keep on one line (not the wrap-friendly prefix-desc column)."""
+    return str(header or "").strip().lower() == "os description"
+
+
 def _html_col_is_prefix_description(header) -> bool:
     h = str(header or "").strip().lower()
     return h in {
-        "os description",
         "nb prefix description",
         "nb proposed prefix description",
         "nb proposed prefix description (editable)",
@@ -300,6 +306,8 @@ def _html_col_is_ip(header) -> bool:
 
 def _html_th_class(header) -> str:
     h = str(header or "")
+    if _html_col_is_os_description(h):
+        return "small align-bottom text-nowrap drift-col-os-description"
     if _html_col_is_prefix_description(h):
         return "small align-bottom drift-col-prefix-description"
     if _html_col_is_maas_fabric(h):
@@ -319,7 +327,9 @@ def _html_th_class(header) -> str:
 def _html_td_class(header, col_idx, notes_col_idx=None) -> str:
     h = str(header or "")
     parts = []
-    if _html_col_is_prefix_description(h):
+    if _html_col_is_os_description(h):
+        parts.extend(["align-top", "text-nowrap", "drift-col-os-description"])
+    elif _html_col_is_prefix_description(h):
         parts.extend(["align-top", "drift-col-prefix-description"])
     elif _html_col_is_role_reason(h):
         parts.extend(["align-top", "drift-col-role-reason", "text-nowrap"])

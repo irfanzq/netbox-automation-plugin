@@ -42,14 +42,14 @@ from netbox_automation_plugin.sync.reporting.drift_report.drift_nb_picker_catalo
     coerce_nb_proposed_tenant_cell,
 )
 
-# Full projection key order (includes optional ``tenant``) for recon tables when some rows omit tenant.
+# Full projection key order for recon preview tables. Optional ``tenant`` appears only on rows
+# that still project it (FIPs, VMs); OpenStack prefix rows do not.
 _NETBOX_PREVIEW_FULL_KEY_ORDER: dict[str, tuple[str, ...]] = {
     "detail_new_prefixes": (
         "prefix",
         "vrf",
         "status",
         "role",
-        "tenant",
         "scope",
         "vlan",
         "vlan_group",
@@ -60,7 +60,6 @@ _NETBOX_PREVIEW_FULL_KEY_ORDER: dict[str, tuple[str, ...]] = {
         "vrf",
         "status",
         "role",
-        "tenant",
         "scope",
         "vlan",
         "vlan_group",
@@ -339,34 +338,28 @@ def netbox_write_projection_cells(selection_key: str, cells: dict[str, str] | No
         return _device_netbox_write_preview(c)
     if sk == "detail_new_prefixes":
         pd = ac._prefix_description_max_len()
-        return _drop_empty_tenant(
-            {
-                "prefix": _cell(c, "CIDR"),
-                "vrf": _cell(c, "NB proposed VRF"),
-                "status": _cell(c, "NB proposed status"),
-                "role": _cell(c, "NB proposed role"),
-                "tenant": coerce_nb_proposed_tenant_cell(_cell(c, "NB Proposed Tenant")),
-                "scope": _prefix_scope_cell(c, _cell),
-                "vlan": _cell(c, "NB Proposed VLAN"),
-                "vlan_group": _cell(c, "NB proposed VLAN group"),
-                "description": ac._prefix_description_from_cells(c, max_len=pd),
-            }
-        )
+        return {
+            "prefix": _cell(c, "CIDR"),
+            "vrf": _cell(c, "NB proposed VRF"),
+            "status": _cell(c, "NB proposed status"),
+            "role": _cell(c, "NB proposed role"),
+            "scope": _prefix_scope_cell(c, _cell),
+            "vlan": _cell(c, "NB Proposed VLAN"),
+            "vlan_group": _cell(c, "NB proposed VLAN group"),
+            "description": ac._prefix_description_from_cells(c, max_len=pd),
+        }
     if sk == "detail_existing_prefixes":
         pd = ac._prefix_description_max_len()
-        return _drop_empty_tenant(
-            {
-                "prefix": _cell(c, "CIDR"),
-                "vrf": _cell(c, "NB proposed VRF"),
-                "status": _cell(c, "NB proposed status"),
-                "role": _cell(c, "NB proposed role"),
-                "tenant": coerce_nb_proposed_tenant_cell(_cell(c, "NB Proposed Tenant")),
-                "scope": _prefix_scope_cell(c, _cell),
-                "vlan": _cell(c, "NB Proposed VLAN"),
-                "vlan_group": _cell(c, "NB proposed VLAN group"),
-                "description": ac._prefix_description_from_cells(c, max_len=pd),
-            }
-        )
+        return {
+            "prefix": _cell(c, "CIDR"),
+            "vrf": _cell(c, "NB proposed VRF"),
+            "status": _cell(c, "NB proposed status"),
+            "role": _cell(c, "NB proposed role"),
+            "scope": _prefix_scope_cell(c, _cell),
+            "vlan": _cell(c, "NB Proposed VLAN"),
+            "vlan_group": _cell(c, "NB proposed VLAN group"),
+            "description": ac._prefix_description_from_cells(c, max_len=pd),
+        }
     if sk == "detail_new_ip_ranges":
         return {
             "start_address": _cell(c, "Start address"),

@@ -14,6 +14,7 @@ from netbox_automation_plugin.sync.reporting.drift_report.fabric_alignment impor
 )
 from netbox_automation_plugin.sync.reporting.drift_report.drift_overrides_apply import (
     coerce_add_proposed_missing_vlan_row_lengths,
+    coerce_legacy_openstack_prefix_row_lengths,
     merge_drift_review_overrides,
     normalize_drift_review_overrides,
 )
@@ -82,6 +83,7 @@ def format_drift_report(
         os_subnet_hints=os_subnet_hints or [],
     )
     coerce_add_proposed_missing_vlan_row_lengths(prop)
+    coerce_legacy_openstack_prefix_row_lengths(prop)
     norm = normalize_drift_review_overrides(drift_overrides)
     if norm:
         prop, align_rows = merge_drift_review_overrides(prop, align_rows, norm)

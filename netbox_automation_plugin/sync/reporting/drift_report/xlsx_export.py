@@ -41,6 +41,7 @@ from netbox_automation_plugin.sync.reporting.drift_report.drift_overrides_apply 
     HEADERS_PLACEMENT_ALIGNMENT,
     HEADERS_SERIAL_REVIEW,
     coerce_add_proposed_missing_vlan_row_lengths,
+    coerce_legacy_openstack_prefix_row_lengths,
     merge_drift_review_overrides,
     normalize_drift_review_overrides,
     _new_nic_row_is_os_authority,
@@ -317,6 +318,7 @@ def build_drift_report_xlsx(
         os_subnet_hints=os_subnet_hints or [],
     )
     coerce_add_proposed_missing_vlan_row_lengths(prop)
+    coerce_legacy_openstack_prefix_row_lengths(prop)
     norm = normalize_drift_review_overrides(drift_overrides)
     if norm:
         prop, align_rows_x = merge_drift_review_overrides(prop, align_rows_x, norm)

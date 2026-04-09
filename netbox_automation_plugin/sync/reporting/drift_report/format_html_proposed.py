@@ -34,7 +34,6 @@ _PROPOSED_NB_PICK_DEVICE = {
     "NB proposed platform": "platform",
 }
 _PROPOSED_NB_PICK_PREFIX = {
-    "NB Proposed Tenant": "tenant",
     "NB Proposed Scope": "scope_location",
     "NB Proposed VLAN": "vlan",
     "NB proposed role": "prefix_role",
@@ -99,7 +98,7 @@ def emit_proposed_change_tables(e, prop):
             [
                 "Existing prefixes (OpenStack drift)",
                 str(len(prop.get("update_prefixes", []))),
-                "Prefix exists; VRF/status/role/tenant/description differ from OpenStack-derived proposal",
+                "Prefix exists; VRF/status/role/description differ from OpenStack-derived proposal",
             ],
             ["New floating IPs (OpenStack authority)", str(len(prop["add_fips"])), "FIP not in IPAM"],
             [

@@ -95,6 +95,39 @@ def _drift_audit_scope_choices():
     return site_choices, location_choices, location_meta, site_meta
 
 
+def _drift_scope_form_blank_labels():
+    """Placeholder labels for required site/location dropdowns."""
+    return str(_("— Select site —")), str(_("— Select location —"))
+
+
+def _drift_scope_location_rows(location_choices, location_meta) -> list[dict]:
+    """Rows for the location ``<select>`` (value, label, site_slug for client-side filtering)."""
+    rows: list[dict] = []
+    for key, label in location_choices:
+        ks = (key or "").strip()
+        if not ks:
+            continue
+        meta = location_meta.get(key) or {}
+        site_slug = (meta.get("site_slug") or "").strip()
+        if not site_slug and "::" in ks:
+            site_slug = ks.split("::", 1)[0].strip()
+        rows.append({"value": key, "label": label, "site_slug": site_slug})
+    return rows
+
+
+def _drift_scope_form_with_blanks():
+    """
+    Drift audit scope form choices with leading empty options, plus location row metadata
+    for filtering locations to the selected site in the browser.
+    """
+    site_choices, location_choices, location_meta, site_meta = _drift_audit_scope_choices()
+    blank_site, blank_loc = _drift_scope_form_blank_labels()
+    site_choices_b = [("", blank_site)] + list(site_choices)
+    location_choices_b = [("", blank_loc)] + list(location_choices)
+    location_rows = _drift_scope_location_rows(location_choices_b, location_meta)
+    return site_choices_b, location_choices_b, location_meta, site_meta, location_rows
+
+
 def _live_baseline_xlsx_download_uri(request, audit_run_id=None) -> str:
     path = reverse("plugins:netbox_automation_plugin:maas_openstack_sync_download_xlsx")
     if audit_run_id:
@@ -731,10 +764,12 @@ class MAASOpenStackSyncView(LoginRequiredMixin, View):
     template_name = "netbox_automation_plugin/maas_openstack_sync_form.html"
 
     def get(self, request):
-        site_choices, location_choices, location_meta, _ = _drift_audit_scope_choices()
+        site_choices_b, location_choices_b, location_meta, _, location_rows = (
+            _drift_scope_form_with_blanks()
+        )
         form = MAASOpenStackSyncForm(
-            site_choices=site_choices,
-            location_choices=location_choices,
+            site_choices=site_choices_b,
+            location_choices=location_choices_b,
             location_meta=location_meta,
         )
         raw_resume = request.GET.get("drift_run_id")
@@ -755,6 +790,7 @@ class MAASOpenStackSyncView(LoginRequiredMixin, View):
                         self.template_name,
                         {
                             "form": form,
+                            "drift_scope_location_rows": location_rows,
                             "report_drift": report_drift,
                             "report_drift_markup": report_drift_markup,
                             "report_reference": audit_run.report_reference or "",
@@ -769,10 +805,24 @@ class MAASOpenStackSyncView(LoginRequiredMixin, View):
                             **_reconciliation_ui_context(request),
                         },
                     )
-        return render(request, self.template_name, {"form": form, "recent_runs": _recent_drift_runs()})
+        return render(
+            request,
+            self.template_name,
+            {
+                "form": form,
+                "drift_scope_location_rows": location_rows,
+                "recent_runs": _recent_drift_runs(),
+            },
+        )
 
     def post(self, request):
-        site_choices, location_choices, location_meta, site_meta = _drift_audit_scope_choices()
+        (
+            site_choices_b,
+            location_choices_b,
+            location_meta,
+            site_meta,
+            location_rows,
+        ) = _drift_scope_form_with_blanks()
         post_data = request.POST.copy()
         if "sites" not in post_data:
             post_data["sites"] = ""
@@ -780,16 +830,32 @@ class MAASOpenStackSyncView(LoginRequiredMixin, View):
             post_data["locations"] = ""
         form = MAASOpenStackSyncForm(
             post_data,
-            site_choices=site_choices,
-            location_choices=location_choices,
+            site_choices=site_choices_b,
+            location_choices=location_choices_b,
             location_meta=location_meta,
         )
         if not form.is_valid():
-            return render(request, self.template_name, {"form": form, "recent_runs": _recent_drift_runs()})
+            return render(
+                request,
+                self.template_name,
+                {
+                    "form": form,
+                    "drift_scope_location_rows": location_rows,
+                    "recent_runs": _recent_drift_runs(),
+                },
+            )
 
         mode = (form.cleaned_data.get("mode") or "audit").strip()
         if mode != "audit":
-            return render(request, self.template_name, {"form": form, "recent_runs": _recent_drift_runs()})
+            return render(
+                request,
+                self.template_name,
+                {
+                    "form": form,
+                    "drift_scope_location_rows": location_rows,
+                    "recent_runs": _recent_drift_runs(),
+                },
+            )
 
         site_val = (form.cleaned_data.get("sites") or "").strip()
         loc_val = (form.cleaned_data.get("locations") or "").strip()
@@ -868,6 +934,7 @@ class MAASOpenStackSyncView(LoginRequiredMixin, View):
                         self.template_name,
                         {
                             "form": form,
+                            "drift_scope_location_rows": location_rows,
                             "report_drift": report_drift,
                             "report_drift_markup": report_drift_markup,
                             "report_reference": report_reference,
@@ -1418,6 +1485,7 @@ class MAASOpenStackSyncView(LoginRequiredMixin, View):
                 self.template_name,
                 {
                     "form": form,
+                    "drift_scope_location_rows": location_rows,
                     "report_drift": report_drift,
                     "report_drift_markup": report_drift_markup,
                     "report_reference": report_reference,
@@ -1442,6 +1510,7 @@ class MAASOpenStackSyncView(LoginRequiredMixin, View):
             self.template_name,
             {
                 "form": form,
+                "drift_scope_location_rows": location_rows,
                 "report_drift": report_drift,
                 "report_drift_markup": report_drift_markup,
                 "report_reference": report_reference,

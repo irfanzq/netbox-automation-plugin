@@ -23,8 +23,12 @@ class MAASOpenStackSyncForm(forms.Form):
             "required": _("Select a site."),
             "invalid_choice": _("Select a valid site."),
         },
-        widget=forms.RadioSelect(
-            attrs={"class": "form-check-input"},
+        widget=forms.Select(
+            attrs={
+                "class": "form-select",
+                "id": "id_sites",
+                "aria-required": "true",
+            },
         ),
         help_text=_("Required. Choose one NetBox site to scope the drift audit."),
     )
@@ -37,8 +41,12 @@ class MAASOpenStackSyncForm(forms.Form):
             "required": _("Select a location."),
             "invalid_choice": _("Select a valid location."),
         },
-        widget=forms.RadioSelect(
-            attrs={"class": "form-check-input"},
+        widget=forms.Select(
+            attrs={
+                "class": "form-select",
+                "id": "id_locations",
+                "aria-required": "true",
+            },
         ),
         help_text=_(
             "Required. Choose one location under that site; OpenStack sections use the same scope."

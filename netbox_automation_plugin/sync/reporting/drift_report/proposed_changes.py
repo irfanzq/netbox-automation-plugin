@@ -1654,9 +1654,7 @@ def _proposed_changes_rows(
             g.get("os_region") or "—",
             g.get("cidr", ""),
             os_desc,
-            "—",
             os_desc,
-            DRIFT_NB_PROPOSED_TENANT_DEFAULT,
             nb_scope,
             nb_vlan,
             role_name,
@@ -1716,12 +1714,6 @@ def _proposed_changes_rows(
             vrf_name = _suggest_vrf_for_prefix_gap(g, selected_locations)
             sugg_status = _suggest_prefix_status(g)
             os_desc = _first_meaningful_text(g.get("subnet_name"), g.get("network_name"))
-            tenant_name = str(
-                g.get("project_owner_name")
-                or g.get("project_name")
-                or g.get("project_id")
-                or "-"
-            )
             nb_scope = _suggest_scope_location_from_os_region(g.get("os_region") or "")
             nb_vlan = _suggest_vlan_from_os_segmentation_id(g.get("provider_segmentation_id"))
             try:
@@ -1758,10 +1750,6 @@ def _proposed_changes_rows(
                 drift_parts.append(f"status {cur_status!r} → {sugg_status!r}")
             if (cur_role or "—") != (role_name or "—"):
                 drift_parts.append(f"role {cur_role!r} → {role_name!r}")
-            ct = (cur_tenant or "—").strip()
-            tt = (tenant_name or "—").strip()
-            if ct != tt and tt not in {"—", "-", ""}:
-                drift_parts.append("tenant")
             if cur_desc != (os_desc or "").strip()[:200] and (os_desc or "").strip():
                 drift_parts.append("description")
             if not drift_parts:
@@ -1771,14 +1759,12 @@ def _proposed_changes_rows(
                 g.get("os_region") or "—",
                 cidr,
                 os_desc,
-                "—",
                 cur_vrf,
                 cur_status or "—",
                 cur_role or "—",
                 cur_tenant,
                 cur_desc or "—",
                 os_desc,
-                DRIFT_NB_PROPOSED_TENANT_DEFAULT,
                 nb_scope,
                 nb_vlan,
                 role_name,
