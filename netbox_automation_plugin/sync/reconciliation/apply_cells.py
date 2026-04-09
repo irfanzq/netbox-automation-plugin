@@ -427,7 +427,14 @@ def _vlan_resolution_snapshot_for_prefix(
 def _save_branch() -> dict[str, str]:
     """Keyword args for ``save()`` — includes ``using=`` whenever :func:`_orm_alias` returns an alias."""
     a = _orm_alias()
-    return {"using": a} if a is not None else {}
+    if a is not None:
+        return {"using": a}
+    if get_reconciliation_apply_guard_context() is not None:
+        raise RuntimeError(
+            "_save_branch() called under reconciliation_apply_guard but _orm_alias() "
+            "returned None — refusing unscoped save() to avoid writing NetBox main."
+        )
+    return {}
 
 
 def _refresh_branch() -> dict[str, str]:
@@ -442,6 +449,12 @@ def _tx_branch():
     if a is not None:
         with transaction.atomic(using=a):
             yield
+    elif get_reconciliation_apply_guard_context() is not None:
+        raise RuntimeError(
+            "_tx_branch() called under reconciliation_apply_guard but _orm_alias() "
+            "returned None — branch alias not set. Refusing transaction on default to avoid "
+            "writing NetBox main."
+        )
     else:
         with transaction.atomic():
             yield
@@ -451,11 +464,16 @@ def _tx_branch():
 def _tx_op(alias: str):
     """Per-row transaction from ``op["branch_db"]`` (interface create/update)."""
     raw = (alias or "").strip()
-    if get_reconciliation_apply_guard_context() is not None:
+    guard = get_reconciliation_apply_guard_context() is not None
+    if guard:
         if not raw or raw.lower() == "default":
             raise RuntimeError(
-                "Interface apply requires op['branch_db'] to be a non-default schema_* alias."
+                "Interface apply requires op['branch_db'] to be a non-default schema_* alias "
+                "(_tx_op)."
             )
+        with transaction.atomic(using=raw):
+            yield
+        return
     if not raw or raw.lower() == "default":
         with transaction.atomic():
             yield
@@ -466,11 +484,15 @@ def _tx_op(alias: str):
 
 def _iface_save_on_op(alias: str, iface: Any) -> None:
     raw = (alias or "").strip()
-    if get_reconciliation_apply_guard_context() is not None:
+    guard = get_reconciliation_apply_guard_context() is not None
+    if guard:
         if not raw or raw.lower() == "default":
             raise RuntimeError(
-                "Interface apply requires op['branch_db'] to be a non-default schema_* alias."
+                "Interface apply requires op['branch_db'] to be a non-default schema_* alias "
+                "(_iface_save_on_op)."
             )
+        iface.save(using=raw)
+        return
     if not raw or raw.lower() == "default":
         iface.save()
     else:
@@ -563,33 +585,40 @@ def _resolve_device_type(raw: str | None) -> Any:
     NetBox stores ``model`` (e.g. "PowerEdge R660") on ``DeviceType`` with a separate
     ``manufacturer`` FK—plain ``model__iexact`` on the full string therefore misses.
     """
-    from dcim.models import DeviceType, Manufacturer
+    from dcim.models import DeviceType
 
     s = str(raw or "").strip()
     if not s or s in ("—", "-"):
         return None
-    dt = _resolve_by_name(DeviceType, s)
+    using = _orm_alias()
+    dt = _resolve_by_name(DeviceType, s, using=using)
     if dt is not None:
         return dt
-    qmod = DeviceType.objects.filter(model__iexact=s)
+    qmod = _orm_qs(DeviceType).filter(model__iexact=s)
     n = qmod.count()
     if n == 1:
         return qmod.first()
     parts = s.split()
     if len(parts) >= 2:
         mfr_key, rest = parts[0], " ".join(parts[1:])
-        hit = DeviceType.objects.filter(
-            manufacturer__name__iexact=mfr_key,
-            model__iexact=rest,
-        ).first()
+        hit = (
+            _orm_qs(DeviceType)
+            .filter(
+                manufacturer__name__iexact=mfr_key,
+                model__iexact=rest,
+            )
+            .first()
+        )
         if hit is not None:
             return hit
-        mfr = Manufacturer.objects.filter(name__iexact=mfr_key).first()
+        mfr = _orm_qs(Manufacturer).filter(name__iexact=mfr_key).first()
         if mfr is None:
             mslug = slugify(mfr_key)[:50]
-            mfr = Manufacturer.objects.filter(slug__iexact=mslug).first() if mslug else None
+            mfr = (
+                _orm_qs(Manufacturer).filter(slug__iexact=mslug).first() if mslug else None
+            )
         if mfr is not None:
-            hit = DeviceType.objects.filter(manufacturer=mfr, model__iexact=rest).first()
+            hit = _orm_qs(DeviceType).filter(manufacturer=mfr, model__iexact=rest).first()
             if hit is not None:
                 return hit
     s_low = s.lower()
@@ -603,9 +632,11 @@ def _resolve_device_type(raw: str | None) -> Any:
         if len(t) < 2 or t.lower() in seen:
             continue
         seen.add(t.lower())
-        qs = DeviceType.objects.select_related("manufacturer").filter(model__iexact=t)
+        qs = _orm_qs(DeviceType).select_related("manufacturer").filter(model__iexact=t)
         if qs.count() > 40:
-            qs = DeviceType.objects.select_related("manufacturer").filter(model__istartswith=t)[:50]
+            qs = _orm_qs(DeviceType).select_related("manufacturer").filter(model__istartswith=t)[
+                :50
+            ]
         for cand in qs:
             if f"{cand.manufacturer.name} {cand.model}".strip().lower() == s_low:
                 return cand
@@ -1460,10 +1491,23 @@ def _resolve_interface_type_slug(cell_val: str):
     return None
 
 
+def _ensure_tag_on_branch(slug: str, name: str) -> Any:
+    """Get or create a Tag using the active branch alias so it lands in the branch schema."""
+    from extras.models import Tag
+
+    a = _orm_alias()
+    mgr = Tag.objects.using(a) if a else Tag.objects
+    nm = str(name or "")
+    tag, _ = mgr.get_or_create(
+        slug=slug,
+        defaults={"name": nm[:100] if len(nm) <= 100 else nm[:97] + "..."},
+    )
+    return tag
+
+
 def _merge_interface_role_tag(iface, label_cell: str) -> bool:
     """Attach a Tag named like the drift role (Management, Data, …) when non-empty."""
     from django.utils.text import slugify
-    from extras.models import Tag
 
     raw = str(label_cell or "").strip()
     if not raw or raw in ("—", "-"):
@@ -1472,31 +1516,33 @@ def _merge_interface_role_tag(iface, label_cell: str) -> bool:
         raw = "Data"
     slug_base = slugify(raw) or "tag"
     slug = slug_base[:50]
-    tag, _ = Tag.objects.get_or_create(
-        slug=slug, defaults={"name": raw[:100] if len(raw) <= 100 else raw[:97] + "..."}
-    )
-    if iface.tags.filter(pk=tag.pk).exists():
+    disp = raw[:100] if len(raw) <= 100 else raw[:97] + "..."
+    tag = _ensure_tag_on_branch(slug, disp)
+    a = _orm_alias()
+    rel = iface.tags
+    tags = rel.using(a) if a is not None else rel
+    if tags.filter(pk=tag.pk).exists():
         return False
-    iface.tags.add(tag)
+    tags.add(tag)
     return True
 
 
 def _merge_device_tags(device, tag_cell: str) -> bool:
-    from extras.models import Tag
-
     tag_cell = str(tag_cell or "").strip()
     if not tag_cell:
         return False
     changed = False
     names = [x.strip() for x in re.split(r"[,;]", tag_cell) if x.strip()]
+    a = _orm_alias()
+    rel = device.tags
+    tags = rel.using(a) if a is not None else rel
     for name in names:
         slug_base = slugify(name) or "tag"
         slug = slug_base[:50]
-        tag, _ = Tag.objects.get_or_create(
-            slug=slug, defaults={"name": name[:100] if len(name) <= 100 else name[:97] + "..."}
-        )
-        if not device.tags.filter(pk=tag.pk).exists():
-            device.tags.add(tag)
+        disp = name[:100] if len(name) <= 100 else name[:97] + "..."
+        tag = _ensure_tag_on_branch(slug, disp)
+        if not tags.filter(pk=tag.pk).exists():
+            tags.add(tag)
             changed = True
     return changed
 
@@ -3235,15 +3281,16 @@ def _fallback_device_role_for_create(hostname: str, cells: dict[str, str]):
     if _cells_indicate_vyos(hostname, cells):
         return None
 
+    rq = _orm_qs(DeviceRole)
     for slug in ("server", "compute", "network-device", "idc", "leaf", "spine"):
-        r = DeviceRole.objects.filter(slug=slug).first()
+        r = rq.filter(slug=slug).first()
         if r is not None:
             return r
     for nm in ("Server", "Compute", "Network Device"):
-        r = DeviceRole.objects.filter(name__iexact=nm).first()
+        r = rq.filter(name__iexact=nm).first()
         if r is not None:
             return r
-    return DeviceRole.objects.order_by("pk").first()
+    return rq.order_by("pk").first()
 
 
 def _apply_device_core(cells: dict[str, str], *, create_if_missing: bool) -> tuple[str, str]:
@@ -3266,7 +3313,9 @@ def _apply_device_core(cells: dict[str, str], *, create_if_missing: bool) -> tup
         platform_name = ""
     else:
         platform_name = _pn
-    platform_obj = _resolve_by_name(Platform, platform_name) if platform_name else None
+    platform_obj = (
+        _resolve_by_name(Platform, platform_name, using=_orm_alias()) if platform_name else None
+    )
     consumed_d = {
         _norm_header("Hostname"),
         _norm_header("Host"),
@@ -3294,11 +3343,13 @@ def _apply_device_core(cells: dict[str, str], *, create_if_missing: bool) -> tup
     if not hostname:
         return _skip_missing_prereq("Device hostname empty (Hostname / Host after scoping).")
     site = _resolve_by_name(Site, site_name, using=_orm_alias()) if site_name else None
-    role = _resolve_by_name(DeviceRole, role_name) if role_name else None
+    role = (
+        _resolve_by_name(DeviceRole, role_name, using=_orm_alias()) if role_name else None
+    )
     dtype = _resolve_device_type(dtype_name) if dtype_name else None
     location = None
     if location_name:
-        location = _resolve_by_name(Location, location_name)
+        location = _resolve_by_name(Location, location_name, using=_orm_alias())
         if location is None:
             return _skip_missing_prereq(
                 f'Location "{location_name}" not found in NetBox (NB proposed location / NetBox location).'
@@ -4165,11 +4216,16 @@ def _fallback_device_type_label_for_bootstrap() -> str:
     from dcim.models import DeviceType
 
     for slug in ("generic-1u-server", "server", "bare-metal-server"):
-        dt = DeviceType.objects.select_related("manufacturer").filter(slug=slug).first()
+        dt = (
+            _orm_qs(DeviceType)
+            .select_related("manufacturer")
+            .filter(slug=slug)
+            .first()
+        )
         if dt is not None:
             mname = getattr(dt.manufacturer, "name", "") or ""
             return f"{mname} {dt.model}".strip()
-    dt = DeviceType.objects.select_related("manufacturer").order_by("pk").first()
+    dt = _orm_qs(DeviceType).select_related("manufacturer").order_by("pk").first()
     if dt is None:
         return ""
     mname = getattr(dt.manufacturer, "name", "") or ""
@@ -4254,8 +4310,10 @@ def infer_vlan_group_name_for_interface_vlan_prereq(
     3. Else if **location** is set and exactly one group is scoped to that location (or an
        ancestor), use it.
 
-    Uses the active DB router (typically main when freezing ops in the UI). If inference fails,
-    returns ``None`` and no synthetic VLAN row is injected — operator can add Proposed missing VLANs.
+    Uses :func:`_orm_qs` so reads follow the reconciliation branch when apply guard / branch
+    alias is active; otherwise the default connection (e.g. main when freezing ops in the UI).
+    If inference fails, returns ``None`` and no synthetic VLAN row is injected — operator can add
+    Proposed missing VLANs.
     """
     from django.contrib.contenttypes.models import ContentType
 
@@ -4265,9 +4323,10 @@ def infer_vlan_group_name_for_interface_vlan_prereq(
     def _group_ok(grp: Any) -> bool:
         return grp is not None and _vid_allowed_in_netbox_vlan_group(vid, grp)
 
+    vgq = _orm_qs(VLANGroup)
     eg = (explicit_group or "").strip()
     if eg and eg not in {"—", "-"}:
-        grp = VLANGroup.objects.filter(name__iexact=eg).first()
+        grp = vgq.filter(name__iexact=eg).first()
         if grp is not None:
             if _group_ok(grp):
                 return str(grp.name)
@@ -4278,7 +4337,7 @@ def infer_vlan_group_name_for_interface_vlan_prereq(
     sn = (site_name or "").strip()
     if not sn or _cell_is_placeholder(sn):
         return None
-    site = Site.objects.filter(name__iexact=sn).first()
+    site = _orm_qs(Site).filter(name__iexact=sn).first()
     if site is None:
         return None
     try:
@@ -4286,7 +4345,7 @@ def infer_vlan_group_name_for_interface_vlan_prereq(
     except Exception:
         ct_site = None
     if ct_site is not None:
-        qs = VLANGroup.objects.filter(scope_type=ct_site, scope_id=site.pk)
+        qs = vgq.filter(scope_type=ct_site, scope_id=site.pk)
         if qs.count() == 1:
             g = qs.first()
             if _group_ok(g):
@@ -4294,13 +4353,13 @@ def infer_vlan_group_name_for_interface_vlan_prereq(
     ln = (location_name or "").strip()
     if not ln or _cell_is_placeholder(ln):
         return None
-    loc = Location.objects.filter(site=site, name__iexact=ln).first()
+    loc = _orm_qs(Location).filter(site=site, name__iexact=ln).first()
     if loc is None:
         return None
     try:
         ct_loc = ContentType.objects.get_by_natural_key("dcim", "location")
         anc = list(loc.get_ancestors(include_self=True).values_list("pk", flat=True))
-        qs2 = VLANGroup.objects.filter(scope_type=ct_loc, scope_id__in=anc)
+        qs2 = vgq.filter(scope_type=ct_loc, scope_id__in=anc)
         if qs2.count() == 1:
             g2 = qs2.first()
             if _group_ok(g2):

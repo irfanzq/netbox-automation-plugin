@@ -21,6 +21,7 @@ Ops are sorted by ``AUDIT_REPORT_APPLY_ORDER`` so device + VLAN creates run befo
 
 from __future__ import annotations
 
+import contextvars
 import hashlib
 import json
 import logging
@@ -161,13 +162,13 @@ def _reconciliation_branch_schema_wait_sec() -> float:
     """
     Seconds to poll for a branch Django DB alias after create (and during apply preflight).
 
-    Override in NetBox ``configuration.py``: ``RECONCILIATION_BRANCH_SCHEMA_WAIT_SEC = 30``.
+    Override in NetBox ``configuration.py``: ``RECONCILIATION_BRANCH_SCHEMA_WAIT_SEC = …``.
     """
-    raw = getattr(settings, "RECONCILIATION_BRANCH_SCHEMA_WAIT_SEC", 15.0)
+    raw = getattr(settings, "RECONCILIATION_BRANCH_SCHEMA_WAIT_SEC", 30.0)
     try:
         v = float(raw)
     except (TypeError, ValueError):
-        return 15.0
+        return 30.0
     return max(0.5, v)
 
 
@@ -175,7 +176,7 @@ def wait_for_branch_schema_ready(
     *,
     branch_id: int | None,
     branch_name: str = "",
-    timeout_sec: float = 15.0,
+    timeout_sec: float = 30.0,
     interval_sec: float = 0.4,
 ) -> tuple[bool, str]:
     """
@@ -183,7 +184,7 @@ def wait_for_branch_schema_ready(
 
     Branch creation returns quickly while schema provisioning and ``DynamicSchemaDict`` wiring
     can lag well beyond a few seconds under load; without this, users hit Apply or recheck
-    immediately and see failures. Default timeout is 15s; set
+    immediately and see failures. Default timeout is 30s; set
     ``RECONCILIATION_BRANCH_SCHEMA_WAIT_SEC`` to tune.
     """
     if branch_id is None:
@@ -804,22 +805,26 @@ def _execute_branch_apply_in_branch_transaction(branch_db: str, op: dict[str, An
             "Reconciliation row apply requires a non-default Django database alias (schema_*). "
             "Literal 'default' is not allowed."
         )
+    # Snapshot ContextVars (``netbox_branching.active_branch``, reconciliation_apply_guard,
+    # per-row branch_db, etc.) and run apply with that context. Library code that spawns worker
+    # threads should wrap task entrypoints with the same pattern so children see these values.
+    cv = contextvars.copy_context()
     try:
         conn = connections[txu]
     except KeyError:
         with transaction.atomic(using=txu):
-            return _execute_branch_apply(op, branch_db)
+            return cv.run(_execute_branch_apply, op, branch_db)
     if getattr(conn, "in_atomic_block", False):
         sid = transaction.savepoint(using=txu)
         try:
-            out = _execute_branch_apply(op, branch_db)
+            out = cv.run(_execute_branch_apply, op, branch_db)
             transaction.savepoint_commit(sid, using=txu)
             return out
         except Exception:
             transaction.savepoint_rollback(sid, using=txu)
             raise
     with transaction.atomic(using=txu):
-        return _execute_branch_apply(op, branch_db)
+        return cv.run(_execute_branch_apply, op, branch_db)
 
 
 def _execute_branch_apply(op: dict[str, Any], branch_db: str | None = None) -> dict[str, Any]:

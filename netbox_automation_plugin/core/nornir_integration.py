@@ -725,7 +725,7 @@ class NornirDeviceManager:
         self.nr = None
         
     def initialize(self):
-        """Initialize Nornir with NetBox inventory using ThreadedRunner for parallel execution"""
+        """Initialize Nornir with NetBox inventory (SerialRunner if num_workers<=1, else ThreadedRunner)."""
         import logging
         logger = logging.getLogger('netbox_automation_plugin.nornir')
 
@@ -739,21 +739,26 @@ class NornirDeviceManager:
         ).load()
         logger.info(f"NornirDeviceManager.initialize: Inventory created with {len(inventory.hosts)} hosts")
 
-        # Create Nornir with our inventory and threaded runner for parallel execution
         from nornir.core import Nornir
         from nornir.core.plugins.connections import ConnectionPluginRegister
-        from nornir.plugins.runners import ThreadedRunner
+        from nornir.plugins.runners import SerialRunner, ThreadedRunner
 
-        # Auto-register all available connection plugins (napalm, netmiko, etc.)
         ConnectionPluginRegister.auto_register()
 
-        # Create Nornir instance with our custom inventory and threaded runner
-        self.nr = Nornir(
-            inventory=inventory,
-            runner=ThreadedRunner(num_workers=self.num_workers)
-        )
+        if self.num_workers <= 1:
+            runner = SerialRunner()
+            runner_label = "SerialRunner"
+        else:
+            runner = ThreadedRunner(num_workers=self.num_workers)
+            runner_label = f"ThreadedRunner({self.num_workers} workers)"
 
-        logger.info(f"Nornir initialized with {len(self.nr.inventory.hosts)} hosts, {self.num_workers} workers (direct connections)")
+        self.nr = Nornir(inventory=inventory, runner=runner)
+
+        logger.info(
+            "Nornir initialized with %s hosts, %s (direct connections)",
+            len(self.nr.inventory.hosts),
+            runner_label,
+        )
         return self.nr
     
     def get_facts(self) -> Dict[str, Any]:

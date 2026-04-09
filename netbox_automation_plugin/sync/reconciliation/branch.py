@@ -194,7 +194,10 @@ def reconciliation_apply_guard(branch: Any, branch_db: str) -> Iterator[None]:
     Mark this thread as executing a reconciliation apply against ``branch`` / ``branch_db``.
 
     :func:`apply_cells.apply_row_operation` refuses to mutate NetBox unless this guard is
-    active and ``netbox_branching``'s active-branch context matches ``branch``.
+    active. When ``netbox_branching``'s ``active_branch`` ContextVar is set (typical request
+    thread), it must match ``branch``. If ``active_branch`` is unset but this guard names a
+    non-default ``branch_db``, apply is still allowed: ORM ``using=`` is resolved from the
+    guard first (covers tooling threads that never call ``activate_branch``).
     """
     bdb = (branch_db or "").strip()
     if not bdb:
@@ -235,6 +238,10 @@ def check_reconciliation_apply_safe_to_mutate(op: dict[str, Any] | None = None) 
 
     Escape hatch: set env ``NETBOX_AUTOMATION_ALLOW_UNSCOPED_APPLY=1`` for controlled tooling
     only (writes may hit NetBox main).
+
+    When ``reconciliation_apply_guard`` is active with a non-default ``branch_db``, mutation is
+    allowed even if ``netbox_branching.active_branch`` is unset (ContextVar not propagated or
+    code path never called ``activate_branch``). If both are set, branch PKs must match.
     """
     if op and op.get("_allow_unscoped_apply"):
         return None
@@ -249,8 +256,16 @@ def check_reconciliation_apply_safe_to_mutate(op: dict[str, Any] | None = None) 
             "reconciliation_apply_guard). Refusing ORM writes to avoid mutating NetBox main."
         )
 
+    guard_db = str(ctx.get("branch_db") or "").strip()
     active = get_netbox_plugin_active_branch()
     if active is None:
+        # ``netbox_branching.active_branch`` is a ContextVar (like this guard). It is not
+        # inherited by Nornir worker threads or other spawned threads, while
+        # ``reconciliation_apply_guard`` may still pin ``branch_db`` / ``branch_pk``. Apply
+        # handlers resolve ``using=`` from the guard via ``_orm_alias()`` first — allow when
+        # the guard already names a non-default branch schema.
+        if guard_db and guard_db.lower() != "default":
+            return None
         return (
             "No active NetBox branch in context (netbox_branching). Refusing apply ORM writes "
             "against the default database."
