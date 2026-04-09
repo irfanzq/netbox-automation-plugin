@@ -119,6 +119,10 @@
                     <div class="mt-2 pt-2 border-top text-body-secondary small">{% trans "Routing debug (copy)" %}</div>
                     <pre class="small mb-0 text-break font-monospace mt-1" style="white-space: pre-wrap; max-height: 12rem; overflow: auto;">{{ row.routing_debug_text }}</pre>
                   {% endif %}
+                  {% if row.apply_extra_debug_text %}
+                    <div class="mt-2 pt-2 border-top text-body-secondary small">{% trans "Handler debug — VLAN resolution etc. (copy)" %}</div>
+                    <pre class="small mb-0 text-break font-monospace mt-1" style="white-space: pre-wrap; max-height: 14rem; overflow: auto;">{{ row.apply_extra_debug_text }}</pre>
+                  {% endif %}
                 </td>
               </tr>
             {% endfor %}
@@ -170,6 +174,10 @@
                   {% if row.routing_debug_text %}
                     <div class="mt-2 pt-2 border-top text-body-secondary small">{% trans "Routing debug (copy)" %}</div>
                     <pre class="small mb-0 text-break font-monospace mt-1" style="white-space: pre-wrap; max-height: 12rem; overflow: auto;">{{ row.routing_debug_text }}</pre>
+                  {% endif %}
+                  {% if row.apply_extra_debug_text %}
+                    <div class="mt-2 pt-2 border-top text-body-secondary small">{% trans "Handler debug — VLAN resolution etc. (copy)" %}</div>
+                    <pre class="small mb-0 text-break font-monospace mt-1" style="white-space: pre-wrap; max-height: 14rem; overflow: auto;">{{ row.apply_extra_debug_text }}</pre>
                   {% endif %}
                 </td>
               </tr>

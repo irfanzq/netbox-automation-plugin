@@ -13,6 +13,11 @@ drift tenant picker catalog (otherwise omitted—never derived from free text).
 Execution order (new devices → proposed missing VLANs → placement → NICs → IPAM/VMs, etc.)
 is enforced in ``service.apply_reconciliation_run`` via ``AUDIT_REPORT_APPLY_ORDER`` and
 action phase.
+
+VLAN / IPAM reads during apply use ``_orm_qs`` / ``_orm_mgr`` so queries target the active
+branch schema (not unscoped main). Interface rows align device site/location from drift
+before resolving untagged VLAN so scope matches recon-created VLANs. Skipped VLAN rows
+include ``apply_extra_debug.vlan_resolution`` on apply results (counts + troubleshoot text).
 """
 
 from __future__ import annotations
@@ -269,6 +274,149 @@ def _orm_mgr(model_cls: Any):
     """Like ``_orm_qs`` but ``db_manager`` for custom managers (e.g. VLAN)."""
     a = _orm_alias()
     return model_cls.objects.db_manager(a) if a is not None else model_cls.objects
+
+
+# Handler-populated diagnostics merged into apply result rows (``apply_extra_debug`` in service).
+_apply_extra_debug_tls = threading.local()
+
+
+def _clear_apply_extra_debug() -> None:
+    try:
+        delattr(_apply_extra_debug_tls, "payload")
+    except AttributeError:
+        pass
+
+
+def _merge_apply_extra_debug(**kwargs: Any) -> None:
+    cur = getattr(_apply_extra_debug_tls, "payload", None)
+    if not isinstance(cur, dict):
+        cur = {}
+    for k, v in kwargs.items():
+        if v is None:
+            continue
+        cur[k] = v
+    _apply_extra_debug_tls.payload = cur
+
+
+def consume_apply_extra_debug() -> dict[str, Any]:
+    """Pop optional handler diagnostics (VLAN resolution, etc.) for the last apply row."""
+    p = getattr(_apply_extra_debug_tls, "payload", None)
+    _clear_apply_extra_debug()
+    return dict(p) if isinstance(p, dict) else {}
+
+
+def _vlan_gfk_name() -> str:
+    from ipam.models import VLAN
+
+    return "group" if any(f.name == "group" for f in VLAN._meta.fields) else "vlan_group"
+
+
+def _vlan_resolution_snapshot_for_device(
+    dev: Any,
+    vid_i: int,
+    vlan_group_hint: str | None,
+) -> dict[str, Any]:
+    """
+    Branch-scoped counts/hints when interface untagged VLAN resolution fails.
+
+    Historical fix context: VLAN reads/writes during apply use ``_orm_qs`` / ``_orm_mgr`` so
+    queries hit the active branch schema (not unscoped main). Missing VLAN skips usually
+    mean the VID is absent on the branch, out of scope for the device site/location, or
+    ``create_vlan`` ran later in the batch than this interface row (see Run #).
+    """
+    from ipam.models import VLAN, VLANGroup
+
+    gfk = _vlan_gfk_name()
+    vlan_mgr = _orm_mgr(VLAN)
+    out: dict[str, Any] = {
+        "context": "interface_untagged_vlan",
+        "requested_vid": vid_i,
+        "device_name": getattr(dev, "name", None),
+        "device_pk": getattr(dev, "pk", None),
+        "device_site_id": getattr(dev, "site_id", None),
+        "device_location_id": getattr(dev, "location_id", None),
+        "nb_proposed_vlan_group": (vlan_group_hint or "").strip() or None,
+        "django_save_using_kwarg": _orm_alias(),
+        "resolved_branch_db_alias": _ab(),
+        "vlan_rows_with_vid_in_branch_schema": vlan_mgr.filter(vid=vid_i).count(),
+    }
+    if getattr(dev, "site_id", None):
+        out["vlan_rows_matching_vid_and_device_site"] = vlan_mgr.filter(
+            vid=vid_i, site_id=dev.site_id
+        ).count()
+    gn = (vlan_group_hint or "").strip()
+    if gn and gn not in {"—", "-"}:
+        grp = _orm_qs(VLANGroup).filter(name__iexact=gn).first()
+        out["vlan_group_name_found_in_branch"] = grp is not None
+        if grp is not None:
+            out["vlan_exists_in_named_group_with_vid"] = (
+                _orm_qs(VLAN).filter(**{gfk: grp, "vid": vid_i}).exists()
+            )
+    out["troubleshoot"] = (
+        "If a create_vlan row for this VID is in the same apply batch, its Run # should be "
+        "lower than this interface row. Ensure the VLAN exists on this branch (not only on "
+        "main) and that VLAN group scope matches the device site/location."
+    )
+    return out
+
+
+def _vlan_resolution_snapshot_for_prefix(
+    vlan_name: str,
+    scope_obj: Any | None,
+    vlan_group_hint: str | None,
+) -> dict[str, Any]:
+    """Branch-scoped hints when prefix VLAN FK resolution fails."""
+    from ipam.models import VLAN, VLANGroup
+
+    raw = str(vlan_name or "").strip()
+    gfk = _vlan_gfk_name()
+    vlan_mgr = _orm_mgr(VLAN)
+    out: dict[str, Any] = {
+        "context": "prefix_vlan_fk",
+        "vlan_cell": raw,
+        "nb_proposed_vlan_group": (vlan_group_hint or "").strip() or None,
+        "prefix_scope_location_pk": getattr(scope_obj, "pk", None) if scope_obj is not None else None,
+        "prefix_scope_location_name": (
+            str(getattr(scope_obj, "name", "") or "").strip() if scope_obj is not None else None
+        ),
+        "prefix_scope_site_id": (
+            getattr(scope_obj, "site_id", None) if scope_obj is not None else None
+        ),
+        "django_save_using_kwarg": _orm_alias(),
+        "resolved_branch_db_alias": _ab(),
+    }
+    candidate_vid: int | None = None
+    m = _VID_FROM_PARENS_RE.search(raw)
+    if m:
+        try:
+            candidate_vid = int(m.group(1))
+        except (TypeError, ValueError):
+            candidate_vid = None
+    elif raw.isdigit():
+        try:
+            candidate_vid = int(raw)
+        except (TypeError, ValueError):
+            candidate_vid = None
+    out["parsed_vid_from_cell"] = candidate_vid
+    if candidate_vid is not None:
+        out["vlan_rows_with_vid_in_branch_schema"] = vlan_mgr.filter(vid=candidate_vid).count()
+        if scope_obj is not None and getattr(scope_obj, "site_id", None):
+            out["vlan_rows_matching_vid_and_scope_site"] = vlan_mgr.filter(
+                vid=candidate_vid, site_id=scope_obj.site_id
+            ).count()
+    gh = (vlan_group_hint or "").strip()
+    if gh and gh not in {"—", "-"}:
+        grp = _orm_qs(VLANGroup).filter(name__iexact=gh).first()
+        out["vlan_group_name_found_in_branch"] = grp is not None
+        if grp is not None and candidate_vid is not None:
+            out["vlan_exists_in_named_group_with_vid"] = (
+                _orm_qs(VLAN).filter(**{gfk: grp, "vid": candidate_vid}).exists()
+            )
+    out["troubleshoot"] = (
+        "If create_vlan for this VID is in the same apply batch, its Run # should be lower "
+        "than this prefix row. Confirm the VLAN exists on the branch and matches scope/name."
+    )
+    return out
 
 
 def _save_branch() -> dict[str, str]:
@@ -1864,6 +2012,13 @@ def apply_create_prefix(op: dict[str, Any]) -> tuple[str, str]:
         except Exception:
             vlan_obj = None
         if vlan_obj is None:
+            try:
+                pfx_dbg = _vlan_resolution_snapshot_for_prefix(
+                    vlan_name, scope_obj, vg_hint or None
+                )
+            except Exception as ex:
+                pfx_dbg = {"vlan_snapshot_error": f"{type(ex).__name__}: {ex}"}
+            _merge_apply_extra_debug(vlan_resolution=pfx_dbg)
             return _skip_missing_prereq(
                 f'VLAN "{vlan_name}" not resolved for this prefix scope '
                 f'(create/link VLAN under site/location or fix name/VID in drift).'
@@ -3602,12 +3757,24 @@ def _resolve_untagged_vlan_for_apply(
 
 
 def _skip_untagged_vlan_unresolved(
-    host: str, vid: int, *, iface_name: str = ""
+    host: str,
+    vid: int,
+    *,
+    iface_name: str = "",
+    device: Any | None = None,
+    vlan_group_hint: str | None = None,
 ) -> tuple[str, str, str]:
     """
     Apply sets ``Interface.untagged_vlan`` (native/access VLAN on the port), not a field on
     Device. Resolution walks the device's site/location to pick a unique ``ipam.VLAN`` row.
     """
+    dbg: dict[str, Any] = {"host": host, "interface_name": (iface_name or "").strip() or None}
+    if device is not None:
+        try:
+            dbg.update(_vlan_resolution_snapshot_for_device(device, int(vid), vlan_group_hint))
+        except Exception as ex:
+            dbg["vlan_snapshot_error"] = f"{type(ex).__name__}: {ex}"
+    _merge_apply_extra_debug(vlan_resolution=dbg)
     ifn = (iface_name or "").strip()
     loc = f'interface "{ifn}" on device "{host}"' if ifn else f'device "{host}" (interface)'
     return _skip_missing_prereq(
@@ -4008,7 +4175,13 @@ def apply_create_interface(op: dict[str, Any]) -> tuple[str, str]:
             vnum = int(vid)
         except (TypeError, ValueError):
             return _skip_missing_prereq(f"Invalid VLAN id in row for device {host!r}.")
-        return _skip_untagged_vlan_unresolved(host, vnum, iface_name=if_name)
+        return _skip_untagged_vlan_unresolved(
+            host,
+            vnum,
+            iface_name=if_name,
+            device=dev,
+            vlan_group_hint=vlan_group_hint or None,
+        )
     if_desc = _interface_description_from_cells(cells)
     if iface is None and ip_blob:
         ip_tok, ip_parse = _nic_ip_blob_parse_stats(ip_blob)
@@ -4157,7 +4330,13 @@ def apply_update_interface(op: dict[str, Any]) -> tuple[str, str]:
             vnum = int(vid)
         except (TypeError, ValueError):
             return _skip_missing_prereq(f"Invalid VLAN id in row for device {host!r}.")
-        return _skip_untagged_vlan_unresolved(host, vnum, iface_name=iface.name or nb_name or ma_name)
+        return _skip_untagged_vlan_unresolved(
+            host,
+            vnum,
+            iface_name=iface.name or nb_name or ma_name,
+            device=dev,
+            vlan_group_hint=vlan_group_hint or None,
+        )
     if_desc = _interface_description_from_cells(cells)
     changed = _interface_scrub_audit_description_stepwise(iface)
     # Each save block gets its own transaction.atomic() savepoint so netbox_branching
@@ -4578,6 +4757,7 @@ def apply_row_operation(
     - 4-tuple adding optional ``written_object`` (``{"label": ..., "pk": ...}`` for post-apply snapshot)
     """
     _clear_tls_routing_snapshot()
+    _clear_apply_extra_debug()
     if (gerr := check_reconciliation_apply_safe_to_mutate(op)) is not None:
         return "failed", "failed_reconciliation_branch_guard", gerr, None
 

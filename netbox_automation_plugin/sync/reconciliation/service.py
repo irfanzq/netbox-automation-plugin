@@ -55,6 +55,7 @@ from .apply_cells import (
     _interface_mac_vlan_ip_from_cells,
     _norm_header,
     apply_row_operation,
+    consume_apply_extra_debug,
     consume_apply_routing_debug_snapshot,
     netbox_write_preview_cells,
     netbox_write_preview_fieldnames,
@@ -222,6 +223,17 @@ def _attach_routing_debug_to_apply_result(result: dict[str, Any]) -> None:
         result.get("action"),
         result.get("status"),
         json.dumps(snap, sort_keys=True, default=str),
+    )
+
+
+def _attach_apply_extra_debug_to_result(result: dict[str, Any]) -> None:
+    """Merge handler diagnostics (e.g. ``vlan_resolution``) into the apply result row."""
+    extra = consume_apply_extra_debug()
+    if not extra:
+        return
+    result["apply_extra_debug"] = extra
+    result["apply_extra_debug_text"] = json.dumps(
+        extra, indent=2, sort_keys=True, default=str
     )
 
 
@@ -552,6 +564,7 @@ def _execute_branch_apply(op: dict[str, Any], branch_db: str | None = None) -> d
         result["status"] = "failed"
         result["reason"] = "failed_bad_apply_return"
         _attach_routing_debug_to_apply_result(result)
+        _attach_apply_extra_debug_to_result(result)
         return _finalize_apply_row(op, result)
     st, reason, skip_detail = _ar[0], _ar[1], _ar[2]
     written_meta = _ar[3] if len(_ar) == 4 and isinstance(_ar[3], dict) else None
@@ -566,6 +579,7 @@ def _execute_branch_apply(op: dict[str, Any], branch_db: str | None = None) -> d
     if branch_db and st in ("created", "updated"):
         _capture_applied_object_snapshot(op, result, branch_db)
     _attach_routing_debug_to_apply_result(result)
+    _attach_apply_extra_debug_to_result(result)
     return _finalize_apply_row(op, result)
 
 
