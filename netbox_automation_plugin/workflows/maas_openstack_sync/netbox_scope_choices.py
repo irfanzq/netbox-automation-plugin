@@ -81,3 +81,32 @@ def list_site_location_choices():
     except Exception as e:
         logger.warning("Could not build site/location filter choices: %s", e)
     return site_choices, location_choices, location_meta, site_meta
+
+
+def filter_site_location_choices_by_site_slugs(
+    site_choices,
+    location_choices,
+    location_meta: dict,
+    site_meta: dict,
+    site_slugs_allowlist,
+):
+    """
+    When ``site_slugs_allowlist`` is non-empty, keep only matching site slugs (case-insensitive)
+    and locations whose ``location_meta`` site_slug is in that set.
+    """
+    if not site_slugs_allowlist:
+        return site_choices, location_choices, location_meta, site_meta
+    allow = {str(x).strip().casefold() for x in site_slugs_allowlist if str(x).strip()}
+    if not allow:
+        return site_choices, location_choices, location_meta, site_meta
+    site_choices_f = [(s, lbl) for s, lbl in site_choices if s.casefold() in allow]
+    site_meta_f = {k: v for k, v in site_meta.items() if k.casefold() in allow}
+    location_choices_f = []
+    location_meta_f = {}
+    for key, lbl in location_choices:
+        meta = location_meta.get(key) or {}
+        slug = (meta.get("site_slug") or "").strip().casefold()
+        if slug in allow:
+            location_choices_f.append((key, lbl))
+            location_meta_f[key] = meta
+    return site_choices_f, location_choices_f, location_meta_f, site_meta_f

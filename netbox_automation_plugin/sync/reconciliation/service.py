@@ -1241,9 +1241,10 @@ def _expand_partial_retry_ops_with_device_creates(
     - If none exist but placement (or NIC ``NB site``) can supply a bootstrap, append a
       synthetic ``create_device`` op (same idea as NIC prerequisite inject at freeze time).
     - If the batch includes ``create_interface`` / ``update_interface``, also pull **every**
-      frozen ``create_vlan`` row from this run (``detail_proposed_missing_vlans``), same as
-      ``_inject_interface_prerequisite_ops`` on first apply — otherwise partial retry can
-      run interfaces before VLAN 2249 exists in IPAM.
+      frozen ``create_vlan`` row already present in **this run's** ``all_ops`` (not the whole
+      drift index), then :func:`_append_synthetic_create_vlan_prereqs_for_interface_ops` — same
+      as first apply after ``build_frozen_operations`` — so partial retry does not run
+      interfaces before a needed VLAN exists in IPAM.
 
     Final sort uses ``AUDIT_REPORT_APPLY_ORDER`` so devices, VLANs, and interfaces run in the
     correct relative order.
@@ -1527,9 +1528,16 @@ def _inject_interface_prerequisite_ops(
     row_index: dict[str, dict[str, Any]],
 ) -> None:
     """
-    If the operator selected any new-interface or NIC-drift row, pull in **every** device,
-    proposed missing-VLAN, and (when needed) synthetic ``create_device`` from **placement**
-    for hosts that still have no device op. Final order is ``AUDIT_REPORT_APPLY_ORDER``.
+    If the operator selected any new-interface or NIC-drift row, pull in **every** device /
+    review-only device row from this snapshot that matches affected hosts (via row index).
+
+    **Proposed missing VLANs** are *not* bulk-pulled here: that made the recon preview list every
+    VLAN gap in the report whenever a single NIC was selected, even when the operator had only
+    checked a subset in the audit. VLAN prerequisites for interfaces are covered by (a) VLAN rows
+    the operator already selected and (b) :func:`_append_synthetic_create_vlan_prereqs_for_interface_ops`.
+
+    Also synthesize placement-based ``create_device`` when a host still has no device op.
+    Final order is ``AUDIT_REPORT_APPLY_ORDER``.
     """
     iface_src = NEW_NIC_SELECTION_KEYS | NIC_DRIFT_SELECTION_KEYS
     if not any(str(o.get("selection_key") or "") in iface_src for o in ops):
@@ -1537,7 +1545,6 @@ def _inject_interface_prerequisite_ops(
     sk_pull = frozenset({
         "detail_new_devices",
         "detail_review_only_devices",
-        "detail_proposed_missing_vlans",
     })
     for meta in row_index.values():
         if str(meta.get("selection_key") or "") not in sk_pull:
@@ -1902,17 +1909,95 @@ def _resolve_fk_labels_in_audit_snap(snap: dict[str, str]) -> dict[str, str]:
     return out
 
 
+# NIC/interface prerequisite injects use row_index >= 1e9-1 so they never collide with report rows.
+_SYNTHETIC_PREREQ_ROW_INDEX_MIN = 10**9 - 1
+
+_ROW_DIFF_ONE_LINE_SECTIONS = frozenset(
+    {
+        "detail_proposed_missing_vlans",
+        "detail_proposed_missing_tenants",
+    }
+)
+
+
+def _frozen_op_is_synthetic_prereq(op: dict[str, Any]) -> bool:
+    """True for auto-injected device/VLAN ops (no drift checkbox row; not comparable in audit diff)."""
+    try:
+        ri = int(op["row_index"]) if op.get("row_index") is not None else -1
+    except (TypeError, ValueError):
+        return False
+    return ri >= _SYNTHETIC_PREREQ_ROW_INDEX_MIN
+
+
+def _baseline_meta_by_row_key(
+    stable_baseline: dict[tuple[str, int], dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    """Map selection ``row_key`` → baseline row meta when (safe_sk, row_index) lookup is stale."""
+    by_rk: dict[str, dict[str, Any]] = {}
+    for meta in stable_baseline.values():
+        if not isinstance(meta, dict):
+            continue
+        sk = str(meta.get("selection_key") or "")
+        if not sk:
+            continue
+        safe = _safe_selection_key(sk)
+        try:
+            ri = int(meta["row_index"]) if meta.get("row_index") is not None else 0
+        except (TypeError, ValueError):
+            ri = 0
+        padded = list(meta.get("row") or [])
+        rk = _selection_row_key(safe, ri, padded)
+        by_rk[rk] = meta
+    return by_rk
+
+
+def _compact_row_diff_changes(section: str, changes: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Show vid/group/site/… on one line for small create-style sections."""
+    if (
+        section not in _ROW_DIFF_ONE_LINE_SECTIONS
+        or not isinstance(changes, list)
+        or len(changes) <= 1
+    ):
+        return changes
+    b_parts: list[str] = []
+    a_parts: list[str] = []
+    for c in changes:
+        if not isinstance(c, dict):
+            continue
+        h = str(c.get("header") or "").strip()
+        if not h:
+            continue
+        b = str(c.get("before") or "").strip()
+        a = str(c.get("after") or "").strip()
+        b_parts.append(f"{h}={b}" if b else f"{h}=—")
+        a_parts.append(f"{h}={a}" if a else f"{h}=—")
+    return [
+        {
+            "header": _("payload"),
+            "before": "; ".join(b_parts) if b_parts else "—",
+            "after": "; ".join(a_parts) if a_parts else "—",
+        }
+    ]
+
+
 def _row_diffs_vs_baseline(
     frozen: list[dict[str, Any]],
     stable_baseline: dict[tuple[str, int], dict[str, Any]],
 ) -> list[dict[str, Any]]:
     """Per selected row: NetBox write preview after review vs auto-proposed snapshot (no overrides)."""
     out: list[dict[str, Any]] = []
+    baseline_by_rk = _baseline_meta_by_row_key(stable_baseline)
     for op in frozen:
+        if not isinstance(op, dict):
+            continue
+        if _frozen_op_is_synthetic_prereq(op):
+            continue
         msk = str(op.get("selection_key") or "")
         safe_m = _safe_selection_key(msk)
         ri = int(op["row_index"]) if op.get("row_index") is not None else 0
         bmeta = stable_baseline.get((safe_m, ri))
+        if not bmeta:
+            bmeta = baseline_by_rk.get(str(op.get("row_key") or ""))
         cells_a = dict(op.get("cells") or {})
         if msk in NEW_NIC_SELECTION_KEYS:
             cells_a = new_nic_cells_for_reconciliation(cells_a)
@@ -1921,16 +2006,44 @@ def _row_diffs_vs_baseline(
         if not fieldnames:
             fieldnames = sorted(proj_a.keys())
         if not bmeta:
-            if any(str(proj_a.get(h, "")).strip() for h in fieldnames):
+            nonempty = [h for h in fieldnames if str(proj_a.get(h, "")).strip()]
+            if not nonempty:
+                continue
+            if msk in _ROW_DIFF_ONE_LINE_SECTIONS:
+                after_s = "; ".join(
+                    f"{h}={str(proj_a.get(h, '')).strip()}" for h in nonempty
+                )
                 out.append(
                     {
                         "summary": op.get("summary"),
                         "section": msk,
                         "action": op.get("action"),
                         "changes": [
-                            {"header": h, "before": "", "after": str(proj_a.get(h, "")).strip()}
-                            for h in fieldnames
+                            {
+                                "header": _("payload"),
+                                "before": "—",
+                                "after": after_s,
+                            }
                         ],
+                    }
+                )
+            else:
+                out.append(
+                    {
+                        "summary": op.get("summary"),
+                        "section": msk,
+                        "action": op.get("action"),
+                        "changes": _compact_row_diff_changes(
+                            msk,
+                            [
+                                {
+                                    "header": h,
+                                    "before": "—",
+                                    "after": str(proj_a.get(h, "")).strip(),
+                                }
+                                for h in nonempty
+                            ],
+                        ),
                     }
                 )
             continue
@@ -1951,19 +2064,20 @@ def _row_diffs_vs_baseline(
             if str(proj_b.get(h, "")).strip() != str(proj_a.get(h, "")).strip()
         ]
         if changed:
+            changes = [
+                {
+                    "header": h,
+                    "before": str(proj_b.get(h, "")).strip(),
+                    "after": str(proj_a.get(h, "")).strip(),
+                }
+                for h in changed
+            ]
             out.append(
                 {
                     "summary": op.get("summary"),
                     "section": msk,
                     "action": op.get("action"),
-                    "changes": [
-                        {
-                            "header": h,
-                            "before": str(proj_b.get(h, "")).strip(),
-                            "after": str(proj_a.get(h, "")).strip(),
-                        }
-                        for h in changed
-                    ],
+                    "changes": _compact_row_diff_changes(msk, changes),
                 }
             )
     return out

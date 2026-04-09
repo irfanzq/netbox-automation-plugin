@@ -60,7 +60,7 @@
         {% if row_diffs %}
           <h6 class="text-body-secondary text-uppercase small mt-3">{% trans "Audit diff (auto-proposed vs your review)" %}</h6>
           <p class="small text-body-secondary mb-2">
-            {% blocktrans trimmed %}Compared fields use the same <strong>projected NetBox attributes</strong> as the apply payload. A row appears only if at least one such field differs between the automatic proposal and your merged review.{% endblocktrans %}
+            {% blocktrans trimmed %}Compared fields use the same <strong>projected NetBox attributes</strong> as the apply payload. A row appears only if at least one such field differs between the automatic proposal and your merged review (or if a row could not be matched to the auto baseline). For <strong>new</strong> creates (e.g. missing VLANs), the left side may show “—” because there is no existing NetBox object yet. Auto-injected prerequisite rows (extra VLAN/device creates pulled in for NIC apply order) are omitted here — see the apply payload tables for those. Missing VLAN / missing tenant sections show one line per row under <code>payload</code>.{% endblocktrans %}
           </p>
           <div class="table-responsive border rounded mb-3">
             <table class="table table-sm mb-0">

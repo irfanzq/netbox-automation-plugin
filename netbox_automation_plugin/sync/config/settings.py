@@ -22,6 +22,9 @@ Option B — Plugin config (NetBox configuration.py):
     PLUGINS_CONFIG = {
       "netbox_automation_plugin": {
         "maas_openstack_sync": {
+          # Optional: limit drift audit pickers to these NetBox site slugs (and their locations).
+          # Same as env DRIFT_AUDIT_SITE_SLUGS (comma-separated), e.g. "b52".
+          # "drift_audit_site_slugs_allowlist": ["b52"],
           "maas_url": os.environ.get("MAAS_URL", ""),
           "maas_api_key": os.environ.get("MAAS_API_KEY", ""),
           "maas_insecure": True,
@@ -156,6 +159,13 @@ def get_sync_config():
         # Site derivation: fabric -> NetBox site slug, pool -> site or tenant (optional)
         "site_mapping_fabric": cfg.get("site_mapping_fabric") or {},  # e.g. {"birch-fabric": "birch"}
         "site_mapping_pool": cfg.get("site_mapping_pool") or {},      # e.g. {"birch": "birch"}
+        # Drift audit scope picker: if non-empty, only these NetBox site slugs (and their locations) appear.
+        # Plugin config (list or comma string) or env DRIFT_AUDIT_SITE_SLUGS=e.g. b52,birch
+        "drift_audit_site_slugs_allowlist": (
+            _parse_csv_allowlist(cfg.get("drift_audit_site_slugs_allowlist"))
+            if cfg.get("drift_audit_site_slugs_allowlist") not in (None, "")
+            else _parse_csv_allowlist(os.environ.get("DRIFT_AUDIT_SITE_SLUGS", ""))
+        ),
     }
 
 

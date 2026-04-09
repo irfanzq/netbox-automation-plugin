@@ -70,9 +70,29 @@ from .drift_snapshot_export import format_drift_report_from_snapshot_payload
 from .drift_snapshot_export import build_drift_report_xlsx_from_snapshot_payload
 from .history_models import MAASOpenStackDriftRun
 from .history_service import create_drift_run_snapshot
-from .netbox_scope_choices import list_site_location_choices as _list_site_location_choices
+from .netbox_scope_choices import (
+    filter_site_location_choices_by_site_slugs,
+    list_site_location_choices as _list_site_location_choices,
+)
 
 logger = logging.getLogger("netbox_automation_plugin")
+
+
+def _drift_audit_scope_choices():
+    """Site/location picker tuples for the drift audit form, optionally limited by plugin config."""
+    site_choices, location_choices, location_meta, site_meta = _list_site_location_choices()
+    allow = get_sync_config().get("drift_audit_site_slugs_allowlist") or []
+    if allow:
+        site_choices, location_choices, location_meta, site_meta = (
+            filter_site_location_choices_by_site_slugs(
+                site_choices,
+                location_choices,
+                location_meta,
+                site_meta,
+                allow,
+            )
+        )
+    return site_choices, location_choices, location_meta, site_meta
 
 
 def _live_baseline_xlsx_download_uri(request, audit_run_id=None) -> str:
@@ -711,8 +731,12 @@ class MAASOpenStackSyncView(LoginRequiredMixin, View):
     template_name = "netbox_automation_plugin/maas_openstack_sync_form.html"
 
     def get(self, request):
-        site_choices, location_choices, _, _ = _list_site_location_choices()
-        form = MAASOpenStackSyncForm(site_choices=site_choices, location_choices=location_choices)
+        site_choices, location_choices, location_meta, _ = _drift_audit_scope_choices()
+        form = MAASOpenStackSyncForm(
+            site_choices=site_choices,
+            location_choices=location_choices,
+            location_meta=location_meta,
+        )
         raw_resume = request.GET.get("drift_run_id")
         if raw_resume is not None and str(raw_resume).strip() != "":
             try:
@@ -748,17 +772,17 @@ class MAASOpenStackSyncView(LoginRequiredMixin, View):
         return render(request, self.template_name, {"form": form, "recent_runs": _recent_drift_runs()})
 
     def post(self, request):
-        site_choices, location_choices, location_meta, site_meta = _list_site_location_choices()
-        # Empty <select multiple> is often omitted from POST entirely; normalize so the audit always runs.
+        site_choices, location_choices, location_meta, site_meta = _drift_audit_scope_choices()
         post_data = request.POST.copy()
         if "sites" not in post_data:
-            post_data.setlist("sites", [])
+            post_data["sites"] = ""
         if "locations" not in post_data:
-            post_data.setlist("locations", [])
+            post_data["locations"] = ""
         form = MAASOpenStackSyncForm(
             post_data,
             site_choices=site_choices,
             location_choices=location_choices,
+            location_meta=location_meta,
         )
         if not form.is_valid():
             return render(request, self.template_name, {"form": form, "recent_runs": _recent_drift_runs()})
@@ -767,10 +791,10 @@ class MAASOpenStackSyncView(LoginRequiredMixin, View):
         if mode != "audit":
             return render(request, self.template_name, {"form": form, "recent_runs": _recent_drift_runs()})
 
-        selected_sites = set(form.cleaned_data.get("sites") or [])
-        selected_location_keys = set(form.cleaned_data.get("locations") or [])
-        all_sites_selected = "__all__" in selected_sites
-        all_locations_selected = "__all__" in selected_location_keys
+        site_val = (form.cleaned_data.get("sites") or "").strip()
+        loc_val = (form.cleaned_data.get("locations") or "").strip()
+        selected_sites = {site_val} if site_val else set()
+        selected_location_keys = {loc_val} if loc_val else set()
         selected_sites.discard("__all__")
         selected_location_keys.discard("__all__")
         selected_location_names = {
@@ -786,10 +810,6 @@ class MAASOpenStackSyncView(LoginRequiredMixin, View):
         # Keep parent-site context for display/debug only. Do NOT widen host scope by site
         # when specific locations are selected; location-scoped runs must stay strict.
         selected_sites |= selected_location_sites
-        if all_sites_selected:
-            selected_sites = set()
-        if all_locations_selected:
-            selected_location_names = set()
         has_netbox_scope = bool(selected_sites or selected_location_names)
         openstack_scope_tokens = _openstack_scope_tokens_from_netbox(
             selected_location_names, selected_sites

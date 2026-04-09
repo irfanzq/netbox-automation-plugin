@@ -753,6 +753,49 @@ def openstack_subnets_missing_prefixes(os_subnet_hints: list):
     return [h for h in (os_subnet_hints or []) if not h.get("exact_prefix_in_netbox")]
 
 
+def _best_effort_os_project_label_for_fip_gap(
+    f: dict,
+    fnet: dict,
+    subnets: list[dict],
+) -> tuple[str, str, str]:
+    """
+    Floating IPs on provider / shared external networks often have no Neutron tenant_id and
+    empty Keystone names after SDK normalization. Subnets on the same network usually carry
+    ``project_name`` from the collector — use that for drift ``NB Proposed Tenant`` defaults.
+    Returns (display_name, owner_name, project_id) for gap dicts (any string may be "").
+    """
+    fnid = str(f.get("floating_network_id") or fnet.get("id") or "").strip()
+    pid = str(f.get("project_id") or "").strip()
+    if not pid and fnet:
+        pid = str(fnet.get("project_id") or "").strip()
+    placeholders = frozenset(("", "-", "—"))
+
+    def _clean(v) -> str:
+        s = str(v or "").strip()
+        return "" if s in placeholders else s
+
+    pn = _clean(f.get("project_name"))
+    po = _clean(f.get("project_owner_name"))
+    if not po and pn:
+        po = pn
+    if not pn and po:
+        pn = po
+    if pn or po:
+        return pn or po, po or pn, pid
+
+    for sn in subnets or []:
+        if str(sn.get("network_id") or "").strip() != fnid:
+            continue
+        spn = _clean(sn.get("project_name"))
+        spo = _clean(sn.get("project_owner_name"))
+        cand = spn or spo
+        if cand:
+            spid = str(sn.get("project_id") or "").strip()
+            return cand, spo or spn or cand, pid or spid
+
+    return "", "", pid
+
+
 def openstack_floating_ips_missing_from_netbox(openstack_data: dict):
     """
     Floating IPs with no matching IPAddress in NetBox (design: runtime allocation visibility).
@@ -779,6 +822,7 @@ def openstack_floating_ips_missing_from_netbox(openstack_data: dict):
         for s in (openstack_data.get("subnets") or [])
         if s.get("id")
     }
+    all_subnets = list(openstack_data.get("subnets") or [])
     missing = []
     for f in openstack_data.get("floating_ips") or []:
         ip = (f.get("floating_ip_address") or "").strip()
@@ -804,14 +848,23 @@ def openstack_floating_ips_missing_from_netbox(openstack_data: dict):
                         if sn and (sn.get("name") or "").strip():
                             subnet_name = (sn.get("name") or "").strip()
                             break
+            dispn, ownern, pid_eff = _best_effort_os_project_label_for_fip_gap(
+                f, fnet, all_subnets
+            )
+            pn_cell = dispn or ownern or ""
+            if not pn_cell and pid_eff:
+                pn_cell = pid_eff
+            if not pn_cell:
+                pn_cell = "-"
             missing.append({
                 "floating_ip": ip,
                 "os_region": (f.get("os_region") or openstack_data.get("openstack_region_name") or "—")[:32],
                 "fixed_ip_address": f.get("fixed_ip_address") or "-",
                 "id": f.get("id", ""),
                 "port_id": f.get("port_id") or "",
-                "project_name": f.get("project_name") or "-",
-                "project_id": f.get("project_id") or "",
+                "project_name": pn_cell,
+                "project_owner_name": ownern or dispn or f.get("project_owner_name") or "",
+                "project_id": pid_eff or str(f.get("project_id") or "").strip(),
                 "floating_network_id": fnid,
                 "floating_network_name": fnet.get("name") or "-",
                 "floating_subnet_name": subnet_name,

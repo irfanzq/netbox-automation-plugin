@@ -15,43 +15,58 @@ class MAASOpenStackSyncForm(forms.Form):
         required=False,
     )
 
-    sites = forms.MultipleChoiceField(
-        label=_("Sites"),
-        required=False,
+    sites = forms.ChoiceField(
+        label=_("Site"),
+        required=True,
         choices=(),
-        widget=forms.SelectMultiple(
-            attrs={
-                "class": "form-select maas-sync-ms-native d-none",
-                "aria-hidden": "true",
-                "tabindex": "-1",
-            }
+        error_messages={
+            "required": _("Select a site."),
+            "invalid_choice": _("Select a valid site."),
+        },
+        widget=forms.RadioSelect(
+            attrs={"class": "form-check-input"},
+        ),
+        help_text=_("Required. Choose one NetBox site to scope the drift audit."),
+    )
+
+    locations = forms.ChoiceField(
+        label=_("Location"),
+        required=True,
+        choices=(),
+        error_messages={
+            "required": _("Select a location."),
+            "invalid_choice": _("Select a valid location."),
+        },
+        widget=forms.RadioSelect(
+            attrs={"class": "form-check-input"},
         ),
         help_text=_(
-            "Optional. Choose “All sites (no filter)” for a full audit, or pick specific sites. "
-            "Leaving the field empty also runs a full audit."
+            "Required. Choose one location under that site; OpenStack sections use the same scope."
         ),
     )
 
-    locations = forms.MultipleChoiceField(
-        label=_("Locations"),
-        required=False,
-        choices=(),
-        widget=forms.SelectMultiple(
-            attrs={
-                "class": "form-select maas-sync-ms-native d-none",
-                "aria-hidden": "true",
-                "tabindex": "-1",
-            }
-        ),
-        help_text=_(
-            "Optional. Choose “All locations (no filter)” for a full audit, or pick specific locations; "
-            "OpenStack sections use the same location-based scope. Empty means no location filter."
-        ),
-    )
-
-    def __init__(self, *args, site_choices=None, location_choices=None, **kwargs):
+    def __init__(
+        self,
+        *args,
+        site_choices=None,
+        location_choices=None,
+        location_meta=None,
+        **kwargs,
+    ):
         super().__init__(*args, **kwargs)
-        self.fields["sites"].choices = [("__all__", _("All sites (no filter)"))] + (site_choices or [])
-        self.fields["locations"].choices = [
-            ("__all__", _("All locations (no filter)"))
-        ] + (location_choices or [])
+        self._location_meta = dict(location_meta or {})
+        self.fields["sites"].choices = site_choices or []
+        self.fields["locations"].choices = location_choices or []
+
+    def clean(self):
+        cleaned = super().clean()
+        site = (cleaned.get("sites") or "").strip()
+        loc_key = (cleaned.get("locations") or "").strip()
+        if site and loc_key:
+            meta = self._location_meta.get(loc_key) or {}
+            loc_site = (meta.get("site_slug") or "").strip()
+            if loc_site and loc_site != site:
+                raise forms.ValidationError(
+                    _("The selected location does not belong to the selected site.")
+                )
+        return cleaned
