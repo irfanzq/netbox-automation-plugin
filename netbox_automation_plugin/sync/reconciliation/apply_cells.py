@@ -33,9 +33,10 @@ from contextvars import ContextVar
 from functools import lru_cache
 from typing import Any
 
+from django.conf import settings
 from django.core.exceptions import FieldDoesNotExist
 from django.core.exceptions import ValidationError as DjangoValidationError
-from django.db import IntegrityError, transaction
+from django.db import IntegrityError, connections, transaction
 from django.db import models as django_models
 from django.utils.text import slugify
 
@@ -202,8 +203,6 @@ def _build_reconciliation_apply_routing_snapshot(op: dict[str, Any]) -> dict[str
     Explains how Django ORM will route saves for this row; does not prove PostgreSQL schema
     (that depends on NetBox Branching + ``activate_branch``).
     """
-    from django.conf import settings
-
     out: dict[str, Any] = {}
     op_bd = str(op.get("branch_db") or "").strip()
     out["op_branch_db"] = op_bd
@@ -288,6 +287,72 @@ def _orm_alias() -> str | None:
             )
         return None
     return u
+
+
+def _assert_row_apply_targets_branch_db(op: dict[str, Any]) -> None:
+    """
+    Run immediately before each reconciliation handler (VLAN, VM, prefix, …).
+
+    When :func:`reconciliation_apply_guard` is active, verifies:
+
+    - ``op['branch_db']`` matches the guard's branch alias (no drift toward ``default``).
+    - :func:`_orm_alias` resolves to that same non-``default`` alias.
+    - On PostgreSQL (unless ``RECONCILIATION_PG_SCHEMA_CHECK_EACH_ROW`` is False), the
+      connection for that alias reports ``current_schema()`` ≠ ``public`` (NetBox main).
+
+    Raises ``RuntimeError`` if any check fails so the row returns as a failure, not a main write.
+    """
+    ctx = get_reconciliation_apply_guard_context()
+    if ctx is None:
+        return
+    op_db = str(op.get("branch_db") or "").strip()
+    guard_db = str(ctx.get("branch_db") or "").strip()
+    if not guard_db or guard_db.lower() == "default":
+        raise RuntimeError(
+            "reconciliation_apply_guard has empty or 'default' branch_db — refusing row apply."
+        )
+    if not op_db or op_db.lower() == "default":
+        raise RuntimeError(
+            "op['branch_db'] is empty or 'default' under apply guard — refusing row apply."
+        )
+    if op_db != guard_db:
+        raise RuntimeError(
+            f"branch_db mismatch: reconciliation guard expects {guard_db!r} but op has {op_db!r}."
+        )
+    orm_u = _orm_alias()
+    if not orm_u or orm_u.lower() == "default":
+        raise RuntimeError("_orm_alias() resolved to empty or 'default' under apply guard.")
+    if orm_u != op_db:
+        raise RuntimeError(
+            f"ORM alias mismatch: _orm_alias()={orm_u!r} vs op['branch_db']={op_db!r}."
+        )
+    if not bool(getattr(settings, "RECONCILIATION_PG_SCHEMA_CHECK_EACH_ROW", True)):
+        return
+    try:
+        conn = connections[orm_u]
+        conn.ensure_connection()
+        inner = getattr(conn, "connection", None)
+        vendor = (getattr(inner, "vendor", None) or "").lower()
+        if vendor != "postgresql":
+            return
+        with conn.cursor() as cursor:
+            cursor.execute("SELECT current_schema()")
+            row = cursor.fetchone()
+        cur = (row[0] or "").strip().lower() if row else ""
+        if cur == "public":
+            raise RuntimeError(
+                f"PostgreSQL current_schema() is 'public' on ORM alias {orm_u!r} — "
+                "refusing row apply (would hit NetBox main)."
+            )
+    except RuntimeError:
+        raise
+    except Exception as exc:
+        logger.warning(
+            "Per-row branch schema check skipped for alias %s: %s",
+            orm_u,
+            exc,
+            exc_info=True,
+        )
 
 
 def _orm_qs(model_cls: Any):
@@ -5219,6 +5284,7 @@ def apply_row_operation(
     _bdb_token = _APPLY_BRANCH_DB.set(str(op.get("branch_db") or "default"))
     _set_tls_routing_snapshot(_build_reconciliation_apply_routing_snapshot(op))
     try:
+        _assert_row_apply_targets_branch_db(op_use)
         raw = fn(op_use)
     finally:
         _APPLY_BRANCH_DB.reset(_bdb_token)
