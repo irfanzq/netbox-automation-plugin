@@ -103,6 +103,18 @@
   </div>
 </div>
 
+<div id="maas-recon-post-create-overlay" class="d-none align-items-center justify-content-center flex-column" style="position:fixed;inset:0;z-index:2000;background:var(--bs-body-bg);opacity:0.97;padding:2rem;">
+  <div class="text-center" style="max-width:32rem;">
+    <div class="spinner-border text-primary mb-3" role="status" aria-hidden="true"></div>
+    <p class="visually-hidden" id="maas-recon-post-create-aria">{% trans "Loading changes" %}</p>
+    <h2 class="h4 mb-2">{% trans "Loading changes…" %}</h2>
+    <p class="small text-muted mb-0">
+      {% trans "Waiting on the server until the branch database session leaves the main (public) schema. You will be sent to the run page when it is safe to continue." %}
+    </p>
+    <p class="small text-body-secondary mt-2 mb-0 font-monospace d-none" id="maas-recon-post-create-overlay-status"></p>
+  </div>
+</div>
+
 {{ selected|json_script:"maas-recon-selected-data" }}
 {{ posted_review_overrides|json_script:"maas-recon-posted-overrides-data" }}
 <form id="recon-action-csrf" class="d-none">{% csrf_token %}</form>
@@ -116,9 +128,9 @@
     var tokEl = document.getElementById("maas-recon-preview-token");
     var createUrl = "{{ create_url|escapejs }}";
     var driftRunId = {{ drift_run.pk }};
+    var postCreatePollMs = {{ recon_post_create_poll_interval_ms|default:5000 }};
+    var postCreatePollMaxTicks = {{ recon_post_create_poll_max_ticks|default:36 }};
     var loadingBtnHtml = '<span class="spinner-border spinner-border-sm me-1" role="status" aria-hidden="true"></span>{% filter escapejs %}{% trans "Creating branch…" %}{% endfilter %}';
-    var waitingBtnHtml = '<span class="spinner-border spinner-border-sm me-1" role="status" aria-hidden="true"></span>{% filter escapejs %}{% trans "Waiting for branch database…" %}{% endfilter %}';
-    var minCreateUiMs = 5000;
     function csrf() {
       var el = document.querySelector("#recon-action-csrf input[name=csrfmiddlewaretoken]");
       return el ? el.value : "";
@@ -146,7 +158,6 @@
         }
       }
       var origBtnHtml = btn.innerHTML;
-      var t0 = Date.now();
       btn.innerHTML = loadingBtnHtml;
       btn.disabled = true;
       if (msg) msg.textContent = "";
@@ -173,19 +184,57 @@
         .then(function(res) {
           if (res.body && res.body.redirect_url) {
             var dest = res.body.redirect_url;
-            var elapsed = Date.now() - t0;
-            var waitMore = Math.max(0, minCreateUiMs - elapsed);
-            function go() {
+            var overlay = document.getElementById("maas-recon-post-create-overlay");
+            var overlayStatus = document.getElementById("maas-recon-post-create-overlay-status");
+            function branchSchemaPollUrl(detailUrl) {
+              var base = (detailUrl || "").replace(/\/?$/, "/");
+              return base + "branch-pg-schema-status/";
+            }
+            function showPostCreateLoading() {
+              if (overlay) {
+                overlay.classList.remove("d-none");
+                overlay.classList.add("d-flex");
+              }
+              if (msg) {
+                msg.textContent = "";
+              }
+            }
+            function redirectToRun() {
               window.location.href = dest;
             }
-            if (waitMore > 0) {
-              btn.innerHTML = waitingBtnHtml;
-              if (msg) {
-                msg.textContent = "{% filter escapejs %}{% trans "The server is finishing branch setup. This page will redirect in a moment (at least a few seconds)." %}{% endfilter %}";
+            if (res.ok) {
+              showPostCreateLoading();
+              var pollUrl = branchSchemaPollUrl(dest);
+              var tick = 0;
+              function runPoll() {
+                tick += 1;
+                if (tick > postCreatePollMaxTicks) {
+                  redirectToRun();
+                  return;
+                }
+                if (overlayStatus) {
+                  overlayStatus.classList.remove("d-none");
+                  overlayStatus.textContent = "{% filter escapejs %}{% trans "Checking branch schema on server…" %}{% endfilter %} (" + tick + "/" + postCreatePollMaxTicks + ")";
+                }
+                fetch(pollUrl, {
+                  credentials: "same-origin",
+                  headers: { Accept: "application/json" }
+                })
+                  .then(function(r) { return r.json(); })
+                  .then(function(data) {
+                    if (data && data.ready) {
+                      redirectToRun();
+                      return;
+                    }
+                    window.setTimeout(runPoll, postCreatePollMs);
+                  })
+                  .catch(function() {
+                    window.setTimeout(runPoll, postCreatePollMs);
+                  });
               }
-              window.setTimeout(go, waitMore);
+              runPoll();
             } else {
-              go();
+              redirectToRun();
             }
             return;
           }

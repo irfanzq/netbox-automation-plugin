@@ -1,17 +1,10 @@
 {% load i18n %}
-<div class="card mb-3">
+<div class="card mb-3 position-relative" id="reconLifecycleCard"{% if branch_pg_schema_status_url %} data-recon-branch-pg-poll-url="{{ branch_pg_schema_status_url|escape }}" data-recon-branch-pg-poll-interval-ms="{{ branch_pg_schema_poll_interval_ms|default:5000 }}" data-recon-branch-pg-poll-max-ticks="{{ branch_pg_schema_poll_max_ticks|default:36 }}"{% endif %}>
   <h5 class="card-header">{% trans "Lifecycle" %}</h5>
-  <div class="card-body">
+  <div class="card-body position-relative"{% if apply_blocked_by_live_pg_schema %} style="min-height: 14rem;"{% endif %}>
     {% if branch_schema_blocked %}
     <p class="small mb-2 text-warning-emphasis border-start border-3 border-warning ps-2">
       {% blocktrans trimmed %}The NetBox branch exists, but its database alias is not usable yet (or apply was blocked). Use “Recheck branch & retry” when the branch is ready. Apply and re-apply actions stay disabled until then.{% endblocktrans %}
-    </p>
-    {% elif apply_blocked_by_live_pg_schema %}
-    <p class="small mb-2 text-info-emphasis border-start border-3 border-info ps-2">
-      {% blocktrans trimmed %}The branch database session is not on the isolated schema yet (PostgreSQL is still on public). Apply and re-apply stay disabled until it is ready. Wait a few seconds and refresh this page.{% endblocktrans %}
-      {% if live_branch_pg_schema_reason %}
-      <span class="d-block font-monospace text-break mt-1">{{ live_branch_pg_schema_reason|escape }}</span>
-      {% endif %}
     </p>
     {% endif %}
     <div class="d-flex flex-wrap gap-1 align-items-center">
@@ -30,5 +23,25 @@
       <button type="button" class="btn btn-outline-danger btn-sm js-recon-discard js-recon-lifecycle-btn" data-initial-disabled="{% if not can_discard %}true{% else %}false{% endif %}" {% if not can_discard %}disabled{% endif %} title="{% trans 'Deletes the branch record in NetBox when possible' %}">{% trans "Discard run" %}</button>
     </div>
     <div id="reconApplyMsg" class="small mt-2 text-body-secondary"></div>
+    {% if apply_blocked_by_live_pg_schema %}
+    <div id="reconBranchSchemaWaitOverlay" class="position-absolute top-0 start-0 w-100 h-100 d-flex align-items-center justify-content-center border-top rounded-bottom" style="z-index: 10; background: var(--bs-body-bg); opacity: 0.97;">
+      <div id="reconBranchSchemaWaitOverlayInner" class="text-center px-4 py-3" style="max-width: 32rem;">
+        <div class="spinner-border text-primary mb-3" role="status" aria-hidden="true"></div>
+        <p class="visually-hidden" id="reconBranchSchemaWaitAria">{% trans "Loading branch database session" %}</p>
+        <p class="fw-semibold mb-2">{% trans "Loading changes…" %}</p>
+        <p class="small text-muted mb-2">
+          {% trans "Apply stays disabled until PostgreSQL current_schema() is no longer the main (public) schema on your branch connection. The server keeps checking in the background; this page will refresh when it is safe to apply." %}
+        </p>
+        {% if recon_branch_django_alias_display %}
+        <p class="small mb-0 font-monospace text-break">
+          {% trans "Target Django ORM alias" %}: <strong>{{ recon_branch_django_alias_display|escape }}</strong>
+        </p>
+        {% endif %}
+        {% if live_branch_pg_schema_reason %}
+        <p class="small mt-2 mb-0 font-monospace text-break text-danger-emphasis">{{ live_branch_pg_schema_reason|escape }}</p>
+        {% endif %}
+      </div>
+    </div>
+    {% endif %}
   </div>
 </div>

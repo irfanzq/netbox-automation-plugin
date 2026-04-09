@@ -153,5 +153,46 @@
         postAction("{{ discard_url|escapejs }}", discardBtn, { fallbackRedirect: "{{ recon_detail_url|escapejs }}" });
       });
     }
+    var lc = document.getElementById("reconLifecycleCard");
+    if (lc && lc.getAttribute("data-recon-branch-pg-poll-url")) {
+      var purl = lc.getAttribute("data-recon-branch-pg-poll-url");
+      var pms = parseInt(lc.getAttribute("data-recon-branch-pg-poll-interval-ms") || "5000", 10);
+      var pmax = parseInt(lc.getAttribute("data-recon-branch-pg-poll-max-ticks") || "36", 10);
+      var msgPoll = document.getElementById("reconApplyMsg");
+      if (msgPoll) {
+        msgPoll.textContent = "{% filter escapejs %}{% trans "Checking branch database in the background…" %}{% endfilter %}";
+      }
+      var pollCount = 0;
+      var pollTimer = null;
+      function runBranchPgPoll() {
+        pollCount += 1;
+        if (pollCount > pmax) {
+          if (pollTimer) {
+            window.clearInterval(pollTimer);
+          }
+          var inner = document.getElementById("reconBranchSchemaWaitOverlayInner");
+          if (inner) {
+            inner.innerHTML = "<p class=\"text-danger fw-semibold mb-2\">{% filter escapejs %}{% trans "Branch schema is still not ready after automatic polling." %}{% endfilter %}</p><p class=\"small text-muted mb-0\">{% filter escapejs %}{% trans "Refresh this page or wait and try again. Apply remains disabled until the branch session leaves the main (public) schema." %}{% endfilter %}</p>";
+          }
+          if (msgPoll) {
+            msgPoll.textContent = "{% filter escapejs %}{% trans "Automatic polling stopped. Refresh when ready." %}{% endfilter %}";
+          }
+          return;
+        }
+        fetch(purl, { credentials: "same-origin", headers: { Accept: "application/json" } })
+          .then(function(r) { return r.json(); })
+          .then(function(data) {
+            if (data && data.ready) {
+              if (pollTimer) {
+                window.clearInterval(pollTimer);
+              }
+              window.location.reload();
+            }
+          })
+          .catch(function() {});
+      }
+      runBranchPgPoll();
+      pollTimer = window.setInterval(runBranchPgPoll, pms);
+    }
   })();
 </script>

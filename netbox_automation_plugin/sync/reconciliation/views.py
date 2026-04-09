@@ -35,12 +35,33 @@ from .service import (
     create_reconciliation_run,
     discard_reconciliation_run,
     preview_reconciliation,
+    branch_pg_schema_status_probe_for_polling,
+    reconciliation_run_resolved_django_alias,
     reconciliation_run_live_branch_pg_schema_ready,
 )
 
 logger = logging.getLogger(__name__)
 
 MAAS_RECON_STAGING_SESSION_KEY = "maas_recon_staging_v1"
+
+
+def _reconciliation_branch_pg_browser_poll_interval_sec() -> float:
+    # Default 5s so each poll can complete a multi-second server-side probe without overlap.
+    raw = getattr(settings, "RECONCILIATION_BRANCH_PG_SCHEMA_BROWSER_POLL_INTERVAL_SEC", 5.0)
+    try:
+        v = float(raw)
+    except (TypeError, ValueError):
+        return 5.0
+    return max(0.5, v)
+
+
+def _reconciliation_branch_pg_browser_poll_max_sec() -> float:
+    raw = getattr(settings, "RECONCILIATION_BRANCH_PG_SCHEMA_BROWSER_POLL_MAX_SEC", 180.0)
+    try:
+        v = float(raw)
+    except (TypeError, ValueError):
+        return 180.0
+    return max(5.0, v)
 
 
 def _reconciliation_run_page_context(
@@ -103,6 +124,19 @@ def _reconciliation_run_page_context(
     apply_blocked_by_live_pg_schema = (
         check_live_pg and (base_can_apply or can_retry_partial_base) and not live_branch_pg_schema_ok
     )
+    poll_iv = _reconciliation_branch_pg_browser_poll_interval_sec()
+    poll_max_sec = _reconciliation_branch_pg_browser_poll_max_sec()
+    poll_max_ticks = max(1, int(poll_max_sec / poll_iv))
+    branch_pg_schema_status_url = ""
+    branch_pg_schema_poll_interval_ms = int(poll_iv * 1000)
+    branch_pg_schema_poll_max_ticks = poll_max_ticks
+    recon_branch_django_alias_display = ""
+    if apply_blocked_by_live_pg_schema:
+        branch_pg_schema_status_url = reverse(
+            "plugins:netbox_automation_plugin:maas_openstack_reconciliation_branch_pg_schema_status",
+            args=[run.pk],
+        )
+        recon_branch_django_alias_display = reconciliation_run_resolved_django_alias(run)
     detail_url = reverse(
         "plugins:netbox_automation_plugin:maas_openstack_reconciliation_detail",
         args=[run.pk],
@@ -148,6 +182,10 @@ def _reconciliation_run_page_context(
         "live_branch_pg_schema_ok": live_branch_pg_schema_ok,
         "live_branch_pg_schema_reason": live_branch_pg_schema_reason,
         "apply_blocked_by_live_pg_schema": apply_blocked_by_live_pg_schema,
+        "branch_pg_schema_status_url": branch_pg_schema_status_url,
+        "branch_pg_schema_poll_interval_ms": branch_pg_schema_poll_interval_ms,
+        "branch_pg_schema_poll_max_ticks": branch_pg_schema_poll_max_ticks,
+        "recon_branch_django_alias_display": recon_branch_django_alias_display,
         "nav_active": nav_active,
     }
 
@@ -361,6 +399,35 @@ class ReconciliationApplyResultsView(LoginRequiredMixin, View):
         )
         ctx = _reconciliation_run_page_context(run, nav_active="apply_results")
         return render(request, self.template_name, ctx)
+
+
+@method_decorator(never_cache, name="dispatch")
+class ReconciliationBranchPgSchemaStatusView(LoginRequiredMixin, View):
+    """
+    JSON for the reconciliation lifecycle UI: whether the branch ORM alias is off PostgreSQL
+    ``public``. Each request closes the branch connection first so a stale pooled session is not
+    mistaken for readiness.
+    """
+
+    http_method_names = ["get"]
+
+    def get(self, request, run_id: int):
+        run = get_object_or_404(MAASOpenStackReconciliationRun, pk=run_id)
+        if not bool(
+            getattr(settings, "RECONCILIATION_CHECK_BRANCH_PG_SCHEMA_ON_RUN_PAGE_GET", True)
+        ):
+            return JsonResponse({"ready": True, "reason": "", "check_disabled": True})
+        try:
+            ok, reason = branch_pg_schema_status_probe_for_polling(run)
+        except Exception as exc:
+            logger.exception(
+                "Branch PG schema status probe failed for reconciliation run %s", run_id
+            )
+            return JsonResponse(
+                {"ready": False, "reason": str(exc) or "probe_error"},
+                status=200,
+            )
+        return JsonResponse({"ready": bool(ok), "reason": (reason or "").strip()})
 
 
 @method_decorator(never_cache, name="dispatch")
@@ -613,6 +680,16 @@ class ReconciliationStagingView(LoginRequiredMixin, View):
                 "posted_review_overrides": data.get("posted_review_overrides")
                 if isinstance(data.get("posted_review_overrides"), dict)
                 else {},
+                "recon_post_create_poll_interval_ms": int(
+                    _reconciliation_branch_pg_browser_poll_interval_sec() * 1000
+                ),
+                "recon_post_create_poll_max_ticks": max(
+                    1,
+                    int(
+                        _reconciliation_branch_pg_browser_poll_max_sec()
+                        / _reconciliation_branch_pg_browser_poll_interval_sec()
+                    ),
+                ),
             },
         )
 

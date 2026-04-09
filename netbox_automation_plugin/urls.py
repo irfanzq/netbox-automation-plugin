@@ -17,6 +17,7 @@ from .workflows.maas_openstack_sync.history_views import (
 from .sync.reconciliation.views import (
     ReconciliationApplyResultsView,
     ReconciliationApplyView,
+    ReconciliationBranchPgSchemaStatusView,
     ReconciliationCreateView,
     ReconciliationDiscardView,
     ReconciliationNotImplementedPostView,
@@ -120,6 +121,11 @@ urlpatterns = [
         "maas-openstack-sync/reconciliation/runs/<int:run_id>/apply-results/",
         ReconciliationApplyResultsView.as_view(),
         name="maas_openstack_reconciliation_apply_results",
+    ),
+    path(
+        "maas-openstack-sync/reconciliation/runs/<int:run_id>/branch-pg-schema-status/",
+        ReconciliationBranchPgSchemaStatusView.as_view(),
+        name="maas_openstack_reconciliation_branch_pg_schema_status",
     ),
     path(
         "maas-openstack-sync/reconciliation/stage/",

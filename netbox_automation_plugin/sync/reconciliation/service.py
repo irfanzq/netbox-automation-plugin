@@ -247,6 +247,11 @@ def collect_branch_routing_confirmation_or_raise(branch_obj: Any, django_db_alia
     until ``RECONCILIATION_BRANCH_SCHEMA_WAIT_SEC`` elapses (same window as post-create wait),
     then raises — no row handlers execute, so the batch cannot partially apply.
 
+    **Do not call this while inside ``transaction.atomic(using=<branch_alias>)``** if the retry
+    loop may call ``connection.close()`` — that can desync the atomic block's connection from the
+    branch schema and produce “preflight passed” while per-row probes still see ``public``.
+    Apply callers run preflight under ``activate_branch`` only, then open ``branch_write_context``.
+
     Returns a JSON-friendly dict stored on ``apply_results.routing_confirmation`` for the UI.
     """
     alias = (django_db_alias or "").strip()
@@ -320,7 +325,14 @@ def collect_branch_routing_confirmation_or_raise(branch_obj: Any, django_db_alia
                     out["preflight_pg_schema_poll_attempts"] = attempts
                     raise ValueError(str(msg))
                 try:
-                    conn.close()
+                    if not getattr(conn, "in_atomic_block", False):
+                        conn.close()
+                    else:
+                        logger.debug(
+                            "reconciliation apply preflight: skip conn.close (inside atomic) "
+                            "alias=%s",
+                            alias,
+                        )
                 except Exception:
                     logger.debug(
                         "reconciliation apply preflight: close branch conn failed alias=%s",
@@ -407,6 +419,92 @@ def reconciliation_run_live_branch_pg_schema_ready(
         return False, (err or _("Branch not found.")).strip()
     cn = str(getattr(branch_obj, "connection_name", None) or "").strip()
     return check_branch_schema_ready(branch_obj, cn)
+
+
+def reconciliation_run_close_branch_orm_connection(run: MAASOpenStackReconciliationRun) -> None:
+    """
+    Close the Django connection for this run's resolved branch alias (when not inside ``atomic``).
+
+    Used before repeated ``current_schema()`` probes so each poll can pick up a fresh session
+    after netbox-branching sets ``search_path`` on connect.
+    """
+    if not run.branch_id and not (run.branch_name or "").strip():
+        return
+    branch_obj, err = get_netbox_branch(
+        branch_id=run.branch_id,
+        branch_name=run.branch_name or "",
+    )
+    if branch_obj is None:
+        return
+    cn = str(getattr(branch_obj, "connection_name", None) or "").strip()
+    alias, _ = resolve_branch_django_database_alias(cn, branch=branch_obj)
+    if not alias:
+        return
+    try:
+        conn = connections[alias]
+        if getattr(conn, "in_atomic_block", False):
+            return
+        conn.close()
+    except Exception:
+        logger.debug(
+            "reconciliation_run_close_branch_orm_connection: close failed run_id=%s",
+            getattr(run, "pk", None),
+            exc_info=True,
+        )
+
+
+def reconciliation_run_resolved_django_alias(run: MAASOpenStackReconciliationRun) -> str:
+    """
+    Resolved ``schema_*`` Django database alias for this run's NetBox branch (for UI labels).
+
+    Falls back to ``connection_name`` when resolution is not yet possible.
+    """
+    if not run.branch_id and not (run.branch_name or "").strip():
+        return ""
+    branch_obj, _err = get_netbox_branch(
+        branch_id=run.branch_id,
+        branch_name=run.branch_name or "",
+    )
+    if branch_obj is None:
+        return ""
+    cn = str(getattr(branch_obj, "connection_name", None) or "").strip()
+    alias, _ = resolve_branch_django_database_alias(cn, branch=branch_obj)
+    return (alias or cn or "").strip()
+
+
+def branch_pg_schema_status_probe_for_polling(
+    run: MAASOpenStackReconciliationRun,
+) -> tuple[bool, str]:
+    """
+    One status-check for the browser poll endpoint: close branch connection, probe, optionally
+    retry in-process for ``RECONCILIATION_BRANCH_PG_STATUS_REQUEST_WAIT_SEC`` (capped at 15s).
+
+    Keeps polling work on the server side within each request so the client needs fewer round
+    trips while the branch session leaves ``public``.
+    """
+    raw = getattr(settings, "RECONCILIATION_BRANCH_PG_STATUS_REQUEST_WAIT_SEC", 4.0)
+    try:
+        budget = float(raw)
+    except (TypeError, ValueError):
+        budget = 4.0
+    budget = max(0.0, min(budget, 15.0))
+    step = _reconciliation_pg_schema_poll_interval_sec()
+    if budget <= 0:
+        reconciliation_run_close_branch_orm_connection(run)
+        return reconciliation_run_live_branch_pg_schema_ready(run)
+    deadline = time.monotonic() + budget
+    last_reason = ""
+    while True:
+        reconciliation_run_close_branch_orm_connection(run)
+        try:
+            ok, last_reason = reconciliation_run_live_branch_pg_schema_ready(run)
+        except Exception as exc:
+            return False, str(exc)
+        if ok:
+            return True, ""
+        if time.monotonic() >= deadline:
+            return False, last_reason or ""
+        time.sleep(step)
 
 
 def _reconciliation_branch_schema_wait_sec() -> float:
@@ -2860,10 +2958,14 @@ def apply_reconciliation_run(
         applied_rows: list[dict[str, Any]] = []
         try:
             _warn_if_netbox_branch_router_missing()
-            with branch_write_context(branch=branch_obj):
-                routing_confirmation = collect_branch_routing_confirmation_or_raise(
-                    branch_obj, django_db_alias
-                )
+            # Preflight must run outside ``branch_write_context``'s ``atomic(using=branch)``:
+            # the preflight poll may ``close()`` the alias connection; doing that inside the
+            # outer atomic leaves a stale session for row handlers (preflight OK, every row public).
+            try:
+                from netbox_branching.utilities import activate_branch as _preflight_activate_branch
+            except ImportError:
+                _preflight_activate_branch = None
+            def _reconciliation_apply_row_loop() -> None:
                 with reconciliation_apply_guard(branch_obj, django_db_alias):
                     for seq_num, op in enumerate(target_ops, start=1):
                         try:
@@ -2884,6 +2986,20 @@ def apply_reconciliation_run(
                             applied_rows.append(
                                 _with_apply_sequence(_failed_apply_row(op, exc), seq_num)
                             )
+
+            if callable(_preflight_activate_branch):
+                with _preflight_activate_branch(branch_obj):
+                    routing_confirmation = collect_branch_routing_confirmation_or_raise(
+                        branch_obj, django_db_alias
+                    )
+                with branch_write_context(branch=branch_obj):
+                    _reconciliation_apply_row_loop()
+            else:
+                with branch_write_context(branch=branch_obj):
+                    routing_confirmation = collect_branch_routing_confirmation_or_raise(
+                        branch_obj, django_db_alias
+                    )
+                    _reconciliation_apply_row_loop()
         except Exception as e:
             et = type(e).__name__
             em = _truncate_exc_message(str(e).strip() or repr(e))
