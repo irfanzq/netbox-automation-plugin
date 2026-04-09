@@ -1520,10 +1520,14 @@ def _merge_interface_role_tag(iface, label_cell: str) -> bool:
     tag = _ensure_tag_on_branch(slug, disp)
     a = _orm_alias()
     rel = iface.tags
-    tags = rel.using(a) if a is not None else rel
-    if tags.filter(pk=tag.pk).exists():
-        return False
-    tags.add(tag)
+    # NetBox returns RestrictedQuerySet from rel.using(...); it has no .add(). Scope reads only.
+    if a is not None:
+        if rel.using(a).filter(pk=tag.pk).exists():
+            return False
+    else:
+        if rel.filter(pk=tag.pk).exists():
+            return False
+    rel.add(tag)
     return True
 
 
@@ -1535,14 +1539,17 @@ def _merge_device_tags(device, tag_cell: str) -> bool:
     names = [x.strip() for x in re.split(r"[,;]", tag_cell) if x.strip()]
     a = _orm_alias()
     rel = device.tags
-    tags = rel.using(a) if a is not None else rel
     for name in names:
         slug_base = slugify(name) or "tag"
         slug = slug_base[:50]
         disp = name[:100] if len(name) <= 100 else name[:97] + "..."
         tag = _ensure_tag_on_branch(slug, disp)
-        if not tags.filter(pk=tag.pk).exists():
-            tags.add(tag)
+        if a is not None:
+            has_tag = rel.using(a).filter(pk=tag.pk).exists()
+        else:
+            has_tag = rel.filter(pk=tag.pk).exists()
+        if not has_tag:
+            rel.add(tag)
             changed = True
     return changed
 
