@@ -289,7 +289,12 @@
       var vis = wrap.querySelector(".drift-nb-pick-visible");
       var t = vis ? vis.textContent.replace(/\s+/g, " ").trim() : "";
       var kind = wrap.getAttribute("data-nb-pick-kind") || "";
-      if (kind === "tenant" && t && !isAllowedDriftTenantCellValue(t)) {
+      if (
+        kind === "tenant" &&
+        t &&
+        !isAllowedDriftTenantCellValue(t) &&
+        wrap.getAttribute("data-drift-tenant-allow-unlisted") !== "1"
+      ) {
         t = "";
         if (vis) vis.textContent = "—";
       }
@@ -317,7 +322,11 @@
         var vis = wrap.querySelector(".drift-nb-pick-visible");
         if (!vis) return;
         var t = visiblePlain(vis);
-        if (t && !isAllowedDriftTenantCellValue(t)) {
+        if (
+          t &&
+          !isAllowedDriftTenantCellValue(t) &&
+          wrap.getAttribute("data-drift-tenant-allow-unlisted") !== "1"
+        ) {
           vis.textContent = "—";
         }
       }

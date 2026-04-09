@@ -74,6 +74,7 @@ SUPPORTED_APPLY_ACTIONS: frozenset[str] = frozenset(
         "create_openstack_vm",
         "update_openstack_vm",
         "create_vlan",
+        "create_tenant",
     }
 )
 
@@ -2025,6 +2026,70 @@ def apply_create_vlan(op: dict[str, Any]) -> tuple[str, str]:
     return "created", "ok_created"
 
 
+def apply_create_tenant(op: dict[str, Any]) -> tuple[str, str]:
+    from tenancy.models import Tenant
+
+    cells = op.get("cells") or {}
+    if (reason := skip_reason_from_row_guides(cells)) is not None:
+        return "skipped", reason
+
+    proj = netbox_write_projection_for_op(op)
+    name = (proj.get("name") or "").strip()
+    if not name or name in {"—", "-"}:
+        return _skip_missing_prereq(
+            "Tenant name empty — set NB proposed tenant name (defaults from OpenStack project on the row)."
+        )
+    if _resolve_tenant(name, using=_orm_alias()) is not None:
+        return "skipped", "skipped_already_desired"
+
+    descr = (proj.get("description") or "").strip()
+    base = slugify(name)[:80] or "tenant"
+    slug = base
+    mgr = Tenant.objects.using(_orm_alias()) if _orm_alias() else Tenant.objects
+    n = 2
+    while mgr.filter(slug=slug).exists():
+        suffix = f"-{n}"
+        slug = (base[: max(1, 80 - len(suffix))] + suffix)[:80]
+        n += 1
+
+    tenant = Tenant(name=name, slug=slug)
+    if descr:
+        try:
+            df = Tenant._meta.get_field("description")
+            ml = int(getattr(df, "max_length", None) or 4000)
+            tenant.description = descr[:ml]
+        except FieldDoesNotExist:
+            pass
+    try:
+        tenant.full_clean(validate_unique=False)
+        with _tx_branch():
+            tenant.save(**_save_branch())
+    except DjangoValidationError as e:
+        detail = _format_django_validation_error(e)
+        return _skip_missing_prereq(f"NetBox rejected the tenant: {detail}")
+    except IntegrityError as e:
+        em = str(e).strip() or repr(e)
+        return _skip_missing_prereq(f"Tenant save hit a database constraint: {em}")
+    except Exception as e:
+        logger.exception("apply_create_tenant: save failed (name=%s)", name)
+        et = type(e).__name__
+        em = (str(e) or "").strip() or et
+        detail = f"{et}: {em}"
+        if len(detail) > 2000:
+            detail = detail[:1997] + "..."
+        return "failed", "failed_validation_save", detail
+
+    try:
+        from netbox_automation_plugin.sync.reporting.drift_report.drift_nb_picker_catalog import (
+            drift_picker_tenant_label_allowlist,
+        )
+
+        drift_picker_tenant_label_allowlist.cache_clear()
+    except Exception:
+        pass
+    return "created", "ok_created"
+
+
 def apply_create_prefix(op: dict[str, Any]) -> tuple[str, str]:
     from ipam.models import Prefix, Role, VRF
 
@@ -2332,7 +2397,6 @@ def apply_create_ip_range(op: dict[str, Any]) -> tuple[str, str]:
 # Detail — new floating IPs (headers must match format_html_proposed / xlsx_export).
 _NEW_FIP_DRIFT_SNAPSHOT_HEADERS: tuple[str, ...] = (
     "OS region",
-    "Project",
     "Floating IP",
     "Name",
     "NAT inside IP (from OpenStack fixed IP)",
@@ -2654,7 +2718,6 @@ def apply_create_floating_ip(op: dict[str, Any]) -> tuple[str, str]:
         _norm_header("Floating IP"),
         _norm_header("Name"),
         _norm_header("NAT inside IP (from OpenStack fixed IP)"),
-        _norm_header("Project"),
         _norm_header("NB Proposed Tenant"),
         _norm_header("NB proposed status"),
         _norm_header("NB proposed role"),
@@ -2686,10 +2749,6 @@ def apply_create_floating_ip(op: dict[str, Any]) -> tuple[str, str]:
         nb_raw = _cell(cells, "NB Proposed Tenant").strip()
         if nb_raw and nb_raw not in {"—", "-"}:
             tenant_obj = _resolve_tenant(nb_raw, using=_orm_alias())
-        if tenant_obj is None:
-            raw_proj = _cell(cells, "Project").strip()
-            if raw_proj and raw_proj not in {"—", "-"}:
-                tenant_obj = _resolve_tenant(raw_proj, using=_orm_alias())
     host_only = str(ipaddress.ip_interface(address).ip)
     existing = _find_ipaddress_for_floating_host(host_only, vrf, normalized_address=address)
     if existing is not None:
@@ -3358,6 +3417,7 @@ _MANDATORY_NETBOX_PREVIEW_FIELDS: dict[str, tuple[str, ...]] = {
     "detail_new_devices": ("name", "site", "role", "device_type"),
     "detail_review_only_devices": ("name", "site", "role", "device_type"),
     "detail_proposed_missing_vlans": ("vid", "vlan_group", "site"),
+    "detail_proposed_missing_tenants": ("name",),
     "detail_new_prefixes": ("prefix", "status"),
     "detail_existing_prefixes": ("prefix", "status"),
     "detail_new_ip_ranges": ("start_address", "end_address", "status"),
@@ -4689,6 +4749,7 @@ def apply_bmc_alignment(op: dict[str, Any]) -> tuple[str, str]:
 
 _APPLY_FUNCS: dict[str, Any] = {
     "create_vlan": apply_create_vlan,
+    "create_tenant": apply_create_tenant,
     "create_prefix": apply_create_prefix,
     "create_ip_range": apply_create_ip_range,
     "create_floating_ip": apply_create_floating_ip,
@@ -4933,6 +4994,12 @@ def _netbox_preview_source_header_norms(selection_key: str) -> frozenset[str] | 
             "NB proposed VLAN name (editable)",
             "NB Proposed Tenant",
             "NB proposed status",
+        )
+    if sk == "detail_proposed_missing_tenants":
+        return _header_norms(
+            "OpenStack project",
+            "NB proposed tenant name",
+            "NB proposed tenant description",
         )
     return None
 

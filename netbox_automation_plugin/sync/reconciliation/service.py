@@ -949,6 +949,7 @@ SK_TO_ACTION = {
     "detail_serial_review": "serial_review",
     "detail_placement_lifecycle_alignment": "placement_alignment",
     "detail_proposed_missing_vlans": "create_vlan",
+    "detail_proposed_missing_tenants": "create_tenant",
 }
 
 # Reconciliation preview tables, frozen-op sorting, and branch apply all use this tuple (low index runs first).
@@ -958,6 +959,7 @@ AUDIT_REPORT_APPLY_ORDER: tuple[str, ...] = (
     "detail_new_devices",
     "detail_review_only_devices",
     "detail_proposed_missing_vlans",
+    "detail_proposed_missing_tenants",
     # Prefixes reference IPAM VLANs: run immediately after proposed VLAN creates so the
     # same apply batch resolves VLAN FKs before NIC / VM rows (ordering tie-break is still
     # phase-based; this keeps section order aligned with dependencies).
@@ -986,6 +988,7 @@ _ACTION_APPLY_PHASE: dict[str, int] = {
     "create_device": 1,
     "review_device": 1,
     "create_vlan": 2,
+    "create_tenant": 2,
     "placement_alignment": 3,
     "create_interface": 4,
     "update_interface": 4,
@@ -1006,6 +1009,7 @@ RECON_SECTION_TITLES: dict[str, str] = {
     "detail_new_devices": "New devices",
     "detail_review_only_devices": "MAAS only hosts",
     "detail_proposed_missing_vlans": "Proposed missing VLANs (IPAM)",
+    "detail_proposed_missing_tenants": "Proposed missing tenants (OpenStack projects)",
     "detail_new_prefixes": "New prefixes",
     "detail_existing_prefixes": "Existing prefixes",
     "detail_new_ip_ranges": "New IP ranges",
@@ -1027,6 +1031,7 @@ RECON_SECTION_TITLES: dict[str, str] = {
 _PROP_LIST_KEY_FALLBACK_ACTION: dict[str, str] = {
     "add_nb_interfaces": "create_interface",
     "add_proposed_missing_vlans": "create_vlan",
+    "add_proposed_missing_tenants": "create_tenant",
 }
 
 
@@ -1104,6 +1109,9 @@ def _operation_summary(meta: dict[str, Any]) -> str:
         grp = (cells.get("NB proposed VLAN group") or "").strip()
         site = (cells.get("NB site") or "").strip()
         return f"Create VLAN VID {vid or '—'} in group {grp or '—'} (site {site or '—'})"
+    if sk == "detail_proposed_missing_tenants":
+        tn = (cells.get("NB proposed tenant name") or cells.get("OpenStack project") or "").strip()
+        return f"Create tenant: {tn or '—'}"
     if sk == "detail_new_prefixes":
         cidr = cells.get("CIDR") or "—"
         vrf = cells.get("NB proposed VRF") or "—"
@@ -1362,6 +1370,21 @@ def _expand_partial_retry_ops_with_device_creates(
             rk = str(o.get("row_key") or "").strip()
             if rk and rk not in have_rk:
                 have_rk.add(rk)
+                out.append(o)
+    if any(
+        str(o.get("action") or "") == "create_floating_ip"
+        for o in out
+        if isinstance(o, dict)
+    ):
+        have_rk2 = {str(o.get("row_key") or "").strip() for o in out if isinstance(o, dict)}
+        for o in all_ops:
+            if not isinstance(o, dict):
+                continue
+            if str(o.get("action") or "") != "create_tenant":
+                continue
+            rk = str(o.get("row_key") or "").strip()
+            if rk and rk not in have_rk2:
+                have_rk2.add(rk)
                 out.append(o)
     _append_synthetic_create_vlan_prereqs_for_interface_ops(out, set())
     allowed_sk = all_registered_selection_keys()
@@ -1635,8 +1658,24 @@ def build_frozen_operations(
             _append_frozen_op_from_meta(meta, ops, seen)
 
     _inject_interface_prerequisite_ops(ops, seen, row_index)
+    _inject_floating_ip_prerequisite_tenant_ops(ops, seen, row_index)
     ops.sort(key=lambda o: _operation_apply_sort_key(o, allowed=allowed))
     return ops
+
+
+def _inject_floating_ip_prerequisite_tenant_ops(
+    ops: list[dict[str, Any]],
+    seen: set[str],
+    row_index: dict[str, dict[str, Any]],
+) -> None:
+    """When any floating IP row is selected, include proposed missing-tenant rows from this snapshot."""
+    fip_sk = frozenset({"detail_new_fips", "detail_existing_fips"})
+    if not any(str(o.get("selection_key") or "") in fip_sk for o in ops if isinstance(o, dict)):
+        return
+    for meta in row_index.values():
+        if str(meta.get("selection_key") or "") != "detail_proposed_missing_tenants":
+            continue
+        _append_frozen_op_from_meta(meta, ops, seen)
 
 
 def group_reconciliation_operation_tables(

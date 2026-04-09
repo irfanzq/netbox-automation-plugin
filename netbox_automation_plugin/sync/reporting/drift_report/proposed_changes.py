@@ -67,6 +67,9 @@ from netbox_automation_plugin.sync.reporting.drift_report.proposed_nic_drift imp
 from netbox_automation_plugin.sync.reporting.drift_report.proposed_missing_vlans import (
     build_proposed_missing_vlan_rows,
 )
+from netbox_automation_plugin.sync.reporting.drift_report.proposed_missing_tenants import (
+    build_proposed_missing_tenant_rows,
+)
 from netbox_automation_plugin.sync.reporting.drift_report.proposed_lldp_tables import (
     build_lldp_drift_rows,
 )
@@ -1664,6 +1667,12 @@ def _proposed_changes_rows(
             SET_NETBOX_ACTION_CREATE_PREFIX,
         ])
 
+    fip_nat_drift_rows: list[dict] = (
+        openstack_floating_ips_nat_inside_drift(openstack_data or {})
+        if openstack_data and not openstack_data.get("error")
+        else []
+    )
+
     add_fips = []
     for g in (os_floating_gaps or []):
         fip = g.get("floating_ip", "")
@@ -1676,7 +1685,6 @@ def _proposed_changes_rows(
         nb_status = "active" if str(g.get("port_id") or "").strip() else "reserved"
         add_fips.append([
             g.get("os_region") or "—",
-            _fip_openstack_project_cell(g),
             fip,
             fip_name,
             g.get("fixed_ip_address", "-"),
@@ -1783,12 +1791,7 @@ def _proposed_changes_rows(
             ])
 
     update_fips: list[list] = []
-    nat_rows = (
-        openstack_floating_ips_nat_inside_drift(openstack_data or {})
-        if openstack_data and not openstack_data.get("error")
-        else []
-    )
-    for d in nat_rows:
+    for d in fip_nat_drift_rows:
         fip = d.get("floating_ip", "")
         fip_name = _first_meaningful_text(
             d.get("floating_pool_subnet_name"),
@@ -1800,7 +1803,6 @@ def _proposed_changes_rows(
         update_fips.append([
             d.get("nb_current_nat_inside") or "—",
             d.get("os_region") or "—",
-            _fip_openstack_project_cell(d),
             fip,
             fip_name,
             d.get("fixed_ip_address", "-"),
@@ -1811,6 +1813,11 @@ def _proposed_changes_rows(
             _fip_parent_prefix_cell(d),
             SET_NETBOX_ACTION_UPDATE_FIP_NAT,
         ])
+
+    add_proposed_missing_tenants = build_proposed_missing_tenant_rows(
+        os_floating_gap_dicts=os_floating_gaps or [],
+        fip_nat_drift_dicts=fip_nat_drift_rows,
+    )
 
     add_openstack_vms: list[list] = []
     update_openstack_vms: list[list] = []
@@ -2030,6 +2037,7 @@ def _proposed_changes_rows(
         "lldp_update": lldp_update,
         "update_nic": update_nic,
         "add_proposed_missing_vlans": add_proposed_missing_vlans,
+        "add_proposed_missing_tenants": add_proposed_missing_tenants,
         "add_nb_interfaces": add_nb_interfaces,
         "add_mgmt_iface": add_mgmt_iface,
         "add_mgmt_iface_new_devices": add_mgmt_iface_new_devices,

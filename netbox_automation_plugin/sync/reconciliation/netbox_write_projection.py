@@ -21,6 +21,9 @@ in NetBox; see ``apply_cells._VM_PROJECTION_CF_KEYS``).
 NetBox VLAN has no Location field; ``apply_create_vlan`` requires **NB site** and sets
 ``VLAN.site`` when the model has a ``site`` field).
 
+**Proposed missing tenants** (``detail_proposed_missing_tenants``): projection keys ``name``,
+``description``, ``openstack_project`` — same contract as ``apply_create_tenant``.
+
 **New / NIC drift interfaces**: projection uses ``untagged_vlan_vid`` (802.1Q tag parsed from
 audit cells), not NetBox ``ipam.VLAN`` database ``id`` — avoids confusing VID with VLAN pk in
 apply logs and preview tables.
@@ -36,7 +39,6 @@ from typing import Any
 
 from netbox_automation_plugin.sync.reporting.drift_report.drift_nb_picker_catalog import (
     coerce_nb_proposed_tenant_cell,
-    coerce_nb_proposed_tenant_cell_with_openstack_project,
 )
 
 # Full projection key order (includes optional ``tenant``) for recon tables when some rows omit tenant.
@@ -114,6 +116,11 @@ _NETBOX_PREVIEW_FULL_KEY_ORDER: dict[str, tuple[str, ...]] = {
         "name",
         "tenant",
         "status",
+    ),
+    "detail_proposed_missing_tenants": (
+        "name",
+        "description",
+        "openstack_project",
     ),
 }
 
@@ -378,10 +385,7 @@ def netbox_write_projection_cells(selection_key: str, cells: dict[str, str] | No
                 "status": _cell(c, "NB proposed status"),
                 "role": _cell(c, "NB proposed role"),
                 "vrf": _cell(c, "NB proposed VRF"),
-                "tenant": coerce_nb_proposed_tenant_cell_with_openstack_project(
-                    _cell(c, "NB Proposed Tenant"),
-                    _cell(c, "Project"),
-                ),
+                "tenant": coerce_nb_proposed_tenant_cell(_cell(c, "NB Proposed Tenant")),
                 "nat_inside": _cell(c, "NAT inside IP (from OpenStack fixed IP)"),
                 "parent_prefix": _cell(c, "NB proposed parent prefix"),
                 "description": ac._fip_description_from_cells(c, max_len=fd),
@@ -395,10 +399,7 @@ def netbox_write_projection_cells(selection_key: str, cells: dict[str, str] | No
                 "status": _cell(c, "NB proposed status"),
                 "role": _cell(c, "NB proposed role"),
                 "vrf": _cell(c, "NB proposed VRF"),
-                "tenant": coerce_nb_proposed_tenant_cell_with_openstack_project(
-                    _cell(c, "NB Proposed Tenant"),
-                    _cell(c, "Project"),
-                ),
+                "tenant": coerce_nb_proposed_tenant_cell(_cell(c, "NB Proposed Tenant")),
                 "nat_inside": _cell(c, "NAT inside IP (from OpenStack fixed IP)"),
                 "parent_prefix": _cell(c, "NB proposed parent prefix"),
                 "description": ac._fip_description_from_cells(c, max_len=fd),
@@ -459,6 +460,15 @@ def netbox_write_projection_cells(selection_key: str, cells: dict[str, str] | No
                 "status": _cell(c, "NB proposed status"),
             }
         )
+    if sk == "detail_proposed_missing_tenants":
+        tname = (_cell(c, "NB proposed tenant name") or "").strip()
+        if not tname or tname in {"—", "-"}:
+            tname = (_cell(c, "OpenStack project") or "").strip()
+        return {
+            "name": tname,
+            "description": _cell(c, "NB proposed tenant description"),
+            "openstack_project": _cell(c, "OpenStack project"),
+        }
     if sk == "detail_serial_review":
         return {
             "name": _cell(c, "Host", "Hostname"),

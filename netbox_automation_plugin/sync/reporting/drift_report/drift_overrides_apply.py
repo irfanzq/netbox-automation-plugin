@@ -21,6 +21,7 @@ SELECTION_KEY_TO_PROP_LIST: dict[str, str] = {
     "detail_new_devices": "add_devices",
     "detail_review_only_devices": "add_devices_review_only",
     "detail_proposed_missing_vlans": "add_proposed_missing_vlans",
+    "detail_proposed_missing_tenants": "add_proposed_missing_tenants",
     "detail_new_prefixes": "add_prefixes",
     "detail_new_ip_ranges": "add_ip_ranges",
     "detail_new_fips": "add_fips",
@@ -76,7 +77,6 @@ HEADERS_DETAIL_NEW_PREFIXES: list[str] = [
 
 HEADERS_DETAIL_NEW_FIPS: list[str] = [
     "OS region",
-    "Project",
     "Floating IP",
     "Name",
     "NAT inside IP (from OpenStack fixed IP)",
@@ -114,7 +114,6 @@ HEADERS_DETAIL_EXISTING_PREFIXES: list[str] = [
 HEADERS_DETAIL_EXISTING_FIPS: list[str] = [
     "NB current NAT inside",
     "OS region",
-    "Project",
     "Floating IP",
     "Name",
     "NAT inside IP (from OpenStack fixed IP)",
@@ -328,10 +327,19 @@ HEADERS_DETAIL_PROPOSED_MISSING_VLANS: list[str] = [
     "Risk",
 ]
 
+HEADERS_DETAIL_PROPOSED_MISSING_TENANTS: list[str] = [
+    "OpenStack project",
+    "NB proposed tenant name",
+    "NB proposed tenant description",
+    "Proposed Action",
+    "Risk",
+]
+
 SELECTION_KEY_TO_HEADERS: dict[str, list[str]] = {
     "detail_new_devices": HEADERS_DETAIL_NEW_DEVICES,
     "detail_review_only_devices": HEADERS_DETAIL_NEW_DEVICES,
     "detail_proposed_missing_vlans": HEADERS_DETAIL_PROPOSED_MISSING_VLANS,
+    "detail_proposed_missing_tenants": HEADERS_DETAIL_PROPOSED_MISSING_TENANTS,
     "detail_new_prefixes": HEADERS_DETAIL_NEW_PREFIXES,
     "detail_new_ip_ranges": HEADERS_DETAIL_NEW_IP_RANGES,
     "detail_new_fips": HEADERS_DETAIL_NEW_FIPS,

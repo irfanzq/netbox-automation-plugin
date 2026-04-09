@@ -13,6 +13,7 @@ from netbox_automation_plugin.sync.reporting.drift_report.drift_overrides_apply 
     HEADERS_DETAIL_NEW_PREFIXES,
     HEADERS_DETAIL_NEW_VMS,
     HEADERS_DETAIL_NIC_DRIFT,
+    HEADERS_DETAIL_PROPOSED_MISSING_TENANTS,
     HEADERS_DETAIL_PROPOSED_MISSING_VLANS,
     HEADERS_SERIAL_REVIEW,
     _new_nic_row_is_os_authority,
@@ -95,6 +96,11 @@ def emit_proposed_change_tables(e, prop):
                 str(len(prop.get("add_proposed_missing_vlans", []))),
                 "Tagged VID from MAAS/OS interface proposals not found in NetBox scope for that device/site",
             ],
+            [
+                "Proposed missing tenants (floating IP projects)",
+                str(len(prop.get("add_proposed_missing_tenants", []))),
+                "OpenStack project on a floating IP row has no matching NetBox Tenant yet",
+            ],
             ["New VMs (OpenStack Nova)", str(len(prop.get("add_openstack_vms", []))), "Instance not modeled as NetBox Virtual Machine"],
             ["New NICs in NetBox", str(len(prop["add_nb_interfaces"])), "Runtime/MAAS fallback interface not modeled in NetBox"],
             ["NIC drift", str(len(prop["update_nic"])), "Runtime authority (OS first, MAAS fallback) differs from NetBox"],
@@ -137,7 +143,7 @@ def emit_proposed_change_tables(e, prop):
         selectable=False,
     )
 
-    # Detail order matches ``service.AUDIT_REPORT_APPLY_ORDER``: devices → missing VLANs → VMs → NICs, then IPAM / drift VMs, then BMC.
+    # Detail order matches ``service.AUDIT_REPORT_APPLY_ORDER``: devices → missing VLANs → missing tenants → VMs → NICs, then IPAM / drift VMs, then BMC.
     if prop["add_devices"]:
         e.spacer()
         e.subtitle("Detail — new devices")
@@ -176,6 +182,26 @@ def emit_proposed_change_tables(e, prop):
             selection_key="detail_proposed_missing_vlans",
             proposed_pick_columns=_PROPOSED_NB_PICK_MISSING_VLAN,
             editable_columns=["NB proposed VLAN name (editable)"],
+        )
+    if prop.get("add_proposed_missing_tenants"):
+        e.spacer()
+        e.subtitle("Detail — proposed missing tenants (OpenStack floating IP projects)")
+        e.paragraph(
+            "These **OpenStack project** names appear on floating IP drift rows but do not match any "
+            "NetBox **Tenant** yet (by the same resolution rules as apply). Include them so "
+            "**create tenant** runs before floating IP apply in the same reconciliation batch "
+            "(they are also auto-included when you select floating IP rows). "
+            "**NB proposed tenant name** defaults from OpenStack; edit if NetBox should use a different label."
+        )
+        e.spacer()
+        e.table(
+            list(HEADERS_DETAIL_PROPOSED_MISSING_TENANTS),
+            prop["add_proposed_missing_tenants"],
+            dynamic_columns=True,
+            wrap_max_width=None,
+            selectable=True,
+            selection_key="detail_proposed_missing_tenants",
+            editable_columns=["NB proposed tenant name", "NB proposed tenant description"],
         )
     if prop.get("add_openstack_vms"):
         e.spacer()
@@ -349,8 +375,10 @@ def emit_proposed_change_tables(e, prop):
         e.spacer()
         e.subtitle("Detail — new floating IPs")
         e.paragraph(
-            "**Project** is the OpenStack project that owns the floating IP (Horizon). "
-            "**NB Proposed Tenant** defaults to that name; use the tenant picker to choose any NetBox tenant. "
+            "**NB Proposed Tenant** defaults to the OpenStack project that owns the floating IP; use the "
+            "tenant picker to choose any NetBox tenant. If the tenant is missing, create it from "
+            "**Detail — proposed missing tenants** first (or select the floating IP row so those creates "
+            "are pulled into the same batch). "
             "Floating IPs are applied as **/32** (IPv4) or **/128** (IPv6). "
             "**NB proposed parent prefix** is the Neutron subnet CIDR on the floating external network "
             "that contains the address (the provider pool), when resolvable from the collected subnets."
@@ -371,7 +399,7 @@ def emit_proposed_change_tables(e, prop):
         e.paragraph(
             "Floating IP exists in NetBox IPAM but NAT inside does not match OpenStack fixed IP "
             "(reassignment or first link). Same apply handler as new FIPs. "
-            "**Project** is the OpenStack owner; **NB Proposed Tenant** defaults from it and can be overridden with the picker. "
+            "**NB Proposed Tenant** defaults from the OpenStack project and can be overridden with the picker. "
             "Apply keeps host routes (**/32** / **/128**). **NB proposed parent prefix** is the OpenStack pool CIDR when known."
         )
         e.spacer()
@@ -475,6 +503,7 @@ def emit_proposed_change_tables(e, prop):
         len(prop["add_fips"]) + len(prop.get("update_fips", [])) +
         len(prop.get("add_openstack_vms", [])) + len(prop.get("update_openstack_vms", [])) +
         len(prop.get("add_proposed_missing_vlans", [])) +
+        len(prop.get("add_proposed_missing_tenants", [])) +
         len(prop["update_nic"]) + len(prop["add_nb_interfaces"]) +
         len(prop["add_mgmt_iface"]) + len(prop.get("add_mgmt_iface_new_devices", [])) +
         len(prop["review_serial"])
@@ -487,6 +516,10 @@ def emit_proposed_change_tables(e, prop):
             [
                 "Proposed missing VLANs (IPAM)",
                 str(len(prop.get("add_proposed_missing_vlans", []))),
+            ],
+            [
+                "Proposed missing tenants (floating IP projects)",
+                str(len(prop.get("add_proposed_missing_tenants", []))),
             ],
             ["New NICs", str(len(prop["add_nb_interfaces"]))],
             ["NIC drift", str(len(prop["update_nic"]))],

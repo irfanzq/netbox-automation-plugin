@@ -179,6 +179,11 @@ def _html_nb_picker_wrap(
     """Wrap already-escaped cell HTML in a NetBox choice picker (search + scroll)."""
     safe_kind = html.escape(kind, quote=True)
     extra = ""
+    if (
+        kind == "tenant"
+        and selection_key in ("detail_new_fips", "detail_existing_fips")
+    ):
+        extra += ' data-drift-tenant-allow-unlisted="1"'
     if col_header and selection_key and row_idx != "":
         # Attributes must be quoted: unquoted values end at whitespace, so
         # "NB proposed device status" was parsed as "NB" and Excel merge skipped columns.

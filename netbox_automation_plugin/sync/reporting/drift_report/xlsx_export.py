@@ -36,6 +36,7 @@ from netbox_automation_plugin.sync.reporting.drift_report.drift_overrides_apply 
     HEADERS_DETAIL_NEW_PREFIXES,
     HEADERS_DETAIL_NEW_VMS,
     HEADERS_DETAIL_NIC_DRIFT,
+    HEADERS_DETAIL_PROPOSED_MISSING_TENANTS,
     HEADERS_DETAIL_PROPOSED_MISSING_VLANS,
     HEADERS_PLACEMENT_ALIGNMENT,
     HEADERS_SERIAL_REVIEW,
@@ -50,9 +51,23 @@ from netbox_automation_plugin.sync.reporting.drift_report.proposed_changes impor
 
 
 def _xlsx_coerce_cell(v):
-    if isinstance(v, tuple) and len(v) == 2 and all(isinstance(x, str) for x in v):
-        a, b = v[0].strip(), v[1].strip()
-        return f"{a}\n\n{b}" if b and b != a else a
+    """
+    openpyxl cannot write Python tuples/lists as cell values. Proposed prefix rows store
+    **Role reason** as ``(one_line_summary, long_detail)`` — normalize like ASCII/HTML tables.
+    """
+    if v is None:
+        return v
+    if isinstance(v, (list, tuple)):
+        parts = [_xlsx_coerce_cell(x) for x in v]
+        parts = [p for p in parts if p is not None and str(p).strip() != ""]
+        if not parts:
+            return ""
+        if len(parts) == 1:
+            return parts[0]
+        if len(parts) == 2:
+            a, b = str(parts[0]).strip(), str(parts[1]).strip()
+            return f"{a}\n\n{b}" if b and b != a else a
+        return "\n\n".join(str(p).strip() for p in parts)
     return v
 
 
@@ -249,7 +264,7 @@ def build_drift_report_xlsx(
         bmc_oob_mismatch=bmc_oob_mismatch,
         netbox_outside_scope=_outside_n,
     ):
-        ws_sum.append(row)
+        ws_sum.append([_xlsx_coerce_cell(c) for c in row])
     ws_sum.append([])
     ws_sum.append(["RUN METRICS", "", ""])
     _append_header(ws_sum, ["Metric", "Value"])
@@ -282,7 +297,7 @@ def build_drift_report_xlsx(
             ["Hostname", "NetBox region", "NetBox site", "NetBox location", "Note"],
         )
         for row in _outside_scope:
-            ws_sum.append(list(row))
+            ws_sum.append([_xlsx_coerce_cell(c) for c in list(row)])
         ws_sum.append([])
     align_rows_x = _alignment_review_rows(
         matched_rows, scope_meta=(drift or {}).get("scope_meta")
@@ -316,7 +331,7 @@ def build_drift_report_xlsx(
                 rl = rl + [""] * (_pn - len(rl))
             elif len(rl) > _pn:
                 rl = rl[:_pn]
-            ws_sum.append(rl)
+            ws_sum.append([_xlsx_coerce_cell(c) for c in rl])
         ws_sum.append([])
 
     ws_sum.append([])
@@ -337,11 +352,18 @@ def build_drift_report_xlsx(
         + len(prop.get("add_mgmt_iface_new_devices", []))
         + len(prop["review_serial"])
         + len(prop.get("add_proposed_missing_vlans", []))
+        + len(prop.get("add_proposed_missing_tenants", []))
     )
     ws_sum.append(["New devices", str(len(prop["add_devices"]))])
     ws_sum.append(["Review-only MAAS-only hosts", str(len(prop.get("add_devices_review_only", [])))])
     ws_sum.append(
         ["Proposed missing VLANs (IPAM)", str(len(prop.get("add_proposed_missing_vlans", [])))]
+    )
+    ws_sum.append(
+        [
+            "Proposed missing tenants (floating IP projects)",
+            str(len(prop.get("add_proposed_missing_tenants", []))),
+        ]
     )
     ws_sum.append(["New prefixes", str(len(prop["add_prefixes"]))])
     ws_sum.append(["Existing prefixes (drift)", str(len(prop.get("update_prefixes", [])))])
@@ -370,6 +392,12 @@ def build_drift_report_xlsx(
     ws_prop.append(["Review-only MAAS-only hosts", len(prop.get("add_devices_review_only", []))])
     ws_prop.append(
         ["Proposed missing VLANs (IPAM)", len(prop.get("add_proposed_missing_vlans", []))]
+    )
+    ws_prop.append(
+        [
+            "Proposed missing tenants (floating IP projects)",
+            len(prop.get("add_proposed_missing_tenants", [])),
+        ]
     )
     ws_prop.append(["New prefixes (OpenStack authority)", len(prop["add_prefixes"])])
     ws_prop.append(["Existing prefixes (drift)", len(prop.get("update_prefixes", []))])
@@ -402,7 +430,7 @@ def build_drift_report_xlsx(
                 rl = rl + [""] * (ncols - len(rl))
             elif len(rl) > ncols:
                 rl = rl[:ncols]
-            ws_prop.append(rl)
+            ws_prop.append([_xlsx_coerce_cell(c) for c in rl])
 
     _append_block(
         "A) New devices",
@@ -418,6 +446,11 @@ def build_drift_report_xlsx(
         "A) Proposed missing VLANs (IPAM)",
         list(HEADERS_DETAIL_PROPOSED_MISSING_VLANS),
         prop.get("add_proposed_missing_vlans", []),
+    )
+    _append_block(
+        "A) Proposed missing tenants (OpenStack floating IP projects)",
+        list(HEADERS_DETAIL_PROPOSED_MISSING_TENANTS),
+        prop.get("add_proposed_missing_tenants", []),
     )
     _append_block(
         "A) New prefixes",
