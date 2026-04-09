@@ -28,7 +28,7 @@
         </div>
       {% elif apply_results.routing_confirmation.preflight_ok %}
         <div class="alert alert-success mb-2 py-2">
-          {% blocktrans trimmed %}Preflight passed: branch ORM alias is not PostgreSQL public, and strict router checks (if enabled) passed. Per-row creates/updates still use save(using= this alias). Use Docker logs (grep reconciliation_orm_write) to trace VLAN / VM / prefix writes.{% endblocktrans %}
+          {% blocktrans trimmed %}Preflight passed: branch ORM alias is not PostgreSQL public, and strict router checks (if enabled) passed. Per-row creates/updates still use save(using= this alias). For Docker, ensure NetBox LOGGING enables INFO for logger netbox_automation_plugin (see plugin docs), then grep reconciliation_netbox_write and reconciliation apply preflight.{% endblocktrans %}
         </div>
       {% endif %}
       {% if apply_results.routing_confirmation_text %}
