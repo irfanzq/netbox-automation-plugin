@@ -176,6 +176,10 @@ def _reconciliation_run_page_context(
         "plugins:netbox_automation_plugin:maas_openstack_reconciliation_apply_results",
         args=[run.pk],
     )
+    reconciliation_run_snapshot_url = reverse(
+        "plugins:netbox_automation_plugin:maas_openstack_reconciliation_run_snapshot",
+        args=[run.pk],
+    )
     show_recheck_branch_btn = branch_schema_blocked
     return {
         "run": run,
@@ -198,6 +202,7 @@ def _reconciliation_run_page_context(
         ),
         "recon_detail_url": detail_url,
         "apply_results_url": apply_results_url,
+        "reconciliation_run_snapshot_url": reconciliation_run_snapshot_url,
         "branching_branch_url": _netbox_branching_branch_url(branch_pk=run.branch_id),
         "can_discard": run.status not in blocked_discard,
         "can_apply": base_can_apply and live_branch_pg_schema_ok,
@@ -471,6 +476,35 @@ class ReconciliationBranchPgSchemaStatusView(LoginRequiredMixin, View):
                 status=200,
             )
         return JsonResponse({"ready": bool(ok), "reason": (reason or "").strip()})
+
+
+@method_decorator(never_cache, name="dispatch")
+class ReconciliationRunSnapshotView(LoginRequiredMixin, View):
+    """
+    Lightweight JSON for polling: current status and whether apply_results has a summary.
+    Used on the apply-results page while a long apply POST is in flight (status stays
+    branch_created until the apply transaction commits).
+    """
+
+    http_method_names = ["get"]
+
+    def get(self, request, run_id: int):
+        run = get_object_or_404(
+            MAASOpenStackReconciliationRun.objects.only(
+                "pk", "status", "apply_results", "last_updated"
+            ),
+            pk=run_id,
+        )
+        ar = run.apply_results if isinstance(run.apply_results, dict) else {}
+        lu = getattr(run, "last_updated", None)
+        return JsonResponse(
+            {
+                "run_id": run.pk,
+                "status": run.status,
+                "has_apply_summary": bool(ar.get("summary")),
+                "last_updated": lu.isoformat() if lu is not None else None,
+            }
+        )
 
 
 @method_decorator(never_cache, name="dispatch")

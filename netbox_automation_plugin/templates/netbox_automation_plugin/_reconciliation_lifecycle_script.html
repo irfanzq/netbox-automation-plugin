@@ -37,7 +37,7 @@
       var willNavigate = false;
       if (msg) msg.textContent = "";
       setLifecycleBusy(true, btn);
-      fetch(url, {
+      var fetchOpts = {
         method: "POST",
         credentials: "same-origin",
         headers: {
@@ -45,7 +45,11 @@
           "X-CSRFToken": csrfToken()
         },
         body: opts.body != null ? opts.body : "{}"
-      }).then(function(r) {
+      };
+      if (typeof AbortSignal !== "undefined" && typeof AbortSignal.timeout === "function") {
+        fetchOpts.signal = AbortSignal.timeout(720000);
+      }
+      fetch(url, fetchOpts).then(function(r) {
         return r.json().then(function(j) { return { ok: r.ok, body: j }; });
       }).then(function(res) {
         if (res.ok && res.body && res.body.ok) {

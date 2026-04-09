@@ -221,6 +221,10 @@
     </div>
   </details>
   {% endif %}
+{% elif apply_results.summary %}
+  <p class="small text-body-secondary mb-0">
+    {% trans "No per-row table for this view; see the summary cards above (attempted count may be zero)." %}
+  </p>
 {% elif not apply_results.summary %}
   <div class="alert alert-secondary mb-0">{% trans "No apply has been recorded for this run yet. Use Apply on the reconciliation run page; you will be redirected here when apply finishes." %}</div>
 {% endif %}

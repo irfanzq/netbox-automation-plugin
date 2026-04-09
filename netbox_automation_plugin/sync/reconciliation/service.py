@@ -41,7 +41,7 @@ from typing import Any
 
 from django.conf import settings
 from django.core import signing
-from django.db import connections, transaction
+from django.db import OperationalError, connections, transaction
 from django.utils import timezone
 from django.utils.translation import gettext as _
 
@@ -3214,8 +3214,13 @@ def apply_reconciliation_run(
     automatically pull in matching frozen ``create_device`` rows for the same host when present.
 
     If the NetBox branch row is missing or its Django DB alias is not registered / connectable
-    yet, raises ``ValueError`` **before** setting apply-in-progress or writing per-row results
-    (transaction rolls back; run row unchanged).
+    yet, raises ``ValueError`` **before** writing per-row results (transaction rolls back; run row
+    unchanged).
+
+    The run row stays at ``branch_created`` (or retry-eligible states) until this function's
+    single commit at the end — we do **not** persist ``apply_in_progress`` mid-flight, so a killed
+    worker or proxy timeout cannot strand the UI in "apply in progress" with empty
+    ``apply_results``. Concurrent apply attempts block on ``select_for_update()`` on the run row.
     """
     partial_retry = bool(retry_failed_only or retry_skipped_only)
     run.refresh_from_db(
@@ -3365,10 +3370,6 @@ def apply_reconciliation_run(
             "entire_batch_aborted_no_row_handlers": False,
         }
 
-        run.status = MAASOpenStackReconciliationRun.STATUS_APPLY_IN_PROGRESS
-        run.error_message = ""
-        run.save(update_fields=["status", "error_message", "last_updated"])
-
         applied_rows: list[dict[str, Any]] = []
         try:
             _warn_if_netbox_branch_router_missing()
@@ -3516,6 +3517,41 @@ def apply_reconciliation_run(
         run.save(update_fields=["apply_results", "status", "error_message", "last_updated"])
 
     return run
+
+
+def try_reset_stuck_reconciliation_apply_run(*, run_id: int) -> tuple[bool, str]:
+    """
+    Recover a run left in ``apply_in_progress`` with no ``apply_results["summary"]`` (legacy
+    half-state or manual DB edits). Uses ``select_for_update(nowait=True)`` so we skip when
+    another request holds the row (apply may still be running).
+
+    Operators: ``python manage.py reconciliation_reset_stuck_apply <run_id>``
+    """
+    with transaction.atomic():
+        try:
+            run = (
+                MAASOpenStackReconciliationRun.objects.select_for_update(nowait=True)
+                .filter(pk=run_id)
+                .first()
+            )
+        except OperationalError:
+            return (
+                False,
+                "Could not lock reconciliation run row (another process may be using it); not reset.",
+            )
+        if run is None:
+            return False, f"Reconciliation run {run_id} not found."
+        if run.status != MAASOpenStackReconciliationRun.STATUS_APPLY_IN_PROGRESS:
+            return False, f"Run status is {run.status!r}, not apply_in_progress; not reset."
+        prior = run.apply_results if isinstance(run.apply_results, dict) else {}
+        if prior.get("summary"):
+            return False, "apply_results already has summary; not reset."
+        run.status = MAASOpenStackReconciliationRun.STATUS_BRANCH_CREATED
+        run.error_message = (
+            "Apply did not finish recording results; status was reset to branch_created. Retry apply."
+        )
+        run.save(update_fields=["status", "error_message", "last_updated"])
+    return True, f"Run {run_id} reset to branch_created."
 
 
 def check_and_reapply_if_branch_ready(

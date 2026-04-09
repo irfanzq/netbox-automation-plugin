@@ -27,6 +27,44 @@
     </div>
 
     {% include "netbox_automation_plugin/_reconciliation_page_nav.html" %}
+    {% if run.status == "apply_in_progress" %}
+    <div class="alert alert-warning mb-3" role="status">
+      <p class="mb-1 fw-semibold">{% trans "Apply is still marked in progress" %}</p>
+      <p class="small mb-0">
+        {% blocktrans trimmed with pk=run.pk %}
+        If this persists, the server may have been interrupted before results were saved. When you are sure no apply is running, an administrator can run
+        <code class="user-select-all">python manage.py reconciliation_reset_stuck_apply %(pk)s</code>
+        in the NetBox environment, then refresh this page. This page also rechecks the run every few seconds and reloads when the status changes.
+        {% endblocktrans %}
+      </p>
+    </div>
+    {% if reconciliation_run_snapshot_url %}
+    <script>
+      (function () {
+        var u = "{{ reconciliation_run_snapshot_url|escapejs }}";
+        var ticks = 0;
+        var iv = window.setInterval(function () {
+          ticks += 1;
+          if (ticks > 240) {
+            window.clearInterval(iv);
+            return;
+          }
+          fetch(u, { credentials: "same-origin", headers: { Accept: "application/json" } })
+            .then(function (r) {
+              return r.json();
+            })
+            .then(function (d) {
+              if (!d) return;
+              if (d.status !== "apply_in_progress" || d.has_apply_summary) {
+                window.location.reload();
+              }
+            })
+            .catch(function () {});
+        }, 3000);
+      })();
+    </script>
+    {% endif %}
+    {% endif %}
     {% include "netbox_automation_plugin/_reconciliation_lifecycle_card.html" with hide_merge_to_main=True %}
     {% include "netbox_automation_plugin/_reconciliation_apply_results_sections.html" %}
   </div>

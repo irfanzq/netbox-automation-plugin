@@ -25,6 +25,7 @@ from .sync.reconciliation.views import (
     ReconciliationRecheckBranchView,
     ReconciliationRetryFailedView,
     ReconciliationRunDetailView,
+    ReconciliationRunSnapshotView,
     ReconciliationRunsListView,
     ReconciliationStagingView,
 )
@@ -126,6 +127,11 @@ urlpatterns = [
         "maas-openstack-sync/reconciliation/runs/<int:run_id>/branch-pg-schema-status/",
         ReconciliationBranchPgSchemaStatusView.as_view(),
         name="maas_openstack_reconciliation_branch_pg_schema_status",
+    ),
+    path(
+        "maas-openstack-sync/reconciliation/runs/<int:run_id>/snapshot/",
+        ReconciliationRunSnapshotView.as_view(),
+        name="maas_openstack_reconciliation_run_snapshot",
     ),
     path(
         "maas-openstack-sync/reconciliation/stage/",
