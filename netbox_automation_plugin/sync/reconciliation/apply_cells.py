@@ -4354,7 +4354,6 @@ def synthetic_create_vlan_cells_from_interface_prereq(
         "NB Proposed VLAN ID": str(vid),
         "NB proposed VLAN group": gn,
         "NB proposed VLAN name (editable)": f"VLAN-{vid}",
-        "NB proposed status": "active",
     }
     return out
 
@@ -4992,8 +4991,6 @@ def _netbox_preview_source_header_norms(selection_key: str) -> frozenset[str] | 
             "NB Proposed VLAN ID",
             "NB proposed VLAN group",
             "NB proposed VLAN name (editable)",
-            "NB Proposed Tenant",
-            "NB proposed status",
         )
     if sk == "detail_proposed_missing_tenants":
         return _header_norms(

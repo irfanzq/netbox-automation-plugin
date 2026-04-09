@@ -321,8 +321,6 @@ HEADERS_DETAIL_PROPOSED_MISSING_VLANS: list[str] = [
     "NB Proposed VLAN ID",
     "NB proposed VLAN group",
     "NB proposed VLAN name (editable)",
-    "NB Proposed Tenant",
-    "NB proposed status",
     "Proposed Action",
     "Risk",
 ]
@@ -549,6 +547,29 @@ def _apply_update_nic_subset(
         update_nic[gi] = row
 
 
+def coerce_add_proposed_missing_vlan_row_lengths(prop: dict) -> None:
+    """In-place: fix pre-change missing-VLAN rows that still have tenant/status columns."""
+    mv = prop.get("add_proposed_missing_vlans")
+    if isinstance(mv, list):
+        _strip_legacy_proposed_missing_vlan_tenant_status_columns(mv)
+
+
+def _strip_legacy_proposed_missing_vlan_tenant_status_columns(rows: list) -> None:
+    """
+    Older drift rows included **NB Proposed Tenant** and **NB proposed status** before
+    Proposed Action / Risk. Drop those two cells in place so lengths match current headers
+    (HTML truncates with ``r[:n]``, which would otherwise hide Proposed Action).
+    """
+    legacy_len = len(HEADERS_DETAIL_PROPOSED_MISSING_VLANS) + 2  # tenant + status
+    for i, r in enumerate(rows):
+        if not isinstance(r, (list, tuple)):
+            continue
+        row = list(r)
+        if len(row) != legacy_len:
+            continue
+        rows[i] = row[:8] + row[10:]
+
+
 def _apply_section(headers: list[str], rows: list, section: dict[str, dict[str, str]]) -> None:
     h2i = {h: i for i, h in enumerate(headers)}
     for ridx_str, cmap in section.items():
@@ -577,6 +598,7 @@ def merge_drift_review_overrides(
     """Deep-copy prop, copy align_rows lists, apply overrides in place on copies."""
     p = copy.deepcopy(prop)
     a = [list(r) for r in align_rows]
+    coerce_add_proposed_missing_vlan_row_lengths(p)
     if not overrides:
         return p, a
     for sel_key, section in overrides.items():

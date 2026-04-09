@@ -63,21 +63,12 @@ _PROPOSED_NB_PICK_BMC_EXISTING = {
 }
 _PROPOSED_NB_PICK_MISSING_VLAN = {
     "NB proposed VLAN group": "vlan_group",
-    "NB Proposed Tenant": "tenant",
-    "NB proposed status": "vlan_status",
 }
 
 
 def emit_proposed_change_tables(e, prop):
     e.spacer()
     e.banner("PROPOSED CHANGES", "-")
-    e.paragraph(
-        "Read-only. Possible NetBox updates from OpenStack runtime (authoritative when present) with MAAS fallback where OpenStack data is missing. "
-        "The **Proposed Action** column uses a ``SET_NETBOX_*`` vocabulary: interface rows use "
-        "``SET_NETBOX_MAC`` / ``SET_NETBOX_UNTAGGED_VLAN`` / ``SET_NETBOX_IP``; workflow rows use "
-        "``SET_NETBOX_ACTION=…`` or ``SET_NETBOX_WORKFLOW=…`` (reconciliation matches rows by table "
-        "selection key, not by parsing these tokens)."
-    )
     e.spacer()
 
     e.subtitle("A) Add to NetBox")
@@ -186,13 +177,6 @@ def emit_proposed_change_tables(e, prop):
     if prop.get("add_proposed_missing_tenants"):
         e.spacer()
         e.subtitle("Detail — proposed missing tenants (OpenStack floating IP projects)")
-        e.paragraph(
-            "These **OpenStack project** names appear on floating IP drift rows but do not match any "
-            "NetBox **Tenant** yet (by the same resolution rules as apply). Include them so "
-            "**create tenant** runs before floating IP apply in the same reconciliation batch "
-            "(they are also auto-included when you select floating IP rows). "
-            "**NB proposed tenant name** defaults from OpenStack; edit if NetBox should use a different label."
-        )
         e.spacer()
         e.table(
             list(HEADERS_DETAIL_PROPOSED_MISSING_TENANTS),
@@ -206,18 +190,6 @@ def emit_proposed_change_tables(e, prop):
     if prop.get("add_openstack_vms"):
         e.spacer()
         e.subtitle("Detail — new VMs")
-        e.paragraph(
-            "OpenStack Nova instances (VMs and Ironic bare metal) with no NetBox Virtual Machine of the same name. "
-            "Requires an existing Cluster (NB proposed cluster). NB proposed device (VM) is always the "
-            "Nova instance name (same as VM name). Hypervisor hostname shows Nova's compute host for "
-            "reference. Apply links a NetBox Device by that VM name first, then by hypervisor hostname "
-            "if no Device matches the VM name. "
-            "If the VM has a custom field whose key is one of "
-            "<code>nova_compute_host</code>, <code>openstack_hypervisor_hostname</code>, "
-            "<code>hypervisor_hostname</code>, or <code>os_hypervisor_host</code>, apply copies "
-            "<strong>Hypervisor hostname</strong> there so the compute host stays visible even when "
-            "the linked Device is the instance name."
-        )
         e.spacer()
         e.table(
             list(HEADERS_DETAIL_NEW_VMS),
@@ -315,14 +287,6 @@ def emit_proposed_change_tables(e, prop):
     if prop["add_prefixes"]:
         e.spacer()
         e.subtitle("Detail — new prefixes")
-        e.paragraph(
-            "Use each row as NetBox Prefix create input (CIDR + OpenStack network/project context). "
-            "NB proposed status: reserved when no Neutron ports were counted on that subnet in this scan; "
-            "active when at least one port was seen. "
-            "Role reason is a short one-line summary; hover the cell for the full OpenStack port narrative. "
-            "NB proposed VRF is inferred from OpenStack naming signals (network/project/region text). "
-            "Columns marked '(editable)' can be clicked and edited directly."
-        )
         e.spacer()
         e.table(
             list(HEADERS_DETAIL_NEW_PREFIXES),
@@ -337,11 +301,6 @@ def emit_proposed_change_tables(e, prop):
     if prop.get("update_prefixes"):
         e.spacer()
         e.subtitle("Detail — existing prefixes")
-        e.paragraph(
-            "Subnet already has an exact matching NetBox Prefix, but OpenStack-derived VRF, status, role, "
-            "tenant, or description does not match. Apply matches the Prefix by CIDR and NB proposed VRF "
-            "(same handler as new prefixes). Role reason uses the same one-line summary + hover detail as new prefixes."
-        )
         e.spacer()
         e.table(
             list(HEADERS_DETAIL_EXISTING_PREFIXES),
@@ -374,15 +333,6 @@ def emit_proposed_change_tables(e, prop):
     if prop["add_fips"]:
         e.spacer()
         e.subtitle("Detail — new floating IPs")
-        e.paragraph(
-            "**NB Proposed Tenant** defaults to the OpenStack project that owns the floating IP; use the "
-            "tenant picker to choose any NetBox tenant. If the tenant is missing, create it from "
-            "**Detail — proposed missing tenants** first (or select the floating IP row so those creates "
-            "are pulled into the same batch). "
-            "Floating IPs are applied as **/32** (IPv4) or **/128** (IPv6). "
-            "**NB proposed parent prefix** is the Neutron subnet CIDR on the floating external network "
-            "that contains the address (the provider pool), when resolvable from the collected subnets."
-        )
         e.spacer()
         e.table(
             list(HEADERS_DETAIL_NEW_FIPS),

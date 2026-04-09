@@ -308,8 +308,10 @@ def _suggest_vlan_group_name(*, device, nb_site: str, nb_location: str) -> str:
 
 def _defaults_for_vlan_group(group_name: str) -> dict[str, str]:
     """
-    Status / VLAN name: first VLAN in the group by VID (stable template).
-    Tenant: left empty — operators set NB Proposed Tenant via the drift picker (real NetBox tenants only).
+    VLAN display name template from the group's existing VLANs (by VID).
+    ``tenant`` / ``status`` are kept for internal defaults only — proposed missing VLAN drift
+    rows no longer surface those columns; apply uses no tenant and ``active`` unless cells
+    carry overrides (e.g. synthetic prerequisite rows).
     """
     from ipam.models import VLAN, VLANGroup
 
@@ -822,8 +824,6 @@ def build_proposed_missing_vlan_rows(
                 str(vid),
                 group,
                 vlan_disp,
-                dfl["tenant"],
-                dfl["status"],
                 SET_NETBOX_ACTION_CREATE_VLAN,
                 risk,
             ]

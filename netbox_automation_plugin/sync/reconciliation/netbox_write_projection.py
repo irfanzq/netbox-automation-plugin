@@ -16,10 +16,11 @@ keys ``name``, ``id`` (existing only), ``primary_ip4``, ``primary_ip6``, ``clust
 in NetBox; see ``apply_cells._VM_PROJECTION_CF_KEYS``).
 
 **Proposed missing VLANs** (``detail_proposed_missing_vlans``): projection keys ``vid``,
-``vlan_group``, ``site``, ``location``, ``name``, ``tenant`` (optional when empty or ``—``),
-``status`` — same cells contract as ``apply_create_vlan`` (``location`` is drift context only;
-NetBox VLAN has no Location field; ``apply_create_vlan`` requires **NB site** and sets
-``VLAN.site`` when the model has a ``site`` field).
+``vlan_group``, ``site``, ``location``, ``name`` — drift table omits tenant/status pickers;
+``apply_create_vlan`` still defaults to **active** and no tenant unless optional cells are
+present (e.g. synthetic prerequisite dicts). ``location`` is context only (NetBox VLAN has no
+Location field); apply requires **NB site** and sets ``VLAN.site`` when the model has a
+``site`` field.
 
 **Proposed missing tenants** (``detail_proposed_missing_tenants``): projection keys ``name``,
 ``description``, ``openstack_project`` — same contract as ``apply_create_tenant``.
@@ -114,8 +115,6 @@ _NETBOX_PREVIEW_FULL_KEY_ORDER: dict[str, tuple[str, ...]] = {
         "site",
         "location",
         "name",
-        "tenant",
-        "status",
     ),
     "detail_proposed_missing_tenants": (
         "name",
@@ -449,17 +448,13 @@ def netbox_write_projection_cells(selection_key: str, cells: dict[str, str] | No
     if sk == "detail_bmc_existing":
         return _netbox_write_bmc_preview(c, existing_oob=True)
     if sk == "detail_proposed_missing_vlans":
-        return _drop_empty_tenant(
-            {
-                "vid": _cell(c, "NB Proposed VLAN ID", "Target VID"),
-                "vlan_group": _cell(c, "NB proposed VLAN group"),
-                "site": _cell(c, "NB site"),
-                "location": _cell(c, "NB location"),
-                "name": _cell(c, "NB proposed VLAN name (editable)", "NB proposed VLAN name"),
-                "tenant": coerce_nb_proposed_tenant_cell(_cell(c, "NB Proposed Tenant")),
-                "status": _cell(c, "NB proposed status"),
-            }
-        )
+        return {
+            "vid": _cell(c, "NB Proposed VLAN ID", "Target VID"),
+            "vlan_group": _cell(c, "NB proposed VLAN group"),
+            "site": _cell(c, "NB site"),
+            "location": _cell(c, "NB location"),
+            "name": _cell(c, "NB proposed VLAN name (editable)", "NB proposed VLAN name"),
+        }
     if sk == "detail_proposed_missing_tenants":
         tname = (_cell(c, "NB proposed tenant name") or "").strip()
         if not tname or tname in {"—", "-"}:

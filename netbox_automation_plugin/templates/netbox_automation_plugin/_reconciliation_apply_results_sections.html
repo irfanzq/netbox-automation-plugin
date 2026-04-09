@@ -3,9 +3,6 @@
   <div class="card mb-3">
     <h5 class="card-header">{% trans "Comprehensive apply state (latest status per row)" %}</h5>
     <div class="card-body py-2">
-      <p class="small text-body-secondary mb-2">
-        {% trans "Each frozen row appears once. Earlier failed or blocked skips are replaced when a re-apply fixes that row. Counts below are the current outcome after your last apply." %}
-      </p>
       <div class="row g-2 small">
         <div class="col-md-2"><strong>{% trans "Rows" %}:</strong> {{ apply_results.cumulative_summary.rows|default:0 }}</div>
         <div class="col-md-2"><strong>{% trans "Succeeded" %}:</strong> {{ apply_results.cumulative_summary.succeeded|default:0 }}</div>
@@ -48,7 +45,7 @@
       </div>
       {% if apply_results.summary.first_failed_exception %}
         <div class="alert alert-warning small mb-0 mt-3">
-          <strong>{% trans "First exception (this attempt; per-row savepoints isolate later rows)" %}</strong>
+          <strong>{% trans "First exception (this attempt)" %}</strong>
           <div class="mt-1 font-monospace">
             {{ apply_results.summary.first_failed_exception.exception_type|default:"—" }}:
             {{ apply_results.summary.first_failed_exception.exception_message|default:"—" }}
@@ -63,23 +60,10 @@
   </div>
 {% endif %}
 
-{% if apply_results.run_routing_context_text %}
-  <div class="card mb-3 border-info">
-    <h5 class="card-header">{% trans "Apply batch — NetBox branch routing (copy for support)" %}</h5>
-    <div class="card-body py-2">
-      <p class="small text-body-secondary mb-2">{% trans "Reconciliation run target branch and DB connection name. Compare with per-row blocks below. Paste this JSON when troubleshooting main vs branch writes." %}</p>
-      <pre class="small mb-0 text-break font-monospace" style="white-space: pre-wrap; max-height: 16rem; overflow: auto;">{{ apply_results.run_routing_context_text }}</pre>
-    </div>
-  </div>
-{% endif %}
-
 {% if apply_results.display_rows or apply_results.rows %}
   {% with comprehensive_rows=apply_results.display_rows|default:apply_results.rows %}
   <div class="card mb-3">
     <h5 class="card-header">{% trans "Apply row results (comprehensive)" %}</h5>
-    <div class="card-body py-2">
-      <p class="small text-body-secondary mb-0">{% trans "All frozen rows with their latest merged status. Table order is by severity (not execution order). Run # is the 1-based execution index from the apply that last updated each row; partial re-applies only number rows in that batch — untouched rows may show a prior Run # or —." %}</p>
-    </div>
     <div class="card-body p-0 border-top">
       <div class="table-responsive">
         <table class="table table-sm table-striped mb-0">
@@ -107,26 +91,14 @@
                 <td class="small">{{ row.action|default:"—" }}</td>
                 <td class="small">{{ row.summary|default:"—" }}</td>
                 <td class="small text-break font-monospace" style="min-width: 14rem; max-width: 36rem;">{% if row.write_preview %}{{ row.write_preview }}{% else %}—{% endif %}</td>
-                <td class="small text-break font-monospace">
-                  {% if row.reason_detail %}
-                    {{ row.reason_detail }}
-                  {% elif row.exception_type or row.exception_message %}
-                    {{ row.exception_type|default:"" }}{% if row.exception_type and row.exception_message %}: {% endif %}{{ row.exception_message|default:"" }}
-                  {% else %}
-                    —
+                <td class="small text-break" style="min-width: 12rem; max-width: 28rem;">
+                  {% if row.reason_detail %}<div class="mb-0">{{ row.reason_detail }}</div>{% endif %}
+                  {% if row.exception_type or row.exception_message %}
+                    <div class="font-monospace {% if row.reason_detail %}mt-1 pt-1 border-top{% endif %}">
+                      {{ row.exception_type|default:"" }}{% if row.exception_type and row.exception_message %}: {% endif %}{{ row.exception_message|default:"" }}
+                    </div>
                   {% endif %}
-                  {% if row.routing_debug_text %}
-                    <div class="mt-2 pt-2 border-top text-body-secondary small">{% trans "Routing debug (copy)" %}</div>
-                    <pre class="small mb-0 text-break font-monospace mt-1" style="white-space: pre-wrap; max-height: 12rem; overflow: auto;">{{ row.routing_debug_text }}</pre>
-                  {% endif %}
-                  {% if row.apply_extra_debug_text %}
-                    <div class="mt-2 pt-2 border-top text-body-secondary small">{% trans "Handler debug — VLAN resolution etc. (copy)" %}</div>
-                    <pre class="small mb-0 text-break font-monospace mt-1" style="white-space: pre-wrap; max-height: 14rem; overflow: auto;">{{ row.apply_extra_debug_text }}</pre>
-                  {% endif %}
-                  {% if row.leak_debug_paste_text %}
-                    <div class="mt-2 pt-2 border-top text-body-secondary small">{% trans "Main vs branch leak audit — paste this whole block (routing + extra + snapshots)" %}</div>
-                    <pre class="small mb-0 text-break font-monospace mt-1" style="white-space: pre-wrap; max-height: 28rem; overflow: auto;">{{ row.leak_debug_paste_text }}</pre>
-                  {% endif %}
+                  {% if not row.reason_detail and not row.exception_type and not row.exception_message %}—{% endif %}
                 </td>
               </tr>
             {% endfor %}
@@ -167,26 +139,14 @@
                 <td class="small">{{ row.action|default:"—" }}</td>
                 <td class="small">{{ row.summary|default:"—" }}</td>
                 <td class="small text-break font-monospace" style="min-width: 14rem; max-width: 36rem;">{% if row.write_preview %}{{ row.write_preview }}{% else %}—{% endif %}</td>
-                <td class="small text-break font-monospace">
-                  {% if row.reason_detail %}
-                    {{ row.reason_detail }}
-                  {% elif row.exception_type or row.exception_message %}
-                    {{ row.exception_type|default:"" }}{% if row.exception_type and row.exception_message %}: {% endif %}{{ row.exception_message|default:"" }}
-                  {% else %}
-                    —
+                <td class="small text-break" style="min-width: 12rem; max-width: 28rem;">
+                  {% if row.reason_detail %}<div class="mb-0">{{ row.reason_detail }}</div>{% endif %}
+                  {% if row.exception_type or row.exception_message %}
+                    <div class="font-monospace {% if row.reason_detail %}mt-1 pt-1 border-top{% endif %}">
+                      {{ row.exception_type|default:"" }}{% if row.exception_type and row.exception_message %}: {% endif %}{{ row.exception_message|default:"" }}
+                    </div>
                   {% endif %}
-                  {% if row.routing_debug_text %}
-                    <div class="mt-2 pt-2 border-top text-body-secondary small">{% trans "Routing debug (copy)" %}</div>
-                    <pre class="small mb-0 text-break font-monospace mt-1" style="white-space: pre-wrap; max-height: 12rem; overflow: auto;">{{ row.routing_debug_text }}</pre>
-                  {% endif %}
-                  {% if row.apply_extra_debug_text %}
-                    <div class="mt-2 pt-2 border-top text-body-secondary small">{% trans "Handler debug — VLAN resolution etc. (copy)" %}</div>
-                    <pre class="small mb-0 text-break font-monospace mt-1" style="white-space: pre-wrap; max-height: 14rem; overflow: auto;">{{ row.apply_extra_debug_text }}</pre>
-                  {% endif %}
-                  {% if row.leak_debug_paste_text %}
-                    <div class="mt-2 pt-2 border-top text-body-secondary small">{% trans "Main vs branch leak audit — paste this whole block (routing + extra + snapshots)" %}</div>
-                    <pre class="small mb-0 text-break font-monospace mt-1" style="white-space: pre-wrap; max-height: 28rem; overflow: auto;">{{ row.leak_debug_paste_text }}</pre>
-                  {% endif %}
+                  {% if not row.reason_detail and not row.exception_type and not row.exception_message %}—{% endif %}
                 </td>
               </tr>
             {% endfor %}

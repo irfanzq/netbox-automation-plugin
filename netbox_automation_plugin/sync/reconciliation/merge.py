@@ -10,6 +10,7 @@ from netbox_automation_plugin.sync.reporting.drift_report.drift_overrides_apply 
     HEADERS_DETAIL_NEW_NICS,
     SELECTION_KEY_TO_HEADERS,
     SELECTION_KEY_TO_PROP_LIST,
+    coerce_add_proposed_missing_vlan_row_lengths,
     merge_drift_review_overrides,
     normalize_drift_review_overrides,
     _new_nic_row_is_os_authority,
@@ -101,6 +102,7 @@ def merged_proposed_from_drift_run(
         netbox_ifaces=payload.get("netbox_ifaces"),
         os_subnet_hints=payload.get("os_subnet_hints") or [],
     )
+    coerce_add_proposed_missing_vlan_row_lengths(prop)
     if norm:
         prop, align_rows = merge_drift_review_overrides(prop, align_rows, norm)
     return prop, align_rows

@@ -2,6 +2,7 @@
 <div class="card mb-3">
   <h5 class="card-header">{% trans "Lifecycle" %}</h5>
   <div class="card-body">
+    {% if not hide_lifecycle_help %}
     <p class="text-body-secondary small mb-2">
       {% if hide_merge_to_main %}
         {% blocktrans trimmed %}Apply saves your selected changes into the branch. Discard cancels the run and removes the branch — it does not roll back individual rows already applied.{% endblocktrans %}
@@ -18,6 +19,7 @@
       “Apply selected changes to branch” always writes to the NetBox branch for this run (“{{ bname }}”, pk {{ bid }}), not to Main. To browse VMs, VLANs, and other objects created here, select that same branch in NetBox’s branch selector (or use Open branch page above).
       {% endblocktrans %}
     </p>
+    {% endif %}
     {% endif %}
     <div class="d-flex flex-wrap gap-1 align-items-center">
       <button type="button" class="btn btn-primary btn-sm js-recon-apply js-recon-lifecycle-btn" data-initial-disabled="{% if not can_apply %}true{% else %}false{% endif %}" {% if not can_apply %}disabled{% endif %}>{% trans "Apply selected changes to branch" %}</button>
