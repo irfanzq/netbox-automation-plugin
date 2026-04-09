@@ -271,12 +271,16 @@ def _html_col_is_os_description(header) -> bool:
     return str(header or "").strip().lower() == "os description"
 
 
+def _html_col_is_nb_proposed_prefix_desc_editable(header) -> bool:
+    """Editable drift-review column: keep header + cells on one line (see template CSS)."""
+    return str(header or "").strip().lower() == "nb proposed prefix description (editable)"
+
+
 def _html_col_is_prefix_description(header) -> bool:
     h = str(header or "").strip().lower()
     return h in {
         "nb prefix description",
         "nb proposed prefix description",
-        "nb proposed prefix description (editable)",
         "nb proposed vlan name (editable)",
     }
 
@@ -308,6 +312,8 @@ def _html_th_class(header) -> str:
     h = str(header or "")
     if _html_col_is_os_description(h):
         return "small align-bottom text-nowrap drift-col-os-description"
+    if _html_col_is_nb_proposed_prefix_desc_editable(h):
+        return "small align-bottom text-nowrap drift-col-prefix-desc-editable"
     if _html_col_is_prefix_description(h):
         return "small align-bottom drift-col-prefix-description"
     if _html_col_is_maas_fabric(h):
@@ -329,6 +335,8 @@ def _html_td_class(header, col_idx, notes_col_idx=None) -> str:
     parts = []
     if _html_col_is_os_description(h):
         parts.extend(["align-top", "text-nowrap", "drift-col-os-description"])
+    elif _html_col_is_nb_proposed_prefix_desc_editable(h):
+        parts.extend(["align-top", "text-nowrap", "drift-col-prefix-desc-editable"])
     elif _html_col_is_prefix_description(h):
         parts.extend(["align-top", "drift-col-prefix-description"])
     elif _html_col_is_role_reason(h):

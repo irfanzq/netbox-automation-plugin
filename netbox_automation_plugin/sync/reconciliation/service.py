@@ -53,6 +53,7 @@ from .branch import (
     get_netbox_branch,
     netbox_branch_exists,
     reconciliation_apply_guard,
+    resolve_branch_django_database_alias,
 )
 from .apply_cells import (
     NEW_NIC_SELECTION_KEYS,
@@ -147,31 +148,13 @@ def check_branch_schema_ready(_branch_obj: Any, branch_db: str) -> tuple[bool, s
     """
     Return (True, "") if reconciliation may safely open ``branch_write_context`` for this alias.
 
-    When ``Branch.connection_name`` is empty or the literal ``default``, NetBox Branching has
-    not assigned a dedicated schema alias yet — applying would risk ORM writes hitting main.
+    Uses :func:`resolve_branch_django_database_alias` so ``schema_branch_*`` names from the
+    Branch model map to ``branch_*`` keys registered by ``DynamicSchemaDict``.
     """
-    raw = (branch_db or "").strip()
-    low = raw.lower()
-    if not raw or low == "default":
-        return (
-            False,
-            _(
-                "Branch connection_name is empty or 'default' — branch schema is not yet "
-                "provisioned. Wait for NetBox branching to finish creating the branch schema, "
-                "then retry."
-            ),
-        )
-    if raw not in connections:
-        return (
-            False,
-            _("Branch DB alias '%(alias)s' is not registered in Django connections.")
-            % {"alias": raw},
-        )
-    try:
-        connections[raw].ensure_connection()
-    except Exception as exc:
-        return (False, _("Branch DB connection failed: %(err)s") % {"err": str(exc)})
-    return (True, "")
+    alias, err = resolve_branch_django_database_alias(branch_db)
+    if alias:
+        return (True, "")
+    return (False, err)
 
 
 def _apply_result_projection_dict(op: dict[str, Any]) -> dict[str, str]:
@@ -2593,15 +2576,22 @@ def apply_reconciliation_run(
         branch_schema_block_reason = ""
         branch_db_for_payload = ""
         if branch_obj is not None:
-            branch_db = str(getattr(branch_obj, "connection_name", None) or "").strip()
-            branch_db_for_payload = branch_db
+            connection_name_raw = str(
+                getattr(branch_obj, "connection_name", None) or ""
+            ).strip()
+            django_db_alias, resolve_err = resolve_branch_django_database_alias(
+                connection_name_raw
+            )
+            schema_ok = bool(django_db_alias)
+            schema_msg = resolve_err if not schema_ok else ""
+            branch_db_for_payload = django_db_alias or connection_name_raw
             run_routing_core = {
                 "reconciliation_run_branch_id": run.branch_id,
                 "reconciliation_run_branch_name": (run.branch_name or "").strip(),
                 "netbox_branch_model_pk": getattr(branch_obj, "pk", None),
-                "netbox_branch_connection_name": branch_db,
+                "netbox_branch_connection_name": connection_name_raw,
+                "django_database_alias": django_db_alias or "",
             }
-            schema_ok, schema_msg = check_branch_schema_ready(branch_obj, branch_db)
             if not schema_ok:
                 branch_schema_not_ready = True
                 branch_schema_block_reason = schema_msg
@@ -2620,13 +2610,15 @@ def apply_reconciliation_run(
                 try:
                     _warn_if_netbox_branch_router_missing()
                     with branch_write_context(branch=branch_obj):
-                        with reconciliation_apply_guard(branch_obj, branch_db):
+                        with reconciliation_apply_guard(
+                            branch_obj, django_db_alias or ""
+                        ):
                             for seq_num, op in enumerate(target_ops, start=1):
                                 try:
                                     applied_rows.append(
                                         _with_apply_sequence(
                                             _execute_branch_apply_in_branch_transaction(
-                                                branch_db, op
+                                                django_db_alias or "", op
                                             ),
                                             seq_num,
                                         )
@@ -2705,6 +2697,13 @@ def apply_reconciliation_run(
             "cumulative_summary": _summarize_apply_result_rows(merged_rows),
             "rows": merged_rows,
             "display_rows": _apply_result_rows_for_comprehensive_display(merged_rows),
+            "branch_connection_name_raw": (
+                str(
+                    (run_routing_core or {}).get("netbox_branch_connection_name") or ""
+                ).strip()
+                if run_routing_core is not None
+                else ""
+            ),
             "branch_db_used": branch_db_for_payload,
             "branch_not_ready": bool(branch_schema_not_ready),
         }
@@ -2744,8 +2743,8 @@ def check_and_reapply_if_branch_ready(
     )
     if branch_obj is None:
         return False, (err or _("Branch not found.")).strip(), run
-    branch_db = str(getattr(branch_obj, "connection_name", None) or "").strip()
-    ready, reason = check_branch_schema_ready(branch_obj, branch_db)
+    connection_name_raw = str(getattr(branch_obj, "connection_name", None) or "").strip()
+    ready, reason = check_branch_schema_ready(branch_obj, connection_name_raw)
     if not ready:
         return False, reason, run
     run = apply_reconciliation_run(run=run, actor=actor, retry_failed_only=True)

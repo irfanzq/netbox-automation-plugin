@@ -140,8 +140,14 @@ def _first_meaningful_text(*vals: Any) -> str:
     return "-"
 
 
-def _friendly_prefix_role_brief(bucket: str, confidence: str, ports_total: int) -> str:
-    """One-line summary for the Role reason column (table readability)."""
+def _friendly_prefix_role_brief(bucket: str, confidence: str) -> str:
+    """
+    One-line summary for the Role reason column: suggested pattern + confidence only.
+
+    Port counts and attachment detail belong in :func:`_friendly_prefix_role_summary` (hover /
+    exports)—they support interpretation but do not define the role label, so we omit them here
+    to avoid implying the count “proves” the role.
+    """
     b = (bucket or "").lower()
     bl = {
         "vm": "Tenant VM network",
@@ -154,11 +160,7 @@ def _friendly_prefix_role_brief(bucket: str, confidence: str, ports_total: int) 
         "medium": "verify role",
         "low": "low certainty",
     }.get((confidence or "low").strip().lower(), "low certainty")
-    if ports_total <= 0:
-        p = "no ports seen"
-    else:
-        p = f"{ports_total} Neutron ports"
-    return f"{bl} · {cl} · {p}"
+    return f"{bl} · {cl}"
 
 
 def _friendly_prefix_role_summary(bucket: str, confidence: str, ports_total: int, owners: str) -> str:
@@ -690,13 +692,10 @@ def _proposed_changes_rows(
                 "OpenStack could not auto-sort this subnet into VM / public / storage / admin from port data. "
                 "Pick a NetBox role manually after checking the network in OpenStack." + tail
             )
-            brief = (
-                "Uncategorized subnet · pick role manually · "
-                + (f"{ports_total} Neutron ports" if ports_total else "no ports seen")
-            )
+            brief = "Uncategorized subnet · pick role manually"
             return "REVIEW_REQUIRED", brief, detail
 
-        brief = _friendly_prefix_role_brief(bucket, confidence, ports_total)
+        brief = _friendly_prefix_role_brief(bucket, confidence)
         summary = _friendly_prefix_role_summary(bucket, confidence, ports_total, owners)
 
         wanted_tokens = {

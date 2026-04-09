@@ -55,6 +55,10 @@ def _reconciliation_run_page_context(
     }
     apply_results: dict = run.apply_results if isinstance(run.apply_results, dict) else {}
     result_rows = apply_results.get("rows") if isinstance(apply_results.get("rows"), list) else []
+    branch_schema_blocked = bool(
+        apply_results.get("branch_not_ready")
+        or run.status == MAASOpenStackReconciliationRun.STATUS_BRANCH_NOT_READY
+    )
     failed_row_n = sum(
         1 for r in result_rows if isinstance(r, dict) and str(r.get("status") or "") == "failed"
     )
@@ -69,9 +73,10 @@ def _reconciliation_run_page_context(
         MAASOpenStackReconciliationRun.STATUS_APPLY_FAILED_PARTIAL,
         MAASOpenStackReconciliationRun.STATUS_APPLY_FAILED,
         MAASOpenStackReconciliationRun.STATUS_APPLIED,
-        MAASOpenStackReconciliationRun.STATUS_BRANCH_NOT_READY,
     }
-    can_retry_partial_base = retry_eligible_status and bool(result_rows)
+    can_retry_partial_base = (
+        retry_eligible_status and bool(result_rows) and not branch_schema_blocked
+    )
     detail_url = reverse(
         "plugins:netbox_automation_plugin:maas_openstack_reconciliation_detail",
         args=[run.pk],
@@ -80,10 +85,7 @@ def _reconciliation_run_page_context(
         "plugins:netbox_automation_plugin:maas_openstack_reconciliation_apply_results",
         args=[run.pk],
     )
-    show_recheck_branch_btn = bool(
-        apply_results.get("branch_not_ready")
-        or run.status == MAASOpenStackReconciliationRun.STATUS_BRANCH_NOT_READY
-    )
+    show_recheck_branch_btn = branch_schema_blocked
     return {
         "run": run,
         "apply_results": apply_results,
@@ -107,7 +109,7 @@ def _reconciliation_run_page_context(
         "apply_results_url": apply_results_url,
         "branching_branch_url": _netbox_branching_branch_url(branch_pk=run.branch_id),
         "can_discard": run.status not in blocked_discard,
-        "can_apply": run.status in apply_ok,
+        "can_apply": run.status in apply_ok and not branch_schema_blocked,
         "can_retry_failed": can_retry_partial_base and failed_row_n > 0,
         "can_retry_skipped": can_retry_partial_base and skipped_row_n > 0,
         "can_retry_failed_or_skipped": can_retry_partial_base
@@ -115,6 +117,7 @@ def _reconciliation_run_page_context(
         "recon_apply_failed_row_count": failed_row_n,
         "recon_apply_skipped_row_count": skipped_row_n,
         "show_recheck_branch_btn": show_recheck_branch_btn,
+        "branch_schema_blocked": branch_schema_blocked,
         "nav_active": nav_active,
     }
 

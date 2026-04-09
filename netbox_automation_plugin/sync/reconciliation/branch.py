@@ -8,9 +8,67 @@ import logging
 import os
 from typing import Any, Iterator
 
-from django.db import transaction
+from django.db import connections, transaction
+from django.utils.translation import gettext as _
 
 logger = logging.getLogger(__name__)
+
+
+def _branch_django_alias_candidates(raw: str) -> list[str]:
+    """
+    NetBox Branching may expose ``Branch.connection_name`` as ``schema_branch_<id>`` while
+    ``DynamicSchemaDict`` registers the Django key as ``branch_<id>`` (schema name in UI is
+    often ``branch_<id>``). Try both spellings.
+    """
+    s = (raw or "").strip()
+    if not s:
+        return []
+    out: list[str] = [s]
+    sl = s.lower()
+    p_schema = "schema_branch_"
+    p_branch = "branch_"
+    if sl.startswith(p_schema):
+        alt = p_branch + s[len(p_schema) :]
+        if alt not in out:
+            out.append(alt)
+    elif sl.startswith(p_branch):
+        alt = p_schema + s[len(p_branch) :]
+        if alt not in out:
+            out.append(alt)
+    return out
+
+
+def resolve_branch_django_database_alias(connection_name: str) -> tuple[str | None, str]:
+    """
+    Map ``Branch.connection_name`` to a Django ``DATABASES`` key that exists in
+    ``django.db.connections`` and accepts connections.
+
+    Returns ``(alias, "")`` on success, or ``(None, error_message)``.
+    """
+    raw = (connection_name or "").strip()
+    low = raw.lower()
+    if not raw or low == "default":
+        return (
+            None,
+            _(
+                "Branch connection_name is empty or 'default' — branch schema is not yet "
+                "provisioned. Wait for NetBox branching to finish creating the branch schema, "
+                "then retry."
+            ),
+        )
+    last_detail = ""
+    for cand in _branch_django_alias_candidates(raw):
+        if cand not in connections:
+            last_detail = _(
+                "Branch DB alias '%(alias)s' is not registered in Django connections."
+            ) % {"alias": cand}
+            continue
+        try:
+            connections[cand].ensure_connection()
+            return (cand, "")
+        except Exception as exc:
+            last_detail = _("Branch DB connection failed: %(err)s") % {"err": str(exc)}
+    return (None, last_detail or _("No usable branch database alias found."))
 
 # Set only during reconciliation apply (and branch-scoped validators) so ORM mutations
 # cannot run against NetBox main by accident.
@@ -202,6 +260,16 @@ def branch_write_context(*, branch: Any) -> Iterator[None]:
                 "transaction.atomic(using=…) for the branch schema — refusing ORM writes "
                 "(would risk NetBox main). Wait until the branch is provisioned and ready."
             )
+        # connection_name may be schema_branch_* while DynamicSchemaDict only registers branch_*.
+        if using.lower() != "default" and using not in connections:
+            resolved, rerr = resolve_branch_django_database_alias(using)
+            if resolved:
+                using = resolved
+            else:
+                raise RuntimeError(
+                    rerr
+                    or f"Branch database alias {using_raw!r} is not registered in Django connections."
+                )
         # NetBox Branching often reports connection_name as the literal "default". Pairing
         # activate_branch with transaction.atomic(using="default") pins Django to the default
         # connection and can bypass branching routers — writes then land in main. Use a plain
