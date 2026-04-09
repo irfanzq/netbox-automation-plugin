@@ -64,17 +64,63 @@ def _log_reconciliation_orm_write(
     message: str,
 ) -> None:
     """
-    INFO log for Docker / NetBox logs: which ORM alias each sensitive create/update used.
-
-    Search: ``reconciliation_orm_write``
+    Extra detail for VLAN/VM/prefix handlers. Primary operator signal is
+    ``reconciliation_netbox_write`` (every created/updated row).
     """
-    logger.info(
+    logger.debug(
         "reconciliation_orm_write entity=%s apply_action=%s row_key=%s branch_db=%s %s",
         entity,
         apply_action,
         str(op.get("row_key") or ""),
         str(op.get("branch_db") or ""),
         message,
+    )
+
+
+def _maybe_log_reconciliation_netbox_write(
+    *,
+    op: dict[str, Any],
+    netbox_action: str,
+    raw: Any,
+) -> None:
+    """
+    One INFO line per reconciliation row that mutates NetBox (``created`` / ``updated``).
+
+    Grep Docker logs for ``reconciliation_netbox_write``; ``postgresql_current_schema``
+    must not be ``public`` (NetBox main). Disable with
+    ``RECONCILIATION_LOG_EACH_NETBOX_WRITE = False`` in NetBox configuration.
+    """
+    if not bool(getattr(settings, "RECONCILIATION_LOG_EACH_NETBOX_WRITE", True)):
+        return
+    if not isinstance(raw, tuple) or len(raw) < 2:
+        return
+    st = str(raw[0])
+    if st not in ("created", "updated"):
+        return
+    reason = str(raw[1])
+    rk = str(op.get("row_key") or "")
+    sk = str(op.get("selection_key") or "")
+    bd = str(op.get("branch_db") or "").strip()
+    probe_alias, probe_schema = _row_schema_probe_for_log()
+    django_alias = probe_alias or bd
+    pg_schema = probe_schema or "(not_probed)"
+    wo_tail = ""
+    if len(raw) >= 4 and isinstance(raw[3], dict):
+        wo = raw[3]
+        lbl, pk = wo.get("label"), wo.get("pk")
+        if lbl is not None and pk is not None:
+            wo_tail = f" written_object={lbl}:{pk}"
+    logger.info(
+        "reconciliation_netbox_write row_status=%s reason=%s netbox_action=%s row_key=%s "
+        "selection_key=%s django_orm_alias=%s postgresql_current_schema=%s%s",
+        st,
+        reason,
+        netbox_action,
+        rk,
+        sk,
+        django_alias,
+        pg_schema,
+        wo_tail,
     )
 
 _VID_FROM_PARENS_RE = re.compile(r"\((\d+)\)\s*$")
@@ -289,6 +335,30 @@ def _orm_alias() -> str | None:
     return u
 
 
+# Populated by _assert_row_apply_targets_branch_db for reconciliation_netbox_write INFO logs.
+_apply_row_schema_probe_tls = threading.local()
+
+
+def _clear_row_schema_probe_tls() -> None:
+    for attr in ("orm_alias", "postgresql_current_schema"):
+        try:
+            delattr(_apply_row_schema_probe_tls, attr)
+        except AttributeError:
+            pass
+
+
+def _set_row_schema_probe_for_log(*, orm_alias: str, postgresql_current_schema: str) -> None:
+    _apply_row_schema_probe_tls.orm_alias = orm_alias
+    _apply_row_schema_probe_tls.postgresql_current_schema = postgresql_current_schema
+
+
+def _row_schema_probe_for_log() -> tuple[str, str]:
+    return (
+        str(getattr(_apply_row_schema_probe_tls, "orm_alias", "") or ""),
+        str(getattr(_apply_row_schema_probe_tls, "postgresql_current_schema", "") or ""),
+    )
+
+
 def _assert_row_apply_targets_branch_db(op: dict[str, Any]) -> None:
     """
     Run immediately before each reconciliation handler (VLAN, VM, prefix, …).
@@ -301,6 +371,9 @@ def _assert_row_apply_targets_branch_db(op: dict[str, Any]) -> None:
       connection for that alias reports ``current_schema()`` ≠ ``public`` (NetBox main).
 
     Raises ``RuntimeError`` if any check fails so the row returns as a failure, not a main write.
+
+    Also records ORM alias + ``current_schema()`` on a thread-local for
+    ``reconciliation_netbox_write`` logging after successful creates/updates.
     """
     ctx = get_reconciliation_apply_guard_context()
     if ctx is None:
@@ -327,6 +400,10 @@ def _assert_row_apply_targets_branch_db(op: dict[str, Any]) -> None:
             f"ORM alias mismatch: _orm_alias()={orm_u!r} vs op['branch_db']={op_db!r}."
         )
     if not bool(getattr(settings, "RECONCILIATION_PG_SCHEMA_CHECK_EACH_ROW", True)):
+        _set_row_schema_probe_for_log(
+            orm_alias=orm_u,
+            postgresql_current_schema="(pg_schema_check_disabled)",
+        )
         return
     try:
         conn = connections[orm_u]
@@ -334,11 +411,20 @@ def _assert_row_apply_targets_branch_db(op: dict[str, Any]) -> None:
         inner = getattr(conn, "connection", None)
         vendor = (getattr(inner, "vendor", None) or "").lower()
         if vendor != "postgresql":
+            _set_row_schema_probe_for_log(
+                orm_alias=orm_u,
+                postgresql_current_schema="(non_postgresql)",
+            )
             return
         with conn.cursor() as cursor:
             cursor.execute("SELECT current_schema()")
             row = cursor.fetchone()
-        cur = (row[0] or "").strip().lower() if row else ""
+        cur_raw = (row[0] or "").strip() if row else ""
+        cur = cur_raw.lower()
+        _set_row_schema_probe_for_log(
+            orm_alias=orm_u,
+            postgresql_current_schema=cur_raw or "(empty)",
+        )
         if cur == "public":
             raise RuntimeError(
                 f"PostgreSQL current_schema() is 'public' on ORM alias {orm_u!r} — "
@@ -5245,6 +5331,7 @@ def apply_row_operation(
     """
     _clear_tls_routing_snapshot()
     _clear_apply_extra_debug()
+    _clear_row_schema_probe_tls()
     if (gerr := check_reconciliation_apply_safe_to_mutate(op)) is not None:
         return "failed", "failed_reconciliation_branch_guard", gerr, None
 
@@ -5283,11 +5370,14 @@ def apply_row_operation(
     # Publish branch_db so all handlers and helpers can open correctly-aliased savepoints.
     _bdb_token = _APPLY_BRANCH_DB.set(str(op.get("branch_db") or "default"))
     _set_tls_routing_snapshot(_build_reconciliation_apply_routing_snapshot(op))
+    raw: tuple[Any, ...] | Any | None = None
     try:
         _assert_row_apply_targets_branch_db(op_use)
         raw = fn(op_use)
     finally:
         _APPLY_BRANCH_DB.reset(_bdb_token)
+    if raw is not None:
+        _maybe_log_reconciliation_netbox_write(op=op_use, netbox_action=action, raw=raw)
     if not isinstance(raw, tuple):
         return "failed", "failed_bad_apply_return", None, None
     if len(raw) == 2:
