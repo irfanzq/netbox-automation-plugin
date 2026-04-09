@@ -113,6 +113,22 @@
       <p class="small mb-2 w-100 maas-recon-overlay-sub" id="maas-recon-post-create-sub">
         {% blocktrans trimmed %}Please wait before schema checks run. The run page will open only after the last check confirms the branch session is not on PostgreSQL <code>public</code>.{% endblocktrans %}
       </p>
+      <div class="d-none w-100 text-start" id="maas-recon-post-create-success" role="status" aria-live="polite">
+        <div class="alert alert-success mb-3 py-3 border-0">
+          <p class="small mb-2 text-body-secondary" id="maas-recon-post-create-success-sub"></p>
+          <dl class="row small mb-0">
+            <dt class="col-sm-4 text-body-secondary">{% trans "PostgreSQL current_schema()" %}</dt>
+            <dd class="col-sm-8 mb-1"><code class="user-select-all" id="maas-recon-success-cur-schema"></code></dd>
+            <dt class="col-sm-4 text-body-secondary">{% trans "Expected branch schema" %}</dt>
+            <dd class="col-sm-8 mb-1"><code class="user-select-all" id="maas-recon-success-exp-schema"></code></dd>
+            <dt class="col-sm-4 text-body-secondary">{% trans "Django ORM alias" %}</dt>
+            <dd class="col-sm-8 mb-0"><code class="user-select-all" id="maas-recon-success-alias"></code></dd>
+          </dl>
+        </div>
+        <button type="button" class="btn btn-primary w-100" id="maas-recon-post-create-continue">
+          {% trans "Continue to reconciliation run" %}
+        </button>
+      </div>
       <div class="alert alert-danger mt-3 mb-0 py-2 small text-start d-none w-100 maas-recon-overlay-error border-0" id="maas-recon-post-create-error" role="alert"></div>
       <button type="button" class="btn btn-warning btn-sm mt-3 d-none align-self-center" id="maas-recon-post-create-retry">{% trans "Retry schema polling" %}</button>
     </div>
@@ -227,6 +243,14 @@
     min-height: 0;
     overflow: hidden;
   }
+  .maas-recon-post-create-overlay-card #maas-recon-post-create-success .alert-success {
+    background-color: rgba(25, 135, 84, 0.12);
+    color: inherit;
+  }
+  [data-bs-theme="dark"] .maas-recon-post-create-overlay-card #maas-recon-post-create-success .alert-success {
+    background-color: rgba(25, 135, 84, 0.2);
+    color: inherit;
+  }
   .maas-recon-probe-json-pre {
     background-color: var(--bs-tertiary-bg);
     color: var(--bs-body-color);
@@ -269,6 +293,9 @@
     var msgShortProbeSub = "{% filter escapejs %}{% trans 'Checking branch database session…' %}{% endfilter %}";
     var msgHintsTitle = "{% filter escapejs %}{% trans 'Troubleshooting hints' %}{% endfilter %}";
     var msgProbeTimeline = "{% filter escapejs %}{% trans 'All probe attempts (timeline)' %}{% endfilter %}";
+    var msgSchemaOkTitle = "{% filter escapejs %}{% trans 'Branch database session is ready' %}{% endfilter %}";
+    var msgSchemaOkSub = "{% filter escapejs %}{% trans 'PostgreSQL current_schema() is not public — you are on the branch schema. Confirm the names below match your branch, then continue to open the reconciliation run page and use Apply selected changes to branch.' %}{% endfilter %}";
+    var msgDash = "{% filter escapejs %}{% trans '—' %}{% endfilter %}";
     var loadingBtnHtml = '<span class="spinner-border spinner-border-sm me-1" role="status" aria-hidden="true"></span>{% filter escapejs %}{% trans "Creating branch…" %}{% endfilter %}';
     function csrf() {
       var el = document.querySelector("#recon-action-csrf input[name=csrfmiddlewaretoken]");
@@ -333,6 +360,12 @@
             var errEl = document.getElementById("maas-recon-post-create-error");
             var retryEl = document.getElementById("maas-recon-post-create-retry");
             var spinEl = document.getElementById("maas-recon-post-create-spinner");
+            var successWrap = document.getElementById("maas-recon-post-create-success");
+            var successSub = document.getElementById("maas-recon-post-create-success-sub");
+            var successCur = document.getElementById("maas-recon-success-cur-schema");
+            var successExp = document.getElementById("maas-recon-success-exp-schema");
+            var successAlias = document.getElementById("maas-recon-success-alias");
+            var continueBtn = document.getElementById("maas-recon-post-create-continue");
             function ensurePostCreateOverlayOnBody() {
               if (!overlay || overlay.parentNode === document.body) {
                 return;
@@ -355,6 +388,12 @@
               if (retryEl) {
                 retryEl.classList.add("d-none");
               }
+              if (successWrap) {
+                successWrap.classList.add("d-none");
+              }
+              if (subEl) {
+                subEl.classList.remove("d-none");
+              }
               if (spinEl) {
                 spinEl.classList.remove("d-none");
               }
@@ -362,9 +401,64 @@
             function redirectToRun() {
               window.location.href = dest;
             }
+            function showSchemaSuccess(d) {
+              var data = d || {};
+              if (spinEl) {
+                spinEl.classList.add("d-none");
+              }
+              if (errEl) {
+                errEl.classList.add("d-none");
+                errEl.innerHTML = "";
+              }
+              if (retryEl) {
+                retryEl.classList.add("d-none");
+              }
+              if (titleEl) {
+                titleEl.textContent = msgSchemaOkTitle;
+              }
+              if (subEl) {
+                subEl.classList.add("d-none");
+              }
+              var cur = data.postgresql_current_schema != null && String(data.postgresql_current_schema) !== ""
+                ? String(data.postgresql_current_schema)
+                : msgDash;
+              var exp = data.expected_branch_schema != null && String(data.expected_branch_schema) !== ""
+                ? String(data.expected_branch_schema)
+                : msgDash;
+              var al = data.django_orm_alias != null && String(data.django_orm_alias) !== ""
+                ? String(data.django_orm_alias)
+                : msgDash;
+              if (successSub) {
+                successSub.textContent = msgSchemaOkSub;
+              }
+              if (successCur) {
+                successCur.textContent = cur;
+              }
+              if (successExp) {
+                successExp.textContent = exp;
+              }
+              if (successAlias) {
+                successAlias.textContent = al;
+              }
+              if (successWrap) {
+                successWrap.classList.remove("d-none");
+              }
+              if (continueBtn) {
+                continueBtn.onclick = function() {
+                  redirectToRun();
+                };
+                continueBtn.focus();
+              }
+            }
             function showSchemaFailure(data, probeHistory) {
               var d = data || {};
               var hist = Array.isArray(probeHistory) ? probeHistory : [];
+              if (successWrap) {
+                successWrap.classList.add("d-none");
+              }
+              if (subEl) {
+                subEl.classList.remove("d-none");
+              }
               if (spinEl) {
                 spinEl.classList.add("d-none");
               }
@@ -484,6 +578,12 @@
                 if (retryEl) {
                   retryEl.classList.add("d-none");
                 }
+                if (successWrap) {
+                  successWrap.classList.add("d-none");
+                }
+                if (subEl) {
+                  subEl.classList.remove("d-none");
+                }
                 if (spinEl) {
                   spinEl.classList.remove("d-none");
                 }
@@ -510,7 +610,7 @@
                         return;
                       }
                       if (lastData && lastData.ready) {
-                        redirectToRun();
+                        showSchemaSuccess(lastData);
                         return;
                       }
                       showSchemaFailure(lastData, probeHistory);
