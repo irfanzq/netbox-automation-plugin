@@ -465,6 +465,11 @@ def _snapshot_pg_schema_after_write(op: dict[str, Any]) -> None:
             orm_u,
             val,
         )
+        raise RuntimeError(
+            f"After NetBox write, PostgreSQL current_schema() is still 'public' on ORM alias "
+            f"{orm_u!r} — aborting row (possible main-database write). Check BranchAwareRouter, "
+            f"save(using=…), and connection pooling."
+        )
 
 
 def consume_apply_row_schema_audit(op: dict[str, Any]) -> dict[str, Any]:
@@ -543,9 +548,11 @@ def _assert_row_apply_targets_branch_db(op: dict[str, Any]) -> None:
     Also records ORM alias + ``current_schema()`` on a thread-local for
     ``reconciliation_netbox_write`` logging after successful creates/updates.
 
-    When the reconciliation guard context is missing (unscoped tooling only), we still probe
-    ``op['branch_db']`` / :func:`_orm_alias` so **every** apply row can show a schema line in
-    the UI — we do not skip recording solely because the guard ContextVar is unset.
+    When the reconciliation guard context is missing (unscoped tooling only; e.g.
+    ``NETBOX_AUTOMATION_ALLOW_UNSCOPED_APPLY``), we still probe ``op['branch_db']`` /
+    :func:`_orm_alias` for the UI. **The PostgreSQL public / unusable-schema checks apply in
+    that case too** so we never skip main-schema protection just because the guard ContextVar
+    is unset.
     """
     ctx = get_reconciliation_apply_guard_context()
     op_db = str(op.get("branch_db") or "").strip()
@@ -570,7 +577,6 @@ def _assert_row_apply_targets_branch_db(op: dict[str, Any]) -> None:
             raise RuntimeError(
                 f"ORM alias mismatch: _orm_alias()={orm_u!r} vs op['branch_db']={op_db!r}."
             )
-        guarded = True
     else:
         logger.warning(
             "reconciliation_apply_no_guard_context row_key=%s action=%s — probing schema from op only",
@@ -589,7 +595,6 @@ def _assert_row_apply_targets_branch_db(op: dict[str, Any]) -> None:
                 postgresql_current_schema="(no_branch_alias)",
             )
             return
-        guarded = False
     if not bool(getattr(settings, "RECONCILIATION_PG_SCHEMA_CHECK_EACH_ROW", True)):
         _set_row_schema_probe_for_log(
             orm_alias=orm_u,
@@ -598,17 +603,18 @@ def _assert_row_apply_targets_branch_db(op: dict[str, Any]) -> None:
         return
     cur_raw = _postgresql_current_schema_probe(orm_u)
     _set_row_schema_probe_for_log(orm_alias=orm_u, postgresql_current_schema=cur_raw)
-    if guarded:
-        if not _schema_probe_result_is_pg_schema_name(cur_raw):
-            raise RuntimeError(
-                f"PostgreSQL current_schema() not usable on ORM alias {orm_u!r} (got {cur_raw!r}) — "
-                "refusing row apply (empty, failed probe, or not a branch schema session)."
-            )
-        if cur_raw.strip().lower() == "public":
-            raise RuntimeError(
-                f"PostgreSQL current_schema() is 'public' on ORM alias {orm_u!r} — "
-                "refusing row apply (would hit NetBox main)."
-            )
+    # Always enforce when row checks are on — not only under reconciliation_apply_guard.
+    # Otherwise NETBOX_AUTOMATION_ALLOW_UNSCOPED_APPLY could probe + log but still allow public.
+    if not _schema_probe_result_is_pg_schema_name(cur_raw):
+        raise RuntimeError(
+            f"PostgreSQL current_schema() not usable on ORM alias {orm_u!r} (got {cur_raw!r}) — "
+            "refusing row apply (empty, failed probe, or not a branch schema session)."
+        )
+    if cur_raw.strip().lower() == "public":
+        raise RuntimeError(
+            f"PostgreSQL current_schema() is 'public' on ORM alias {orm_u!r} — "
+            "refusing row apply (would hit NetBox main)."
+        )
 
 
 def _orm_qs(model_cls: Any):
