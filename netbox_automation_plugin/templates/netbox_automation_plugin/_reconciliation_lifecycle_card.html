@@ -6,6 +6,13 @@
     <p class="small mb-2 text-warning-emphasis border-start border-3 border-warning ps-2">
       {% blocktrans trimmed %}The NetBox branch exists, but its database alias is not usable yet (or apply was blocked). Use “Recheck branch & retry” when the branch is ready. Apply and re-apply actions stay disabled until then.{% endblocktrans %}
     </p>
+    {% elif apply_blocked_by_live_pg_schema %}
+    <p class="small mb-2 text-info-emphasis border-start border-3 border-info ps-2">
+      {% blocktrans trimmed %}The branch database session is not on the isolated schema yet (PostgreSQL is still on public). Apply and re-apply stay disabled until it is ready. Wait a few seconds and refresh this page.{% endblocktrans %}
+      {% if live_branch_pg_schema_reason %}
+      <span class="d-block font-monospace text-break mt-1">{{ live_branch_pg_schema_reason|escape }}</span>
+      {% endif %}
+    </p>
     {% endif %}
     <div class="d-flex flex-wrap gap-1 align-items-center">
       <button type="button" class="btn btn-primary btn-sm js-recon-apply js-recon-lifecycle-btn" data-initial-disabled="{% if not can_apply %}true{% else %}false{% endif %}" {% if not can_apply %}disabled{% endif %}>{% trans "Apply selected changes to branch" %}</button>

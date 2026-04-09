@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 
+from django.conf import settings
 from django.contrib import messages
 from django.contrib.auth.mixins import LoginRequiredMixin
 from django.http import JsonResponse
@@ -34,6 +35,7 @@ from .service import (
     create_reconciliation_run,
     discard_reconciliation_run,
     preview_reconciliation,
+    reconciliation_run_live_branch_pg_schema_ready,
 )
 
 logger = logging.getLogger(__name__)
@@ -77,6 +79,30 @@ def _reconciliation_run_page_context(
     can_retry_partial_base = (
         retry_eligible_status and bool(result_rows) and not branch_schema_blocked
     )
+    base_can_apply = run.status in apply_ok and not branch_schema_blocked
+    check_live_pg = bool(
+        getattr(settings, "RECONCILIATION_CHECK_BRANCH_PG_SCHEMA_ON_RUN_PAGE_GET", True)
+    )
+    live_branch_pg_schema_ok = True
+    live_branch_pg_schema_reason = ""
+    if check_live_pg and (run.branch_id or (run.branch_name or "").strip()):
+        if base_can_apply or can_retry_partial_base:
+            try:
+                live_branch_pg_schema_ok, live_branch_pg_schema_reason = (
+                    reconciliation_run_live_branch_pg_schema_ready(run)
+                )
+            except Exception:
+                logger.exception(
+                    "Live branch PG schema check failed for reconciliation run %s",
+                    run.pk,
+                )
+                live_branch_pg_schema_ok = False
+                live_branch_pg_schema_reason = str(
+                    _("Could not verify branch database readiness (see server logs).")
+                )
+    apply_blocked_by_live_pg_schema = (
+        check_live_pg and (base_can_apply or can_retry_partial_base) and not live_branch_pg_schema_ok
+    )
     detail_url = reverse(
         "plugins:netbox_automation_plugin:maas_openstack_reconciliation_detail",
         args=[run.pk],
@@ -109,15 +135,19 @@ def _reconciliation_run_page_context(
         "apply_results_url": apply_results_url,
         "branching_branch_url": _netbox_branching_branch_url(branch_pk=run.branch_id),
         "can_discard": run.status not in blocked_discard,
-        "can_apply": run.status in apply_ok and not branch_schema_blocked,
-        "can_retry_failed": can_retry_partial_base and failed_row_n > 0,
-        "can_retry_skipped": can_retry_partial_base and skipped_row_n > 0,
+        "can_apply": base_can_apply and live_branch_pg_schema_ok,
+        "can_retry_failed": can_retry_partial_base and live_branch_pg_schema_ok and failed_row_n > 0,
+        "can_retry_skipped": can_retry_partial_base and live_branch_pg_schema_ok and skipped_row_n > 0,
         "can_retry_failed_or_skipped": can_retry_partial_base
+        and live_branch_pg_schema_ok
         and (failed_row_n > 0 or skipped_row_n > 0),
         "recon_apply_failed_row_count": failed_row_n,
         "recon_apply_skipped_row_count": skipped_row_n,
         "show_recheck_branch_btn": show_recheck_branch_btn,
         "branch_schema_blocked": branch_schema_blocked,
+        "live_branch_pg_schema_ok": live_branch_pg_schema_ok,
+        "live_branch_pg_schema_reason": live_branch_pg_schema_reason,
+        "apply_blocked_by_live_pg_schema": apply_blocked_by_live_pg_schema,
         "nav_active": nav_active,
     }
 

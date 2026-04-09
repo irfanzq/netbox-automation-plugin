@@ -144,11 +144,108 @@ def _branch_aware_router_configured() -> bool:
         return False
 
 
+def _reconciliation_pg_schema_poll_interval_sec() -> float:
+    """Sleep between retries when waiting for ``current_schema()`` to leave ``public``."""
+    raw = getattr(settings, "RECONCILIATION_PG_SCHEMA_POLL_INTERVAL_SEC", 0.35)
+    try:
+        v = float(raw)
+    except (TypeError, ValueError):
+        return 0.35
+    return max(0.1, v)
+
+
+def _read_postgresql_current_schema_for_alias(alias: str) -> tuple[str, bool, str | None]:
+    """
+    Return ``(current_schema, is_postgresql, error)``.
+
+    ``error`` is set when the DB connection or ``SELECT current_schema()`` fails and
+    ``is_postgresql`` is True.
+    """
+    try:
+        conn = connections[alias]
+        conn.ensure_connection()
+        inner = getattr(conn, "connection", None)
+        vendor = (getattr(inner, "vendor", None) or "").lower()
+        if vendor != "postgresql":
+            return "", False, None
+        with conn.cursor() as cursor:
+            cursor.execute("SELECT current_schema()")
+            row = cursor.fetchone()
+        cur = (row[0] or "").strip() if row else ""
+        return cur, True, None
+    except Exception as exc:
+        return "", True, f"{type(exc).__name__}: {exc}"
+
+
+def branch_django_alias_pg_ready_for_writes(branch_obj: Any, django_alias: str) -> tuple[bool, str, str]:
+    """
+    Return ``(ok, error_message, last_schema_read)``.
+
+    On PostgreSQL, ``ok`` is True only when ``current_schema()`` is not ``public`` — matching
+    :func:`apply_cells._assert_row_apply_targets_branch_db`. Uses
+    ``netbox_branching.utilities.activate_branch`` when available so the probe matches apply
+    (same as :func:`branch.branch_write_context`).
+    """
+    alias = (django_alias or "").strip()
+    if not alias or alias.lower() == "default":
+        return False, str(_("Invalid branch Django alias for schema probe.")), ""
+
+    def probe() -> tuple[bool, str, str]:
+        cur, is_pg, err = _read_postgresql_current_schema_for_alias(alias)
+        if err:
+            return False, err, cur
+        if not is_pg:
+            return True, "", cur
+        if cur.lower() == "public":
+            return False, "", cur
+        return True, "", cur
+
+    try:
+        from netbox_branching.utilities import activate_branch as _nb_activate_branch
+    except ImportError:
+        _nb_activate_branch = None
+
+    ok, err, sch = (False, "", "")
+    if branch_obj is not None and callable(_nb_activate_branch):
+        with _nb_activate_branch(branch_obj):
+            ok, err, sch = probe()
+    else:
+        ok, err, sch = probe()
+
+    if ok:
+        return True, "", sch
+    if err:
+        return False, err, sch
+    hint = ""
+    try:
+        sn = getattr(branch_obj, "schema_name", None)
+        if callable(sn):
+            sn = sn()
+        hint = str(sn or "").strip().lower()
+    except Exception:
+        pass
+    return (
+        False,
+        str(
+            _(
+                "ORM alias %(alias)s still uses PostgreSQL schema 'public' (NetBox main). "
+                "Wait for the branch schema session to be ready, then use “Recheck branch” or retry. "
+                "Expected branch schema hint: %(hint)s."
+            )
+            % {"alias": alias, "hint": hint or "—"}
+        ),
+        sch,
+    )
+
+
 def collect_branch_routing_confirmation_or_raise(branch_obj: Any, django_db_alias: str) -> dict[str, Any]:
     """
     Run apply preflight **before any frozen op runs**: router check (optional), then PostgreSQL
-    ``current_schema()`` on the branch ORM alias. If the schema is still ``public``, raises —
-    no row handlers execute, so the batch cannot partially apply.
+    ``current_schema()`` on the branch ORM alias.
+
+    If the schema is still ``public``, closes the Django connection for that alias and retries
+    until ``RECONCILIATION_BRANCH_SCHEMA_WAIT_SEC`` elapses (same window as post-create wait),
+    then raises — no row handlers execute, so the batch cannot partially apply.
 
     Returns a JSON-friendly dict stored on ``apply_results.routing_confirmation`` for the UI.
     """
@@ -187,28 +284,52 @@ def collect_branch_routing_confirmation_or_raise(branch_obj: Any, django_db_alia
         vendor = (getattr(inner, "vendor", None) or "").lower()
         out["postgresql_vendor"] = vendor or None
         if vendor == "postgresql":
-            with conn.cursor() as cursor:
-                cursor.execute("SELECT current_schema()")
-                row = cursor.fetchone()
-            current_raw = (row[0] or "").strip() if row else ""
-            out["postgresql_current_schema"] = current_raw
-            current = current_raw.lower()
-            if current == "public":
-                hint = ""
+            wait_deadline = time.monotonic() + _reconciliation_branch_schema_wait_sec()
+            poll_step = _reconciliation_pg_schema_poll_interval_sec()
+            attempts = 0
+            current_raw = ""
+            while True:
+                attempts += 1
+                with conn.cursor() as cursor:
+                    cursor.execute("SELECT current_schema()")
+                    row = cursor.fetchone()
+                current_raw = (row[0] or "").strip() if row else ""
+                out["postgresql_current_schema"] = current_raw
+                if current_raw.lower() != "public":
+                    break
+                if time.monotonic() >= wait_deadline:
+                    hint = ""
+                    try:
+                        sn = getattr(branch_obj, "schema_name", None)
+                        if callable(sn):
+                            sn = sn()
+                        hint = str(sn or "").strip().lower()
+                    except Exception:
+                        pass
+                    msg = _(
+                        "Reconciliation aborted: ORM alias %(alias)s still uses PostgreSQL schema "
+                        "'public' (NetBox main) after waiting %(sec).1fs. No apply rows were executed. "
+                        "Try “Recheck branch” or retry apply; tune RECONCILIATION_BRANCH_SCHEMA_WAIT_SEC "
+                        "if provisioning is slow. Expected branch schema hint: %(hint)s."
+                    ) % {
+                        "alias": alias,
+                        "sec": float(_reconciliation_branch_schema_wait_sec()),
+                        "hint": hint or "—",
+                    }
+                    out["preflight_error"] = str(msg)
+                    out["preflight_pg_schema_poll_attempts"] = attempts
+                    raise ValueError(str(msg))
                 try:
-                    sn = getattr(branch_obj, "schema_name", None)
-                    if callable(sn):
-                        sn = sn()
-                    hint = str(sn or "").strip().lower()
+                    conn.close()
                 except Exception:
-                    pass
-                msg = _(
-                    "Reconciliation aborted: ORM alias %(alias)s uses PostgreSQL schema 'public' "
-                    "(NetBox main). No apply rows were executed. Fix DATABASE_ROUTERS / PLUGINS order. "
-                    "Expected branch schema hint: %(hint)s."
-                ) % {"alias": alias, "hint": hint or "—"}
-                out["preflight_error"] = str(msg)
-                raise ValueError(str(msg))
+                    logger.debug(
+                        "reconciliation apply preflight: close branch conn failed alias=%s",
+                        alias,
+                        exc_info=True,
+                    )
+                time.sleep(poll_step)
+                conn.ensure_connection()
+            out["preflight_pg_schema_poll_attempts"] = attempts
         out["preflight_ok"] = True
         out["entire_batch_aborted_no_row_handlers"] = False
         logger.info(
@@ -248,18 +369,44 @@ def _recon_explicit_orm_using(db_alias: str) -> str | None:
     return u
 
 
-def check_branch_schema_ready(_branch_obj: Any, branch_db: str) -> tuple[bool, str]:
+def check_branch_schema_ready(branch_obj: Any, branch_db: str) -> tuple[bool, str]:
     """
-    Return (True, "") if reconciliation may safely open ``branch_write_context`` for this alias.
+    Return (True, "") when the branch Django alias exists and is safe for reconciliation writes.
 
-    Uses :func:`resolve_branch_django_database_alias` with ``branch=`` so bare PostgreSQL-style
-    names (e.g. ``branch_<schema_id>``) map to Django aliases ``schema_<schema_name>`` as in
-    current netbox-branching.
+    Resolves the alias via :func:`resolve_branch_django_database_alias`, then (on PostgreSQL)
+    requires ``current_schema()`` ≠ ``public`` using :func:`branch_django_alias_pg_ready_for_writes`
+    so the UI can keep Apply disabled until the branch session matches apply-time checks.
     """
-    alias, err = resolve_branch_django_database_alias(branch_db, branch=_branch_obj)
-    if alias:
-        return (True, "")
-    return (False, err)
+    alias, err = resolve_branch_django_database_alias(branch_db, branch=branch_obj)
+    if not alias:
+        return (False, err)
+    ok_pg, msg_pg, _sch = branch_django_alias_pg_ready_for_writes(branch_obj, alias)
+    if not ok_pg:
+        return (False, (msg_pg or "").strip() or str(_("Branch schema session not ready.")))
+    return (True, "")
+
+
+def reconciliation_run_live_branch_pg_schema_ready(
+    run: MAASOpenStackReconciliationRun,
+) -> tuple[bool, str]:
+    """
+    Live check for reconciliation run detail pages: branch exists and PostgreSQL is not on
+    ``public`` for that Django alias (same rules as :func:`check_branch_schema_ready`).
+
+    Used when ``RECONCILIATION_CHECK_BRANCH_PG_SCHEMA_ON_RUN_PAGE_GET`` is enabled so Apply /
+    re-apply buttons stay disabled until the session matches apply preflight, without requiring
+    a click.
+    """
+    if not run.branch_id and not (run.branch_name or "").strip():
+        return False, str(_("Run has no branch to probe."))
+    branch_obj, err = get_netbox_branch(
+        branch_id=run.branch_id,
+        branch_name=run.branch_name or "",
+    )
+    if branch_obj is None:
+        return False, (err or _("Branch not found.")).strip()
+    cn = str(getattr(branch_obj, "connection_name", None) or "").strip()
+    return check_branch_schema_ready(branch_obj, cn)
 
 
 def _reconciliation_branch_schema_wait_sec() -> float:
@@ -284,11 +431,12 @@ def wait_for_branch_schema_ready(
     interval_sec: float = 0.4,
 ) -> tuple[bool, str]:
     """
-    Poll until NetBox Branching exposes a connectable Django DB alias for the branch, or time out.
+    Poll until the branch has a Django DB alias **and** PostgreSQL ``current_schema()`` is not
+    ``public`` on that alias (when applicable), or time out.
 
     Branch creation returns quickly while schema provisioning and ``DynamicSchemaDict`` wiring
-    can lag well beyond a few seconds under load; without this, users hit Apply or recheck
-    immediately and see failures. Default timeout is 30s; set
+    can lag; an alias can exist while connections still sit on ``public``. This wait aligns
+    post-create gating with apply preflight / per-row guards. Default timeout is 30s; set
     ``RECONCILIATION_BRANCH_SCHEMA_WAIT_SEC`` to tune.
     """
     if branch_id is None:
