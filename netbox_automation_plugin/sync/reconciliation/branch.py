@@ -8,6 +8,7 @@ import logging
 import os
 from typing import Any, Iterator
 
+from django.conf import settings
 from django.db import connections, transaction
 from django.utils.translation import gettext as _
 
@@ -16,9 +17,12 @@ logger = logging.getLogger(__name__)
 
 def _branch_django_alias_candidates(raw: str) -> list[str]:
     """
-    NetBox Branching may expose ``Branch.connection_name`` as ``schema_branch_<id>`` while
-    ``DynamicSchemaDict`` registers the Django key as ``branch_<id>`` (schema name in UI is
-    often ``branch_<id>``). Try both spellings.
+    Try alternate spellings between PostgreSQL schema-style names and legacy keys.
+
+    Current netbox-branching uses Django aliases ``schema_<schema_name>`` (e.g.
+    ``schema_branch_abc123``) via ``DynamicSchemaDict``; older rows or a DB column named
+    ``connection_name`` may still hold ``branch_abc123`` only, which is **not** a valid
+    ``DATABASES`` key unless wrapped with the ``schema_`` prefix.
     """
     s = (raw or "").strip()
     if not s:
@@ -38,16 +42,119 @@ def _branch_django_alias_candidates(raw: str) -> list[str]:
     return out
 
 
-def resolve_branch_django_database_alias(connection_name: str) -> tuple[str | None, str]:
+def _canonical_schema_connection_aliases_from_branch(branch: Any) -> list[str]:
     """
-    Map ``Branch.connection_name`` to a Django ``DATABASES`` key that exists in
-    ``django.db.connections`` and accepts connections.
+    Aliases that match ``netbox_branching.models.Branch.connection_name`` (``schema_`` + schema_name).
+
+    Prefer the model's ``schema_name`` when present; fall back to ``schema_prefix`` + ``schema_id``.
+    """
+    out: list[str] = []
+    seen: set[str] = set()
+
+    def add(x: str) -> None:
+        t = (x or "").strip()
+        if not t or t in seen:
+            return
+        seen.add(t)
+        out.append(t)
+
+    try:
+        sn = getattr(branch, "schema_name", None)
+        if callable(sn):
+            sn = sn()
+        if isinstance(sn, str) and sn.strip():
+            add(f"schema_{sn.strip()}")
+    except Exception:
+        logger.debug("branch schema_name for Django alias failed", exc_info=True)
+
+    sid = str(getattr(branch, "schema_id", None) or "").strip()
+    if sid:
+        try:
+            from netbox_branching.utilities import get_plugin_config
+
+            pfx = str(get_plugin_config("netbox_branching", "schema_prefix") or "branch_")
+        except Exception:
+            pfx = "branch_"
+        add(f"schema_{pfx}{sid}")
+
+    return out
+
+
+def _all_django_branch_alias_candidates(connection_name: str, branch: Any | None) -> list[str]:
+    """Ordered unique candidates: canonical ``schema_*`` first, then raw ``connection_name`` variants."""
+    seen: set[str] = set()
+    ordered: list[str] = []
+
+    def add(s: str) -> None:
+        t = (s or "").strip()
+        if not t or t.lower() == "default" or t in seen:
+            return
+        seen.add(t)
+        ordered.append(t)
+
+    if branch is not None:
+        for c in _canonical_schema_connection_aliases_from_branch(branch):
+            add(c)
+    raw = (connection_name or "").strip()
+    if raw:
+        add(raw)
+        for c in _branch_django_alias_candidates(raw):
+            add(c)
+    return ordered
+
+
+def _branch_database_alias_defined(alias: str) -> bool:
+    """
+    True if Django can resolve this database alias.
+
+    Prefer ``alias in settings.DATABASES``. NetBox Branching uses
+    ``DynamicSchemaDict``: virtual ``schema_*`` keys answer ``in DATABASES`` but
+    ``alias in connections`` is often **False** until first use — so DATABASES must be
+    checked first.
+
+    When ``DATABASES`` is a normal dict (tests, installs without branching), a key may be
+    absent from the dict but still resolvable via ``connections`` in some setups; we OR in
+    ``alias in connections`` only after DATABASES does not claim the alias.
+    """
+    a = (alias or "").strip()
+    if not a or a.lower() == "default":
+        return False
+    try:
+        dbs = settings.DATABASES
+    except Exception:
+        try:
+            return a in connections
+        except Exception:
+            return False
+    try:
+        if a in dbs:
+            return True
+    except Exception:
+        pass
+    try:
+        return a in connections
+    except Exception:
+        return False
+
+
+def resolve_branch_django_database_alias(
+    connection_name: str, *, branch: Any | None = None
+) -> tuple[str | None, str]:
+    """
+    Map ``Branch.connection_name`` (and related branch fields) to a Django ``DATABASES`` key
+    that netbox-branching can serve (including virtual ``schema_*`` aliases) and that connects.
+
+    Membership must be checked on ``settings.DATABASES`` (``DynamicSchemaDict``): Django's
+    ``alias in connections`` is false for those virtual keys even though
+    ``connections[alias].ensure_connection()`` works.
+
+    Pass ``branch=`` so we can build the canonical ``schema_<schema_name>`` alias even when
+    ``connection_name`` holds only the PostgreSQL schema name (``branch_<id>``).
 
     Returns ``(alias, "")`` on success, or ``(None, error_message)``.
     """
-    raw = (connection_name or "").strip()
-    low = raw.lower()
-    if not raw or low == "default":
+    candidates = _all_django_branch_alias_candidates(connection_name or "", branch)
+    if not candidates:
         return (
             None,
             _(
@@ -57,10 +164,13 @@ def resolve_branch_django_database_alias(connection_name: str) -> tuple[str | No
             ),
         )
     last_detail = ""
-    for cand in _branch_django_alias_candidates(raw):
-        if cand not in connections:
+    for cand in candidates:
+        if cand.lower() == "default":
+            continue
+        if not _branch_database_alias_defined(cand):
             last_detail = _(
-                "Branch DB alias '%(alias)s' is not registered in Django connections."
+                "Branch DB alias '%(alias)s' is not defined in Django DATABASES "
+                "(check netbox-branching DynamicSchemaDict configuration)."
             ) % {"alias": cand}
             continue
         try:
@@ -260,15 +370,17 @@ def branch_write_context(*, branch: Any) -> Iterator[None]:
                 "transaction.atomic(using=…) for the branch schema — refusing ORM writes "
                 "(would risk NetBox main). Wait until the branch is provisioned and ready."
             )
-        # connection_name may be schema_branch_* while DynamicSchemaDict only registers branch_*.
-        if using.lower() != "default" and using not in connections:
-            resolved, rerr = resolve_branch_django_database_alias(using)
+        # connection_name may be the bare PostgreSQL schema name (branch_*) while Django's
+        # alias is schema_<schema_name> under DynamicSchemaDict. Do not use ``using in
+        # connections`` — virtual schema_* aliases are absent from that check.
+        if using.lower() != "default" and not _branch_database_alias_defined(using):
+            resolved, rerr = resolve_branch_django_database_alias(using, branch=branch)
             if resolved:
                 using = resolved
             else:
                 raise RuntimeError(
                     rerr
-                    or f"Branch database alias {using_raw!r} is not registered in Django connections."
+                    or f"Branch database alias {using_raw!r} is not defined in Django DATABASES."
                 )
         # NetBox Branching often reports connection_name as the literal "default". Pairing
         # activate_branch with transaction.atomic(using="default") pins Django to the default

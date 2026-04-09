@@ -148,10 +148,11 @@ def check_branch_schema_ready(_branch_obj: Any, branch_db: str) -> tuple[bool, s
     """
     Return (True, "") if reconciliation may safely open ``branch_write_context`` for this alias.
 
-    Uses :func:`resolve_branch_django_database_alias` so ``schema_branch_*`` names from the
-    Branch model map to ``branch_*`` keys registered by ``DynamicSchemaDict``.
+    Uses :func:`resolve_branch_django_database_alias` with ``branch=`` so bare PostgreSQL-style
+    names (e.g. ``branch_<schema_id>``) map to Django aliases ``schema_<schema_name>`` as in
+    current netbox-branching.
     """
-    alias, err = resolve_branch_django_database_alias(branch_db)
+    alias, err = resolve_branch_django_database_alias(branch_db, branch=_branch_obj)
     if alias:
         return (True, "")
     return (False, err)
@@ -302,19 +303,6 @@ def _truncate_exc_message(msg: str, *, max_len: int = _APPLY_EXCEPTION_MESSAGE_M
     if len(s) > max_len:
         return s[: max_len - 3] + "..."
     return s
-
-
-def _apply_branch_prereq_failed_row(
-    op: dict[str, Any], *, reason: str, detail: str
-) -> dict[str, Any]:
-    """Row result when apply cannot start (e.g. missing branch DB alias)."""
-    result = _apply_result_row_shell(op)
-    result["status"] = "failed"
-    result["reason"] = reason
-    result["reason_detail"] = _truncate_exc_message(
-        detail, max_len=_APPLY_EXCEPTION_MESSAGE_MAX + 64
-    )
-    return _finalize_apply_row(op, result)
 
 
 def _failed_apply_row(op: dict[str, Any], exc: Exception) -> dict[str, Any]:
@@ -2485,6 +2473,10 @@ def apply_reconciliation_run(
     Partial retries (``retry_failed_only`` / ``retry_skipped_only``) re-run only rows whose
     latest result status matches; results are merged into prior row history. Interface retries
     automatically pull in matching frozen ``create_device`` rows for the same host when present.
+
+    If the NetBox branch row is missing or its Django DB alias is not registered / connectable
+    yet, raises ``ValueError`` **before** setting apply-in-progress or writing per-row results
+    (transaction rolls back; run row unchanged).
     """
     partial_retry = bool(retry_failed_only or retry_skipped_only)
     run.refresh_from_db(
@@ -2562,92 +2554,73 @@ def apply_reconciliation_run(
             .filter(pk=run.pk)
             .first()
         ) or run
-        run.status = MAASOpenStackReconciliationRun.STATUS_APPLY_IN_PROGRESS
-        run.error_message = ""
-        run.save(update_fields=["status", "error_message", "last_updated"])
 
         branch_obj, branch_err = get_netbox_branch(
             branch_id=run.branch_id,
             branch_name=run.branch_name,
         )
-        applied_rows: list[dict[str, Any]] = []
-        run_routing_core: dict[str, Any] | None = None
-        branch_schema_not_ready = False
-        branch_schema_block_reason = ""
-        branch_db_for_payload = ""
-        if branch_obj is not None:
-            connection_name_raw = str(
-                getattr(branch_obj, "connection_name", None) or ""
-            ).strip()
-            django_db_alias, resolve_err = resolve_branch_django_database_alias(
-                connection_name_raw
+        if branch_obj is None:
+            raise ValueError((branch_err or _("Branch not found.")).strip())
+
+        connection_name_raw = str(
+            getattr(branch_obj, "connection_name", None) or ""
+        ).strip()
+        django_db_alias, resolve_err = resolve_branch_django_database_alias(
+            connection_name_raw,
+            branch=branch_obj,
+        )
+        if not django_db_alias:
+            raise ValueError(
+                (resolve_err or _("Branch database alias is not ready.")).strip()
             )
-            schema_ok = bool(django_db_alias)
-            schema_msg = resolve_err if not schema_ok else ""
-            branch_db_for_payload = django_db_alias or connection_name_raw
-            run_routing_core = {
-                "reconciliation_run_branch_id": run.branch_id,
-                "reconciliation_run_branch_name": (run.branch_name or "").strip(),
-                "netbox_branch_model_pk": getattr(branch_obj, "pk", None),
-                "netbox_branch_connection_name": connection_name_raw,
-                "django_database_alias": django_db_alias or "",
-            }
-            if not schema_ok:
-                branch_schema_not_ready = True
-                branch_schema_block_reason = schema_msg
-                for seq_num, op in enumerate(target_ops, start=1):
-                    applied_rows.append(
-                        _with_apply_sequence(
-                            _apply_branch_prereq_failed_row(
-                                op,
-                                reason="failed_branch_not_ready",
-                                detail=schema_msg,
-                            ),
-                            seq_num,
-                        )
-                    )
-            else:
-                try:
-                    _warn_if_netbox_branch_router_missing()
-                    with branch_write_context(branch=branch_obj):
-                        with reconciliation_apply_guard(
-                            branch_obj, django_db_alias or ""
-                        ):
-                            for seq_num, op in enumerate(target_ops, start=1):
-                                try:
-                                    applied_rows.append(
-                                        _with_apply_sequence(
-                                            _execute_branch_apply_in_branch_transaction(
-                                                django_db_alias or "", op
-                                            ),
-                                            seq_num,
-                                        )
-                                    )
-                                except Exception as exc:
-                                    logger.exception(
-                                        "Reconciliation apply row failed: row_key=%s action=%s",
-                                        str(op.get("row_key") or ""),
-                                        str(op.get("action") or ""),
-                                    )
-                                    applied_rows.append(
-                                        _with_apply_sequence(_failed_apply_row(op, exc), seq_num)
-                                    )
-                except Exception as e:
-                    et = type(e).__name__
-                    em = _truncate_exc_message(str(e).strip() or repr(e))
+
+        branch_db_for_payload = django_db_alias
+        run_routing_core: dict[str, Any] = {
+            "reconciliation_run_branch_id": run.branch_id,
+            "reconciliation_run_branch_name": (run.branch_name or "").strip(),
+            "netbox_branch_model_pk": getattr(branch_obj, "pk", None),
+            "netbox_branch_connection_name": connection_name_raw,
+            "django_database_alias": django_db_alias,
+        }
+
+        run.status = MAASOpenStackReconciliationRun.STATUS_APPLY_IN_PROGRESS
+        run.error_message = ""
+        run.save(update_fields=["status", "error_message", "last_updated"])
+
+        applied_rows: list[dict[str, Any]] = []
+        try:
+            _warn_if_netbox_branch_router_missing()
+            with branch_write_context(branch=branch_obj):
+                with reconciliation_apply_guard(branch_obj, django_db_alias):
                     for seq_num, op in enumerate(target_ops, start=1):
-                        row = _apply_result_from_operation(op, branch_context_ready=False)
-                        row["exception_type"] = et
-                        row["exception_message"] = em
-                        row["reason_detail"] = _truncate_exc_message(
-                            f"{et}: {em}", max_len=_APPLY_EXCEPTION_MESSAGE_MAX + 64
-                        )
-                        applied_rows.append(_with_apply_sequence(row, seq_num))
-        else:
+                        try:
+                            applied_rows.append(
+                                _with_apply_sequence(
+                                    _execute_branch_apply_in_branch_transaction(
+                                        django_db_alias, op
+                                    ),
+                                    seq_num,
+                                )
+                            )
+                        except Exception as exc:
+                            logger.exception(
+                                "Reconciliation apply row failed: row_key=%s action=%s",
+                                str(op.get("row_key") or ""),
+                                str(op.get("action") or ""),
+                            )
+                            applied_rows.append(
+                                _with_apply_sequence(_failed_apply_row(op, exc), seq_num)
+                            )
+        except Exception as e:
+            et = type(e).__name__
+            em = _truncate_exc_message(str(e).strip() or repr(e))
             for seq_num, op in enumerate(target_ops, start=1):
                 row = _apply_result_from_operation(op, branch_context_ready=False)
-                if branch_err:
-                    row["reason_detail"] = branch_err
+                row["exception_type"] = et
+                row["exception_message"] = em
+                row["reason_detail"] = _truncate_exc_message(
+                    f"{et}: {em}", max_len=_APPLY_EXCEPTION_MESSAGE_MAX + 64
+                )
                 applied_rows.append(_with_apply_sequence(row, seq_num))
         merged_rows = []
         seen_retry: set[str] = set()
@@ -2670,9 +2643,7 @@ def apply_reconciliation_run(
         created = sum(1 for r in applied_rows if r.get("status") == "created")
         updated = sum(1 for r in applied_rows if r.get("status") == "updated")
 
-        if branch_schema_not_ready:
-            final_status = MAASOpenStackReconciliationRun.STATUS_BRANCH_NOT_READY
-        elif failed == 0:
+        if failed == 0:
             final_status = MAASOpenStackReconciliationRun.STATUS_APPLIED
         elif failed == len(applied_rows):
             final_status = MAASOpenStackReconciliationRun.STATUS_APPLY_FAILED
@@ -2697,29 +2668,22 @@ def apply_reconciliation_run(
             "cumulative_summary": _summarize_apply_result_rows(merged_rows),
             "rows": merged_rows,
             "display_rows": _apply_result_rows_for_comprehensive_display(merged_rows),
-            "branch_connection_name_raw": (
-                str(
-                    (run_routing_core or {}).get("netbox_branch_connection_name") or ""
-                ).strip()
-                if run_routing_core is not None
-                else ""
-            ),
+            "branch_connection_name_raw": str(
+                run_routing_core.get("netbox_branch_connection_name") or ""
+            ).strip(),
             "branch_db_used": branch_db_for_payload,
-            "branch_not_ready": bool(branch_schema_not_ready),
+            "branch_not_ready": False,
         }
-        if run_routing_core is not None:
-            apply_payload["run_routing_context"] = run_routing_core
-            apply_payload["run_routing_context_text"] = json.dumps(
-                run_routing_core, indent=2, sort_keys=True, default=str
-            )
+        apply_payload["run_routing_context"] = run_routing_core
+        apply_payload["run_routing_context_text"] = json.dumps(
+            run_routing_core, indent=2, sort_keys=True, default=str
+        )
         # Partial re-apply: optional ``last_attempt_rows`` for a "this click only" drill-down.
         if partial_retry:
             apply_payload["last_attempt_rows"] = applied_rows
         run.apply_results = apply_payload
         run.status = final_status
-        if branch_schema_not_ready:
-            run.error_message = (branch_schema_block_reason or "").strip()
-        elif failed > 0:
+        if failed > 0:
             run.error_message = "Apply completed with failures. Review per-row results."
         else:
             run.error_message = ""
