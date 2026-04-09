@@ -64,6 +64,26 @@ def _reconciliation_branch_pg_browser_poll_max_sec() -> float:
     return max(5.0, v)
 
 
+def _reconciliation_post_create_schema_overlay_min_ms() -> int:
+    """Minimum time the post-create overlay stays up before redirect-on-ready (UX + avoids one-shot false positives)."""
+    raw = getattr(settings, "RECONCILIATION_POST_CREATE_SCHEMA_OVERLAY_MIN_MS", 2500)
+    try:
+        v = int(float(raw))
+    except (TypeError, ValueError):
+        return 2500
+    return max(0, min(v, 120_000))
+
+
+def _reconciliation_post_create_schema_ready_polls_required() -> int:
+    """Consecutive JSON poll responses with ready=true required before redirect (after create branch)."""
+    raw = getattr(settings, "RECONCILIATION_POST_CREATE_SCHEMA_READY_POLLS_REQUIRED", 2)
+    try:
+        v = int(raw)
+    except (TypeError, ValueError):
+        return 2
+    return max(1, min(v, 20))
+
+
 def _reconciliation_run_page_context(
     run: MAASOpenStackReconciliationRun,
     *,
@@ -407,16 +427,16 @@ class ReconciliationBranchPgSchemaStatusView(LoginRequiredMixin, View):
     JSON for the reconciliation lifecycle UI: whether the branch ORM alias is off PostgreSQL
     ``public``. Each request closes the branch connection first so a stale pooled session is not
     mistaken for readiness.
+
+    This endpoint always runs the real probe. ``RECONCILIATION_CHECK_BRANCH_PG_SCHEMA_ON_RUN_PAGE_GET``
+    only skips the live check on **HTML** run-detail GET (to save work per page view); disabling
+    it must not short-circuit post-create polling or the overlay would dismiss instantly.
     """
 
     http_method_names = ["get"]
 
     def get(self, request, run_id: int):
         run = get_object_or_404(MAASOpenStackReconciliationRun, pk=run_id)
-        if not bool(
-            getattr(settings, "RECONCILIATION_CHECK_BRANCH_PG_SCHEMA_ON_RUN_PAGE_GET", True)
-        ):
-            return JsonResponse({"ready": True, "reason": "", "check_disabled": True})
         try:
             ok, reason = branch_pg_schema_status_probe_for_polling(run)
         except Exception as exc:
@@ -690,6 +710,8 @@ class ReconciliationStagingView(LoginRequiredMixin, View):
                         / _reconciliation_branch_pg_browser_poll_interval_sec()
                     ),
                 ),
+                "recon_post_create_min_overlay_ms": _reconciliation_post_create_schema_overlay_min_ms(),
+                "recon_post_create_ready_polls_required": _reconciliation_post_create_schema_ready_polls_required(),
             },
         )
 

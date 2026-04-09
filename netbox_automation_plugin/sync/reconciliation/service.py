@@ -407,7 +407,8 @@ def reconciliation_run_live_branch_pg_schema_ready(
 
     Used when ``RECONCILIATION_CHECK_BRANCH_PG_SCHEMA_ON_RUN_PAGE_GET`` is enabled so Apply /
     re-apply buttons stay disabled until the session matches apply preflight, without requiring
-    a click.
+    a click. The JSON ``branch-pg-schema-status`` endpoint always probes regardless of that
+    setting so post-create polling cannot be short-circuited.
     """
     if not run.branch_id and not (run.branch_name or "").strip():
         return False, str(_("Run has no branch to probe."))

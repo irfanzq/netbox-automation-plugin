@@ -130,6 +130,8 @@
     var driftRunId = {{ drift_run.pk }};
     var postCreatePollMs = {{ recon_post_create_poll_interval_ms|default:5000 }};
     var postCreatePollMaxTicks = {{ recon_post_create_poll_max_ticks|default:36 }};
+    var postCreateMinOverlayMs = {{ recon_post_create_min_overlay_ms|default:2500 }};
+    var postCreateReadyPollsRequired = {{ recon_post_create_ready_polls_required|default:2 }};
     var loadingBtnHtml = '<span class="spinner-border spinner-border-sm me-1" role="status" aria-hidden="true"></span>{% filter escapejs %}{% trans "Creating branch…" %}{% endfilter %}';
     function csrf() {
       var el = document.querySelector("#recon-action-csrf input[name=csrfmiddlewaretoken]");
@@ -206,6 +208,8 @@
               showPostCreateLoading();
               var pollUrl = branchSchemaPollUrl(dest);
               var tick = 0;
+              var overlayStarted = Date.now();
+              var consecutiveReady = 0;
               function runPoll() {
                 tick += 1;
                 if (tick > postCreatePollMaxTicks) {
@@ -222,13 +226,28 @@
                 })
                   .then(function(r) { return r.json(); })
                   .then(function(data) {
+                    var elapsed = Date.now() - overlayStarted;
                     if (data && data.ready) {
+                      consecutiveReady += 1;
+                    } else {
+                      consecutiveReady = 0;
+                    }
+                    if (
+                      data && data.ready
+                      && consecutiveReady >= postCreateReadyPollsRequired
+                      && elapsed >= postCreateMinOverlayMs
+                    ) {
                       redirectToRun();
                       return;
                     }
-                    window.setTimeout(runPoll, postCreatePollMs);
+                    var delay = postCreatePollMs;
+                    if (data && data.ready) {
+                      delay = Math.max(delay, postCreateMinOverlayMs - elapsed);
+                    }
+                    window.setTimeout(runPoll, Math.max(200, delay));
                   })
                   .catch(function() {
+                    consecutiveReady = 0;
                     window.setTimeout(runPoll, postCreatePollMs);
                   });
               }
