@@ -113,7 +113,7 @@
       <p class="small mb-2 w-100 maas-recon-overlay-sub" id="maas-recon-post-create-sub">
         {% blocktrans trimmed %}Please wait before schema checks run. The run page will open only after the last check confirms the branch session is not on PostgreSQL <code>public</code>.{% endblocktrans %}
       </p>
-      <div class="alert alert-danger mt-3 mb-0 py-2 small text-start d-none w-100 maas-recon-overlay-error" id="maas-recon-post-create-error" role="alert"></div>
+      <div class="alert alert-danger mt-3 mb-0 py-2 small text-start d-none w-100 maas-recon-overlay-error border-0" id="maas-recon-post-create-error" role="alert"></div>
       <button type="button" class="btn btn-warning btn-sm mt-3 d-none align-self-center" id="maas-recon-post-create-retry">{% trans "Retry schema polling" %}</button>
     </div>
   </div>
@@ -135,15 +135,24 @@
   [data-bs-theme="dark"] .maas-recon-post-create-overlay-root {
     background-color: rgba(0, 0, 0, 0.72);
   }
+  /* Title/sub inherit card foreground — avoid dark-on-grey (secondary-bg) contrast issues. */
   .maas-recon-overlay-title {
-    color: var(--bs-emphasis-color);
+    color: inherit;
   }
   .maas-recon-overlay-sub {
-    color: var(--bs-emphasis-color);
+    color: inherit;
+    opacity: 0.92;
     text-align: center;
   }
   .maas-recon-overlay-sub code {
     color: inherit;
+    opacity: 1;
+    background-color: rgba(0, 0, 0, 0.06);
+    padding: 0.1em 0.35em;
+    border-radius: 0.25rem;
+  }
+  [data-bs-theme="dark"] .maas-recon-overlay-sub code {
+    background-color: rgba(255, 255, 255, 0.08);
   }
   .maas-recon-overlay-error {
     color: var(--bs-danger-text-emphasis);
@@ -185,19 +194,38 @@
     table-layout: auto;
   }
   .maas-recon-post-create-overlay-card {
-    /* Lift panel off page/table grays (body-bg matched striped tables). */
     min-width: min(100%, 18rem);
-    background-color: var(--bs-secondary-bg) !important;
-    color: var(--bs-body-color);
-    border: 2px solid var(--bs-border-color) !important;
+    /* Light: near-white panel on dim scrim (not secondary-bg grey + dark text). */
+    background-color: #ffffff !important;
+    color: #212529 !important;
+    border: 1px solid rgba(0, 0, 0, 0.12) !important;
     box-shadow:
-      0 0.25rem 0.5rem rgba(0, 0, 0, 0.08),
-      0 1rem 2.5rem rgba(0, 0, 0, 0.14) !important;
+      0 0.35rem 1.25rem rgba(0, 0, 0, 0.12),
+      0 0 0 1px rgba(0, 0, 0, 0.04) !important;
   }
   [data-bs-theme="dark"] .maas-recon-post-create-overlay-card {
+    background-color: #2b3035 !important;
+    color: #f8f9fa !important;
+    border: 1px solid rgba(255, 255, 255, 0.12) !important;
     box-shadow:
-      0 0.25rem 0.5rem rgba(0, 0, 0, 0.4),
-      0 1rem 2.5rem rgba(0, 0, 0, 0.55) !important;
+      0 0.35rem 1.5rem rgba(0, 0, 0, 0.45),
+      0 0 0 1px rgba(255, 255, 255, 0.06) !important;
+  }
+  /* NetBox/card often sets .card-body to --bs-card-bg (grey) — overrides our panel. */
+  .maas-recon-post-create-overlay-card .card-body {
+    background-color: transparent !important;
+    color: inherit !important;
+  }
+  .maas-recon-post-create-overlay-card .card-body .maas-recon-overlay-title,
+  .maas-recon-post-create-overlay-card .card-body .maas-recon-overlay-sub {
+    color: inherit !important;
+  }
+  #maas-recon-post-create-error.d-none {
+    margin: 0 !important;
+    padding: 0 !important;
+    border-width: 0 !important;
+    min-height: 0;
+    overflow: hidden;
   }
   .maas-recon-probe-json-pre {
     background-color: var(--bs-tertiary-bg);
