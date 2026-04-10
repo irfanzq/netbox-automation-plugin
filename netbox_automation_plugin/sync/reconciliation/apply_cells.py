@@ -3351,9 +3351,47 @@ def _resolve_ipaddress_for_vm_primary(raw: str):
         return None
 
 
+def _ensure_vminterface_for_primary_ip(vm: Any) -> Any | None:
+    """
+    ``VirtualMachine.clean()`` requires ``primary_ip4`` / ``primary_ip6`` to point at an
+    ``IPAddress`` whose ``assigned_object`` is a ``VMInterface`` on that VM
+    (``virtualization.models.VirtualMachine``). Create a default ``eth0`` when none exist.
+    """
+    from virtualization.models import VMInterface
+
+    pk = getattr(vm, "pk", None)
+    if not pk:
+        return None
+    qs = _orm_qs(VMInterface).filter(virtual_machine_id=pk).order_by("pk")
+    pref = qs.filter(name__iexact="eth0").first()
+    if pref is not None:
+        return pref
+    existing = qs.first()
+    if existing is not None:
+        return existing
+    iface = VMInterface(virtual_machine=vm, name="eth0")
+    iface.save(**_save_branch())
+    return iface
+
+
+def _assign_ipaddress_to_vminterface(ip_obj: Any, vminterface: Any) -> bool:
+    """Point ``IPAddress.assigned_object`` at ``vminterface`` when needed; returns True if saved."""
+    if not hasattr(ip_obj, "assigned_object"):
+        return False
+    try:
+        if ip_obj.assigned_object == vminterface:
+            return False
+    except Exception:
+        pass
+    _netbox_changelog_snapshot(ip_obj)
+    ip_obj.assigned_object = vminterface
+    ip_obj.save(**_save_branch())
+    return True
+
+
 def _apply_vm_primary_ip_link(vm, raw: str) -> bool:
     ip_obj = _resolve_ipaddress_for_vm_primary(raw)
-    if ip_obj is None:
+    if ip_obj is None or not getattr(vm, "pk", None):
         return False
     try:
         ver = int(ip_obj.address.version)
@@ -3362,6 +3400,10 @@ def _apply_vm_primary_ip_link(vm, raw: str) -> bool:
             ver = ipaddress.ip_address(str(ip_obj.address).split("/", 1)[0]).version
         except Exception:
             return False
+    vmin = _ensure_vminterface_for_primary_ip(vm)
+    if vmin is None:
+        return False
+    _assign_ipaddress_to_vminterface(ip_obj, vmin)
     changed = False
     if ver == 4 and hasattr(vm, "primary_ip4_id"):
         if getattr(vm, "primary_ip4_id", None) != ip_obj.pk:
