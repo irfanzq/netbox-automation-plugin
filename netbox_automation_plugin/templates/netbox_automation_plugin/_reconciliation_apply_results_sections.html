@@ -133,7 +133,8 @@
               <th>{% trans "Section" %}</th>
               <th>{% trans "Action" %}</th>
               <th>{% trans "Summary" %}</th>
-              <th>{% trans "NetBox write (preview)" %}</th>
+              <th>{% trans "NetBox write" %}</th>
+              <th>{% trans "Branch readback" %}</th>
               <th>{% trans "Schema audit (same as Docker log line)" %}</th>
               <th>{% trans "Detail (exceptions, skip reasons, routing)" %}</th>
             </tr>
@@ -148,7 +149,8 @@
                 <td class="small text-monospace">{{ row.selection_key|default:"—" }}</td>
                 <td class="small">{{ row.action|default:"—" }}</td>
                 <td class="small">{{ row.summary|default:"—" }}</td>
-                <td class="small text-break font-monospace" style="min-width: 14rem; max-width: 36rem;">{% if row.write_preview %}{{ row.write_preview }}{% else %}—{% endif %}</td>
+                <td class="small text-break font-monospace" style="min-width: 14rem; max-width: 36rem;" {% if row.write_preview_source == "orm_write" %}title="{% trans 'Values the plugin recorded for ORM saves on this row (handler scope; not a separate branch readback query).' %}"{% elif row.write_preview_source == "projection" %}title="{% trans 'From drift projection only (handler did not attach orm_write — e.g. skip or action not instrumented yet).' %}"{% endif %}>{% if row.write_preview %}{% if row.write_preview_source == "orm_write" %}<span class="badge text-bg-primary me-1">ORM</span>{% elif row.write_preview_source == "projection" %}<span class="badge text-bg-secondary me-1">{% trans "plan" %}</span>{% endif %}{{ row.write_preview }}{% else %}—{% endif %}</td>
+                <td class="small text-break font-monospace" style="min-width: 14rem; max-width: 36rem;" title="{% trans 'Reloaded from the branch DB after apply (same field snapshot as merge/debug); compare to NetBox write column.' %}">{% if row.branch_write_preview %}{{ row.branch_write_preview }}{% else %}—{% endif %}</td>
                 <td class="small text-break font-monospace" style="min-width: 12rem; max-width: 28rem;">
                   {% if row.schema_audit_log_line %}
                     {% if row.schema_audit and row.schema_audit.is_public_main %}<span class="badge text-bg-danger me-1">public</span>{% endif %}
@@ -188,7 +190,8 @@
               <th>{% trans "Section" %}</th>
               <th>{% trans "Action" %}</th>
               <th>{% trans "Summary" %}</th>
-              <th>{% trans "NetBox write (preview)" %}</th>
+              <th>{% trans "NetBox write" %}</th>
+              <th>{% trans "Branch readback" %}</th>
               <th>{% trans "Schema audit (same as Docker log line)" %}</th>
               <th>{% trans "Detail (exceptions, skip reasons, routing)" %}</th>
             </tr>
@@ -203,7 +206,8 @@
                 <td class="small text-monospace">{{ row.selection_key|default:"—" }}</td>
                 <td class="small">{{ row.action|default:"—" }}</td>
                 <td class="small">{{ row.summary|default:"—" }}</td>
-                <td class="small text-break font-monospace" style="min-width: 14rem; max-width: 36rem;">{% if row.write_preview %}{{ row.write_preview }}{% else %}—{% endif %}</td>
+                <td class="small text-break font-monospace" style="min-width: 14rem; max-width: 36rem;" {% if row.write_preview_source == "orm_write" %}title="{% trans 'Values the plugin recorded for ORM saves on this row (handler scope; not a separate branch readback query).' %}"{% elif row.write_preview_source == "projection" %}title="{% trans 'From drift projection only (handler did not attach orm_write — e.g. skip or action not instrumented yet).' %}"{% endif %}>{% if row.write_preview %}{% if row.write_preview_source == "orm_write" %}<span class="badge text-bg-primary me-1">ORM</span>{% elif row.write_preview_source == "projection" %}<span class="badge text-bg-secondary me-1">{% trans "plan" %}</span>{% endif %}{{ row.write_preview }}{% else %}—{% endif %}</td>
+                <td class="small text-break font-monospace" style="min-width: 14rem; max-width: 36rem;" title="{% trans 'Reloaded from the branch DB after apply (same field snapshot as merge/debug); compare to NetBox write column.' %}">{% if row.branch_write_preview %}{{ row.branch_write_preview }}{% else %}—{% endif %}</td>
                 <td class="small text-break font-monospace" style="min-width: 12rem; max-width: 28rem;">
                   {% if row.schema_audit_log_line %}
                     {% if row.schema_audit and row.schema_audit.is_public_main %}<span class="badge text-bg-danger me-1">public</span>{% endif %}

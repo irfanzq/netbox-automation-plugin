@@ -1007,7 +1007,13 @@ def wait_for_branch_schema_ready(
 
 
 def _apply_result_projection_dict(op: dict[str, Any]) -> dict[str, str]:
-    """NetBox write projection (resolved FK labels) for one frozen op — same basis as preview tables."""
+    """
+    NetBox-oriented projection from frozen **audit cells** (resolved FK labels).
+
+    Same basis as recon preview tables (**intent** from the frozen row). Apply results use
+    handler-supplied ``written_object["orm_write"]`` for ``write_preview`` when present
+    (values the plugin set for ORM saves); otherwise this projection as fallback.
+    """
     sk = str(op.get("selection_key") or "").strip()
     raw = op.get("cells")
     cells: dict[str, str] = {}
@@ -1036,8 +1042,40 @@ def _apply_result_write_preview_from_proj(proj: dict[str, str]) -> str:
     return s
 
 
+def _apply_result_write_preview_from_snapshot(snap: dict[str, str], selection_key: str) -> str:
+    """
+    Same ``key=value; …`` shape as projection, ordered like recon preview columns when possible,
+    then any extra snapshot keys (ORM fields not in the preview schema).
+    """
+    sk = str(selection_key or "").strip()
+    try:
+        ordered = list(netbox_write_preview_ordered_fieldnames(sk))
+    except Exception:
+        ordered = []
+    snap_clean = {str(k): ("" if v is None else str(v).strip()) for k, v in snap.items()}
+    seen: set[str] = set()
+    parts: list[str] = []
+    for k in ordered:
+        vv = snap_clean.get(k, "").strip()
+        if not vv or vv in ("—", "-"):
+            continue
+        parts.append(f"{k}={vv}")
+        seen.add(k)
+    for k in sorted(snap_clean.keys()):
+        if k in seen:
+            continue
+        vv = snap_clean[k].strip()
+        if not vv or vv in ("—", "-"):
+            continue
+        parts.append(f"{k}={vv}")
+    s = "; ".join(parts)
+    if len(s) > _WRITE_PREVIEW_MAX:
+        return s[: _WRITE_PREVIEW_MAX - 3] + "..."
+    return s
+
+
 def _apply_result_write_preview(op: dict[str, Any]) -> str:
-    """Human-readable NetBox-oriented fields for apply logs (same projection as recon tables)."""
+    """Human-readable NetBox fields from drift projection only (no DB read)."""
     return _apply_result_write_preview_from_proj(_apply_result_projection_dict(op))
 
 
@@ -1054,15 +1092,12 @@ def _build_field_changes_from_proj_and_snapshot(
     """
     Build the field-changes list shown in the apply results log.
 
-    Only projection fields (what the handler was asked to write) are included —
-    never extra snap fields that were not part of the operation.  The snap value
-    is used as the authoritative "after" value when available (it is the resolved
-    FK label read back from the branch DB after the save).
+    Only projection fields (what the drift row asked to write) are listed. The ``after``
+    column prefers **orm_write** (handler-built, no extra readback query) when passed as
+    ``snap``; otherwise branch **field_snapshot** readback; otherwise the projection string.
 
-    For "created": before="", after=snap value (or proj value as fallback).
-    For "updated": before="—", after=snap value (or proj value as fallback).
-    Both cases show every non-empty projection field so the log always reflects
-    exactly what was sent to NetBox.
+    For "created": before="", after=resolved "after" value.
+    For "updated": before="—", after=resolved "after" value.
     """
     snap = snap or {}
     out: list[dict[str, str]] = []
@@ -1071,8 +1106,6 @@ def _build_field_changes_from_proj_and_snapshot(
         for k, v in proj.items():
             if not _field_changes_nonempty_scalar(v):
                 continue
-            # Prefer the snap value (resolved FK label from branch DB); fall back
-            # to the raw projection string if the snap doesn't have this key.
             after = str(snap.get(k, v) or "").strip() or str(v).strip()
             if not after:
                 continue
@@ -1134,21 +1167,39 @@ def _attach_schema_audit_to_apply_result(result: dict[str, Any], op: dict[str, A
 
 def _finalize_apply_row(op: dict[str, Any], result: dict[str, Any]) -> dict[str, Any]:
     proj = _apply_result_projection_dict(op)
-    wp = _apply_result_write_preview_from_proj(proj)
-    if wp:
-        result["write_preview"] = wp
     st = str(result.get("status") or "")
     raw_snap = result.get("field_snapshot")
-    if isinstance(raw_snap, dict):
-        snap_n = {
-            str(k): ("" if v is None else str(v).strip()) for k, v in raw_snap.items()
-        }
-    else:
-        snap_n = None
+    snap_n: dict[str, str] | None = None
+    if isinstance(raw_snap, dict) and raw_snap:
+        snap_n = {str(k): ("" if v is None else str(v).strip()) for k, v in raw_snap.items()}
+    orm_w: dict[str, str] | None = None
+    wo = result.get("written_object")
+    if isinstance(wo, dict):
+        raw_ow = wo.get("orm_write")
+        if isinstance(raw_ow, dict) and raw_ow:
+            orm_w = {str(k): ("" if v is None else str(v).strip()) for k, v in raw_ow.items()}
+    sk = str(op.get("selection_key") or "")
+    wp = ""
+    if st in ("created", "updated") and orm_w:
+        wp = _apply_result_write_preview_from_snapshot(orm_w, sk)
+        if wp:
+            result["write_preview"] = wp
+            result["write_preview_source"] = "orm_write"
+            result["orm_write"] = orm_w
+    if not wp:
+        wp = _apply_result_write_preview_from_proj(proj)
+        if wp:
+            result["write_preview"] = wp
+            result["write_preview_source"] = "projection"
     if st in ("created", "updated"):
-        fc = _build_field_changes_from_proj_and_snapshot(st, proj, snap_n)
+        after_src = orm_w or snap_n
+        fc = _build_field_changes_from_proj_and_snapshot(st, proj, after_src)
         if fc:
             result["field_changes"] = fc
+        if snap_n:
+            bwp = _apply_result_write_preview_from_snapshot(snap_n, sk)
+            if bwp:
+                result["branch_write_preview"] = bwp
     return result
 
 
@@ -1234,7 +1285,22 @@ def _interface_assigned_ip_blob(iface: Any, using: str) -> str:
         return ""
 
 
-def _orm_instance_field_snapshot(obj: Any, *, selection_key: str, using: str) -> dict[str, str]:
+def _orm_instance_field_snapshot(
+    obj: Any,
+    *,
+    selection_key: str,
+    using: str,
+    mode: str = "readback",
+) -> dict[str, str]:
+    """
+    Flatten a NetBox model instance to projection-like ``field -> str`` pairs.
+
+    ``mode``:
+    - ``readback`` (default): full snapshot used after apply for branch comparison; for
+      ``dcim.interface``, includes assigned IPs, tag names, and parent device site/location.
+    - ``orm_flush``: same scalar/FK walk but skips extra interface queries (handlers that
+      attach a hand-built ``orm_write`` use that for the NetBox-write column instead).
+    """
     out: dict[str, str] = {}
     try:
         opts = obj._meta
@@ -1276,10 +1342,37 @@ def _orm_instance_field_snapshot(obj: Any, *, selection_key: str, using: str) ->
                 continue
             out[name] = s
             n += 1
-        if str(opts.label_lower) == "dcim.interface":
+        if str(opts.label_lower) == "dcim.interface" and mode == "readback":
             ips = _interface_assigned_ip_blob(obj, using)
             if ips:
-                out["assigned_ips"] = ips
+                out["IPAddress.address"] = ips
+            try:
+                alias = _recon_explicit_orm_using(using)
+                rel = obj.tags
+                if alias is not None:
+                    tag_iter = rel.using(alias).all()
+                else:
+                    tag_iter = rel.all()
+                tnames = sorted(str(t.name) for t in tag_iter if getattr(t, "name", None))
+                if tnames:
+                    out["tags"] = ", ".join(tnames)
+            except Exception:
+                pass
+            try:
+                dev = getattr(obj, "device", None)
+                if dev is not None:
+                    site = getattr(dev, "site", None)
+                    if site is not None:
+                        sn = str(getattr(site, "name", "") or "").strip()
+                        if sn:
+                            out["device.site"] = sn
+                    loc = getattr(dev, "location", None)
+                    if loc is not None:
+                        ln = str(getattr(loc, "name", "") or "").strip()
+                        if ln:
+                            out["device.location"] = ln
+            except Exception:
+                pass
     except Exception:
         return {}
     sk = str(selection_key or "")

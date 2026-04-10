@@ -24,7 +24,8 @@ include ``apply_extra_debug.vlan_resolution`` on apply results (counts + trouble
 merging a branch. Notable constraints: (1) ``VirtualMachine.primary_ip4`` / ``primary_ip6``
 — the ``IPAddress`` must be assigned to a ``VMInterface`` on that VM (see
 ``_ensure_vminterface_for_primary_ip`` / ``_assign_ipaddress_to_vminterface`` /
-``_apply_vm_primary_ip_link``). (2) ``Device.primary_ip4`` / ``primary_ip6`` / ``oob_ip`` —
+``_ensure_ipaddress_for_vm_primary`` / ``_apply_vm_primary_ip_link``). (2)
+``Device.primary_ip4`` / ``primary_ip6`` / ``oob_ip`` —
 the address must be assigned to an interface in that device’s effective interface set
 (virtual chassis); reconciliation apply here does **not** set those fields (devices are
 created without primary/OOB; NIC apply only attaches IPs to ``dcim.Interface``). (3) VLAN,
@@ -40,6 +41,7 @@ surface as ``failed_merge_validation`` during apply instead of only on merge.
 from __future__ import annotations
 
 import ipaddress
+import json
 import logging
 import os
 import re
@@ -156,6 +158,23 @@ def _maybe_log_reconciliation_netbox_write(
         default_snap,
         wo_tail,
     )
+    ow_body = None
+    if len(raw) >= 4 and isinstance(raw[3], dict):
+        ow_body = raw[3].get("orm_write")
+    if isinstance(ow_body, dict) and ow_body:
+        try:
+            payload = json.dumps(ow_body, sort_keys=True, default=str)
+        except TypeError:
+            payload = str(ow_body)
+        if len(payload) > 8000:
+            payload = payload[:7997] + "..."
+        logger.info(
+            "reconciliation_orm_write_payload row_key=%s netbox_action=%s selection_key=%s %s",
+            rk,
+            netbox_action,
+            sk,
+            payload,
+        )
 
 _VID_FROM_PARENS_RE = re.compile(r"\((\d+)\)\s*$")
 # Log once per model if snapshot() is missing (branch Diff will lack field deltas).
@@ -233,6 +252,51 @@ def _skip_missing_prereq(detail: str) -> tuple[str, str, str]:
     if len(d) > 2000:
         d = d[:1997] + "..."
     return "skipped", "skipped_prerequisite_missing", d
+
+
+def _apply_written_meta(
+    op: dict[str, Any],
+    *,
+    pk: int,
+    obj: Any | None = None,
+    label: str | None = None,
+    orm_write: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    """
+    Per-row ``written_object`` for apply results: NetBox model label, pk, and optional
+    ``orm_write`` (projection-shaped strings the UI logs as the ORM write column).
+
+    When ``orm_write`` is omitted and ``obj`` is set, builds a dict via
+    :func:`_orm_instance_field_snapshot` on the branch (``orm_flush`` for most models;
+    ``readback`` for ``dcim.interface`` so BMC / implicit interface paths include IPs/tags).
+    """
+    if label is None and obj is not None:
+        label = str(obj._meta.label_lower)
+    if not label:
+        label = "unknown.unknown"
+    meta: dict[str, Any] = {"label": label, "pk": int(pk)}
+    ow = orm_write
+    if ow is None and obj is not None:
+        bd = str(op.get("branch_db") or "").strip()
+        if bd:
+            from netbox_automation_plugin.sync.reconciliation.service import (
+                _orm_instance_field_snapshot,
+            )
+
+            sk = str(op.get("selection_key") or "")
+            snap_mode = (
+                "readback"
+                if str(getattr(obj._meta, "label_lower", "") or "") == "dcim.interface"
+                else "orm_flush"
+            )
+            got = _orm_instance_field_snapshot(
+                obj, selection_key=sk, using=bd, mode=snap_mode
+            )
+            if got:
+                ow = got
+    if ow:
+        meta["orm_write"] = ow
+    return meta
 
 
 # ---------------------------------------------------------------------------
@@ -877,10 +941,10 @@ def _netbox_changelog_snapshot(instance: Any) -> None:
     For **creates**, a single ``save()`` with every field often yields a branch row with an
     empty Difference column; prefer a minimal first ``save()``, then follow-up updates.
 
-    Interface **scalar** fields (MAC, untagged VLAN, type, description) are applied in **one**
-    ``snapshot()`` + ``save()`` per reconciliation row so branch Diff shows every changed
-    field in one delta; multiple Interface saves in the same DB transaction are often
-    collapsed in the Diff UI to a single sparse row (e.g. tags only).
+    Interface **scalar** fields use **one** ``snapshot()`` + ``save()`` per row; role tags are
+    linked afterward via explicit ``TaggedItem`` rows (see
+    :func:`_interface_apply_scalar_and_role_tag_single_save`) so branch diffs / merge replay keep
+    MAC, VLAN, and type.
 
     Ref: https://github.com/netboxlabs/netbox-branching/discussions/51
     """
@@ -1831,13 +1895,15 @@ def _interface_apply_scalar_and_role_tag_single_save(
     role_label: str | None,
 ) -> bool:
     """
-    Apply MAC, untagged VLAN, type, description, and role tag with one ``snapshot()`` and one
-    ``save()``.
+    Apply MAC, untagged VLAN, type, description, then role tags.
 
-    Reconciliation runs inside ``branch_write_context``'s outer ``atomic(using=branch)``; nested
-    ``transaction.atomic`` calls are savepoints only. netbox-branching often collapses multiple
-    Interface saves in that outer transaction into one Diff row, typically showing only the last
-    mutation (commonly tags) and hiding MAC / VLAN / type. Batching avoids that.
+    **Order:** Persist scalar fields with ``snapshot()`` + ``iface.save()`` *before* inserting
+    ``extras.TaggedItem`` rows for the role tag. Linking tags first interleaves another model's
+    writes with the Interface row's pre-save snapshot and can leave netbox-branching branch diffs
+    / merge replay missing MAC, VLAN, or type even though apply logs show the intended projection.
+
+    Tags still use :func:`_merge_interface_role_tag` (explicit ``TaggedItem.objects.using(branch)``
+    inserts) and do not require a second Interface ``save()``.
     """
     _interface_refresh_safe(iface)
     _netbox_changelog_snapshot(iface)
@@ -1863,14 +1929,14 @@ def _interface_apply_scalar_and_role_tag_single_save(
         if cur != ds2:
             iface.description = ds2
             changed = True
+    if changed:
+        iface.save(**_save_branch())
+        _interface_refresh_safe(iface)
     tag_added = False
     rl = str(role_label or "").strip()
     if rl and hasattr(iface, "tags"):
         tag_added = _merge_interface_role_tag(iface, rl)
-    if changed or tag_added:
-        iface.save(**_save_branch())
-        return True
-    return False
+    return changed or tag_added
 
 
 def _merge_audit_residual_onto_object(
@@ -1906,6 +1972,93 @@ def _resolve_interface_type_slug(cell_val: str):
         if str(lab).strip().lower() == slow:
             return val
     return None
+
+
+def _interface_type_label_for_orm_write(type_slug: Any) -> str:
+    """Human label for Interface.type (for apply-result ``orm_write`` lines)."""
+    if type_slug is None or type_slug == "":
+        return ""
+    try:
+        from dcim.models import Interface
+
+        field = Interface._meta.get_field("type")
+        ch = getattr(field, "choices", None) or []
+        for val, lab in ch:
+            if val is None or val == "":
+                continue
+            if val == type_slug:
+                return str(lab).strip()
+        return str(type_slug).strip()
+    except Exception:
+        return str(type_slug).strip()
+
+
+def _nic_interface_orm_write_dict(
+    *,
+    dev: Any,
+    iface: Any,
+    mac: str,
+    untagged: Any,
+    type_slug: Any,
+    description: str,
+    role_label: str | None,
+    ip_blob: str,
+) -> dict[str, str]:
+    """
+    Projection-shaped dict of what this handler passed into ORM saves for the interface row.
+
+    Built from handler-local values and the in-memory ``iface``/``dev`` after saves — **no**
+    extra reconciliation SELECT solely for apply-result display (contrast with branch
+    ``field_snapshot`` readback).
+    """
+    out: dict[str, str] = {}
+    dn = str(getattr(dev, "name", "") or "").strip()
+    if dn:
+        out["device"] = dn
+    nm = str(getattr(iface, "name", "") or "").strip()
+    if nm:
+        out["name"] = nm
+    tl = _interface_type_label_for_orm_write(type_slug)
+    if not tl:
+        tl = _interface_type_label_for_orm_write(getattr(iface, "type", None))
+    if tl:
+        out["type"] = tl
+    m = (mac or "").strip()
+    if not m:
+        ma = getattr(iface, "mac_address", None)
+        m = str(ma).strip() if ma is not None else ""
+    if m:
+        nm2 = _normalize_mac(m)
+        out["mac_address"] = nm2 if nm2 else m
+    if untagged is not None:
+        vvid = getattr(untagged, "vid", None)
+        if vvid is not None:
+            out["untagged_vlan_vid"] = str(vvid)
+    ds = (description or "").strip()
+    if not ds:
+        ds = (getattr(iface, "description", None) or "").strip()
+    if ds:
+        out["description"] = ds if len(ds) <= 500 else ds[:497] + "..."
+    rl = str(role_label or "").strip()
+    if rl:
+        out["tags"] = rl
+    try:
+        site = getattr(dev, "site", None)
+        if site is not None:
+            sn = str(getattr(site, "name", "") or "").strip()
+            if sn:
+                out["device.site"] = sn
+        loc = getattr(dev, "location", None)
+        if loc is not None:
+            ln = str(getattr(loc, "name", "") or "").strip()
+            if ln:
+                out["device.location"] = ln
+    except Exception:
+        pass
+    ib = (ip_blob or "").strip()
+    if ib and ib not in ("—", "-"):
+        out["IPAddress.address"] = ib
+    return out
 
 
 def _ensure_tag_on_branch(slug: str, name: str) -> Any:
@@ -2577,7 +2730,7 @@ def apply_create_vlan(op: dict[str, Any]) -> tuple[str, str]:
     )
     if (bad := _fail_merge_precheck_if_invalid(vlan, model_label="VLAN")) is not None:
         return bad
-    return "created", "ok_created"
+    return "created", "ok_created", None, _apply_written_meta(op, pk=int(vlan.pk), obj=vlan)
 
 
 def apply_create_tenant(op: dict[str, Any]) -> tuple[str, str]:
@@ -2643,7 +2796,7 @@ def apply_create_tenant(op: dict[str, Any]) -> tuple[str, str]:
         pass
     if (bad := _fail_merge_precheck_if_invalid(tenant, model_label="Tenant")) is not None:
         return bad
-    return "created", "ok_created"
+    return "created", "ok_created", None, _apply_written_meta(op, pk=int(tenant.pk), obj=tenant)
 
 
 def apply_create_prefix(op: dict[str, Any]) -> tuple[str, str]:
@@ -2729,7 +2882,9 @@ def apply_create_prefix(op: dict[str, Any]) -> tuple[str, str]:
             )
             if (bad := _fail_merge_precheck_if_invalid(existing, model_label="Prefix")) is not None:
                 return bad
-            return "updated", "ok_updated"
+            return "updated", "ok_updated", None, _apply_written_meta(
+                op, pk=int(existing.pk), obj=existing
+            )
         return "skipped", "skipped_already_desired"
     obj = Prefix(prefix=cidr, vrf=vrf)
     try:
@@ -2790,7 +2945,7 @@ def apply_create_prefix(op: dict[str, Any]) -> tuple[str, str]:
             )
             if (bad := _fail_merge_precheck_if_invalid(pfx, model_label="Prefix")) is not None:
                 return bad
-            return "created", "ok_created"
+            return "created", "ok_created", None, _apply_written_meta(op, pk=int(pfx.pk), obj=pfx)
         _prefix_apply_row_stepwise_changelog(
             pfx,
             vrf=None,
@@ -2809,7 +2964,7 @@ def apply_create_prefix(op: dict[str, Any]) -> tuple[str, str]:
         )
         if (bad := _fail_merge_precheck_if_invalid(pfx, model_label="Prefix")) is not None:
             return bad
-        return "created", "ok_created"
+        return "created", "ok_created", None, _apply_written_meta(op, pk=int(pfx.pk), obj=pfx)
 
     _prefix_apply_row_stepwise_changelog(
         obj,
@@ -2829,7 +2984,7 @@ def apply_create_prefix(op: dict[str, Any]) -> tuple[str, str]:
     )
     if (bad := _fail_merge_precheck_if_invalid(obj, model_label="Prefix")) is not None:
         return bad
-    return "created", "ok_created"
+    return "created", "ok_created", None, _apply_written_meta(op, pk=int(obj.pk), obj=obj)
 
 
 def apply_create_ip_range(op: dict[str, Any]) -> tuple[str, str]:
@@ -2900,7 +3055,9 @@ def apply_create_ip_range(op: dict[str, Any]) -> tuple[str, str]:
             existing.save(**_save_branch())
             if (bad := _fail_merge_precheck_if_invalid(existing, model_label="IPRange")) is not None:
                 return bad
-            return "updated", "ok_updated"
+            return "updated", "ok_updated", None, _apply_written_meta(
+                op, pk=int(existing.pk), obj=existing
+            )
         return "skipped", "skipped_already_desired"
     obj = IPRange(start_address=start_addr, end_address=end_addr, vrf=vrf)
     try:
@@ -2934,7 +3091,7 @@ def apply_create_ip_range(op: dict[str, Any]) -> tuple[str, str]:
             rng.save(**_save_branch())
             if (bad := _fail_merge_precheck_if_invalid(rng, model_label="IPRange")) is not None:
                 return bad
-            return "created", "ok_created"
+            return "created", "ok_created", None, _apply_written_meta(op, pk=int(rng.pk), obj=rng)
         _netbox_changelog_snapshot(rng)
         phase2_fb = False
         if status_name:
@@ -2954,7 +3111,7 @@ def apply_create_ip_range(op: dict[str, Any]) -> tuple[str, str]:
             rng.save(**_save_branch())
         if (bad := _fail_merge_precheck_if_invalid(rng, model_label="IPRange")) is not None:
             return bad
-        return "created", "ok_created"
+        return "created", "ok_created", None, _apply_written_meta(op, pk=int(rng.pk), obj=rng)
 
     _netbox_changelog_snapshot(obj)
     phase2 = False
@@ -2975,7 +3132,7 @@ def apply_create_ip_range(op: dict[str, Any]) -> tuple[str, str]:
         obj.save(**_save_branch())
     if (bad := _fail_merge_precheck_if_invalid(obj, model_label="IPRange")) is not None:
         return bad
-    return "created", "ok_created"
+    return "created", "ok_created", None, _apply_written_meta(op, pk=int(obj.pk), obj=obj)
 
 
 # Detail — new floating IPs (headers must match format_html_proposed / xlsx_export).
@@ -3357,7 +3514,9 @@ def apply_create_floating_ip(op: dict[str, Any]) -> tuple[str, str]:
         if any_save or merge_ch or tenant_cleared:
             if (bad := _fail_merge_precheck_if_invalid(existing, model_label="IPAddress")) is not None:
                 return bad
-            return "updated", "ok_updated"
+            return "updated", "ok_updated", None, _apply_written_meta(
+                op, pk=int(existing.pk), obj=existing
+            )
         return "skipped", "skipped_already_desired"
     ip_obj = IPAddress(address=address, vrf=vrf)
     try:
@@ -3393,7 +3552,7 @@ def apply_create_floating_ip(op: dict[str, Any]) -> tuple[str, str]:
         )
         if (bad := _fail_merge_precheck_if_invalid(ip_fb, model_label="IPAddress")) is not None:
             return bad
-        return "created", "ok_created"
+        return "created", "ok_created", None, _apply_written_meta(op, pk=int(ip_fb.pk), obj=ip_fb)
 
     _floating_ip_apply_row_stepwise(
         ip_obj,
@@ -3410,17 +3569,24 @@ def apply_create_floating_ip(op: dict[str, Any]) -> tuple[str, str]:
     )
     if (bad := _fail_merge_precheck_if_invalid(ip_obj, model_label="IPAddress")) is not None:
         return bad
-    return "created", "ok_created"
+    return "created", "ok_created", None, _apply_written_meta(op, pk=int(ip_obj.pk), obj=ip_obj)
 
 
-def _resolve_ipaddress_for_vm_primary(raw: str):
-    """Match NetBox IPAddress rows from drift cell (full prefix or host-only from OpenStack)."""
+def _resolve_ipaddress_for_vm_primary(raw: str, vrf: Any | None = None):
+    """Match NetBox IPAddress on the branch (full prefix or host-only); optional VRF narrows matches."""
     from ipam.models import IPAddress
 
     raw = (raw or "").strip()
     if not raw or raw in {"—", "-"}:
         return None
-    o = _orm_qs(IPAddress).filter(address=raw).first()
+
+    def _scoped(qs):
+        if vrf is not None:
+            return qs.filter(vrf=vrf)
+        return qs
+
+    qs0 = _scoped(_orm_qs(IPAddress).filter(address=raw))
+    o = qs0.first()
     if o is not None:
         return o
     host = raw.split("/", 1)[0].strip()
@@ -3429,12 +3595,52 @@ def _resolve_ipaddress_for_vm_primary(raw: str):
     except ValueError:
         return None
     suffix = "/32" if ver == 4 else "/128"
-    o = _orm_qs(IPAddress).filter(address=host + suffix).first()
+    o = _scoped(_orm_qs(IPAddress).filter(address=host + suffix)).first()
     if o is not None:
         return o
     try:
-        return _orm_qs(IPAddress).filter(address__startswith=host + "/").order_by("pk").first()
+        return _scoped(
+            _orm_qs(IPAddress).filter(address__startswith=host + "/").order_by("pk")
+        ).first()
     except Exception:
+        return None
+
+
+def _ensure_ipaddress_for_vm_primary(raw: str, vrf: Any | None) -> Any | None:
+    """
+    Resolve an ``IPAddress`` for VM primary-ip linking; create on the branch if missing.
+
+    OpenStack drift often proposes addresses that are not yet in IPAM on the branch; without a
+    create path, primary-ip apply is a silent no-op while the recon preview still shows the cell.
+    """
+    from ipam.models import IPAddress
+
+    raw = (raw or "").strip()
+    if not raw or raw in {"—", "-"}:
+        return None
+    hit = _resolve_ipaddress_for_vm_primary(raw, vrf=vrf)
+    if hit is not None:
+        return hit
+    try:
+        token = raw.split()[0].strip()
+        addr = _normalize_ip_for_netbox(token)
+    except Exception:
+        return None
+    existing = _orm_qs(IPAddress).filter(address=addr, vrf=vrf).first()
+    if existing is not None:
+        return existing
+    ip_obj = IPAddress(address=addr, vrf=vrf)
+    try:
+        ip_obj.save(**_save_branch())
+        return ip_obj
+    except Exception:
+        logger.debug(
+            "ensure_ipaddress_for_vm_primary: save failed raw=%r addr=%r vrf=%r",
+            raw,
+            addr,
+            vrf,
+            exc_info=True,
+        )
         return None
 
 
@@ -3476,8 +3682,8 @@ def _assign_ipaddress_to_vminterface(ip_obj: Any, vminterface: Any) -> bool:
     return True
 
 
-def _apply_vm_primary_ip_link(vm, raw: str) -> bool:
-    ip_obj = _resolve_ipaddress_for_vm_primary(raw)
+def _apply_vm_primary_ip_link(vm, raw: str, *, vrf: Any | None = None) -> bool:
+    ip_obj = _ensure_ipaddress_for_vm_primary((raw or "").strip(), vrf)
     if ip_obj is None or not getattr(vm, "pk", None):
         return False
     try:
@@ -3505,17 +3711,19 @@ def _apply_vm_primary_ip_link(vm, raw: str) -> bool:
 
 def _apply_vm_primary_ip_from_cell(vm, cells: dict[str, str]) -> bool:
     pri = _cell(cells, "NB proposed primary IP")
-    return _apply_vm_primary_ip_link(vm, pri)
+    vrf = _vrf_for_ip_from_row_cells(cells)
+    return _apply_vm_primary_ip_link(vm, pri, vrf=vrf)
 
 
 def _apply_vm_primary_ip_from_projection(
     vm, proj: dict[str, str], cells: dict[str, str]
 ) -> bool:
     """Set primary_ip4/6 from projection; if both empty, fall back to NB proposed primary IP cell."""
+    vrf = _vrf_for_ip_from_row_cells(cells)
     changed = False
     for k in ("primary_ip4", "primary_ip6"):
         raw = (proj.get(k) or "").strip()
-        if _meaningful_cell_val(raw) and _apply_vm_primary_ip_link(vm, raw):
+        if _meaningful_cell_val(raw) and _apply_vm_primary_ip_link(vm, raw, vrf=vrf):
             changed = True
     if not any(
         _meaningful_cell_val((proj.get(x) or "").strip()) for x in ("primary_ip4", "primary_ip6")
@@ -3668,7 +3876,7 @@ def apply_create_openstack_vm(op: dict[str, Any]) -> tuple[str, str]:
     )
     if (bad := _fail_merge_precheck_if_invalid(vm, model_label="VirtualMachine")) is not None:
         return bad
-    return "created", "ok_created"
+    return "created", "ok_created", None, _apply_written_meta(op, pk=int(vm.pk), obj=vm)
 
 
 def apply_update_openstack_vm(op: dict[str, Any]) -> tuple[str, str]:
@@ -3828,7 +4036,7 @@ def apply_update_openstack_vm(op: dict[str, Any]) -> tuple[str, str]:
         )
         if (bad := _fail_merge_precheck_if_invalid(vm, model_label="VirtualMachine")) is not None:
             return bad
-        return "updated", "ok_updated"
+        return "updated", "ok_updated", None, _apply_written_meta(op, pk=int(vm.pk), obj=vm)
     return "skipped", "skipped_already_desired"
 
 
@@ -3901,7 +4109,9 @@ def _fallback_device_role_for_create(hostname: str, cells: dict[str, str]):
     return rq.order_by("pk").first()
 
 
-def _apply_device_core(cells: dict[str, str], *, create_if_missing: bool) -> tuple[str, str]:
+def _apply_device_core(
+    op: dict[str, Any], cells: dict[str, str], *, create_if_missing: bool
+) -> Any:
     from dcim.models import Device, DeviceRole, DeviceType, Location, Platform, Site
 
     hostname = _cell(cells, "Hostname", "Host")
@@ -4030,7 +4240,7 @@ def _apply_device_core(cells: dict[str, str], *, create_if_missing: bool) -> tup
         )
         if (bad := _fail_merge_precheck_if_invalid(dev, model_label="Device")) is not None:
             return bad
-        return "created", "ok_created"
+        return "created", "ok_created", None, _apply_written_meta(op, pk=int(dev.pk), obj=dev)
     # Device exists in NetBox but has no role: fill from audit, or non-VyOS fallback; VyOS needs explicit pick.
     if getattr(existing, "role_id", None) in (None, 0):
         rr = (role_name or "").strip()
@@ -4067,7 +4277,9 @@ def _apply_device_core(cells: dict[str, str], *, create_if_missing: bool) -> tup
             site_chk = _orm_qs(Site).filter(pk=target_site.pk).first()
             if (bad := _fail_merge_precheck_if_invalid(site_chk, model_label="Site")) is not None:
                 return bad
-        return "updated", "ok_updated"
+        return "updated", "ok_updated", None, _apply_written_meta(
+            op, pk=int(existing.pk), obj=existing
+        )
     return "skipped", "skipped_already_desired"
 
 
@@ -4255,7 +4467,7 @@ def apply_create_device(op: dict[str, Any]) -> tuple[str, str]:
     cells = op.get("cells") or {}
     if (reason := skip_reason_from_row_guides(cells)) is not None:
         return "skipped", reason
-    return _apply_device_core(cells, create_if_missing=True)
+    return _apply_device_core(op, cells, create_if_missing=True)
 
 
 def apply_review_device(op: dict[str, Any]) -> tuple[str, str]:
@@ -4264,7 +4476,7 @@ def apply_review_device(op: dict[str, Any]) -> tuple[str, str]:
         return "skipped", reason
     # Same creation path as new-device rows when the operator includes this row in apply:
     # review-only means the report flagged weak/unsafe MAAS state, not "never create in NB".
-    return _apply_device_core(cells, create_if_missing=True)
+    return _apply_device_core(op, cells, create_if_missing=True)
 
 
 def apply_placement_alignment(op: dict[str, Any]) -> tuple[str, str]:
@@ -4287,6 +4499,7 @@ def apply_placement_alignment(op: dict[str, Any]) -> tuple[str, str]:
         "NB proposed device status": _cell(cells, "NB proposed device status"),
     }
     return _apply_device_core(
+        op,
         {**cells_no_role, **{k: v for k, v in fake.items() if v}},
         create_if_missing=False,
     )
@@ -4327,7 +4540,7 @@ def apply_serial_review(op: dict[str, Any]) -> tuple[str, str]:
         dev.save(**_save_branch())
         if (bad := _fail_merge_precheck_if_invalid(dev, model_label="Device")) is not None:
             return bad
-        return "updated", "ok_updated"
+        return "updated", "ok_updated", None, _apply_written_meta(op, pk=int(dev.pk), obj=dev)
     return "skipped", "skipped_already_desired"
 
 
@@ -5032,7 +5245,7 @@ def synthetic_create_vlan_cells_from_interface_prereq(
 
 
 def _try_bootstrap_device_for_new_interface_apply(
-    cells: dict[str, str], host: str
+    op: dict[str, Any], cells: dict[str, str], host: str
 ) -> tuple[str, str, str] | None:
     """
     Attempt :func:`_apply_device_core` from the NIC row when the device record is missing.
@@ -5043,7 +5256,7 @@ def _try_bootstrap_device_for_new_interface_apply(
     synth = synthetic_device_cells_from_new_nic_for_prereq(cells, host)
     if synth is None:
         return None
-    res = _apply_device_core(synth, create_if_missing=True)
+    res = _apply_device_core(op, synth, create_if_missing=True)
     detail = res[2] if len(res) > 2 else None
     reason = str(res[1])
     status = str(res[0])
@@ -5059,7 +5272,7 @@ def _try_bootstrap_device_for_new_interface_apply(
     )
 
 
-def apply_create_interface(op: dict[str, Any]) -> tuple[str, str]:
+def apply_create_interface(op: dict[str, Any]) -> Any:
     from dcim.models import Device, Interface, Location, Site
 
     branch_db: str = (op.get("branch_db") or "default")
@@ -5095,7 +5308,7 @@ def apply_create_interface(op: dict[str, Any]) -> tuple[str, str]:
         )
     dev = _device_for_reconciliation_apply(host)
     if not dev:
-        boot_err = _try_bootstrap_device_for_new_interface_apply(cells, host)
+        boot_err = _try_bootstrap_device_for_new_interface_apply(op, cells, host)
         if boot_err is not None:
             return boot_err
         dev = _device_for_reconciliation_apply(host)
@@ -5182,7 +5395,24 @@ def apply_create_interface(op: dict[str, Any]) -> tuple[str, str]:
         ip_vrf = _vrf_for_ip_from_row_cells(cells)
         if ip_blob:
             _assign_ips_to_interface(iface, ip_blob, ip_vrf)
-        iface = _orm_qs(Interface).filter(pk=iface.pk).first()
+        wo_iface = iface
+        ow = _nic_interface_orm_write_dict(
+            dev=dev,
+            iface=wo_iface,
+            mac=mac or "",
+            untagged=untagged,
+            type_slug=type_slug,
+            description=if_desc,
+            role_label=role_label,
+            ip_blob=ip_blob or "",
+        )
+        wmeta = _apply_written_meta(
+            op,
+            pk=int(getattr(wo_iface, "pk", 0) or 0),
+            label="dcim.interface",
+            orm_write=ow,
+        )
+        iface = _orm_qs(Interface).filter(pk=wo_iface.pk).first()
         if iface is None:
             return (
                 "failed",
@@ -5191,7 +5421,8 @@ def apply_create_interface(op: dict[str, Any]) -> tuple[str, str]:
             )
         if (bad := _merge_precheck_nic_stack(dev, iface)) is not None:
             return bad
-        return "created", "ok_created"
+        wmeta["pk"] = int(iface.pk)
+        return "created", "ok_created", None, wmeta
     with _tx_op(branch_db):
         changed = _interface_apply_scalar_and_role_tag_single_save(
             iface,
@@ -5212,7 +5443,21 @@ def apply_create_interface(op: dict[str, Any]) -> tuple[str, str]:
         if ip_ch:
             changed = True
     if changed:
-        iface = _orm_qs(Interface).filter(pk=iface.pk).first()
+        pk_before = iface.pk
+        ow = _nic_interface_orm_write_dict(
+            dev=dev,
+            iface=iface,
+            mac=mac or "",
+            untagged=untagged,
+            type_slug=type_slug,
+            description=if_desc,
+            role_label=role_label,
+            ip_blob=ip_blob or "",
+        )
+        wmeta = _apply_written_meta(
+            op, pk=int(pk_before), label="dcim.interface", orm_write=ow
+        )
+        iface = _orm_qs(Interface).filter(pk=pk_before).first()
         if iface is None:
             return (
                 "failed",
@@ -5221,7 +5466,8 @@ def apply_create_interface(op: dict[str, Any]) -> tuple[str, str]:
             )
         if (bad := _merge_precheck_nic_stack(dev, iface)) is not None:
             return bad
-        return "updated", "ok_updated"
+        wmeta["pk"] = int(iface.pk)
+        return "updated", "ok_updated", None, wmeta
     if dev_geom_dirty:
         d = _orm_qs(Device).filter(pk=dev.pk).first()
         if (bad := _fail_merge_precheck_if_invalid(d, model_label="Device")) is not None:
@@ -5229,7 +5475,7 @@ def apply_create_interface(op: dict[str, Any]) -> tuple[str, str]:
     return "skipped", "skipped_already_desired"
 
 
-def apply_update_interface(op: dict[str, Any]) -> tuple[str, str]:
+def apply_update_interface(op: dict[str, Any]) -> Any:
     from dcim.models import Device, Interface, Location, Site
 
     branch_db: str = (op.get("branch_db") or "default")
@@ -5340,7 +5586,21 @@ def apply_update_interface(op: dict[str, Any]) -> tuple[str, str]:
     if ip_ch:
         changed = True
     if changed:
-        iface = _orm_qs(Interface).filter(pk=iface.pk).first()
+        pk_before = iface.pk
+        ow = _nic_interface_orm_write_dict(
+            dev=dev,
+            iface=iface,
+            mac=mac or "",
+            untagged=untagged,
+            type_slug=type_slug,
+            description=if_desc,
+            role_label=role_label,
+            ip_blob=ip_blob or "",
+        )
+        wmeta = _apply_written_meta(
+            op, pk=int(pk_before), label="dcim.interface", orm_write=ow
+        )
+        iface = _orm_qs(Interface).filter(pk=pk_before).first()
         if iface is None:
             return (
                 "failed",
@@ -5349,7 +5609,8 @@ def apply_update_interface(op: dict[str, Any]) -> tuple[str, str]:
             )
         if (bad := _merge_precheck_nic_stack(dev, iface)) is not None:
             return bad
-        return "updated", "ok_updated"
+        wmeta["pk"] = int(iface.pk)
+        return "updated", "ok_updated", None, wmeta
     if dev_geom_dirty:
         d = _orm_qs(Device).filter(pk=dev.pk).first()
         if (bad := _fail_merge_precheck_if_invalid(d, model_label="Device")) is not None:
@@ -5442,7 +5703,10 @@ def _bmc_apply(op: dict[str, Any], *, existing_oob: bool) -> tuple[str, str]:
             )
         if (bad := _merge_precheck_nic_stack(dev, iface)) is not None:
             return bad
-        return ("created", "ok_created") if created else ("updated", "ok_updated")
+        meta = _apply_written_meta(op, pk=int(iface.pk), obj=iface)
+        if created:
+            return "created", "ok_created", None, meta
+        return "updated", "ok_updated", None, meta
     return "skipped", "skipped_already_desired"
 
 
@@ -5592,6 +5856,9 @@ def _netbox_preview_source_header_norms(selection_key: str) -> frozenset[str] | 
             "OS region",
             "OS status",
             "Project",
+            "NB proposed VRF",
+            "NetBox VRF",
+            "VRF",
         )
     if sk == "detail_existing_vms":
         return _header_norms(
@@ -5616,6 +5883,9 @@ def _netbox_preview_source_header_norms(selection_key: str) -> frozenset[str] | 
             "NB current device",
             "NB current VM status",
             "Drift summary",
+            "NB proposed VRF",
+            "NetBox VRF",
+            "VRF",
         )
     if sk in NEW_NIC_SELECTION_KEYS:
         return _header_norms(
@@ -5638,6 +5908,13 @@ def _netbox_preview_source_header_norms(selection_key: str) -> frozenset[str] | 
             "OS runtime VLAN",
             "MAAS IPs",
             "OS runtime IP",
+            "NB proposed VRF",
+            "NetBox VRF",
+            "VRF",
+            "Description",
+            "NB proposed description",
+            "NB intf description",
+            "Interface description",
         )
     if sk in ("detail_nic_drift_os", "detail_nic_drift_maas"):
         return _header_norms(
@@ -5663,6 +5940,13 @@ def _netbox_preview_source_header_norms(selection_key: str) -> frozenset[str] | 
             "Parsed MAC",
             "Parsed untagged VLAN",
             "Parsed IPs",
+            "NB proposed VRF",
+            "NetBox VRF",
+            "VRF",
+            "Description",
+            "NB proposed description",
+            "NB intf description",
+            "Interface description",
         )
     if sk == "detail_bmc_new_devices":
         return _header_norms(
@@ -5675,6 +5959,9 @@ def _netbox_preview_source_header_norms(selection_key: str) -> frozenset[str] | 
             "Suggested NB mgmt iface",
             "NB Proposed intf Label",
             "NB Proposed intf Type",
+            "NB proposed VRF",
+            "NetBox VRF",
+            "VRF",
         )
     if sk == "detail_bmc_existing":
         return _header_norms(
@@ -5687,6 +5974,9 @@ def _netbox_preview_source_header_norms(selection_key: str) -> frozenset[str] | 
             "Suggested NB OOB Port",
             "NB Proposed intf Label",
             "NetBox OOB",
+            "NB proposed VRF",
+            "NetBox VRF",
+            "VRF",
         )
     if sk == "detail_serial_review":
         return _header_norms("Host", "Hostname", "MAAS Serial", "NetBox Serial", "Serial Number")
@@ -5758,7 +6048,9 @@ def apply_row_operation(
 
     - 2-tuple ``(status, reason)``
     - 3-tuple with optional human ``reason_detail`` (skips/failures)
-    - 4-tuple adding optional ``written_object`` (``{"label": ..., "pk": ...}`` for post-apply snapshot)
+    - 4-tuple adding ``written_object`` (``{"label", "pk", "orm_write"?: {...}}``). Handlers
+      either pass a hand-built ``orm_write`` (e.g. NIC drift) or rely on
+      :func:`_apply_written_meta` to snapshot the persisted instance on the branch.
     """
     _clear_tls_routing_snapshot()
     _clear_apply_extra_debug()
