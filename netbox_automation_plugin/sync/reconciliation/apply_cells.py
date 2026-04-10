@@ -4545,12 +4545,20 @@ def apply_serial_review(op: dict[str, Any]) -> tuple[str, str]:
 
 
 def _iface_type_default():
+    """
+    Default ``Interface.type`` for creates (new NIC row, BMC mgmt interface).
+
+    We used ``TYPE_OTHER`` historically, but merge-time ``full_clean()`` on some NetBox
+    versions/deployments rejects ``other`` for device interfaces (``Value "other" is not a
+    valid choice``). Physical management / server ports are typically modeled as 1GE copper;
+    ``1000base-t`` matches that and passes validation (same as many hand-entered BMC rows).
+    """
     try:
         from dcim.choices import InterfaceTypeChoices
 
-        return InterfaceTypeChoices.TYPE_OTHER
+        return InterfaceTypeChoices.TYPE_1GE_FIXED
     except Exception:
-        return "other"
+        return "1000base-t"
 
 
 def _sync_site_region(site_obj, region_name: str) -> tuple[bool, bool]:
