@@ -111,11 +111,13 @@
       <p class="visually-hidden" id="maas-recon-post-create-aria">{% trans "Branch provisioning" %}</p>
       <h2 class="h4 mb-2 maas-recon-overlay-title" id="maas-recon-post-create-title">{% trans "Branch created" %}</h2>
       <p class="small mb-2 w-100 maas-recon-overlay-sub" id="maas-recon-post-create-sub">
-        {% blocktrans trimmed %}Please wait before schema checks run. The run page will open only after the last check confirms the branch session is not on PostgreSQL <code>public</code>.{% endblocktrans %}
+        {% blocktrans trimmed %}After the branch is created, we wait a short moment (about 10 seconds), then run a few automatic checks. The run page opens only after the last check confirms your session is not on the main <code>public</code> catalog. Technical details stay on this card for logs.{% endblocktrans %}
       </p>
       <div class="d-none w-100 text-start" id="maas-recon-post-create-success" role="status" aria-live="polite">
         <div class="alert alert-success mb-3 py-3 border-0">
+          <p class="mb-3 text-body fw-semibold" id="maas-recon-success-plain-summary" role="status"></p>
           <p class="small mb-2 text-body-secondary" id="maas-recon-post-create-success-sub"></p>
+          <p class="small fw-semibold text-body-secondary mb-1">{% trans "Technical verification (keep for support / logs)" %}</p>
           <dl class="row small mb-0">
             <dt class="col-sm-4 text-body-secondary">{% trans "PostgreSQL current_schema()" %}</dt>
             <dd class="col-sm-8 mb-1"><code class="user-select-all" id="maas-recon-success-cur-schema"></code></dd>
@@ -279,10 +281,10 @@
     var tokEl = document.getElementById("maas-recon-preview-token");
     var createUrl = "{{ create_url|escapejs }}";
     var driftRunId = {{ drift_run.pk }};
-    var postCreateInitialDelayMs = {{ recon_post_create_initial_delay_ms|default:30000 }};
+    var postCreateInitialDelayMs = {{ recon_post_create_initial_delay_ms|default:10000 }};
     var postCreateProbeIntervalMs = {{ recon_post_create_schema_probe_interval_ms|default:5000 }};
     var postCreateProbeCount = {{ recon_post_create_schema_probe_count|default:6 }};
-    var msgPhaseWait = "{% filter escapejs %}{% blocktrans trimmed %}Branch created successfully. Waiting before schema checks…{% endblocktrans %}{% endfilter %}";
+    var msgPhaseWait = "{% filter escapejs %}{% blocktrans trimmed %}Branch created successfully. Waiting about 10 seconds before schema checks…{% endblocktrans %}{% endfilter %}";
     var msgLoadingRun = "{% filter escapejs %}{% trans 'Loading changes…' %}{% endfilter %}";
     var msgErrTitle = "{% filter escapejs %}{% trans 'Branch schema is still not safe for apply.' %}{% endfilter %}";
     var msgObserved = "{% filter escapejs %}{% trans 'Observed PostgreSQL current_schema()' %}{% endfilter %}";
@@ -294,7 +296,8 @@
     var msgHintsTitle = "{% filter escapejs %}{% trans 'Troubleshooting hints' %}{% endfilter %}";
     var msgProbeTimeline = "{% filter escapejs %}{% trans 'All probe attempts (timeline)' %}{% endfilter %}";
     var msgSchemaOkTitle = "{% filter escapejs %}{% trans 'Branch database session is ready' %}{% endfilter %}";
-    var msgSchemaOkSub = "{% filter escapejs %}{% trans 'PostgreSQL current_schema() is not public — you are on the branch schema. Confirm the names below match your branch, then continue to open the reconciliation run page and use Apply selected changes to branch.' %}{% endfilter %}";
+    var msgSchemaOkSub = "{% filter escapejs %}{% trans 'Technical check passed: database session is not on main public. Confirm the values below match your branch, then continue to the run page and use Apply selected changes to branch.' %}{% endfilter %}";
+    var msgPlainSummaryFallback = "{% filter escapejs %}{% trans 'Your branch workspace is ready. Main NetBox stays unchanged until you merge.' %}{% endfilter %}";
     var msgDash = "{% filter escapejs %}{% trans '—' %}{% endfilter %}";
     var loadingBtnHtml = '<span class="spinner-border spinner-border-sm me-1" role="status" aria-hidden="true"></span>{% filter escapejs %}{% trans "Creating branch…" %}{% endfilter %}';
     function csrf() {
@@ -362,6 +365,7 @@
             var spinEl = document.getElementById("maas-recon-post-create-spinner");
             var successWrap = document.getElementById("maas-recon-post-create-success");
             var successSub = document.getElementById("maas-recon-post-create-success-sub");
+            var successPlain = document.getElementById("maas-recon-success-plain-summary");
             var successCur = document.getElementById("maas-recon-success-cur-schema");
             var successExp = document.getElementById("maas-recon-success-exp-schema");
             var successAlias = document.getElementById("maas-recon-success-alias");
@@ -428,6 +432,12 @@
               var al = data.django_orm_alias != null && String(data.django_orm_alias) !== ""
                 ? String(data.django_orm_alias)
                 : msgDash;
+              var plainTxt = (data.operator_workspace_summary != null && String(data.operator_workspace_summary).trim() !== "")
+                ? String(data.operator_workspace_summary).trim()
+                : msgPlainSummaryFallback;
+              if (successPlain) {
+                successPlain.textContent = plainTxt;
+              }
               if (successSub) {
                 successSub.textContent = msgSchemaOkSub;
               }
@@ -472,6 +482,9 @@
               var spDisp = spVal != null && String(spVal) !== "" ? String(spVal) : "(empty)";
               var parts = [];
               parts.push("<strong>" + msgErrTitle + "</strong>");
+              if (d.operator_workspace_summary != null && String(d.operator_workspace_summary).trim() !== "") {
+                parts.push("<div class=\"mt-2 small text-body\">" + escapeHtml(String(d.operator_workspace_summary).trim()) + "</div>");
+              }
               parts.push("<div class=\"mt-2 font-monospace\">" + msgObserved + ": <code>" + escapeHtml(String(d.postgresql_current_schema != null && d.postgresql_current_schema !== "" ? d.postgresql_current_schema : "(empty)")) + "</code></div>");
               parts.push("<div class=\"mt-1 font-monospace small\">" + msgSearchPath + ": <code>" + escapeHtml(spDisp) + "</code></div>");
               if (d.expected_branch_schema) {

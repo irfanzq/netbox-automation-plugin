@@ -75,6 +75,10 @@ class NetBoxAutomationPluginConfig(PluginConfig):
 
     def ready(self):
         super().ready()
+        import logging
+
+        from django.conf import settings
+
         from netbox_automation_plugin.integrations.netbox_branching_router_patch import (
             apply_branch_router_objectchange_write_patch,
         )
@@ -84,6 +88,19 @@ class NetBoxAutomationPluginConfig(PluginConfig):
 
         apply_branch_router_objectchange_write_patch()
         apply_branching_diff_object_column_patch()
+
+        # Reconciliation / branch routing diagnostics: DEBUG on submodule loggers when enabled.
+        # Disable with RECONCILIATION_DIAGNOSTIC_LOGGERS_VERBOSE = False in NetBox configuration.
+        if getattr(settings, "RECONCILIATION_DIAGNOSTIC_LOGGERS_VERBOSE", True):
+            for _log_name in (
+                "netbox_automation_plugin.sync.reconciliation",
+                "netbox_automation_plugin.sync.reconciliation.apply_cells",
+                "netbox_automation_plugin.sync.reconciliation.service",
+                "netbox_automation_plugin.sync.reconciliation.views",
+                "netbox_automation_plugin.sync.reconciliation.branch",
+                "netbox_automation_plugin.sync.reconciliation.pg_branch_session",
+            ):
+                logging.getLogger(_log_name).setLevel(logging.DEBUG)
 
 
 config = NetBoxAutomationPluginConfig

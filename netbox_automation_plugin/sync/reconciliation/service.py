@@ -1,8 +1,11 @@
 """Preview, signed acknowledgement, and frozen operations for branch reconciliation.
 
 Reconciliation timing, schema stability, and log verbosity use **code defaults** via
-``getattr(settings, "RECONCILIATION_*", default)``. Deployments do not need NetBox ``extra.py``
-changes unless operators want to override a specific knob.
+``getattr(settings, "RECONCILIATION_*", default)``. Row-level NetBox write INFO and schema-audit
+INFO default **on**; submodule loggers default to DEBUG when
+``RECONCILIATION_DIAGNOSTIC_LOGGERS_VERBOSE`` is True (ensure Django ``LOGGING`` handlers allow
+DEBUG if you need those lines in Docker). Set the relevant flags to False in NetBox configuration
+to quiet production.
 
 When ``current_schema()`` is empty or ``public`` on a branch alias, the plugin can run
 ``SET search_path TO <Branch.schema_name>, public`` (identifier validated) before re-probing;
@@ -699,6 +702,51 @@ def _branch_expected_postgresql_schema_name(run: MAASOpenStackReconciliationRun)
         return ""
 
 
+def _operator_branch_workspace_summary(
+    *,
+    branch_display_name: str,
+    expected_schema: str,
+    django_orm_alias: str,
+) -> str:
+    """
+    Plain-language line for the staging overlay (not a substitute for technical probe fields).
+    """
+    bn = (branch_display_name or "").strip()
+    es = (expected_schema or "").strip()
+    al = (django_orm_alias or "").strip()
+    if bn and es:
+        return str(
+            _(
+                'Your reconciliation work is on NetBox branch “%(branch)s”. '
+                "Changes are stored in an isolated database workspace (%(schema)s). "
+                "What you see as Main in NetBox is unchanged until you merge this branch."
+            )
+            % {"branch": bn, "schema": es}
+        )
+    if es:
+        return str(
+            _(
+                "Changes are stored in an isolated database workspace (%(schema)s). "
+                "Main NetBox data stays unchanged until you merge this branch."
+            )
+            % {"schema": es}
+        )
+    if bn:
+        return str(
+            _(
+                'Your reconciliation work is on NetBox branch “%(branch)s”. '
+                "Main NetBox data stays unchanged until you merge."
+            )
+            % {"branch": bn}
+        )
+    if al:
+        return str(
+            _("Branch workspace is ready (connection %(alias)s). Main stays unchanged until merge.")
+            % {"alias": al}
+        )
+    return str(_("Branch workspace is ready. Main NetBox stays unchanged until you merge."))
+
+
 def branch_pg_schema_status_snapshot_for_staging_poll(
     run: MAASOpenStackReconciliationRun,
 ) -> dict[str, Any]:
@@ -724,6 +772,8 @@ def branch_pg_schema_status_snapshot_for_staging_poll(
             "postgresql_search_path": "",
             "django_orm_alias": "",
             "expected_branch_schema": expected,
+            "branch_display_name": "",
+            "operator_workspace_summary": str(_("No branch is attached to this run yet.")),
             "schema_session_diagnostics": {},
             "troubleshooting_hints": [str(_("Run has no branch id or name to load NetBox Branch."))],
         }
@@ -740,6 +790,8 @@ def branch_pg_schema_status_snapshot_for_staging_poll(
             "postgresql_search_path": "",
             "django_orm_alias": "",
             "expected_branch_schema": expected,
+            "branch_display_name": (run.branch_name or "").strip(),
+            "operator_workspace_summary": str(_("Could not load this branch from NetBox yet.")),
             "schema_session_diagnostics": {},
             "troubleshooting_hints": [br],
         }
@@ -747,6 +799,7 @@ def branch_pg_schema_status_snapshot_for_staging_poll(
     alias, res_err = resolve_branch_django_database_alias(cn, branch=branch_obj)
     if not alias:
         rr = (res_err or "").strip()
+        bd = str(getattr(branch_obj, "name", None) or run.branch_name or "").strip()
         return {
             "ready": False,
             "reason": rr,
@@ -754,6 +807,12 @@ def branch_pg_schema_status_snapshot_for_staging_poll(
             "postgresql_search_path": "",
             "django_orm_alias": "",
             "expected_branch_schema": expected,
+            "branch_display_name": bd,
+            "operator_workspace_summary": _operator_branch_workspace_summary(
+                branch_display_name=bd,
+                expected_schema=expected,
+                django_orm_alias="",
+            ),
             "schema_session_diagnostics": {},
             "troubleshooting_hints": [rr or str(_("No usable branch Django database alias."))],
         }
@@ -761,6 +820,7 @@ def branch_pg_schema_status_snapshot_for_staging_poll(
         branch_obj, alias
     )
     ready = bool(ok) and _postgresql_branch_schema_session_name_ok(cur)
+    branch_display = str(getattr(branch_obj, "name", None) or run.branch_name or "").strip()
     out: dict[str, Any] = {
         "ready": ready,
         "reason": (reason or "").strip(),
@@ -768,6 +828,12 @@ def branch_pg_schema_status_snapshot_for_staging_poll(
         "postgresql_search_path": search_path,
         "django_orm_alias": alias,
         "expected_branch_schema": expected,
+        "branch_display_name": branch_display,
+        "operator_workspace_summary": _operator_branch_workspace_summary(
+            branch_display_name=branch_display,
+            expected_schema=expected,
+            django_orm_alias=alias,
+        ),
         "schema_session_diagnostics": session_diag,
     }
     if (
@@ -1046,13 +1112,13 @@ def _attach_schema_audit_to_apply_result(result: dict[str, Any], op: dict[str, A
     """
     Per-row PostgreSQL schema / ORM alias audit for the UI (always stored on ``schema_audit``).
 
-    Docker INFO line ``reconciliation_row_schema_audit`` is **off** by default; set
-    ``RECONCILIATION_LOG_ROW_SCHEMA_AUDIT = True`` to enable.
+    Docker INFO line ``reconciliation_row_schema_audit`` defaults **on** (set
+    ``RECONCILIATION_LOG_ROW_SCHEMA_AUDIT = False`` to disable).
     """
     audit = consume_apply_row_schema_audit(op)
     result["schema_audit"] = audit
     result["schema_audit_log_line"] = audit.get("schema_audit_log_line", "")
-    if not bool(getattr(settings, "RECONCILIATION_LOG_ROW_SCHEMA_AUDIT", False)):
+    if not bool(getattr(settings, "RECONCILIATION_LOG_ROW_SCHEMA_AUDIT", True)):
         return
     logger.info(
         "reconciliation_row_schema_audit row_key=%s selection_key=%s action=%s status=%s "
@@ -3353,6 +3419,13 @@ def apply_reconciliation_run(
             "netbox_branch_connection_name": connection_name_raw,
             "django_database_alias": django_db_alias,
         }
+        logger.info(
+            "reconciliation_apply_batch_start run_pk=%s branch_pk=%s branch_name=%r django_db_alias=%r",
+            run.pk,
+            getattr(branch_obj, "pk", None),
+            (run.branch_name or "").strip(),
+            django_db_alias,
+        )
 
         routing_confirmation: dict[str, Any] = {
             "django_database_alias": django_db_alias,

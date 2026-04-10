@@ -76,12 +76,12 @@ def _reconciliation_post_create_browser_poll_interval_sec() -> float:
 
 
 def _reconciliation_post_create_initial_delay_ms() -> int:
-    """After create-branch succeeds, wait this long before schema polling (default 30s)."""
-    raw = getattr(settings, "RECONCILIATION_POST_CREATE_INITIAL_DELAY_MS", 30_000)
+    """After create-branch succeeds, wait this long before schema polling (default 10s)."""
+    raw = getattr(settings, "RECONCILIATION_POST_CREATE_INITIAL_DELAY_MS", 10_000)
     try:
         v = int(float(raw))
     except (TypeError, ValueError):
-        return 30_000
+        return 10_000
     return max(0, min(v, 300_000))
 
 

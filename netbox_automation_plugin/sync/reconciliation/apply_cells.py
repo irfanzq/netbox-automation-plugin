@@ -93,11 +93,11 @@ def _maybe_log_reconciliation_netbox_write(
     ``postgresql_current_schema`` (effective branch schema); ``default_current_schema`` is the
     Django ``default`` connection at the same moment (usually ``public`` on NetBox main). If
     objects still appear on main while the branch line shows a branch schema, trace handlers for
-    ``save()`` without ``using=`` or side effects on ``default``. Per-row INFO logging is **off**
-    by default; set ``RECONCILIATION_LOG_EACH_NETBOX_WRITE = True`` to enable. Disable the extra
-    ``default`` probe with ``RECONCILIATION_LOG_DEFAULT_CONNECTION_SCHEMA_IN_ROW_AUDIT = False``.
+    ``save()`` without ``using=`` or side effects on ``default``.     Per-row INFO logging defaults **on** (set ``RECONCILIATION_LOG_EACH_NETBOX_WRITE = False`` to
+    disable). Disable the extra ``default`` probe with
+    ``RECONCILIATION_LOG_DEFAULT_CONNECTION_SCHEMA_IN_ROW_AUDIT = False``.
     """
-    if not bool(getattr(settings, "RECONCILIATION_LOG_EACH_NETBOX_WRITE", False)):
+    if not bool(getattr(settings, "RECONCILIATION_LOG_EACH_NETBOX_WRITE", True)):
         return
     if not isinstance(raw, tuple) or len(raw) < 2:
         return
@@ -1854,6 +1854,31 @@ def _ensure_tag_on_branch(slug: str, name: str) -> Any:
     return tag
 
 
+def _link_tag_to_instance_on_branch(instance: Any, tag: Any) -> None:
+    """
+    Persist tag M2M on the reconciliation branch schema.
+
+    ``TaggableManager.add`` can route the through-model insert to Django's ``default``
+    connection even when the parent instance was loaded from a ``schema_*`` alias, which
+    mirrors tags onto main. Creating ``extras.TaggedItem`` with ``.using(alias)`` keeps
+    the row in the branch schema.
+    """
+    alias = _orm_alias()
+    if alias is None:
+        instance.tags.add(tag)
+        return
+    from django.contrib.contenttypes.models import ContentType
+
+    from extras.models import TaggedItem
+
+    ct = ContentType.objects.get_for_model(instance.__class__, for_concrete_model=False)
+    TaggedItem.objects.using(alias).get_or_create(
+        content_type=ct,
+        object_id=instance.pk,
+        tag=tag,
+    )
+
+
 def _merge_interface_role_tag(iface, label_cell: str) -> bool:
     """Attach a Tag named like the drift role (Management, Data, …) when non-empty."""
     from django.utils.text import slugify
@@ -1876,7 +1901,7 @@ def _merge_interface_role_tag(iface, label_cell: str) -> bool:
     else:
         if rel.filter(pk=tag.pk).exists():
             return False
-    rel.add(tag)
+    _link_tag_to_instance_on_branch(iface, tag)
     return True
 
 
@@ -1898,7 +1923,7 @@ def _merge_device_tags(device, tag_cell: str) -> bool:
         else:
             has_tag = rel.filter(pk=tag.pk).exists()
         if not has_tag:
-            rel.add(tag)
+            _link_tag_to_instance_on_branch(device, tag)
             changed = True
     return changed
 
