@@ -1805,6 +1805,58 @@ def _interface_apply_role_tag_changelog(iface: Any, role_label: str | None) -> b
     return True
 
 
+def _interface_apply_scalar_and_role_tag_single_save(
+    iface: Any,
+    *,
+    mac: str,
+    untagged: Any,
+    type_slug: Any,
+    description: str,
+    role_label: str | None,
+) -> bool:
+    """
+    Apply MAC, untagged VLAN, type, description, and role tag with one ``snapshot()`` and one
+    ``save()``.
+
+    Reconciliation runs inside ``branch_write_context``'s outer ``atomic(using=branch)``; nested
+    ``transaction.atomic`` calls are savepoints only. netbox-branching often collapses multiple
+    Interface saves in that outer transaction into one Diff row, typically showing only the last
+    mutation (commonly tags) and hiding MAC / VLAN / type. Batching avoids that.
+    """
+    _interface_refresh_safe(iface)
+    _netbox_changelog_snapshot(iface)
+    changed = False
+    if _interface_description_is_drift_audit_dump(getattr(iface, "description", None)):
+        iface.description = None
+        changed = True
+    m = (mac or "").strip()
+    if m and str(iface.mac_address or "").upper() != m.upper():
+        iface.mac_address = mac
+        changed = True
+    if untagged is not None and iface.untagged_vlan_id != untagged.pk:
+        iface.untagged_vlan = untagged
+        changed = True
+    if type_slug is not None and getattr(iface, "type", None) != type_slug:
+        iface.type = type_slug
+        changed = True
+    ds = (description or "").strip()
+    if ds and hasattr(iface, "description"):
+        ml = _interface_description_max_len()
+        ds2 = ds[: max(ml - 3, 0)] + "..." if len(ds) > ml else ds
+        cur = (getattr(iface, "description", None) or "").strip()
+        if cur != ds2:
+            iface.description = ds2
+            changed = True
+    tag_added = False
+    rl = str(role_label or "").strip()
+    if rl and hasattr(iface, "tags"):
+        tag_added = _merge_interface_role_tag(iface, rl)
+    if changed or tag_added:
+        iface.save(**_save_branch())
+        return True
+    return False
+
+
 def _merge_audit_residual_onto_object(
     obj: Any,
     cells: dict[str, str],
@@ -4962,9 +5014,6 @@ def apply_create_interface(op: dict[str, Any]) -> tuple[str, str]:
                 f"no valid IP parsed from row (MAAS IPs / OS runtime IP / Proposed Action)."
             )
     if iface is None:
-        # Each save block gets its own transaction.atomic() savepoint so netbox_branching
-        # cannot collapse them into a single diff row (which would show only the last
-        # mutation — e.g. tags — and hide MAC / VLAN / type changes).
         with _tx_op(branch_db):
             iface = Interface(device=dev, name=if_name, type=_iface_type_default())
             _iface_save_on_op(branch_db, iface)
@@ -4979,29 +5028,27 @@ def apply_create_interface(op: dict[str, Any]) -> tuple[str, str]:
                 f'Interface "{if_name}" on device "{host}" not found immediately after create.',
             )
         with _tx_op(branch_db):
-            _interface_apply_physical_fields_batched(
+            _interface_apply_scalar_and_role_tag_single_save(
                 iface,
                 mac=mac or "",
                 untagged=untagged,
                 type_slug=type_slug,
                 description=if_desc,
+                role_label=role_label,
             )
-        with _tx_op(branch_db):
-            _interface_apply_role_tag_changelog(iface, role_label)
         ip_vrf = _vrf_for_ip_from_row_cells(cells)
         if ip_blob:
             _assign_ips_to_interface(iface, ip_blob, ip_vrf)
         return "created", "ok_created"
-    changed = _interface_scrub_audit_description_stepwise(iface)
-    changed |= _interface_apply_physical_fields_stepwise(
-        iface,
-        mac=mac or "",
-        untagged=untagged,
-        type_slug=type_slug,
-        description=if_desc,
-    )
-    if _interface_apply_role_tag_changelog(iface, role_label):
-        changed = True
+    with _tx_op(branch_db):
+        changed = _interface_apply_scalar_and_role_tag_single_save(
+            iface,
+            mac=mac or "",
+            untagged=untagged,
+            type_slug=type_slug,
+            description=if_desc,
+            role_label=role_label,
+        )
     ip_vrf = _vrf_for_ip_from_row_cells(cells)
     if ip_blob:
         ip_ch, ip_tok, ip_parse = _assign_ips_to_interface(iface, ip_blob, ip_vrf)
@@ -5109,21 +5156,15 @@ def apply_update_interface(op: dict[str, Any]) -> tuple[str, str]:
             vlan_group_hint=vlan_group_hint or None,
         )
     if_desc = _interface_description_from_cells(cells)
-    changed = _interface_scrub_audit_description_stepwise(iface)
-    # Each save block gets its own transaction.atomic() savepoint so netbox_branching
-    # cannot collapse them into a single diff row (which would show only the last
-    # mutation — e.g. tags — and hide MAC / VLAN / type changes).
     with _tx_op(branch_db):
-        changed |= _interface_apply_physical_fields_batched(
+        changed = _interface_apply_scalar_and_role_tag_single_save(
             iface,
             mac=mac or "",
             untagged=untagged,
             type_slug=type_slug,
             description=if_desc,
+            role_label=role_label,
         )
-    with _tx_op(branch_db):
-        if _interface_apply_role_tag_changelog(iface, role_label):
-            changed = True
     ip_vrf = _vrf_for_ip_from_row_cells(cells)
     ip_ch, ip_tok, ip_parse = _assign_ips_to_interface(iface, ip_blob or "", ip_vrf)
     if ip_tok and not ip_parse:
@@ -5173,25 +5214,28 @@ def _bmc_apply(op: dict[str, Any], *, existing_oob: bool) -> tuple[str, str]:
     if not dev:
         return _skip_missing_prereq(f'Device "{host}" not found in NetBox.')
     iface = _orm_qs(Interface).filter(device=dev, name=if_name).first()
+    phy_tag_changed = False
     if iface is None:
         iface = Interface(device=dev, name=if_name, type=_iface_type_default())
         iface.save(**_save_branch())
-        _interface_apply_physical_fields_batched(
+        phy_tag_changed = _interface_apply_scalar_and_role_tag_single_save(
             iface,
             mac=bmc_mac or "",
             untagged=None,
             type_slug=type_slug,
             description="",
+            role_label=role_label,
         )
         created = True
     else:
         created = False
-        _interface_apply_physical_fields_batched(
+        phy_tag_changed = _interface_apply_scalar_and_role_tag_single_save(
             iface,
             mac=bmc_mac or "",
             untagged=None,
             type_slug=type_slug,
             description="",
+            role_label=role_label,
         )
     ip_vrf = _vrf_for_ip_from_row_cells(cells)
     combined_blob = (
@@ -5207,11 +5251,10 @@ def _bmc_apply(op: dict[str, Any], *, existing_oob: bool) -> tuple[str, str]:
     desc_changed = False
     if not created and _scrub_interface_drift_audit_description(iface):
         desc_changed = True
-    tag_ch = _interface_apply_role_tag_changelog(iface, role_label)
     if desc_changed:
         _netbox_changelog_snapshot(iface)
         iface.save(**_save_branch())
-    if ip_changed or desc_changed or created or tag_ch:
+    if ip_changed or desc_changed or created or phy_tag_changed:
         return ("created", "ok_created") if created else ("updated", "ok_updated")
     return "skipped", "skipped_already_desired"
 
