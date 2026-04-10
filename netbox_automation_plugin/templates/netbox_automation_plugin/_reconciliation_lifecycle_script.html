@@ -63,11 +63,20 @@
           }
           var dest = res.body.redirect_url || opts.fallbackRedirect || "";
           if (dest) {
-            var applyResultsNewTab = dest.indexOf("/apply-results/") !== -1;
-            if (applyResultsNewTab) {
+            var applyResultsDest = dest.indexOf("/apply-results/") !== -1;
+            var alreadyOnApplyResults =
+              window.location.pathname.indexOf("/apply-results/") !== -1;
+            function destWithCacheBust(u) {
+              var sep = u.indexOf("?") >= 0 ? "&" : "?";
+              return u + sep + "_nap_apply_refresh=" + Date.now();
+            }
+            if (applyResultsDest && alreadyOnApplyResults) {
+              if (msg) msg.textContent = "{% filter escapejs %}{% trans "Opening results…" %}{% endfilter %}";
+              window.location.href = destWithCacheBust(dest);
+            } else if (applyResultsDest) {
               var w = null;
               try {
-                w = window.open(dest, "_blank", "noopener");
+                w = window.open(destWithCacheBust(dest), "_blank", "noopener");
               } catch (e2) {}
               if (w && !w.closed) {
                 if (msg) msg.textContent = "{% filter escapejs %}{% trans "Apply finished. Results opened in a new tab." %}{% endfilter %}";
@@ -75,7 +84,7 @@
                 setLifecycleBusy(false, null);
               } else {
                 if (msg) msg.textContent = "{% filter escapejs %}{% trans "Opening results…" %}{% endfilter %}";
-                window.location.href = dest;
+                window.location.href = destWithCacheBust(dest);
               }
             } else {
               if (msg) msg.textContent = "{% filter escapejs %}{% trans "Opening results…" %}{% endfilter %}";

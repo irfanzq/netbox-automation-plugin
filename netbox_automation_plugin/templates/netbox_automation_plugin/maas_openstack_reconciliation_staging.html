@@ -105,7 +105,7 @@
 
 {# Full-screen layer: mounted under document.body in JS so position:fixed is viewport-wide (avoids transformed ancestors in NetBox layout). #}
 <div id="maas-recon-post-create-overlay" class="d-none align-items-center justify-content-center flex-column maas-recon-post-create-overlay-root" role="dialog" aria-modal="true" aria-labelledby="maas-recon-post-create-title">
-  <div class="card shadow-lg maas-recon-post-create-overlay-card text-center rounded-3 w-100" style="max-width:36rem;">
+  <div class="card shadow-lg maas-recon-post-create-overlay-card text-center rounded-3 w-100" style="max-width:44rem;">
     <div class="card-body p-4 w-100 d-flex flex-column align-items-stretch">
       <div class="spinner-border text-primary mb-3 align-self-center" id="maas-recon-post-create-spinner" role="status" aria-hidden="true"></div>
       <p class="visually-hidden" id="maas-recon-post-create-aria">{% trans "Branch provisioning" %}</p>
@@ -114,18 +114,32 @@
         {% blocktrans trimmed %}After the branch is created, we wait a short moment (about 10 seconds), then run a few automatic checks. The run page opens only after the last check confirms your session is not on the main <code>public</code> catalog. Technical details stay on this card for logs.{% endblocktrans %}
       </p>
       <div class="d-none w-100 text-start" id="maas-recon-post-create-success" role="status" aria-live="polite">
-        <div class="alert alert-success mb-3 py-3 border-0">
-          <p class="mb-3 text-body fw-semibold" id="maas-recon-success-plain-summary" role="status"></p>
-          <p class="small mb-2 text-body-secondary" id="maas-recon-post-create-success-sub"></p>
-          <p class="small fw-semibold text-body-secondary mb-1">{% trans "Technical verification (keep for support / logs)" %}</p>
-          <dl class="row small mb-0">
-            <dt class="col-sm-4 text-body-secondary">{% trans "PostgreSQL current_schema()" %}</dt>
-            <dd class="col-sm-8 mb-1"><code class="user-select-all" id="maas-recon-success-cur-schema"></code></dd>
-            <dt class="col-sm-4 text-body-secondary">{% trans "Expected branch schema" %}</dt>
-            <dd class="col-sm-8 mb-1"><code class="user-select-all" id="maas-recon-success-exp-schema"></code></dd>
-            <dt class="col-sm-4 text-body-secondary">{% trans "Django ORM alias" %}</dt>
-            <dd class="col-sm-8 mb-0"><code class="user-select-all" id="maas-recon-success-alias"></code></dd>
-          </dl>
+        <div class="maas-recon-success-summary rounded-3 border border-success border-opacity-25 bg-success bg-opacity-10 p-3 mb-3">
+          <div class="text-uppercase small fw-semibold text-success-emphasis mb-2 letter-spacing-tight">
+            {% trans "What this means" %}
+          </div>
+          <p class="mb-0 maas-recon-success-summary-text text-body" id="maas-recon-success-plain-summary" role="status"></p>
+        </div>
+        <p class="small text-body-secondary mb-3 lh-base" id="maas-recon-post-create-success-sub"></p>
+        <div class="maas-recon-success-tech rounded-3 border overflow-hidden mb-3 text-start">
+          <div class="px-3 py-2 border-bottom bg-body-secondary bg-opacity-50">
+            <span class="small fw-semibold text-body d-block">{% trans "Technical verification" %}</span>
+            <span class="small text-body-secondary d-block mt-1">{% trans "Save or screenshot this block for support and logs." %}</span>
+          </div>
+          <div class="p-3 d-flex flex-column gap-3 bg-body-tertiary bg-opacity-25">
+            <div class="maas-recon-success-tech-field">
+              <div class="small text-body-secondary mb-1">{% trans "PostgreSQL current_schema()" %}</div>
+              <code class="maas-recon-success-code user-select-all" id="maas-recon-success-cur-schema"></code>
+            </div>
+            <div class="maas-recon-success-tech-field">
+              <div class="small text-body-secondary mb-1">{% trans "Expected branch schema" %}</div>
+              <code class="maas-recon-success-code user-select-all" id="maas-recon-success-exp-schema"></code>
+            </div>
+            <div class="maas-recon-success-tech-field">
+              <div class="small text-body-secondary mb-1">{% trans "Django ORM alias" %}</div>
+              <code class="maas-recon-success-code user-select-all" id="maas-recon-success-alias"></code>
+            </div>
+          </div>
         </div>
         <button type="button" class="btn btn-primary w-100" id="maas-recon-post-create-continue">
           {% trans "Continue to reconciliation run" %}
@@ -245,13 +259,37 @@
     min-height: 0;
     overflow: hidden;
   }
-  .maas-recon-post-create-overlay-card #maas-recon-post-create-success .alert-success {
-    background-color: rgba(25, 135, 84, 0.12);
-    color: inherit;
+  .maas-recon-success-summary {
+    text-align: left;
   }
-  [data-bs-theme="dark"] .maas-recon-post-create-overlay-card #maas-recon-post-create-success .alert-success {
-    background-color: rgba(25, 135, 84, 0.2);
-    color: inherit;
+  .maas-recon-success-summary .letter-spacing-tight {
+    letter-spacing: 0.04em;
+  }
+  .maas-recon-success-summary-text {
+    font-size: 1rem;
+    line-height: 1.6;
+    white-space: pre-line;
+  }
+  .maas-recon-success-tech {
+    border-color: var(--bs-border-color) !important;
+  }
+  .maas-recon-success-code {
+    display: block;
+    width: 100%;
+    box-sizing: border-box;
+    font-size: 0.8125rem;
+    line-height: 1.45;
+    padding: 0.5rem 0.65rem;
+    margin: 0;
+    background-color: var(--bs-body-bg);
+    border: 1px solid var(--bs-border-color);
+    border-radius: 0.375rem;
+    word-break: break-word;
+    overflow-wrap: anywhere;
+    color: var(--bs-body-color);
+  }
+  [data-bs-theme="dark"] .maas-recon-success-code {
+    background-color: rgba(0, 0, 0, 0.25);
   }
   .maas-recon-probe-json-pre {
     background-color: var(--bs-tertiary-bg);
@@ -282,8 +320,8 @@
     var createUrl = "{{ create_url|escapejs }}";
     var driftRunId = {{ drift_run.pk }};
     var postCreateInitialDelayMs = {{ recon_post_create_initial_delay_ms|default:10000 }};
-    var postCreateProbeIntervalMs = {{ recon_post_create_schema_probe_interval_ms|default:5000 }};
-    var postCreateProbeCount = {{ recon_post_create_schema_probe_count|default:6 }};
+    var postCreateProbeIntervalMs = {{ recon_post_create_schema_probe_interval_ms|default:2000 }};
+    var postCreateProbeCount = {{ recon_post_create_schema_probe_count|default:5 }};
     var msgPhaseWait = "{% filter escapejs %}{% blocktrans trimmed %}Branch created successfully. Waiting about 10 seconds before schema checks…{% endblocktrans %}{% endfilter %}";
     var msgLoadingRun = "{% filter escapejs %}{% trans 'Loading changes…' %}{% endfilter %}";
     var msgErrTitle = "{% filter escapejs %}{% trans 'Branch schema is still not safe for apply.' %}{% endfilter %}";

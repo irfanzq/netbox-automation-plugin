@@ -66,12 +66,12 @@ def _reconciliation_branch_pg_browser_poll_max_sec() -> float:
 
 
 def _reconciliation_post_create_browser_poll_interval_sec() -> float:
-    """Seconds between branch-schema polls on the staging “Create branch” overlay (default 5s)."""
-    raw = getattr(settings, "RECONCILIATION_POST_CREATE_BROWSER_POLL_INTERVAL_SEC", 5.0)
+    """Seconds between branch-schema polls on the staging “Create branch” overlay (default 2s)."""
+    raw = getattr(settings, "RECONCILIATION_POST_CREATE_BROWSER_POLL_INTERVAL_SEC", 2.0)
     try:
         v = float(raw)
     except (TypeError, ValueError):
-        return 5.0
+        return 2.0
     return max(0.5, v)
 
 
@@ -86,12 +86,12 @@ def _reconciliation_post_create_initial_delay_ms() -> int:
 
 
 def _reconciliation_post_create_schema_probe_count() -> int:
-    """Number of lightweight schema polls after the initial delay (default 6); only the last decides."""
-    raw = getattr(settings, "RECONCILIATION_POST_CREATE_SCHEMA_PROBE_COUNT", 6)
+    """Number of lightweight schema polls after the initial delay (default 5); only the last decides."""
+    raw = getattr(settings, "RECONCILIATION_POST_CREATE_SCHEMA_PROBE_COUNT", 5)
     try:
         v = int(raw)
     except (TypeError, ValueError):
-        return 6
+        return 5
     return max(1, min(v, 20))
 
 

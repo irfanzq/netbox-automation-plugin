@@ -47,6 +47,12 @@
           <pre class="small mt-2 mb-0 p-2 bg-body-secondary rounded text-break" style="max-height: 20rem; overflow: auto;">{{ apply_results.routing_confirmation_text }}</pre>
         </details>
       {% endif %}
+      {% if apply_results.run_routing_context_text %}
+        <details class="mt-2">
+          <summary class="text-body-secondary" style="cursor: pointer;">{% trans "Run routing context JSON (branch identity on this reconciliation run)" %}</summary>
+          <pre class="small mt-2 mb-0 p-2 bg-body-secondary rounded text-break" style="max-height: 20rem; overflow: auto;">{{ apply_results.run_routing_context_text }}</pre>
+        </details>
+      {% endif %}
     </div>
   </div>
 {% endif %}
@@ -226,5 +232,12 @@
     {% trans "No per-row table for this view; see the summary cards above (attempted count may be zero)." %}
   </p>
 {% elif not apply_results.summary %}
-  <div class="alert alert-secondary mb-0">{% trans "No apply has been recorded for this run yet. Use Apply on the reconciliation run page; you will be redirected here when apply finishes." %}</div>
+  <div class="alert alert-secondary mb-0">
+    <p class="mb-2">{% trans "No apply has been recorded for this run yet. Use Apply from the lifecycle card above; when apply finishes successfully, this page should show a summary and row tables." %}</p>
+    <p class="small mb-0 text-body-secondary">
+      {% blocktrans trimmed %}
+      If you already clicked Apply: check whether results opened in another browser tab; refresh this page. A reverse-proxy timeout can cut off the browser while the server is still working—check NetBox logs and consider raising proxy and Gunicorn timeouts for long applies.
+      {% endblocktrans %}
+    </p>
+  </div>
 {% endif %}
