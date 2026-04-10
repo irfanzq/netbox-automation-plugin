@@ -19,6 +19,22 @@ VLAN / IPAM reads during apply use ``_orm_qs`` / ``_orm_mgr`` so queries target 
 branch schema (not unscoped main). Interface rows align device site/location from drift
 before resolving untagged VLAN so scope matches recon-created VLANs. Skipped VLAN rows
 include ``apply_extra_debug.vlan_resolution`` on apply results (counts + troubleshoot text).
+
+**Branch merge / ``full_clean()`` (same rules as main):** NetBox rejects inconsistent rows when
+merging a branch. Notable constraints: (1) ``VirtualMachine.primary_ip4`` / ``primary_ip6``
+— the ``IPAddress`` must be assigned to a ``VMInterface`` on that VM (see
+``_ensure_vminterface_for_primary_ip`` / ``_assign_ipaddress_to_vminterface`` /
+``_apply_vm_primary_ip_link``). (2) ``Device.primary_ip4`` / ``primary_ip6`` / ``oob_ip`` —
+the address must be assigned to an interface in that device’s effective interface set
+(virtual chassis); reconciliation apply here does **not** set those fields (devices are
+created without primary/OOB; NIC apply only attaches IPs to ``dcim.Interface``). (3) VLAN,
+prefix, tenant, IP range, floating IP creates/updates use normal ORM ``save()`` and therefore
+hit model validation at apply time; merge failures usually mean main diverged (duplicate
+prefix, scope mismatch) rather than missing assignment logic.
+
+After successful writes, handlers call :func:`_fail_merge_precheck_if_invalid` to re-run
+``full_clean(validate_unique=False)`` on the persisted row so remaining ``clean()`` rules
+surface as ``failed_merge_validation`` during apply instead of only on merge.
 """
 
 from __future__ import annotations
@@ -2372,6 +2388,51 @@ def _format_django_validation_error(exc: DjangoValidationError) -> str:
     return str(exc)
 
 
+def _fail_merge_precheck_if_invalid(
+    instance: Any, *, model_label: str | None = None
+) -> tuple[str, str, str] | None:
+    """
+    Re-run NetBox ``Model.clean()`` (via ``full_clean(validate_unique=False)``) on a row that
+    was just written on the branch. Surfaces the same validation errors branch merge would
+    hit when promoting to main, so operators see failures in the reconciliation apply run.
+    """
+    if instance is None:
+        return None
+    pk = getattr(instance, "pk", None)
+    if not pk:
+        return None
+    label = model_label or getattr(type(instance), "__name__", "object")
+    cls = instance.__class__
+    fresh = _orm_qs(cls).filter(pk=pk).first()
+    if fresh is None:
+        msg = f"Would fail branch merge — {label} pk={pk} not found on branch after apply."
+        if len(msg) > 2000:
+            msg = msg[:1997] + "..."
+        return "failed", "failed_merge_validation", msg
+    try:
+        fresh.full_clean(validate_unique=False)
+    except DjangoValidationError as e:
+        detail = _format_django_validation_error(e)
+        msg = f"Would fail branch merge — NetBox rejected {label}: {detail}"
+        if len(msg) > 2000:
+            msg = msg[:1997] + "..."
+        return "failed", "failed_merge_validation", msg
+    return None
+
+
+def _merge_precheck_nic_stack(dev: Any, iface: Any | None) -> tuple[str, str, str] | None:
+    """After interface/BMC apply, validate Interface then Device (primary IP / OOB rules)."""
+    if iface is not None and getattr(iface, "pk", None):
+        f = _orm_qs(iface.__class__).filter(pk=iface.pk).first()
+        if (bad := _fail_merge_precheck_if_invalid(f, model_label="Interface")) is not None:
+            return bad
+    if dev is not None and getattr(dev, "pk", None):
+        d = _orm_qs(dev.__class__).filter(pk=dev.pk).first()
+        if (bad := _fail_merge_precheck_if_invalid(d, model_label="Device")) is not None:
+            return bad
+    return None
+
+
 def apply_create_vlan(op: dict[str, Any]) -> tuple[str, str]:
     from ipam.models import VLAN, VLANGroup
 
@@ -2514,6 +2575,8 @@ def apply_create_vlan(op: dict[str, Any]) -> tuple[str, str]:
         op=op,
         message=f"created pk={getattr(vlan, 'pk', None)} vid={vid_i} name={name!r} group={group_name!r}",
     )
+    if (bad := _fail_merge_precheck_if_invalid(vlan, model_label="VLAN")) is not None:
+        return bad
     return "created", "ok_created"
 
 
@@ -2578,6 +2641,8 @@ def apply_create_tenant(op: dict[str, Any]) -> tuple[str, str]:
         drift_picker_tenant_label_allowlist.cache_clear()
     except Exception:
         pass
+    if (bad := _fail_merge_precheck_if_invalid(tenant, model_label="Tenant")) is not None:
+        return bad
     return "created", "ok_created"
 
 
@@ -2662,6 +2727,8 @@ def apply_create_prefix(op: dict[str, Any]) -> tuple[str, str]:
                 op=op,
                 message=f"updated pk={getattr(existing, 'pk', None)} prefix={cidr!r}",
             )
+            if (bad := _fail_merge_precheck_if_invalid(existing, model_label="Prefix")) is not None:
+                return bad
             return "updated", "ok_updated"
         return "skipped", "skipped_already_desired"
     obj = Prefix(prefix=cidr, vrf=vrf)
@@ -2721,6 +2788,8 @@ def apply_create_prefix(op: dict[str, Any]) -> tuple[str, str]:
                 op=op,
                 message=f"created pk={getattr(pfx, 'pk', None)} prefix={cidr!r} (fallback path)",
             )
+            if (bad := _fail_merge_precheck_if_invalid(pfx, model_label="Prefix")) is not None:
+                return bad
             return "created", "ok_created"
         _prefix_apply_row_stepwise_changelog(
             pfx,
@@ -2738,6 +2807,8 @@ def apply_create_prefix(op: dict[str, Any]) -> tuple[str, str]:
             op=op,
             message=f"created pk={getattr(pfx, 'pk', None)} prefix={cidr!r}",
         )
+        if (bad := _fail_merge_precheck_if_invalid(pfx, model_label="Prefix")) is not None:
+            return bad
         return "created", "ok_created"
 
     _prefix_apply_row_stepwise_changelog(
@@ -2756,6 +2827,8 @@ def apply_create_prefix(op: dict[str, Any]) -> tuple[str, str]:
         op=op,
         message=f"created pk={getattr(obj, 'pk', None)} prefix={cidr!r}",
     )
+    if (bad := _fail_merge_precheck_if_invalid(obj, model_label="Prefix")) is not None:
+        return bad
     return "created", "ok_created"
 
 
@@ -2825,6 +2898,8 @@ def apply_create_ip_range(op: dict[str, Any]) -> tuple[str, str]:
         )
         if changed or merge_ch:
             existing.save(**_save_branch())
+            if (bad := _fail_merge_precheck_if_invalid(existing, model_label="IPRange")) is not None:
+                return bad
             return "updated", "ok_updated"
         return "skipped", "skipped_already_desired"
     obj = IPRange(start_address=start_addr, end_address=end_addr, vrf=vrf)
@@ -2857,6 +2932,8 @@ def apply_create_ip_range(op: dict[str, Any]) -> tuple[str, str]:
             if descr and hasattr(rng, "description"):
                 rng.description = descr[:2000]
             rng.save(**_save_branch())
+            if (bad := _fail_merge_precheck_if_invalid(rng, model_label="IPRange")) is not None:
+                return bad
             return "created", "ok_created"
         _netbox_changelog_snapshot(rng)
         phase2_fb = False
@@ -2875,6 +2952,8 @@ def apply_create_ip_range(op: dict[str, Any]) -> tuple[str, str]:
             phase2_fb = True
         if phase2_fb:
             rng.save(**_save_branch())
+        if (bad := _fail_merge_precheck_if_invalid(rng, model_label="IPRange")) is not None:
+            return bad
         return "created", "ok_created"
 
     _netbox_changelog_snapshot(obj)
@@ -2894,6 +2973,8 @@ def apply_create_ip_range(op: dict[str, Any]) -> tuple[str, str]:
         phase2 = True
     if phase2:
         obj.save(**_save_branch())
+    if (bad := _fail_merge_precheck_if_invalid(obj, model_label="IPRange")) is not None:
+        return bad
     return "created", "ok_created"
 
 
@@ -3274,6 +3355,8 @@ def apply_create_floating_ip(op: dict[str, Any]) -> tuple[str, str]:
             vrf=vrf,
         )
         if any_save or merge_ch or tenant_cleared:
+            if (bad := _fail_merge_precheck_if_invalid(existing, model_label="IPAddress")) is not None:
+                return bad
             return "updated", "ok_updated"
         return "skipped", "skipped_already_desired"
     ip_obj = IPAddress(address=address, vrf=vrf)
@@ -3308,6 +3391,8 @@ def apply_create_floating_ip(op: dict[str, Any]) -> tuple[str, str]:
         _merge_audit_residual_onto_object(
             ip_fb, cells, consumed, attr_names=("description",), max_len=max(dmax, 8000)
         )
+        if (bad := _fail_merge_precheck_if_invalid(ip_fb, model_label="IPAddress")) is not None:
+            return bad
         return "created", "ok_created"
 
     _floating_ip_apply_row_stepwise(
@@ -3323,6 +3408,8 @@ def apply_create_floating_ip(op: dict[str, Any]) -> tuple[str, str]:
     _merge_audit_residual_onto_object(
         ip_obj, cells, consumed, attr_names=("description",), max_len=max(dmax, 8000)
     )
+    if (bad := _fail_merge_precheck_if_invalid(ip_obj, model_label="IPAddress")) is not None:
+        return bad
     return "created", "ok_created"
 
 
@@ -3579,6 +3666,8 @@ def apply_create_openstack_vm(op: dict[str, Any]) -> tuple[str, str]:
         op=op,
         message=f"created pk={getattr(vm, 'pk', None)} name={name!r} cluster={cluster_name!r}",
     )
+    if (bad := _fail_merge_precheck_if_invalid(vm, model_label="VirtualMachine")) is not None:
+        return bad
     return "created", "ok_created"
 
 
@@ -3737,6 +3826,8 @@ def apply_update_openstack_vm(op: dict[str, Any]) -> tuple[str, str]:
             op=op,
             message=f"updated pk={getattr(vm, 'pk', None)} name={getattr(vm, 'name', '')!r}",
         )
+        if (bad := _fail_merge_precheck_if_invalid(vm, model_label="VirtualMachine")) is not None:
+            return bad
         return "updated", "ok_updated"
     return "skipped", "skipped_already_desired"
 
@@ -3937,6 +4028,8 @@ def _apply_device_core(cells: dict[str, str], *, create_if_missing: bool) -> tup
             cells=cells,
             placement=False,
         )
+        if (bad := _fail_merge_precheck_if_invalid(dev, model_label="Device")) is not None:
+            return bad
         return "created", "ok_created"
     # Device exists in NetBox but has no role: fill from audit, or non-VyOS fallback; VyOS needs explicit pick.
     if getattr(existing, "role_id", None) in (None, 0):
@@ -3968,6 +4061,12 @@ def _apply_device_core(cells: dict[str, str], *, create_if_missing: bool) -> tup
     target_site = site if site is not None else existing.site
     _, site_saved = _sync_site_region(target_site, region_name)
     if any_dev or site_saved:
+        if (bad := _fail_merge_precheck_if_invalid(existing, model_label="Device")) is not None:
+            return bad
+        if site_saved and target_site is not None and getattr(target_site, "pk", None):
+            site_chk = _orm_qs(Site).filter(pk=target_site.pk).first()
+            if (bad := _fail_merge_precheck_if_invalid(site_chk, model_label="Site")) is not None:
+                return bad
         return "updated", "ok_updated"
     return "skipped", "skipped_already_desired"
 
@@ -4226,6 +4325,8 @@ def apply_serial_review(op: dict[str, Any]) -> tuple[str, str]:
     )
     if changed or merge_ch:
         dev.save(**_save_branch())
+        if (bad := _fail_merge_precheck_if_invalid(dev, model_label="Device")) is not None:
+            return bad
         return "updated", "ok_updated"
     return "skipped", "skipped_already_desired"
 
@@ -5081,6 +5182,15 @@ def apply_create_interface(op: dict[str, Any]) -> tuple[str, str]:
         ip_vrf = _vrf_for_ip_from_row_cells(cells)
         if ip_blob:
             _assign_ips_to_interface(iface, ip_blob, ip_vrf)
+        iface = _orm_qs(Interface).filter(pk=iface.pk).first()
+        if iface is None:
+            return (
+                "failed",
+                "failed_interface_missing_after_create",
+                f'Interface "{if_name}" on device "{host}" not found after apply for merge validation.',
+            )
+        if (bad := _merge_precheck_nic_stack(dev, iface)) is not None:
+            return bad
         return "created", "ok_created"
     with _tx_op(branch_db):
         changed = _interface_apply_scalar_and_role_tag_single_save(
@@ -5102,7 +5212,20 @@ def apply_create_interface(op: dict[str, Any]) -> tuple[str, str]:
         if ip_ch:
             changed = True
     if changed:
+        iface = _orm_qs(Interface).filter(pk=iface.pk).first()
+        if iface is None:
+            return (
+                "failed",
+                "failed_interface_missing_after_update",
+                f'Interface on device "{host}" not found after apply for merge validation.',
+            )
+        if (bad := _merge_precheck_nic_stack(dev, iface)) is not None:
+            return bad
         return "updated", "ok_updated"
+    if dev_geom_dirty:
+        d = _orm_qs(Device).filter(pk=dev.pk).first()
+        if (bad := _fail_merge_precheck_if_invalid(d, model_label="Device")) is not None:
+            return bad
     return "skipped", "skipped_already_desired"
 
 
@@ -5217,7 +5340,20 @@ def apply_update_interface(op: dict[str, Any]) -> tuple[str, str]:
     if ip_ch:
         changed = True
     if changed:
+        iface = _orm_qs(Interface).filter(pk=iface.pk).first()
+        if iface is None:
+            return (
+                "failed",
+                "failed_interface_missing_after_update",
+                f'Interface on device "{host}" not found after apply for merge validation.',
+            )
+        if (bad := _merge_precheck_nic_stack(dev, iface)) is not None:
+            return bad
         return "updated", "ok_updated"
+    if dev_geom_dirty:
+        d = _orm_qs(Device).filter(pk=dev.pk).first()
+        if (bad := _fail_merge_precheck_if_invalid(d, model_label="Device")) is not None:
+            return bad
     return "skipped", "skipped_already_desired"
 
 
@@ -5297,6 +5433,15 @@ def _bmc_apply(op: dict[str, Any], *, existing_oob: bool) -> tuple[str, str]:
         _netbox_changelog_snapshot(iface)
         iface.save(**_save_branch())
     if ip_changed or desc_changed or created or phy_tag_changed:
+        iface = _orm_qs(Interface).filter(pk=iface.pk).first()
+        if iface is None:
+            return (
+                "failed",
+                "failed_interface_missing_after_update",
+                f'Interface "{if_name}" on device "{host}" not found after BMC apply for merge validation.',
+            )
+        if (bad := _merge_precheck_nic_stack(dev, iface)) is not None:
+            return bad
         return ("created", "ok_created") if created else ("updated", "ok_updated")
     return "skipped", "skipped_already_desired"
 
