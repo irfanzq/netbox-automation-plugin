@@ -114,11 +114,21 @@
         {% blocktrans trimmed %}After the branch is created, we wait a short moment (about 10 seconds), then run a few automatic checks. The run page opens only after the last check confirms your session is not on the main <code>public</code> catalog. Technical details stay on this card for logs.{% endblocktrans %}
       </p>
       <div class="d-none w-100 text-start" id="maas-recon-post-create-success" role="status" aria-live="polite">
-        <div class="maas-recon-success-summary rounded-3 border border-success border-opacity-25 bg-success bg-opacity-10 p-3 mb-3">
-          <div class="text-uppercase small fw-semibold text-success-emphasis mb-2 letter-spacing-tight">
-            {% trans "What this means" %}
+        <div class="maas-recon-success-summary rounded-3 mb-3" role="status">
+          <div class="d-flex gap-3 align-items-start">
+            <div class="maas-recon-success-summary-icon flex-shrink-0" aria-hidden="true">
+              <svg class="maas-recon-success-summary-svg" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+                <circle cx="12" cy="12" r="11" class="maas-recon-success-summary-svg-ring"/>
+                <path class="maas-recon-success-summary-svg-check" d="M7.5 12.5l2.8 2.8L16.5 9" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+              </svg>
+            </div>
+            <div class="flex-grow-1 min-w-0 text-start">
+              <div class="maas-recon-success-summary-label text-uppercase small fw-semibold text-success-emphasis mb-2">
+                {% trans "What this means" %}
+              </div>
+              <p class="mb-0 maas-recon-success-summary-text text-body" id="maas-recon-success-plain-summary"></p>
+            </div>
           </div>
-          <p class="mb-0 maas-recon-success-summary-text text-body" id="maas-recon-success-plain-summary" role="status"></p>
         </div>
         <p class="small text-body-secondary mb-3 lh-base" id="maas-recon-post-create-success-sub"></p>
         <div class="maas-recon-success-tech rounded-3 border overflow-hidden mb-3 text-start">
@@ -261,13 +271,67 @@
   }
   .maas-recon-success-summary {
     text-align: left;
+    padding: 1rem 1.15rem 1.1rem 1rem;
+    border: 1px solid rgba(25, 135, 84, 0.22);
+    border-left-width: 4px;
+    border-left-color: rgba(25, 135, 84, 0.85);
+    background: linear-gradient(
+      135deg,
+      rgba(25, 135, 84, 0.11) 0%,
+      rgba(25, 135, 84, 0.05) 48%,
+      rgba(255, 255, 255, 0.65) 100%
+    );
+    box-shadow:
+      0 1px 2px rgba(25, 135, 84, 0.06),
+      inset 0 1px 0 rgba(255, 255, 255, 0.45);
   }
-  .maas-recon-success-summary .letter-spacing-tight {
-    letter-spacing: 0.04em;
+  [data-bs-theme="dark"] .maas-recon-success-summary {
+    border-color: rgba(117, 183, 152, 0.35);
+    border-left-color: rgba(117, 183, 152, 0.95);
+    background: linear-gradient(
+      135deg,
+      rgba(25, 135, 84, 0.22) 0%,
+      rgba(25, 135, 84, 0.1) 45%,
+      rgba(43, 48, 53, 0.92) 100%
+    );
+    box-shadow:
+      0 1px 3px rgba(0, 0, 0, 0.35),
+      inset 0 1px 0 rgba(255, 255, 255, 0.06);
+  }
+  .maas-recon-success-summary-label {
+    letter-spacing: 0.06em;
+  }
+  [data-bs-theme="dark"] .maas-recon-success-summary-label.text-success-emphasis {
+    color: #9fd4b8 !important;
+  }
+  .maas-recon-success-summary-icon {
+    width: 2.5rem;
+    height: 2.5rem;
+    margin-top: 0.1rem;
+  }
+  .maas-recon-success-summary-svg {
+    width: 2.5rem;
+    height: 2.5rem;
+    display: block;
+  }
+  .maas-recon-success-summary-svg-ring {
+    stroke: rgba(25, 135, 84, 0.45);
+    stroke-width: 1.5;
+    fill: rgba(25, 135, 84, 0.12);
+  }
+  .maas-recon-success-summary-svg-check {
+    stroke: rgba(21, 115, 71, 0.95);
+  }
+  [data-bs-theme="dark"] .maas-recon-success-summary-svg-ring {
+    stroke: rgba(117, 183, 152, 0.55);
+    fill: rgba(25, 135, 84, 0.2);
+  }
+  [data-bs-theme="dark"] .maas-recon-success-summary-svg-check {
+    stroke: #b8e6cc;
   }
   .maas-recon-success-summary-text {
-    font-size: 1rem;
-    line-height: 1.6;
+    font-size: 1.02rem;
+    line-height: 1.65;
     white-space: pre-line;
   }
   .maas-recon-success-tech {
