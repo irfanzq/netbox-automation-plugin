@@ -397,6 +397,8 @@
     var msgShortProbeSub = "{% filter escapejs %}{% trans 'Checking branch database session…' %}{% endfilter %}";
     var msgHintsTitle = "{% filter escapejs %}{% trans 'Troubleshooting hints' %}{% endfilter %}";
     var msgProbeTimeline = "{% filter escapejs %}{% trans 'All probe attempts (timeline)' %}{% endfilter %}";
+    var msgOpenBranch = "{% filter escapejs %}{% trans 'Open branch' %}{% endfilter %}";
+    var msgOpenJobs = "{% filter escapejs %}{% trans 'Open branch jobs' %}{% endfilter %}";
     var msgSchemaOkTitle = "{% filter escapejs %}{% trans 'Branch database session is ready' %}{% endfilter %}";
     var msgSchemaOkSub = "{% filter escapejs %}{% trans 'Technical check passed: database session is not on main public. Confirm the values below match your branch, then continue to the run page and use Apply selected changes to branch.' %}{% endfilter %}";
     var msgPlainSummaryFallback = "{% filter escapejs %}{% trans 'Your branch workspace is ready. Main NetBox stays unchanged until you merge.' %}{% endfilter %}";
@@ -587,6 +589,36 @@
               if (d.operator_workspace_summary != null && String(d.operator_workspace_summary).trim() !== "") {
                 parts.push("<div class=\"mt-2 small text-body\">" + escapeHtml(String(d.operator_workspace_summary).trim()) + "</div>");
               }
+              var orx = d.operator_recovery;
+              if (orx && typeof orx === "object") {
+                var osm = orx.summary != null && String(orx.summary).trim() !== "" ? String(orx.summary).trim() : "";
+                var ost = Array.isArray(orx.steps) ? orx.steps : [];
+                var ourl = (orx.urls && typeof orx.urls === "object") ? orx.urls : {};
+                if (osm || ost.length > 0) {
+                  parts.push("<div class=\"alert alert-info border-info text-start mt-3 maas-recon-operator-recovery\" role=\"status\">");
+                  if (osm) {
+                    parts.push("<div class=\"fw-semibold\">" + escapeHtml(osm) + "</div>");
+                  }
+                  if (ost.length > 0) {
+                    parts.push("<ol class=\"small mb-0 mt-2 ps-3\">");
+                    ost.forEach(function(step) {
+                      parts.push("<li class=\"mb-1\">" + escapeHtml(String(step)) + "</li>");
+                    });
+                    parts.push("</ol>");
+                  }
+                  if (ourl.branch || ourl.jobs) {
+                    parts.push("<div class=\"mt-2 small d-flex flex-wrap gap-2\">");
+                    if (ourl.branch) {
+                      parts.push("<a class=\"btn btn-sm btn-outline-primary\" href=\"" + escapeHtml(String(ourl.branch)) + "\">" + escapeHtml(msgOpenBranch) + "</a>");
+                    }
+                    if (ourl.jobs) {
+                      parts.push("<a class=\"btn btn-sm btn-outline-secondary\" href=\"" + escapeHtml(String(ourl.jobs)) + "\">" + escapeHtml(msgOpenJobs) + "</a>");
+                    }
+                    parts.push("</div>");
+                  }
+                  parts.push("</div>");
+                }
+              }
               parts.push("<div class=\"mt-2 font-monospace\">" + msgObserved + ": <code>" + escapeHtml(String(d.postgresql_current_schema != null && d.postgresql_current_schema !== "" ? d.postgresql_current_schema : "(empty)")) + "</code></div>");
               parts.push("<div class=\"mt-1 font-monospace small\">" + msgSearchPath + ": <code>" + escapeHtml(spDisp) + "</code></div>");
               if (d.expected_branch_schema) {
@@ -636,7 +668,11 @@
                 parts.push("<div class=\"mt-1 small text-body-secondary font-monospace\">" + escapeHtml(String(d.schema_name_compare_note)) + "</div>");
               }
               try {
-                var jsonStr = JSON.stringify(d, null, 2);
+                var jsonForDetails = Object.assign({}, d);
+                delete jsonForDetails.operator_recovery;
+                delete jsonForDetails.branch_provision_job;
+                delete jsonForDetails.branch_workspace_urls;
+                var jsonStr = JSON.stringify(jsonForDetails, null, 2);
                 parts.push(
                   "<details class=\"mt-3 text-start\"><summary class=\"small\" style=\"cursor:pointer;\">" +
                   escapeHtml(msgJsonDetails) +

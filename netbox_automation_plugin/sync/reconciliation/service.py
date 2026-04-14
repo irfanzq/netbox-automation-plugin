@@ -45,6 +45,7 @@ from typing import Any
 from django.conf import settings
 from django.core import signing
 from django.db import OperationalError, connections, transaction
+from django.urls import NoReverseMatch, reverse
 from django.utils import timezone
 from django.utils.translation import gettext as _
 
@@ -747,6 +748,209 @@ def _operator_branch_workspace_summary(
     return str(_("Branch workspace is ready. Main NetBox stays unchanged until you merge."))
 
 
+_STAGING_POLL_EMPTY_JOB: dict[str, Any] = {
+    "found": False,
+    "job_pk": None,
+    "name": "",
+    "status": "",
+    "status_label": "",
+}
+
+
+def _staging_branch_workspace_urls(*, branch_pk: int | None) -> dict[str, str | None]:
+    """Relative URLs for NetBox Branching UI (best-effort reverse; optional ``/jobs/`` suffix)."""
+    branch_url: str | None = None
+    jobs_url: str | None = None
+    if branch_pk is None:
+        return {"branch": branch_url, "jobs": jobs_url}
+    for name in (
+        "plugins:netbox_branching:branch",
+        "plugins:netbox_branching:branch_detail",
+    ):
+        try:
+            branch_url = reverse(name, kwargs={"pk": branch_pk})
+            break
+        except NoReverseMatch:
+            continue
+    for name in (
+        "plugins:netbox_branching:branch_jobs",
+        "plugins:netbox_branching:branch_job_list",
+    ):
+        try:
+            jobs_url = reverse(name, kwargs={"pk": branch_pk})
+            break
+        except NoReverseMatch:
+            continue
+    if branch_url and not jobs_url:
+        jobs_url = f"{branch_url.rstrip('/')}/jobs/"
+    return {"branch": branch_url, "jobs": jobs_url}
+
+
+def _staging_provision_branch_job_snapshot(branch_obj: Any) -> dict[str, Any]:
+    """
+    Best-effort: latest NetBox ``core.Job`` row attached to this Branch (prefers name containing
+    "provision"). Empty dict fields when branching/jobs are unavailable.
+    """
+    out = dict(_STAGING_POLL_EMPTY_JOB)
+    if branch_obj is None:
+        return out
+    pk = getattr(branch_obj, "pk", None)
+    if pk is None:
+        return out
+    try:
+        from django.contrib.contenttypes.models import ContentType
+
+        from core.models import Job
+    except Exception:
+        return out
+    try:
+        ct = ContentType.objects.get_for_model(branch_obj.__class__, for_concrete_model=False)
+        base = Job.objects.filter(object_type=ct, object_id=int(pk))
+        job = (
+            base.filter(name__icontains="provision").order_by("-created").first()
+            or base.order_by("-created").first()
+        )
+    except Exception:
+        return out
+    if job is None:
+        return out
+    label = ""
+    try:
+        label = str(job.get_status_display())
+    except Exception:
+        label = str(getattr(job, "status", None) or "")
+    out.update(
+        {
+            "found": True,
+            "job_pk": int(job.pk),
+            "name": str(job.name or ""),
+            "status": str(job.status or ""),
+            "status_label": label,
+        }
+    )
+    return out
+
+
+def _staging_operator_recovery(
+    *,
+    ready: bool,
+    postgresql_current_schema: str,
+    provision_job: dict[str, Any],
+    urls: dict[str, str | None],
+    schema_probe_ran: bool = True,
+) -> dict[str, Any]:
+    """
+    Structured guidance for the staging overlay main card (not duplicated in technical JSON).
+
+    Emphasizes queued **provision** jobs (pending/scheduled) and worker availability.
+    """
+    if ready:
+        return {}
+    st = (provision_job.get("status") or "").strip().lower()
+    jname = (provision_job.get("name") or "").strip() or str(_("Provision branch"))
+    state_disp = (provision_job.get("status_label") or st or "").strip()
+    branch_u = urls.get("branch")
+    jobs_u = urls.get("jobs")
+    url_pack: dict[str, str | None] = {"branch": branch_u, "jobs": jobs_u}
+    cur_raw = (postgresql_current_schema or "").strip()
+    cur_l = cur_raw.lower()
+    session_ok = _postgresql_branch_schema_session_name_ok(postgresql_current_schema)
+
+    if provision_job.get("found") and st in ("pending", "scheduled"):
+        return {
+            "summary": str(
+                _(
+                    "NetBox has queued background job “%(job)s” for this branch (%(state)s). "
+                    "Workers must run that job before new sessions reliably use the branch schema."
+                )
+                % {"job": jname, "state": state_disp or st}
+            ),
+            "steps": [
+                str(
+                    _(
+                        "Ensure NetBox RQ workers (housekeeping / default queues) are running and can reach Redis."
+                    )
+                ),
+                str(_("In NetBox, open this branch’s Jobs tab and confirm the job moves out of Pending or Scheduled.")),
+                str(_("When the job completes, use Retry schema check here.")),
+                str(
+                    _(
+                        "If it stays pending or stuck, contact your NetBox administrator with the branch name, "
+                        "job name, and (if possible) a screenshot of the Jobs list so they can check workers, Redis, and the job queue."
+                    )
+                ),
+            ],
+            "urls": url_pack,
+        }
+    if provision_job.get("found") and st == "running":
+        return {
+            "summary": str(
+                _(
+                    "NetBox is running “%(job)s” for this branch. Wait until it completes before expecting an isolated schema session."
+                )
+                % {"job": jname}
+            ),
+            "steps": [
+                str(_("Watch progress on the branch Jobs tab.")),
+                str(_("Use Retry schema check after the job shows Completed.")),
+                str(
+                    _(
+                        "If the job never finishes, contact your NetBox administrator with the branch name and job name "
+                        "so they can inspect workers and logs."
+                    )
+                ),
+            ],
+            "urls": url_pack,
+        }
+    if provision_job.get("found") and st in ("errored", "failed"):
+        return {
+            "summary": str(
+                _(
+                    "The latest “%(job)s” job for this branch ended in %(state)s — provisioning did not finish successfully."
+                )
+                % {"job": jname, "state": state_disp or st}
+            ),
+            "steps": [
+                str(_("Open the branch Jobs tab, inspect the failed job’s error output, and fix the underlying issue.")),
+                str(
+                    _(
+                        "If you cannot fix it yourself, contact your NetBox administrator and share the job error text "
+                        "and branch name."
+                    )
+                ),
+                str(_("Use Retry schema check here once a successful provision job has run.")),
+            ],
+            "urls": url_pack,
+        }
+    if schema_probe_ran and not provision_job.get("found") and not session_ok:
+        schema_hint = cur_l or str(_("empty"))
+        return {
+            "summary": str(
+                _(
+                    "The database session is still not on your isolated branch schema (observed: %(schema)s)."
+                )
+                % {"schema": schema_hint}
+            ),
+            "steps": [
+                str(
+                    _(
+                        "If the branch was just created, start NetBox workers and wait for the Provision branch job to run."
+                    )
+                ),
+                str(_("Open the branch page and confirm the branch is healthy before retrying.")),
+                str(_("Use Retry schema check after workers have processed pending jobs.")),
+                str(
+                    _(
+                        "If the problem continues, contact your NetBox administrator with the branch name and the "
+                        "observed schema value shown above."
+                    )
+                ),
+            ],
+            "urls": url_pack,
+        }
+    return {}
+
+
 def branch_pg_schema_status_snapshot_for_staging_poll(
     run: MAASOpenStackReconciliationRun,
 ) -> dict[str, Any]:
@@ -776,6 +980,9 @@ def branch_pg_schema_status_snapshot_for_staging_poll(
             "operator_workspace_summary": str(_("No branch is attached to this run yet.")),
             "schema_session_diagnostics": {},
             "troubleshooting_hints": [str(_("Run has no branch id or name to load NetBox Branch."))],
+            "branch_provision_job": dict(_STAGING_POLL_EMPTY_JOB),
+            "branch_workspace_urls": _staging_branch_workspace_urls(branch_pk=None),
+            "operator_recovery": {},
         }
     branch_obj, berr = get_netbox_branch(
         branch_id=run.branch_id,
@@ -783,6 +990,7 @@ def branch_pg_schema_status_snapshot_for_staging_poll(
     )
     if branch_obj is None:
         br = (berr or _("Branch not found.")).strip()
+        bid = int(run.branch_id) if run.branch_id else None
         return {
             "ready": False,
             "reason": br,
@@ -794,12 +1002,23 @@ def branch_pg_schema_status_snapshot_for_staging_poll(
             "operator_workspace_summary": str(_("Could not load this branch from NetBox yet.")),
             "schema_session_diagnostics": {},
             "troubleshooting_hints": [br],
+            "branch_provision_job": dict(_STAGING_POLL_EMPTY_JOB),
+            "branch_workspace_urls": _staging_branch_workspace_urls(branch_pk=bid),
+            "operator_recovery": {},
         }
     cn = str(getattr(branch_obj, "connection_name", None) or "").strip()
     alias, res_err = resolve_branch_django_database_alias(cn, branch=branch_obj)
     if not alias:
         rr = (res_err or "").strip()
         bd = str(getattr(branch_obj, "name", None) or run.branch_name or "").strip()
+        bpk = getattr(branch_obj, "pk", None)
+        if bpk is None and run.branch_id:
+            try:
+                bpk = int(run.branch_id)
+            except (TypeError, ValueError):
+                bpk = None
+        urls_nf = _staging_branch_workspace_urls(branch_pk=bpk)
+        prov_nf = _staging_provision_branch_job_snapshot(branch_obj)
         return {
             "ready": False,
             "reason": rr,
@@ -815,6 +1034,15 @@ def branch_pg_schema_status_snapshot_for_staging_poll(
             ),
             "schema_session_diagnostics": {},
             "troubleshooting_hints": [rr or str(_("No usable branch Django database alias."))],
+            "branch_provision_job": prov_nf,
+            "branch_workspace_urls": urls_nf,
+            "operator_recovery": _staging_operator_recovery(
+                ready=False,
+                postgresql_current_schema="",
+                provision_job=prov_nf,
+                urls=urls_nf,
+                schema_probe_ran=False,
+            ),
         }
     ok, reason, cur, search_path, session_diag = branch_django_alias_pg_ready_for_writes(
         branch_obj, alias
@@ -848,6 +1076,27 @@ def branch_pg_schema_status_snapshot_for_staging_poll(
     out["troubleshooting_hints"] = _staging_schema_troubleshooting_hints(
         cur, expected, session_diag
     )
+    bpk = getattr(branch_obj, "pk", None)
+    if bpk is None and run.branch_id:
+        try:
+            bpk = int(run.branch_id)
+        except (TypeError, ValueError):
+            bpk = None
+    urls_ok = _staging_branch_workspace_urls(branch_pk=bpk)
+    out["branch_workspace_urls"] = urls_ok
+    if ready:
+        out["branch_provision_job"] = dict(_STAGING_POLL_EMPTY_JOB)
+        out["operator_recovery"] = {}
+    else:
+        prov_ok = _staging_provision_branch_job_snapshot(branch_obj)
+        out["branch_provision_job"] = prov_ok
+        out["operator_recovery"] = _staging_operator_recovery(
+            ready=False,
+            postgresql_current_schema=cur,
+            provision_job=prov_ok,
+            urls=urls_ok,
+            schema_probe_ran=True,
+        )
     return out
 
 
