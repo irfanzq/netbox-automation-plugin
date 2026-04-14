@@ -1,5 +1,7 @@
 """NIC-row builders and drift-note helpers for proposed-change buckets."""
 
+from __future__ import annotations
+
 from netbox_automation_plugin.sync.reporting.drift_report.misc_utils import _dedupe_note_parts
 from netbox_automation_plugin.sync.reporting.drift_report.proposed_action_format import (
     format_set_netbox_nic_directives,
@@ -9,7 +11,10 @@ from netbox_automation_plugin.sync.reporting.drift_report.proposed_nic_derived i
 )
 
 
-def _build_add_nb_interface_rows(interface_audit):
+def _build_add_nb_interface_rows(
+    interface_audit,
+    vm_primary_hosts: frozenset[str] | None = None,
+):
     """
     MAAS NICs with a MAC that do not match any NetBox port on the device.
     Preview: proposed new NetBox ports (+ VLAN, IPs from MAAS).
@@ -35,7 +40,9 @@ def _build_add_nb_interface_rows(interface_audit):
             authority = str(row.get("authority") or "maas_fallback").strip()
             authority_badge = "[OS]" if authority == "openstack_runtime" else "[MAAS]"
             os_region = str(row.get("os_region") or "—").strip() or "—"
-            props = format_set_netbox_nic_directives(mac=mac, vlan=vlan, ips=ips)
+            props, nic_reason = format_set_netbox_nic_directives(
+                mac=mac, vlan=vlan, ips=ips, vm_primary_hosts=vm_primary_hosts
+            )
             ex = derive_nic_proposed_columns(
                 hn, row, bmc_mac=str(row.get("host_bmc_mac") or "")
             )
@@ -65,7 +72,7 @@ def _build_add_nb_interface_rows(interface_audit):
                 ),
                 props,
                 authority_badge,
-                "Medium",
+                nic_reason,
             ])
     return sorted(out, key=lambda x: (x[0] or "").lower())
 

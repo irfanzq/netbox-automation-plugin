@@ -218,7 +218,7 @@ HEADERS_DETAIL_NEW_NICS: list[str] = [
     "Suggested NB name",
     "Proposed Action",
     "Authority",
-    "Risk",
+    "Reason",
 ]
 
 HEADERS_DETAIL_NIC_DRIFT: list[str] = [
@@ -247,7 +247,7 @@ HEADERS_DETAIL_NIC_DRIFT: list[str] = [
     "NB Proposed intf Type",
     "Authority",
     "Proposed Action",
-    "Risk",
+    "Reason",
 ]
 
 # Same columns as MAAS-fallback NIC drift; selection_key differs only.
@@ -272,7 +272,6 @@ HEADERS_BMC_NEW_DEVICES: list[str] = [
     "NB mgmt iface IP",
     "Authority",
     "Proposed Action",
-    "Risk",
 ]
 
 HEADERS_BMC_EXISTING: list[str] = [
@@ -298,7 +297,6 @@ HEADERS_BMC_EXISTING: list[str] = [
     "Authority",
     "Status",
     "Proposed Action",
-    "Risk",
 ]
 
 HEADERS_SERIAL_REVIEW: list[str] = [
@@ -306,7 +304,6 @@ HEADERS_SERIAL_REVIEW: list[str] = [
     "MAAS Serial",
     "NetBox Serial",
     "Proposed Action",
-    "Risk",
 ]
 
 HEADERS_DETAIL_PROPOSED_MISSING_VLANS: list[str] = [
@@ -319,7 +316,6 @@ HEADERS_DETAIL_PROPOSED_MISSING_VLANS: list[str] = [
     "NB proposed VLAN group",
     "NB proposed VLAN name (editable)",
     "Proposed Action",
-    "Risk",
 ]
 
 HEADERS_DETAIL_PROPOSED_MISSING_TENANTS: list[str] = [
@@ -327,7 +323,6 @@ HEADERS_DETAIL_PROPOSED_MISSING_TENANTS: list[str] = [
     "NB proposed tenant name",
     "NB proposed tenant description",
     "Proposed Action",
-    "Risk",
 ]
 
 SELECTION_KEY_TO_HEADERS: dict[str, list[str]] = {
@@ -583,7 +578,7 @@ def coerce_legacy_openstack_prefix_row_lengths(prop: dict) -> None:
 def _strip_legacy_proposed_missing_vlan_tenant_status_columns(rows: list) -> None:
     """
     Older drift rows included **NB Proposed Tenant** and **NB proposed status** before
-    Proposed Action / Risk. Drop those two cells in place so lengths match current headers
+    Proposed Action. Drop those two cells in place so lengths match current headers
     (HTML truncates with ``r[:n]``, which would otherwise hide Proposed Action).
     """
     legacy_len = len(HEADERS_DETAIL_PROPOSED_MISSING_VLANS) + 2  # tenant + status

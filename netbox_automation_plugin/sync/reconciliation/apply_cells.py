@@ -6,7 +6,7 @@ there; apply handlers should read those same projected strings where possible so
 writes stay aligned.
 
 ``apply_row_operation`` narrows each row to reconciliation-preview source columns (plus
-workflow fields: Proposed Action, Status, Risk, Authority). Generic columns use a
+workflow fields: Proposed Action, Status, Authority). Generic columns use a
 non-placeholder heuristic. **NB Proposed Tenant** is coerced via the drift tenant picker
 catalog for sections that still expose that column (e.g. floating IPs, VMs); values not in
 the catalog are omitted from scoped cells.
@@ -1577,6 +1577,7 @@ NEW_NIC_RECON_CORE_HEADERS: tuple[str, ...] = (
     "NB Proposed intf Type",
     "Suggested NB name",
     "Proposed Action",
+    "Reason",
 )
 # Site / scope / VLAN-group hints must survive freezing so ``apply_create_interface`` can
 # align ``Device.site`` with recon-created VLANs (same NB site as IPAM rows) and resolve
@@ -5730,7 +5731,6 @@ _APPLY_WORKFLOW_HEADER_NORMS: frozenset[str] = frozenset(
         "Proposed properties",
         "Proposed properties (from MAAS)",
         "Status",
-        "Risk",
         "Authority",
     )
 )

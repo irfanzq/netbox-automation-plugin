@@ -257,10 +257,6 @@ def _html_col_is_mac(header) -> bool:
     return re.search(r"(?i)\bMAC\b", str(header or "")) is not None
 
 
-def _html_col_is_risk(header) -> bool:
-    return str(header or "").strip().lower() == "risk"
-
-
 def _html_col_is_role_reason(header) -> bool:
     """Proposed-prefix rows: one-line summary with full text in the cell title."""
     return str(header or "").strip().lower() == "role reason"
@@ -325,8 +321,6 @@ def _html_th_class(header) -> str:
         return f"{base} text-nowrap font-monospace"
     if _html_col_is_ip(h):
         return f"{base} text-nowrap"
-    if _html_col_is_risk(h):
-        return f"{base} text-nowrap"
     return base
 
 
@@ -344,8 +338,6 @@ def _html_td_class(header, col_idx, notes_col_idx=None) -> str:
     elif _html_col_is_mac(h):
         parts.extend(["align-top", "text-nowrap", "font-monospace"])
     elif _html_col_is_ip(h):
-        parts.extend(["align-top", "text-nowrap"])
-    elif _html_col_is_risk(h):
         parts.extend(["align-top", "text-nowrap"])
     elif _html_col_is_maas_fabric(h):
         parts.extend(["align-top", "text-nowrap"])

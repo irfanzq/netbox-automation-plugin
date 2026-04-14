@@ -70,7 +70,6 @@ def build_proposed_missing_tenant_rows(
                 project,
                 "",
                 SET_NETBOX_ACTION_CREATE_TENANT,
-                "",
             ]
         )
     return rows

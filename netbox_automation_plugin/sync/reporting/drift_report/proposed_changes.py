@@ -83,6 +83,7 @@ from netbox_automation_plugin.sync.reporting.drift_report.proposed_action_format
     SET_NETBOX_ACTION_UPDATE_PREFIX,
     SET_NETBOX_ACTION_UPDATE_VM,
     format_set_netbox_nic_directives,
+    nova_vm_primary_ip_host_set,
 )
 from netbox_automation_plugin.sync.reporting.drift_report.maas_vlan_display import (
     format_maas_vlan_vid_for_reports,
@@ -1376,6 +1377,7 @@ def _proposed_changes_rows(
 
     os_runtime_idx = _runtime_nic_index_by_host_mac(openstack_data)
     os_host_authority = _os_host_authority_map(openstack_data)
+    vm_primary_hosts = nova_vm_primary_ip_host_set(openstack_data)
     _birch_audit = birch_audit_rules_active((drift or {}).get("scope_meta") or {})
     _os_hosts_birch = openstack_hostnames_short(openstack_data)
 
@@ -1409,7 +1411,9 @@ def _proposed_changes_rows(
                     if maas_if != "—"
                     else f"maas-nic-{mac.replace(':', '')[-6:]}"
                 )
-                props = format_set_netbox_nic_directives(mac=mac, vlan=vlan, ips=ips)
+                props, nic_reason = format_set_netbox_nic_directives(
+                    mac=mac, vlan=vlan, ips=ips, vm_primary_hosts=vm_primary_hosts
+                )
                 osr = os_runtime_idx.get(((h or "").strip().lower(), _norm_mac_local(mac))) or {}
                 os_reg = str(
                     osr.get("os_region") or (openstack_data or {}).get("openstack_region_name") or "—"
@@ -1428,7 +1432,9 @@ def _proposed_changes_rows(
                 )
                 if os_has_runtime:
                     # OS authority: Proposed Action reflects runtime only (MAAS columns still show MAAS).
-                    props = format_set_netbox_nic_directives(mac=os_mac, vlan=os_vlan, ips=os_ip)
+                    props, nic_reason = format_set_netbox_nic_directives(
+                        mac=os_mac, vlan=os_vlan, ips=os_ip, vm_primary_hosts=vm_primary_hosts
+                    )
                 from netbox_automation_plugin.sync.reporting.drift_report.proposed_nic_derived import (
                     derive_nic_proposed_columns,
                     parse_os_lldp_structured,
@@ -1476,7 +1482,7 @@ def _proposed_changes_rows(
                         suggested_name,
                         props,
                         "[OS]" if os_has_runtime else "[MAAS]",
-                        "Medium",
+                        nic_reason,
                     ]
                 )
         return sorted(out, key=lambda x: (x[0] or "").lower())
@@ -1546,7 +1552,6 @@ def _proposed_changes_rows(
                     str(target_ip or "").strip() or "—",
                     authority_badge,
                     action,
-                    "Medium",
                 ]
             )
         return sorted(out, key=lambda x: (x[0] or "").lower())
@@ -1557,7 +1562,9 @@ def _proposed_changes_rows(
         matched_rows, by_h, netbox_ifaces, openstack_data=openstack_data
     )
     add_mgmt_iface_new_devices = _new_device_bmc_rows()
-    add_nb_interfaces = _build_add_nb_interface_rows(interface_audit) + _new_device_nic_rows()
+    add_nb_interfaces = _build_add_nb_interface_rows(
+        interface_audit, vm_primary_hosts=vm_primary_hosts
+    ) + _new_device_nic_rows()
     add_nb_interfaces = sorted(add_nb_interfaces, key=lambda x: (x[0] or "").lower())
     if _birch_audit:
         add_nb_interfaces = [
@@ -1960,7 +1967,7 @@ def _proposed_changes_rows(
     # Temporarily disabled per operator request: do not emit allocation-pool IPRange proposals.
     add_ip_ranges = []
 
-    update_nic = _build_update_nic_rows(interface_audit)
+    update_nic = _build_update_nic_rows(interface_audit, vm_primary_hosts=vm_primary_hosts)
     # Enforce host-level authority gate across NIC drift rows:
     # - non-authoritative OS host: never keep OS-only NIC rows
     # - remaining rows on that host are treated as MAAS fallback authority

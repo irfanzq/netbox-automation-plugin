@@ -16,6 +16,7 @@ import re
 from typing import Any
 
 # Authority column (0-based) for NIC drift vs new-NIC tables (headers differ).
+# ``Reason`` sits after ``Proposed Action`` (drift) or after ``Authority`` (new NICs); indices unchanged.
 NIC_DRIFT_AUTHORITY_COL_INDEX = 23  # HEADERS_DETAIL_NIC_DRIFT
 NIC_NEW_AUTHORITY_COL_INDEX = 20  # HEADERS_DETAIL_NEW_NICS
 # "OS MAC" column (same index in new-NIC and NIC-drift detail tables).

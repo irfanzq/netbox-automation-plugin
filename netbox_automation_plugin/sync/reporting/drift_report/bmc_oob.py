@@ -272,7 +272,6 @@ def _build_proposed_mgmt_interface_rows(
             )
             if maas_mac or maas_vlan:
                 action += f" MAAS hints: MAC={maas_mac or '—'} VLAN={maas_vlan or '—'}."
-            risk = "High"
             bx = _bmc_drift_extra_columns(m)
             out.append([
                 h,
@@ -297,7 +296,6 @@ def _build_proposed_mgmt_interface_rows(
                 authority_badge,
                 status,
                 action,
-                risk,
             ])
             continue
 
@@ -336,41 +334,27 @@ def _build_proposed_mgmt_interface_rows(
 
         target_ip = str(cov_ip_used or bmc_effective or bmc or "—").strip() or "—"
 
-        risk_rank = {"None": 0, "Low": 1, "Medium": 2, "High": 3}
-
-        def _bump_risk(cur: str, want: str) -> str:
-            c = cur if cur in risk_rank else "Low"
-            w = want if want in risk_rank else "Low"
-            return w if risk_rank[w] > risk_rank[c] else c
-
         if oob_match and cov == "MGMT_IFACE":
             status = "OK"
             action = _OOB_NO_CHANGE
-            risk = "None"
         elif oob_match and cov == "NO_IFACE_IP":
             status = "ADD_MGMT_IFACE"
             action = "SET_NETBOX_OOB_CREATE_IFACE; SET_NETBOX_OOB_IP"
-            risk = "Medium"
         elif oob_match and cov == "IP_OTHER_IFACE":
             status = "REVIEW"
             action = "SET_NETBOX_OOB_REVIEW=PORT_CLASSIFICATION"
-            risk = "Low"
         elif not oob_match and cov == "MGMT_IFACE":
             status = "SET_OOB"
             action = "SET_NETBOX_OOB_IP"
-            risk = "Low"
         elif not oob_match and cov == "OOB_IFACE_IP_MISMATCH":
             status = "SET_OOB"
             action = "SET_NETBOX_OOB_IP; SET_NETBOX_OOB_REVIEW=OOB_IFACE_IP"
-            risk = "Medium"
         elif cov == "NO_IFACE_IP":
             status = "ADD_OOB_AND_MGMT"
             action = "SET_NETBOX_OOB_IP; SET_NETBOX_OOB_CREATE_IFACE"
-            risk = "Medium"
         else:
             status = "REVIEW"
             action = "SET_NETBOX_OOB_REVIEW=BMC_ALIGNMENT"
-            risk = "Medium"
 
         if action != _OOB_NO_CHANGE:
             if "SET_NETBOX_OOB_IP" in action:
@@ -391,7 +375,6 @@ def _build_proposed_mgmt_interface_rows(
             if maas_mac_norm and nb_mgmt_mac_norm and maas_mac_norm != nb_mgmt_mac_norm:
                 if status == "OK":
                     status = "REVIEW"
-                    risk = "Medium"
                 # Emit concrete target/current MAC values for mismatch.
                 if status_before_mac == "OK":
                     action = (
@@ -403,19 +386,16 @@ def _build_proposed_mgmt_interface_rows(
                         f"; SET_NETBOX_OOB_MAC={maas_mac_norm} "
                         f"(current NB MAC {nb_mgmt_mac})"
                     )
-                risk = _bump_risk(risk, "High")
         elif maas_mac_norm and (
             (not nb_mgmt_mac) or str(nb_mgmt_mac).strip() in {"", "—", "-", "None", "none"}
         ):
             # Missing NetBox OOB MAC: populate from MAAS hardware MAC.
             action += f"; SET_NETBOX_OOB_MAC={maas_mac_norm} (current NB MAC —)"
-            risk = _bump_risk(risk, "Medium")
         if maas_vlan and nb_mgmt_vid not in ("", "—", "None"):
             if maas_vlan.strip() != str(nb_mgmt_vid).strip():
                 action += "; SET_NETBOX_OOB_REVIEW=VLAN_HINT"
                 if status == "OK":
                     status = "REVIEW"
-                risk = _bump_risk(risk, "Medium")
 
         if authority == "openstack_runtime":
             # OS generally does not expose BMC MAC reliably; suppress MAAS MAC-only drift here.
@@ -496,6 +476,5 @@ def _build_proposed_mgmt_interface_rows(
             authority_badge,
             status,
             action,
-            risk,
         ])
     return sorted(out, key=lambda x: (x[0] or "").lower())

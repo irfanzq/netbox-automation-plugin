@@ -1,8 +1,13 @@
 """NIC drift and serial-review rows for proposed-change buckets."""
 
+from __future__ import annotations
+
+import re
+
 from netbox_automation_plugin.sync.reporting.drift_report.proposed_action_format import (
     SET_NETBOX_ACTION_REVIEW_PORT_ALIGNMENT,
     SET_NETBOX_ACTION_SERIAL_REVIEW,
+    vm_primary_ip_defer_reason,
 )
 from netbox_automation_plugin.sync.reporting.drift_report.proposed_nic_derived import (
     derive_nic_proposed_columns,
@@ -27,8 +32,12 @@ def _drift_row_nb_placement_cells(row: dict) -> tuple[str, str, str]:
     )
 
 
-def _build_update_nic_rows(interface_audit):
+def _build_update_nic_rows(
+    interface_audit,
+    vm_primary_hosts: frozenset[str] | None = None,
+):
     update_nic = []
+    vm_primary_hosts = vm_primary_hosts or frozenset()
     for b in (interface_audit or {}).get("hosts") or []:
         hn = b.get("hostname", "")
         for row in b.get("rows") or []:
@@ -51,7 +60,7 @@ def _build_update_nic_rows(interface_audit):
 
             statuses = []
             actions = []
-            risk = "Medium"
+            reason_cell = "—"
             maas_mac = str(row.get("maas_mac") or "").strip() or "—"
             maas_ips = str(row.get("maas_ips") or "").strip() or "—"
 
@@ -73,12 +82,26 @@ def _build_update_nic_rows(interface_audit):
                     statuses.append("VLAN_MISMATCH")
                 vlan_target = _preferred_value(os_vlan, maas_vlan)
                 actions.append(f"SET_NETBOX_UNTAGGED_VLAN={vlan_target}")
-                risk = "High"
 
             if "IP_GAP" in st:
                 statuses.append("MISSING_NB_IP")
                 ip_target = _preferred_value(os_ip, maas_ips)
-                actions.append(f"SET_NETBOX_IP={ip_target}")
+                deferred_hosts: list[str] = []
+                kept_set: list[str] = []
+                if ip_target and ip_target not in {"", "—", "-", "None", "none"}:
+                    for chunk in re.split(r"[,;\s]+", str(ip_target)):
+                        t = chunk.strip()
+                        if not t or t in {"", "—", "-", "None", "none"}:
+                            continue
+                        host = t.split("/", 1)[0].strip().lower()
+                        if vm_primary_hosts and host in vm_primary_hosts:
+                            if host not in deferred_hosts:
+                                deferred_hosts.append(host)
+                        else:
+                            kept_set.append(f"SET_NETBOX_IP={t}")
+                if deferred_hosts:
+                    reason_cell = vm_primary_ip_defer_reason(deferred_hosts)
+                actions.extend(kept_set)
 
             note_l = notes.lower()
             if ("netbox mac empty" in note_l) or ("mac mismatch" in note_l) or ("mac-drift" in note_l):
@@ -127,7 +150,7 @@ def _build_update_nic_rows(interface_audit):
                 ex["nb_proposed_intf_type"],
                 authority_badge,
                 "; ".join(dict.fromkeys([a for a in actions if a])),
-                risk,
+                reason_cell,
             ])
     return update_nic
 
@@ -141,6 +164,5 @@ def _build_review_serial_rows(matched_rows):
                 str(r.get("maas_serial", "")),
                 str(r.get("netbox_serial", "")),
                 SET_NETBOX_ACTION_SERIAL_REVIEW,
-                "High",
             ])
     return review_serial

@@ -813,7 +813,6 @@ def build_proposed_missing_vlan_rows(
         if gkey in seen:
             return
         seen.add(gkey)
-        risk = "Medium" if dev is not None else "High"
         out.append(
             [
                 site_disp or "—",
@@ -825,7 +824,6 @@ def build_proposed_missing_vlan_rows(
                 group,
                 vlan_disp,
                 SET_NETBOX_ACTION_CREATE_VLAN,
-                risk,
             ]
         )
 

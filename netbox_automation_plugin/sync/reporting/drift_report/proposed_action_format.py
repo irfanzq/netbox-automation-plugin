@@ -4,6 +4,8 @@ Canonical ``SET_NETBOX_*`` strings for drift / proposed-change **Proposed Action
 Apply/reconciliation reads interface directives ``SET_NETBOX_MAC``, ``SET_NETBOX_UNTAGGED_VLAN``,
 and ``SET_NETBOX_IP`` from this column (see ``apply_cells``). Workflow rows use ``SET_NETBOX_ACTION=…``
 or ``SET_NETBOX_WORKFLOW=…`` so operators and automation share one vocabulary.
+When a host IP collides with a Nova VM primary in the same audit, omit ``SET_NETBOX_IP`` for that
+address and surface the explanation in the drift table **Reason** column (not in Proposed Action).
 
 MAAS VLAN: use ``vlan.vid`` for directives, never ``vlan.id``. Numeric **0** omits
 ``SET_NETBOX_UNTAGGED_VLAN`` (MAAS native / untagged). See ``maas_client`` for the full mapping.
@@ -16,14 +18,62 @@ import re
 _PLACEHOLDER = frozenset({"", "—", "-", "None", "none", "NONE"})
 
 
+def _ip_token_host_only(token: str) -> str | None:
+    t = (token or "").strip().split()[0] if token else ""
+    if not t or t in _PLACEHOLDER:
+        return None
+    return t.split("/", 1)[0].strip().lower() or None
+
+
+def nova_vm_primary_ip_host_set(openstack_data: dict | None) -> frozenset[str]:
+    """
+    Host-only IPv4/IPv6 strings from each Nova instance's ``os_primary_ip`` (same pick as VM drift rows).
+
+    Used to avoid proposing ``SET_NETBOX_IP`` on DCIM interfaces when that address is already the
+    audited VM primary (Ironic overlap).
+    """
+    hosts: set[str] = set()
+    for inst in (openstack_data or {}).get("compute_instances") or []:
+        raw = str(inst.get("os_primary_ip") or "").strip()
+        if not raw or raw in _PLACEHOLDER:
+            continue
+        h = _ip_token_host_only(raw)
+        if h:
+            hosts.add(h)
+    return frozenset(hosts)
+
+
+def vm_primary_ip_defer_reason(deferred_hosts: list[str]) -> str:
+    """Operator text for the NIC **Reason** column when device-interface IPs overlap VM primaries."""
+    if not deferred_hosts:
+        return "—"
+    uniq = ", ".join(dict.fromkeys(deferred_hosts))
+    if len(uniq) > 220:
+        uniq = uniq[:217] + "…"
+    return (
+        "Address(es) "
+        + uniq
+        + " match a Nova VM primary IP in this audit; NetBox cannot attach the same IP to this "
+        "device interface (duplicate)—model the IP on the Virtual Machine (Ironic overlap)."
+    )
+
+
 def format_set_netbox_nic_directives(
     *,
     mac: str = "",
     vlan: str = "",
     ips: str = "",
-) -> str:
-    """``SET_NETBOX_MAC`` / ``SET_NETBOX_UNTAGGED_VLAN`` / ``SET_NETBOX_IP`` for new-NIC rows."""
+    vm_primary_hosts: frozenset[str] | None = None,
+) -> tuple[str, str]:
+    """
+    Build ``SET_NETBOX_*`` directives for new-NIC **Proposed Action** only.
+
+    Returns ``(proposed_action, reason)`` where *reason* is ``vm_primary_ip_defer_reason`` when any
+    IP was omitted, else ``"—"``.
+    """
     parts: list[str] = []
+    vm_primary_hosts = vm_primary_hosts or frozenset()
+    deferred_hosts: list[str] = []
     m = str(mac or "").strip()
     if m and m not in _PLACEHOLDER:
         parts.append(f"SET_NETBOX_MAC={m}")
@@ -41,9 +91,16 @@ def format_set_netbox_nic_directives(
     if raw_ips and raw_ips not in _PLACEHOLDER:
         for chunk in re.split(r"[,;\s]+", raw_ips):
             t = chunk.strip()
-            if t and t not in _PLACEHOLDER:
-                parts.append(f"SET_NETBOX_IP={t}")
-    return "; ".join(parts)
+            if not t or t in _PLACEHOLDER:
+                continue
+            h = _ip_token_host_only(t)
+            if h and h in vm_primary_hosts:
+                if h not in deferred_hosts:
+                    deferred_hosts.append(h)
+                continue
+            parts.append(f"SET_NETBOX_IP={t}")
+    reason = vm_primary_ip_defer_reason(deferred_hosts) if deferred_hosts else "—"
+    return "; ".join(parts), reason
 
 
 # --- Reconciliation routing / row labels (with existing handler semantics) ---
