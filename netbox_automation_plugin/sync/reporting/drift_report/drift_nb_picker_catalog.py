@@ -434,16 +434,11 @@ def build_drift_nb_picker_catalog(*, user=None) -> dict[str, list[str]]:
         logger.debug("drift picker intf_role: %s", e)
 
     try:
-        from dcim.models import Interface
+        from netbox_automation_plugin.sync.reconciliation.netbox_interface_types import (
+            all_netbox_interface_type_slugs_sorted,
+        )
 
-        field = Interface._meta.get_field("type")
-        ch = getattr(field, "choices", None) or []
-        slugs = []
-        for val, _lab in ch:
-            if val is None or val == "":
-                continue
-            slugs.append(str(val).strip())
-        out["interface_type"] = sorted(set(slugs) - {""})
+        out["interface_type"] = all_netbox_interface_type_slugs_sorted()
     except Exception as e:
         logger.debug("drift picker interface_type: %s", e)
 

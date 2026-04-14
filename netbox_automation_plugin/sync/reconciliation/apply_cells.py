@@ -1804,8 +1804,9 @@ def _interface_apply_physical_fields_batched(
     if untagged is not None and iface.untagged_vlan_id != untagged.pk:
         iface.untagged_vlan = untagged
         changed = True
-    if type_slug is not None and getattr(iface, "type", None) != type_slug:
-        iface.type = type_slug
+    ct = _coerced_interface_type_slug(type_slug)
+    if ct is not None and getattr(iface, "type", None) != ct:
+        iface.type = ct
         changed = True
     ds = (description or "").strip()
     if ds and hasattr(iface, "description"):
@@ -1852,9 +1853,10 @@ def _interface_apply_physical_fields_stepwise(
         iface.save(**_save_branch())
         any_save = True
         _interface_refresh_safe(iface)
-    if type_slug is not None and getattr(iface, "type", None) != type_slug:
+    ct = _coerced_interface_type_slug(type_slug)
+    if ct is not None and getattr(iface, "type", None) != ct:
         _netbox_changelog_snapshot(iface)
-        iface.type = type_slug
+        iface.type = ct
         iface.save(**_save_branch())
         any_save = True
         _interface_refresh_safe(iface)
@@ -1918,8 +1920,9 @@ def _interface_apply_scalar_and_role_tag_single_save(
     if untagged is not None and iface.untagged_vlan_id != untagged.pk:
         iface.untagged_vlan = untagged
         changed = True
-    if type_slug is not None and getattr(iface, "type", None) != type_slug:
-        iface.type = type_slug
+    ct = _coerced_interface_type_slug(type_slug)
+    if ct is not None and getattr(iface, "type", None) != ct:
+        iface.type = ct
         changed = True
     ds = (description or "").strip()
     if ds and hasattr(iface, "description"):
@@ -1952,45 +1955,23 @@ def _merge_audit_residual_onto_object(
 
 
 def _resolve_interface_type_slug(cell_val: str):
-    """NetBox Interface.type choice value from drift cell (slug or human label)."""
-    try:
-        from dcim.models import Interface
-    except Exception:
+    """NetBox ``Interface.type`` slug from a drift cell (slug, label, or noisy pasted UI text)."""
+    from netbox_automation_plugin.sync.reconciliation.netbox_interface_types import (
+        resolve_interface_type_slug,
+    )
+
+    return resolve_interface_type_slug(cell_val)
+
+
+def _coerced_interface_type_slug(type_slug: Any) -> str | None:
+    """Interface.type value safe for ORM (canonical slug); ``None`` if unmappable or unset."""
+    if type_slug is None:
         return None
-    s = str(cell_val or "").strip()
-    if not s or s in ("—", "-"):
-        return None
-    field = Interface._meta.get_field("type")
-    ch = getattr(field, "choices", None) or []
-    slow = s.lower()
-    for val, lab in ch:
-        if val is None or val == "":
-            continue
-        if str(val).strip().lower() == slow:
-            return val
-    for val, lab in ch:
-        if str(lab).strip().lower() == slow:
-            return val
-    return None
+    from netbox_automation_plugin.sync.reconciliation.netbox_interface_types import (
+        coerce_interface_type_slug_for_orm,
+    )
 
-
-def _interface_type_label_for_orm_write(type_slug: Any) -> str:
-    """Human label for Interface.type (for apply-result ``orm_write`` lines)."""
-    if type_slug is None or type_slug == "":
-        return ""
-    try:
-        from dcim.models import Interface
-
-        field = Interface._meta.get_field("type")
-        ch = getattr(field, "choices", None) or []
-        for val, lab in ch:
-            if val is None or val == "":
-                continue
-            if val == type_slug:
-                return str(lab).strip()
-        return str(type_slug).strip()
-    except Exception:
-        return str(type_slug).strip()
+    return coerce_interface_type_slug_for_orm(type_slug)
 
 
 def _nic_interface_orm_write_dict(
@@ -2018,11 +1999,11 @@ def _nic_interface_orm_write_dict(
     nm = str(getattr(iface, "name", "") or "").strip()
     if nm:
         out["name"] = nm
-    tl = _interface_type_label_for_orm_write(type_slug)
-    if not tl:
-        tl = _interface_type_label_for_orm_write(getattr(iface, "type", None))
-    if tl:
-        out["type"] = tl
+    ts = _coerced_interface_type_slug(type_slug)
+    if ts is None:
+        ts = _coerced_interface_type_slug(getattr(iface, "type", None))
+    if ts:
+        out["type"] = ts
     m = (mac or "").strip()
     if not m:
         ma = getattr(iface, "mac_address", None)
@@ -4545,20 +4526,21 @@ def apply_serial_review(op: dict[str, Any]) -> tuple[str, str]:
 
 
 def _iface_type_default():
-    """
-    Default ``Interface.type`` for creates (new NIC row, BMC mgmt interface).
+    """Default ``Interface.type`` for generic new-interface creates (MAAS host NICs, etc.)."""
+    from netbox_automation_plugin.sync.reconciliation.netbox_interface_types import (
+        netbox_default_bmc_interface_type_slug,
+    )
 
-    We used ``TYPE_OTHER`` historically, but merge-time ``full_clean()`` on some NetBox
-    versions/deployments rejects ``other`` for device interfaces (``Value "other" is not a
-    valid choice``). Physical management / server ports are typically modeled as 1GE copper;
-    ``1000base-t`` matches that and passes validation (same as many hand-entered BMC rows).
-    """
-    try:
-        from dcim.choices import InterfaceTypeChoices
+    return netbox_default_bmc_interface_type_slug()
 
-        return InterfaceTypeChoices.TYPE_1GE_FIXED
-    except Exception:
-        return "1000base-t"
+
+def _bmc_iface_type_default():
+    """Default ``Interface.type`` for new BMC/OOB ports when type is not inferred from sources."""
+    from netbox_automation_plugin.sync.reconciliation.netbox_interface_types import (
+        netbox_oob_interface_type_when_unknown_slug,
+    )
+
+    return netbox_oob_interface_type_when_unknown_slug()
 
 
 def _sync_site_region(site_obj, region_name: str) -> tuple[bool, bool]:
@@ -5642,11 +5624,7 @@ def _bmc_apply(op: dict[str, Any], *, existing_oob: bool) -> tuple[str, str]:
         cells,
         "Suggested NB mgmt iface" if not existing_oob else "Suggested NB OOB Port",
     )
-    type_slug = (
-        None
-        if existing_oob
-        else _resolve_interface_type_slug(_cell(cells, "NB Proposed intf Type"))
-    )
+    type_slug = _resolve_interface_type_slug(_cell(cells, "NB Proposed intf Type"))
     role_label = _cell(cells, "NB Proposed intf Label")
     if not host or not if_name:
         return _skip_missing_prereq(
@@ -5663,7 +5641,7 @@ def _bmc_apply(op: dict[str, Any], *, existing_oob: bool) -> tuple[str, str]:
     iface = _orm_qs(Interface).filter(device=dev, name=if_name).first()
     phy_tag_changed = False
     if iface is None:
-        iface = Interface(device=dev, name=if_name, type=_iface_type_default())
+        iface = Interface(device=dev, name=if_name, type=_bmc_iface_type_default())
         iface.save(**_save_branch())
         phy_tag_changed = _interface_apply_scalar_and_role_tag_single_save(
             iface,
@@ -5981,6 +5959,7 @@ def _netbox_preview_source_header_norms(selection_key: str) -> frozenset[str] | 
             "NB OOB MAC",
             "Suggested NB OOB Port",
             "NB Proposed intf Label",
+            "NB Proposed intf Type",
             "NetBox OOB",
             "NB proposed VRF",
             "NetBox VRF",

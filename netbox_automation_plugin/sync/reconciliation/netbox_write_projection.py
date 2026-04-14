@@ -27,7 +27,8 @@ Location field); apply requires **NB site** and sets ``VLAN.site`` when the mode
 
 **New / NIC drift interfaces**: projection uses ``untagged_vlan_vid`` (802.1Q tag parsed from
 audit cells), not NetBox ``ipam.VLAN`` database ``id`` — avoids confusing VID with VLAN pk in
-apply logs and preview tables.
+apply logs and preview tables. The ``type`` key is the NetBox ``Interface.type`` **slug**
+(resolved from ``NB Proposed intf Type`` cells, which may contain labels or HTML).
 
 Imports from ``apply_cells`` are deferred inside functions to avoid import cycles while
 ``apply_cells`` is still loading.
@@ -40,6 +41,9 @@ from typing import Any
 
 from netbox_automation_plugin.sync.reporting.drift_report.drift_nb_picker_catalog import (
     coerce_nb_proposed_tenant_cell,
+)
+from netbox_automation_plugin.sync.reconciliation.netbox_interface_types import (
+    resolve_interface_type_slug,
 )
 
 # Full projection key order for recon preview tables. Optional ``tenant`` appears only on rows
@@ -219,6 +223,13 @@ def netbox_write_projection_cells(selection_key: str, cells: dict[str, str] | No
     sk = str(selection_key or "").strip()
     c = cells or {}
 
+    def _proposed_interface_type_slug_preview(cc: dict[str, str]) -> str:
+        raw = (_cell(cc, "NB Proposed intf Type") or "").strip()
+        if not raw or raw in ("—", "-"):
+            return "—"
+        slug = resolve_interface_type_slug(raw)
+        return slug if slug else "—"
+
     def _device_netbox_write_preview(cc: dict[str, str]) -> dict[str, str]:
         serial = _cell(cc, "Serial Number", "MAAS Serial")
         platform_src = _cell(cc, "NB proposed platform", "OS provision", "OS release")
@@ -267,7 +278,7 @@ def netbox_write_projection_cells(selection_key: str, cells: dict[str, str] | No
         return {
             "device": _cell(cc, "Host"),
             "name": if_name,
-            "type": _cell(cc, "NB Proposed intf Type"),
+            "type": _proposed_interface_type_slug_preview(cc),
             "mac_address": mac or "—",
             "untagged_vlan_vid": str(vid) if vid else "—",
             "description": if_desc or "—",
@@ -289,7 +300,7 @@ def netbox_write_projection_cells(selection_key: str, cells: dict[str, str] | No
         return {
             "device": _cell(cc, "Host"),
             "name": _cell(cc, "NB intf"),
-            "type": _cell(cc, "NB Proposed intf Type"),
+            "type": _proposed_interface_type_slug_preview(cc),
             "mac_address": mac or "—",
             "untagged_vlan_vid": str(vid) if vid else "—",
             "description": if_desc or "—",
@@ -313,6 +324,7 @@ def netbox_write_projection_cells(selection_key: str, cells: dict[str, str] | No
             return {
                 "device": _cell(cc, "Host"),
                 "name": if_name,
+                "type": _proposed_interface_type_slug_preview(cc),
                 "mac_address": mac or "—",
                 "tags": _cell(cc, "NB Proposed intf Label"),
                 "IPAddress.address": bmc_ip or "—",
@@ -322,7 +334,7 @@ def netbox_write_projection_cells(selection_key: str, cells: dict[str, str] | No
             "device": _cell(cc, "Host"),
             "name": if_name,
             "mac_address": mac or "—",
-            "type": _cell(cc, "NB Proposed intf Type"),
+            "type": _proposed_interface_type_slug_preview(cc),
             "tags": _cell(cc, "NB Proposed intf Label"),
             "IPAddress.address": bmc_ip or "—",
         }

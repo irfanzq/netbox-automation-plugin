@@ -289,6 +289,7 @@ HEADERS_BMC_EXISTING: list[str] = [
     "OS model",
     "OS LLDP switch",
     "NB Proposed intf Label",
+    "NB Proposed intf Type",
     "Suggested NB OOB Port",
     "NetBox OOB",
     "NB IP coverage",

@@ -350,11 +350,15 @@ def derive_nic_proposed_columns(
 
 def bmc_row_proposed_defaults(_machine: dict | None) -> dict[str, str]:
     """Defaults for BMC / OOB drift table columns (label/type/LLDP display helpers)."""
+    from netbox_automation_plugin.sync.reconciliation.netbox_interface_types import (
+        netbox_oob_interface_type_when_unknown_slug,
+    )
+
     return {
         "os_lldp_switch_disp": "—",
         "maas_lldp_switch_disp": "—",
         "os_switch_disp": "—",
         "maas_nic_model": "—",
         "nb_proposed_intf_label": "BMC",
-        "nb_proposed_intf_type": "other",
+        "nb_proposed_intf_type": netbox_oob_interface_type_when_unknown_slug(),
     }

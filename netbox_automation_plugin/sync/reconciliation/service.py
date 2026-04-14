@@ -1295,6 +1295,10 @@ def _orm_instance_field_snapshot(
     """
     Flatten a NetBox model instance to projection-like ``field -> str`` pairs.
 
+    The generic walk adds at most **48** populated scalar/FK fields (model field order).
+    Busy ``dcim.Interface`` rows can exceed that before ``mac_address`` / ``untagged_vlan``;
+    the readback branch therefore **always** merges those when present.
+
     ``mode``:
     - ``readback`` (default): full snapshot used after apply for branch comparison; for
       ``dcim.interface``, includes assigned IPs, tag names, and parent device site/location.
@@ -1343,6 +1347,20 @@ def _orm_instance_field_snapshot(
             out[name] = s
             n += 1
         if str(opts.label_lower) == "dcim.interface" and mode == "readback":
+            try:
+                ma = getattr(obj, "mac_address", None)
+                if ma is not None and str(ma).strip():
+                    out["mac_address"] = str(ma).strip()
+                uv = getattr(obj, "untagged_vlan", None)
+                if uv is not None:
+                    vvid = getattr(uv, "vid", None)
+                    if vvid is not None:
+                        out["untagged_vlan_vid"] = str(vvid)
+                    uvn = str(getattr(uv, "name", None) or "").strip()
+                    if uvn:
+                        out["untagged_vlan"] = uvn
+            except Exception:
+                pass
             ips = _interface_assigned_ip_blob(obj, using)
             if ips:
                 out["IPAddress.address"] = ips
