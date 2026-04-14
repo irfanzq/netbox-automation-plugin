@@ -3948,6 +3948,17 @@ def apply_reconciliation_run(
         else:
             run.error_message = ""
         run.save(update_fields=["apply_results", "status", "error_message", "last_updated"])
+        logger.info(
+            "reconciliation_apply_batch_done run_pk=%s final_status=%s attempted=%s "
+            "created=%s updated=%s skipped=%s failed=%s",
+            run.pk,
+            final_status,
+            len(applied_rows),
+            created,
+            updated,
+            skipped,
+            failed,
+        )
 
     return run
 

@@ -64,28 +64,21 @@
           var dest = res.body.redirect_url || opts.fallbackRedirect || "";
           if (dest) {
             var applyResultsDest = dest.indexOf("/apply-results/") !== -1;
-            var alreadyOnApplyResults =
-              window.location.pathname.indexOf("/apply-results/") !== -1;
             function destWithCacheBust(u) {
               var sep = u.indexOf("?") >= 0 ? "&" : "?";
               return u + sep + "_nap_apply_refresh=" + Date.now();
             }
-            if (applyResultsDest && alreadyOnApplyResults) {
+            // Always load apply results in **this** tab (do not rely on window.open). Popups
+            // were racing read replicas / commit visibility: the new tab often GETs before
+            // ``apply_results`` is readable, so the first paint looked empty; a second apply
+            // then showed skipped/updated from the first run. A short delay + cache-bust URL
+            // gives the ORM commit time to propagate on typical primary/replica setups.
+            var navDelayMs = 250;
+            if (applyResultsDest) {
               if (msg) msg.textContent = "{% filter escapejs %}{% trans "Opening results…" %}{% endfilter %}";
-              window.location.href = destWithCacheBust(dest);
-            } else if (applyResultsDest) {
-              var w = null;
-              try {
-                w = window.open(destWithCacheBust(dest), "_blank", "noopener");
-              } catch (e2) {}
-              if (w && !w.closed) {
-                if (msg) msg.textContent = "{% filter escapejs %}{% trans "Apply finished. Results opened in a new tab." %}{% endfilter %}";
-                willNavigate = false;
-                setLifecycleBusy(false, null);
-              } else {
-                if (msg) msg.textContent = "{% filter escapejs %}{% trans "Opening results…" %}{% endfilter %}";
+              window.setTimeout(function () {
                 window.location.href = destWithCacheBust(dest);
-              }
+              }, navDelayMs);
             } else {
               if (msg) msg.textContent = "{% filter escapejs %}{% trans "Opening results…" %}{% endfilter %}";
               window.location.href = dest;
