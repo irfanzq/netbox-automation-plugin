@@ -236,6 +236,9 @@
     {% trans "No per-row table for this view; see the summary cards above (attempted count may be zero)." %}
   </p>
 {% elif not apply_results.summary %}
+  {% if run.status == "draft" or run.status == "branch_creating" or run.status == "branch_created" or run.status == "branch_create_failed" or run.status == "branch_not_ready" or run.status == "apply_in_progress" %}
+    {# No persisted apply summary yet — omit empty-state alert (pre-apply or in-flight; lifecycle / banner above cover next steps). #}
+  {% else %}
   <div class="alert alert-secondary mb-0">
     <p class="mb-2">{% trans "No apply has been recorded for this run yet. Use Apply from the lifecycle card above; when apply finishes successfully, this page should show a summary and row tables." %}</p>
     <p class="small mb-0 text-body-secondary">
@@ -244,4 +247,5 @@
       {% endblocktrans %}
     </p>
   </div>
+  {% endif %}
 {% endif %}

@@ -1257,6 +1257,110 @@ def _vlan_vid_over_ieee_max_from_proposed_body(body: str) -> int | None:
     return None
 
 
+_dcim_interface_has_mac_address_model_field: bool | None = None
+
+
+def _dcim_interface_mac_is_legacy_db_field() -> bool:
+    """
+    NetBox 4.2+ stores device interface MACs on ``dcim.MACAddress`` (``primary_mac_address`` FK).
+    Older versions used an ``Interface.mac_address`` model column; assigning that attribute then
+    no longer persists (and readback stays empty) when the column is gone.
+    """
+    global _dcim_interface_has_mac_address_model_field
+    if _dcim_interface_has_mac_address_model_field is not None:
+        return _dcim_interface_has_mac_address_model_field
+    try:
+        from dcim.models import Interface
+        from django.core.exceptions import FieldDoesNotExist
+
+        Interface._meta.get_field("mac_address")
+        _dcim_interface_has_mac_address_model_field = True
+    except FieldDoesNotExist:
+        _dcim_interface_has_mac_address_model_field = False
+    except Exception:
+        _dcim_interface_has_mac_address_model_field = False
+    return _dcim_interface_has_mac_address_model_field
+
+
+def _interface_mac_strings_equal(a: str | None, b: str | None) -> bool:
+    na = _normalize_mac(a or "") or (str(a or "").strip().upper().replace("-", ":"))
+    nb = _normalize_mac(b or "") or (str(b or "").strip().upper().replace("-", ":"))
+    if not na or not nb:
+        return False
+    return na.upper() == nb.upper()
+
+
+def _interface_mac_apply_needed(iface: Any, mac_raw: str) -> bool:
+    m = (mac_raw or "").strip()
+    if not m:
+        return False
+    cur_prop = getattr(iface, "mac_address", None)
+    cur_s = str(cur_prop).strip() if cur_prop is not None else ""
+    return (not cur_s) or (not _interface_mac_strings_equal(cur_s, m))
+
+
+def _persist_interface_mac(iface: Any, mac_raw: str) -> bool:
+    """
+    Persist ``mac_raw`` onto ``iface``.
+
+    - Legacy NetBox: assign ``Interface.mac_address`` (column).
+    - Modern NetBox: create/update ``dcim.MACAddress`` and wire ``primary_mac_address``.
+
+    Returns True when the interface (or its primary MAC row) was mutated such that callers
+    typically need an ``Interface`` save for primary FK (legacy field and new-primary cases)
+    or have already completed the MAC side (in-place MACAddress update still returns True so
+    apply-result logic records a touch).
+    """
+    if not _interface_mac_apply_needed(iface, mac_raw):
+        return False
+    m = (mac_raw or "").strip()
+    kw = _save_branch()
+
+    if _dcim_interface_mac_is_legacy_db_field():
+        iface.mac_address = _normalize_mac(m) or m
+        return True
+
+    from dcim.models import MACAddress
+
+    norm = _normalize_mac(m) or m
+    pm = getattr(iface, "primary_mac_address", None)
+    if pm is not None and getattr(pm, "pk", None):
+        if not _interface_mac_strings_equal(str(getattr(pm, "mac_address", "")), m):
+            pm.mac_address = norm
+            pm.save(**kw)
+        if getattr(pm, "assigned_object_id", None) != getattr(iface, "pk", None):
+            pm.assigned_object = iface
+            pm.save(**kw)
+        iface.primary_mac_address = pm
+        try:
+            del iface.__dict__["mac_address"]
+        except (KeyError, TypeError):
+            pass
+        return True
+
+    mac_obj = MACAddress(mac_address=norm, assigned_object=iface)
+    mac_obj.save(**kw)
+    iface.primary_mac_address = mac_obj
+    try:
+        del iface.__dict__["mac_address"]
+    except (KeyError, TypeError):
+        pass
+    return True
+
+
+def _ensure_iface_mode_for_untagged_vlan(iface: Any) -> bool:
+    """802.1Q ``mode`` must be set or NetBox ``BaseInterface.save`` clears ``untagged_vlan``."""
+    if getattr(iface, "mode", None):
+        return False
+    try:
+        from dcim.choices import InterfaceModeChoices
+
+        iface.mode = InterfaceModeChoices.MODE_ACCESS
+        return True
+    except Exception:
+        return False
+
+
 def _normalize_mac(raw: str) -> str | None:
     s = str(raw or "").strip().upper()
     if not s or s in ("—", "-"):
@@ -1799,8 +1903,9 @@ def _interface_apply_physical_fields_batched(
     _interface_refresh_safe(iface)
     _netbox_changelog_snapshot(iface)
     changed = False
-    if mac and str(iface.mac_address or "").upper() != mac.upper():
-        iface.mac_address = mac
+    if untagged is not None and _ensure_iface_mode_for_untagged_vlan(iface):
+        changed = True
+    if _persist_interface_mac(iface, mac):
         changed = True
     if untagged is not None and iface.untagged_vlan_id != untagged.pk:
         iface.untagged_vlan = untagged
@@ -1842,18 +1947,24 @@ def _interface_apply_physical_fields_stepwise(
     _interface_refresh_safe(iface)
     any_save = False
     m = (mac or "").strip()
-    if m and str(iface.mac_address or "").upper() != m.upper():
+    if m and _interface_mac_apply_needed(iface, m):
         _netbox_changelog_snapshot(iface)
-        iface.mac_address = mac
+        _persist_interface_mac(iface, m)
         iface.save(**_save_branch())
         any_save = True
         _interface_refresh_safe(iface)
-    if untagged is not None and iface.untagged_vlan_id != untagged.pk:
-        _netbox_changelog_snapshot(iface)
-        iface.untagged_vlan = untagged
-        iface.save(**_save_branch())
-        any_save = True
-        _interface_refresh_safe(iface)
+    if untagged is not None:
+        if _ensure_iface_mode_for_untagged_vlan(iface):
+            _netbox_changelog_snapshot(iface)
+            iface.save(**_save_branch())
+            any_save = True
+            _interface_refresh_safe(iface)
+        if iface.untagged_vlan_id != untagged.pk:
+            _netbox_changelog_snapshot(iface)
+            iface.untagged_vlan = untagged
+            iface.save(**_save_branch())
+            any_save = True
+            _interface_refresh_safe(iface)
     ct = _coerced_interface_type_slug(type_slug)
     if ct is not None and getattr(iface, "type", None) != ct:
         _netbox_changelog_snapshot(iface)
@@ -1915,12 +2026,14 @@ def _interface_apply_scalar_and_role_tag_single_save(
         iface.description = None
         changed = True
     m = (mac or "").strip()
-    if m and str(iface.mac_address or "").upper() != m.upper():
-        iface.mac_address = mac
+    if _persist_interface_mac(iface, mac):
         changed = True
-    if untagged is not None and iface.untagged_vlan_id != untagged.pk:
-        iface.untagged_vlan = untagged
-        changed = True
+    if untagged is not None:
+        if _ensure_iface_mode_for_untagged_vlan(iface):
+            changed = True
+        if iface.untagged_vlan_id != untagged.pk:
+            iface.untagged_vlan = untagged
+            changed = True
     ct = _coerced_interface_type_slug(type_slug)
     if ct is not None and getattr(iface, "type", None) != ct:
         iface.type = ct
