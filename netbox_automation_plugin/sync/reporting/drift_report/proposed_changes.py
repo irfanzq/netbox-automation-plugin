@@ -1926,9 +1926,10 @@ def _proposed_changes_rows(
                 cur_dn = ""
                 if getattr(vm, "device_id", None) and vm.device:
                     cur_dn = (vm.device.name or "").strip().lower()
-                if valid_dev_names:
-                    if not cur_dn or cur_dn not in valid_dev_names:
-                        drift_vm.append("device")
+                # Only treat as drift when NetBox has a *wrong* device link. Bare-metal-style VMs
+                # often intentionally omit ``device`` while hypervisor hostname is populated.
+                if valid_dev_names and cur_dn and cur_dn not in valid_dev_names:
+                    drift_vm.append("device")
                 if str(vm.status).lower() != nb_vm_status.lower():
                     drift_vm.append("status")
                 if prop_cluster and prop_cluster not in {"—", "-"} and cur_cl != prop_cluster:

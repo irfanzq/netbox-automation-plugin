@@ -27,8 +27,10 @@ merging a branch. Notable constraints: (1) ``VirtualMachine.primary_ip4`` / ``pr
 ``_ensure_ipaddress_for_vm_primary`` / ``_apply_vm_primary_ip_link``). (2)
 ``Device.primary_ip4`` / ``primary_ip6`` / ``oob_ip`` —
 the address must be assigned to an interface in that device’s effective interface set
-(virtual chassis); reconciliation apply here does **not** set those fields (devices are
-created without primary/OOB; NIC apply only attaches IPs to ``dcim.Interface``). (3) VLAN,
+(virtual chassis). Reconciliation does **not** set primary IPs from drift here; **BMC apply**
+(``bmc_alignment`` / ``bmc_documentation``) assigns the canonical BMC address to the OOB
+interface, prunes other addresses on that interface, and points ``Device.oob_ip`` at the
+same ``IPAddress`` when the model exposes that field. (3) VLAN,
 prefix, tenant, IP range, floating IP creates/updates use normal ORM ``save()`` and therefore
 hit model validation at apply time; merge failures usually mean main diverged (duplicate
 prefix, scope mismatch) rather than missing assignment logic.
@@ -4395,8 +4397,8 @@ _MANDATORY_NETBOX_PREVIEW_FIELDS: dict[str, tuple[str, ...]] = {
     "detail_existing_vms": ("id", "name", "cluster"),
     "detail_nic_drift_os": ("device", "name"),
     "detail_nic_drift_maas": ("device", "name"),
-    "detail_bmc_new_devices": ("device", "name", "IPAddress.address"),
-    "detail_bmc_existing": ("device", "name", "IPAddress.address"),
+    "detail_bmc_new_devices": ("device", "name", "IPAddress.address", "oob_ip"),
+    "detail_bmc_existing": ("device", "name", "IPAddress.address", "oob_ip"),
     "detail_serial_review": ("name", "serial"),
 }
 
@@ -4421,6 +4423,7 @@ _PREVIEW_FIELD_LABELS: dict[str, str] = {
     "description": "Description",
     "tags": "Tags / labels",
     "IPAddress.address": "IP address",
+    "oob_ip": "Out-of-band IP (device)",
     "start_address": "Start address",
     "end_address": "End address",
     "address": "Address",
@@ -5144,6 +5147,90 @@ def _assign_ips_to_interface(iface, ip_blob: str, vrf) -> tuple[bool, bool, bool
     return changed, row_had_ip_tokens, any_parse_ok
 
 
+def _first_normalized_ip_from_blob(ip_blob: str) -> str | None:
+    for raw in _split_ip_candidates(str(ip_blob or "").strip()):
+        try:
+            return _normalize_ip_for_netbox(raw.split()[0])
+        except Exception:
+            continue
+    return None
+
+
+def _iface_ip_rows_assigned(iface) -> list[Any]:
+    try:
+        mgr = getattr(iface, "ip_addresses", None)
+        if mgr is not None:
+            return list(mgr.all())
+    except Exception:
+        pass
+    return []
+
+
+def _bmc_prune_or_detach_ip_row(ip_row: Any) -> bool:
+    """Remove an IP from NetBox, or clear its interface assignment if delete is blocked."""
+    try:
+        _netbox_changelog_snapshot(ip_row)
+        ip_row.delete()
+        return True
+    except Exception:
+        logger.debug("BMC IP prune: delete failed; try unassign", exc_info=True)
+    try:
+        _netbox_changelog_snapshot(ip_row)
+        if hasattr(ip_row, "assigned_object"):
+            ip_row.assigned_object = None
+        elif hasattr(ip_row, "interface_id"):
+            ip_row.interface_id = None
+        ip_row.save(**_save_branch())
+        return True
+    except Exception:
+        logger.debug("BMC IP prune: unassign failed", exc_info=True)
+        return False
+
+
+def _prune_bmc_interface_ips_to_single(iface: Any, keep_normalized: str) -> bool:
+    """
+    Leave exactly one ``IPAddress`` on ``iface``: the row whose ``address`` matches
+    ``keep_normalized``. Every other assignment on that interface is removed.
+    """
+    changed = False
+    seen_keep = False
+    for ip_row in _iface_ip_rows_assigned(iface):
+        cur = str(getattr(ip_row, "address", "") or "").strip()
+        if cur == keep_normalized:
+            if seen_keep:
+                changed |= _bmc_prune_or_detach_ip_row(ip_row)
+            else:
+                seen_keep = True
+            continue
+        changed |= _bmc_prune_or_detach_ip_row(ip_row)
+    return changed
+
+
+def _sync_device_oob_ip_if_supported(dev: Any, keep_normalized: str, vrf: Any) -> bool:
+    """Point ``Device.oob_ip`` at the ``IPAddress`` for ``keep_normalized`` when the field exists."""
+    try:
+        dev._meta.get_field("oob_ip")
+    except Exception:
+        return False
+    from ipam.models import IPAddress
+
+    qs = _orm_qs(IPAddress).filter(address=keep_normalized)
+    if vrf is not None:
+        hit = qs.filter(vrf_id=getattr(vrf, "pk", None)).first()
+    else:
+        hit = qs.filter(vrf__isnull=True).first()
+    if hit is None:
+        hit = qs.first()
+    if hit is None:
+        return False
+    if getattr(dev, "oob_ip_id", None) == getattr(hit, "pk", None):
+        return False
+    _netbox_changelog_snapshot(dev)
+    dev.oob_ip = hit
+    dev.save(**_save_branch())
+    return True
+
+
 def _fallback_device_type_label_for_bootstrap() -> str:
     """
     Label for ``NB proposed device type`` when inferring a DCIM device from a NIC or placement row.
@@ -5723,7 +5810,7 @@ def apply_update_interface(op: dict[str, Any]) -> Any:
 
 
 def _bmc_apply(op: dict[str, Any], *, existing_oob: bool) -> tuple[str, str]:
-    from dcim.models import Interface
+    from dcim.models import Device, Interface
 
     cells = op.get("cells") or {}
     if (reason := skip_reason_from_row_guides(cells)) is not None:
@@ -5777,16 +5864,25 @@ def _bmc_apply(op: dict[str, Any], *, existing_oob: bool) -> tuple[str, str]:
             role_label=role_label,
         )
     ip_vrf = _vrf_for_ip_from_row_cells(cells)
-    combined_blob = (
-        " ".join(x for x in (bmc_ip_maas, bmc_ip_os, bmc_ip_nb) if (x or "").strip())
-        or str(bmc_ip).strip()
-    )
+    apply_blob = str(bmc_ip or "").strip()
     try:
-        for raw in _split_ip_candidates(combined_blob):
+        for raw in _split_ip_candidates(apply_blob):
             _normalize_ip_for_netbox(raw.split()[0])
     except Exception:
         return "failed", "failed_validation_bad_ip"
-    ip_changed, _, _ = _assign_ips_to_interface(iface, combined_blob, ip_vrf)
+    ip_changed, _, _ = _assign_ips_to_interface(iface, apply_blob, ip_vrf)
+    target_norm = _first_normalized_ip_from_blob(apply_blob)
+    if target_norm:
+        if _prune_bmc_interface_ips_to_single(iface, target_norm):
+            ip_changed = True
+        dev = _orm_qs(Device).filter(pk=dev.pk).first()
+        if dev is None:
+            return "failed", "failed_device_missing_after_bmc_ip_prune"
+        if _sync_device_oob_ip_if_supported(dev, target_norm, ip_vrf):
+            ip_changed = True
+            dev = _orm_qs(Device).filter(pk=dev.pk).first()
+            if dev is not None and (bad := _fail_merge_precheck_if_invalid(dev, model_label="Device")) is not None:
+                return bad
     desc_changed = False
     if not created and _scrub_interface_drift_audit_description(iface):
         desc_changed = True

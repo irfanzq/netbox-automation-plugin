@@ -9,6 +9,34 @@ import logging
 logger = logging.getLogger("netbox_automation_plugin.sync")
 
 
+def _dcim_interface_effective_mac_str(iface) -> str:
+    """
+    Normalized aa:bb:cc:dd:ee:ff for drift/audit snapshots.
+
+    NetBox 4.2+ stores interface MACs on ``dcim.MACAddress`` (``primary_mac_address`` FK);
+    the legacy ``Interface.mac_address`` column may be absent while the property still
+    resolves from the primary MAC row.
+    """
+    mac = ""
+    try:
+        prop = getattr(iface, "mac_address", None)
+        if prop is not None and str(prop).strip():
+            mac = str(prop).lower().replace("-", ":")
+    except Exception:
+        mac = ""
+    if mac:
+        return mac
+    try:
+        pm = getattr(iface, "primary_mac_address", None)
+        if pm is not None:
+            raw = getattr(pm, "mac_address", None)
+            if raw is not None and str(raw).strip():
+                return str(raw).lower().replace("-", ":")
+    except Exception:
+        pass
+    return ""
+
+
 def fetch_netbox_data_local():
     """
     Read sites and devices from this NetBox via Django ORM (like vlan_deployment).
@@ -207,8 +235,14 @@ def fetch_netbox_audit_detail_for_names(names: set):
         from ipam.models import IPAddress
 
         names_list = list(names)[:8000]
+        iface_rel = ["untagged_vlan"]
+        try:
+            Interface._meta.get_field("primary_mac_address")
+            iface_rel.append("primary_mac_address")
+        except Exception:
+            pass
         iface_qs = (
-            Interface.objects.select_related("untagged_vlan")
+            Interface.objects.select_related(*iface_rel)
             .prefetch_related(
                 Prefetch(
                     "ip_addresses",
@@ -245,15 +279,11 @@ def fetch_netbox_audit_detail_for_names(names: set):
             serial = (getattr(d, "serial", None) or "").strip()
             primary_mac = ""
             try:
-                ifaces = [
-                    i
-                    for i in d.interfaces.all()
-                    if i.mac_address
-                ]
+                ifaces = [i for i in d.interfaces.all() if _dcim_interface_effective_mac_str(i)]
                 mgmt = [i for i in ifaces if getattr(i, "mgmt_only", False)]
                 pick = mgmt[0] if mgmt else (ifaces[0] if ifaces else None)
                 if pick:
-                    primary_mac = str(pick.mac_address).lower()
+                    primary_mac = _dcim_interface_effective_mac_str(pick)
             except Exception:
                 pass
             primary_ip4_host = ""
@@ -389,10 +419,13 @@ def fetch_netbox_interfaces_for_names(names: set):
         from ipam.models import IPAddress
 
         names_list = list(names)[:2000]
-        iface_qs = Interface.objects.select_related(
-            "untagged_vlan",
-            "cable",
-        ).prefetch_related(
+        iface_rel = ["untagged_vlan", "cable"]
+        try:
+            Interface._meta.get_field("primary_mac_address")
+            iface_rel.insert(0, "primary_mac_address")
+        except Exception:
+            pass
+        iface_qs = Interface.objects.select_related(*iface_rel).prefetch_related(
             Prefetch(
                 "ip_addresses",
                 queryset=IPAddress.objects.select_related("vrf"),
@@ -421,9 +454,7 @@ def fetch_netbox_interfaces_for_names(names: set):
                 pass
             lst = []
             for iface in d.interfaces.all():
-                mac = ""
-                if iface.mac_address:
-                    mac = str(iface.mac_address).lower().replace("-", ":")
+                mac = _dcim_interface_effective_mac_str(iface)
                 ips = []
                 ip_vrfs = []
                 for ip in iface.ip_addresses.all():

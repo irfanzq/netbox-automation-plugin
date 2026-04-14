@@ -315,6 +315,13 @@ def netbox_write_projection_cells(selection_key: str, cells: dict[str, str] | No
         bmc_ip_os = _cell(cc, "OS BMC IP")
         bmc_ip_nb = _cell(cc, "NB mgmt iface IP")
         bmc_ip = bmc_ip_maas or bmc_ip_os or bmc_ip_nb
+        addr_disp = bmc_ip or "—"
+        try:
+            norm = ac._first_normalized_ip_from_blob(str(bmc_ip or "").strip())
+            if norm:
+                addr_disp = norm
+        except Exception:
+            pass
         mac = ac._normalize_mac(_cell(cc, "MAAS BMC MAC", "NB OOB MAC"))
         if_name = _cell(
             cc,
@@ -327,7 +334,8 @@ def netbox_write_projection_cells(selection_key: str, cells: dict[str, str] | No
                 "type": _proposed_interface_type_slug_preview(cc),
                 "mac_address": mac or "—",
                 "tags": _cell(cc, "NB Proposed intf Label"),
-                "IPAddress.address": bmc_ip or "—",
+                "IPAddress.address": addr_disp,
+                "oob_ip": addr_disp,
                 "description": _cell(cc, "NetBox OOB"),
             }
         return {
@@ -336,7 +344,8 @@ def netbox_write_projection_cells(selection_key: str, cells: dict[str, str] | No
             "mac_address": mac or "—",
             "type": _proposed_interface_type_slug_preview(cc),
             "tags": _cell(cc, "NB Proposed intf Label"),
-            "IPAddress.address": bmc_ip or "—",
+            "IPAddress.address": addr_disp,
+            "oob_ip": addr_disp,
         }
 
     if sk == "detail_placement_lifecycle_alignment":

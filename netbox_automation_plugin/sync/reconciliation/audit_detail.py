@@ -488,6 +488,15 @@ def build_maas_netbox_interface_audit(
                     mac_mismatch = True
                     notes.append(f"mac-drift: MAAS MAC {mac} != NetBox {nb.get('mac') or '-'}")
 
+            nb_mac_norm = _normalize_mac(nb.get("mac") or "")
+            if not nb_mac_norm and (mac or (os_authoritative and os_mac)):
+                mac_mismatch = True
+                joined_low = " ".join(notes).lower()
+                if "netbox mac empty" not in joined_low:
+                    notes.append(
+                        "netbox mac empty — set NB primary MAC to MAAS/OpenStack value for this NIC"
+                    )
+
             if vlan_drift and missing_nb:
                 status = "OS_RUNTIME_VLAN_DRIFT+IP_GAP" if os_authoritative else "VLAN_DRIFT+IP_GAP"
             elif vlan_drift:
