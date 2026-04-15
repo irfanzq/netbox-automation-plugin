@@ -53,13 +53,12 @@
         return r.json().then(function(j) { return { ok: r.ok, body: j }; });
       }).then(function(res) {
         if (res.ok && res.body && res.body.ok) {
+          var stayOnPage = !!opts.stayOnPageOnSuccess;
           willNavigate = true;
-          if (opts.openBranchPageRefresh && res.body.branching_branch_url) {
-            var base = res.body.branching_branch_url;
-            var sep = base.indexOf("?") >= 0 ? "&" : "?";
-            try {
-              window.open(base + sep + "_nap_branch_refresh=" + Date.now(), "_blank", "noopener");
-            } catch (e) {}
+          if (stayOnPage) {
+            if (msg) msg.textContent = "{% filter escapejs %}{% trans "Action complete. Refreshing…" %}{% endfilter %}";
+            window.location.reload();
+            return;
           }
           var dest = res.body.redirect_url || opts.fallbackRedirect || "";
           if (dest) {
@@ -126,7 +125,10 @@
     var retryUrl = "{{ retry_failed_url|escapejs }}";
     if (applyBtn) {
       applyBtn.addEventListener("click", function() {
-        postAction("{{ apply_url|escapejs }}", applyBtn, { openBranchPageRefresh: true, fallbackRedirect: applyResultsUrl });
+        postAction("{{ apply_url|escapejs }}", applyBtn, {
+          fallbackRedirect: applyResultsUrl,
+          stayOnPageOnSuccess: true
+        });
       });
     }
     function wireRetry(btn, payload) {
@@ -134,6 +136,7 @@
       btn.addEventListener("click", function() {
         postAction(retryUrl, btn, {
           fallbackRedirect: applyResultsUrl,
+          stayOnPageOnSuccess: true,
           body: JSON.stringify(payload || { retry: "failed" })
         });
       });

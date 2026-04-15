@@ -9,6 +9,9 @@
     {% endif %}
     <div class="d-flex flex-wrap gap-1 align-items-center">
       <button type="button" class="btn btn-primary btn-sm js-recon-apply js-recon-lifecycle-btn" data-initial-disabled="{% if not can_apply %}true{% else %}false{% endif %}" {% if not can_apply %}disabled{% endif %}>{% trans "Apply selected changes to branch" %}</button>
+      {% if run.status == "applied" and not can_apply %}
+      <a href="{{ apply_results_url }}" class="btn btn-outline-secondary btn-sm js-recon-page-link" data-loading-label="{% trans 'Apply logs' %}">{% trans "View apply logs" %}</a>
+      {% endif %}
       <button type="button" class="btn btn-outline-primary btn-sm js-recon-retry-failed js-recon-lifecycle-btn" data-initial-disabled="{% if not can_retry_failed %}true{% else %}false{% endif %}" {% if not can_retry_failed %}disabled{% endif %} title="{% trans 'Rows whose latest status is failed' %}">{% trans "Re-apply failed" %} ({{ recon_apply_failed_row_count|default:0 }})</button>
       <button type="button" class="btn btn-outline-primary btn-sm js-recon-retry-skipped js-recon-lifecycle-btn" data-initial-disabled="{% if not can_retry_skipped %}true{% else %}false{% endif %}" {% if not can_retry_skipped %}disabled{% endif %} title="{% trans 'Rows whose latest status is skipped (e.g. missing device); device rows for the same host are included when present' %}">{% trans "Re-apply skipped" %} ({{ recon_apply_skipped_row_count|default:0 }})</button>
       <button type="button" class="btn btn-outline-secondary btn-sm js-recon-retry-both js-recon-lifecycle-btn" data-initial-disabled="{% if not can_retry_failed_or_skipped %}true{% else %}false{% endif %}" {% if not can_retry_failed_or_skipped %}disabled{% endif %} title="{% trans 'Union of failed and skipped rows in one pass' %}">{% trans "Re-apply failed & skipped" %}</button>

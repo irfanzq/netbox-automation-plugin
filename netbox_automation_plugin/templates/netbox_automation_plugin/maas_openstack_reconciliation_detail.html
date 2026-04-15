@@ -44,6 +44,9 @@
 
     {% include "netbox_automation_plugin/_reconciliation_page_nav.html" %}
     {% include "netbox_automation_plugin/_reconciliation_lifecycle_card.html" %}
+    {% with apply_results=apply_results|default:{} %}
+      {% include "netbox_automation_plugin/_reconciliation_apply_results_sections.html" %}
+    {% endwith %}
 
     {% include "netbox_automation_plugin/_reconciliation_apply_snapshot_block.html" %}
   </div>

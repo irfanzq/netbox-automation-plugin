@@ -3721,6 +3721,7 @@ def apply_reconciliation_run(
             MAASOpenStackReconciliationRun.STATUS_BRANCH_CREATED,
             MAASOpenStackReconciliationRun.STATUS_APPLY_FAILED_PARTIAL,
             MAASOpenStackReconciliationRun.STATUS_APPLY_FAILED,
+            MAASOpenStackReconciliationRun.STATUS_APPLIED,
         }
     if run.status not in allowed:
         raise ValueError(f"Run status '{run.status}' cannot enter apply.")
