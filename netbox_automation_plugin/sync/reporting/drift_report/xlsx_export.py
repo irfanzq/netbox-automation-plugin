@@ -17,6 +17,7 @@ from netbox_automation_plugin.sync.reporting.drift_report.fabric_alignment impor
     _alignment_review_rows,
 )
 from netbox_automation_plugin.sync.reporting.drift_report.metrics import (
+    _align_phase0_counts_with_rendered_details,
     _count_hints,
     _phase0_category_counts,
     _run_metadata_rows,
@@ -186,12 +187,42 @@ def build_drift_report_xlsx(
         )
     ws_sum.append([])
     ws_sum.append([])
+    align_rows_x = _alignment_review_rows(
+        matched_rows, scope_meta=(drift or {}).get("scope_meta")
+    )
+    prop = _proposed_changes_rows(
+        maas_data,
+        netbox_data,
+        drift,
+        interface_audit,
+        matched_rows,
+        os_subnet_gaps or [],
+        os_ip_range_gaps or [],
+        os_floating_gaps or [],
+        openstack_data=openstack_data,
+        netbox_ifaces=netbox_ifaces,
+        os_subnet_hints=os_subnet_hints or [],
+    )
+    coerce_add_proposed_missing_vlan_row_lengths(prop)
+    coerce_legacy_openstack_prefix_row_lengths(prop)
+    norm = normalize_drift_review_overrides(drift_overrides)
+    if norm:
+        prop, align_rows_x = merge_drift_review_overrides(prop, align_rows_x, norm)
+
     pc = _phase0_category_counts(
         drift,
         matched_rows,
         interface_audit,
         os_subnet_gaps,
         os_floating_gaps or [],
+    )
+    pc = _align_phase0_counts_with_rendered_details(
+        pc,
+        update_nic_rows=(prop or {}).get("update_nic"),
+        add_nb_interface_rows=(prop or {}).get("add_nb_interfaces"),
+        alignment_rows=align_rows_x,
+        add_device_rows=(prop or {}).get("add_devices"),
+        add_device_review_rows=(prop or {}).get("add_devices_review_only"),
     )
     serial_validation_needed = _count_hints(matched_rows, "NB serial empty")
     bmc_oob_mismatch = _count_hints(matched_rows, "BMC ")
@@ -302,27 +333,6 @@ def build_drift_report_xlsx(
         for row in _outside_scope:
             ws_sum.append([_xlsx_coerce_cell(c) for c in list(row)])
         ws_sum.append([])
-    align_rows_x = _alignment_review_rows(
-        matched_rows, scope_meta=(drift or {}).get("scope_meta")
-    )
-    prop = _proposed_changes_rows(
-        maas_data,
-        netbox_data,
-        drift,
-        interface_audit,
-        matched_rows,
-        os_subnet_gaps or [],
-        os_ip_range_gaps or [],
-        os_floating_gaps or [],
-        openstack_data=openstack_data,
-        netbox_ifaces=netbox_ifaces,
-        os_subnet_hints=os_subnet_hints or [],
-    )
-    coerce_add_proposed_missing_vlan_row_lengths(prop)
-    coerce_legacy_openstack_prefix_row_lengths(prop)
-    norm = normalize_drift_review_overrides(drift_overrides)
-    if norm:
-        prop, align_rows_x = merge_drift_review_overrides(prop, align_rows_x, norm)
     if align_rows_x:
         r_al = ws_sum.max_row + 1
         ws_sum.append(["Detail — placement & lifecycle alignment", ""])

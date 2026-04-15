@@ -4,6 +4,7 @@ from netbox_automation_plugin.sync.reporting.drift_report.fabric_alignment impor
     _alignment_review_rows,
 )
 from netbox_automation_plugin.sync.reporting.drift_report.metrics import (
+    _align_phase0_counts_with_rendered_details,
     _count_hints,
     _phase0_category_counts,
     _severity_triage_rows,
@@ -23,6 +24,7 @@ def emit_drift_counts_and_alignment(
     orphaned_nb_count,
     *,
     alignment_rows_override=None,
+    proposed_rows_override=None,
 ):
     e.spacer()
     e.banner("DRIFT COUNTS")
@@ -34,6 +36,14 @@ def emit_drift_counts_and_alignment(
         interface_audit,
         os_subnet_gaps,
         os_floating_gaps,
+    )
+    pc = _align_phase0_counts_with_rendered_details(
+        pc,
+        update_nic_rows=(proposed_rows_override or {}).get("update_nic"),
+        add_nb_interface_rows=(proposed_rows_override or {}).get("add_nb_interfaces"),
+        alignment_rows=alignment_rows_override,
+        add_device_rows=(proposed_rows_override or {}).get("add_devices"),
+        add_device_review_rows=(proposed_rows_override or {}).get("add_devices_review_only"),
     )
     serial_validation_needed = _count_hints(matched_rows, "NB serial empty")
     bmc_oob_mismatch = _count_hints(matched_rows, "BMC ")

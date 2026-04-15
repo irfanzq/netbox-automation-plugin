@@ -99,6 +99,7 @@ def format_drift_report(
         os_floating_gaps,
         orphaned_nb_count,
         alignment_rows_override=align_rows,
+        proposed_rows_override=prop,
     )
     emit_proposed_change_tables(e, prop)
 

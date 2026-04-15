@@ -42,6 +42,39 @@ def _phase0_category_counts(
     }
 
 
+def _align_phase0_counts_with_rendered_details(
+    pc: dict,
+    *,
+    update_nic_rows=None,
+    add_nb_interface_rows=None,
+    alignment_rows=None,
+    add_device_rows=None,
+    add_device_review_rows=None,
+):
+    """
+    Normalize headline counts to the same rendered/filtered rows used by detail tables.
+    This avoids confusion when raw audit rows are later merged/deferred/hidden.
+    """
+    out = dict(pc or {})
+    if alignment_rows is not None:
+        out["check_hosts"] = len(alignment_rows or [])
+    if add_device_rows is not None or add_device_review_rows is not None:
+        out["maas_only"] = len(add_device_rows or []) + len(add_device_review_rows or [])
+    if update_nic_rows is not None or add_nb_interface_rows is not None:
+        upd = list(update_nic_rows or [])
+        addi = list(add_nb_interface_rows or [])
+        out["iface_not_ok"] = len(upd) + len(addi)
+        out["maas_nic_missing_nb"] = len(addi)
+        out["vlan_drift_nic"] = sum(
+            1
+            for r in upd
+            if isinstance(r, (list, tuple))
+            and len(r) >= 2
+            and "SET_NETBOX_UNTAGGED_VLAN=" in str(r[-2] or "")
+        )
+    return out
+
+
 def _matched_hosts_with_drift(matched_rows):
     """Rows that have review hints (place_match CHECK) so we show drifting hosts only."""
     if not matched_rows:

@@ -20,9 +20,6 @@ from netbox_automation_plugin.sync.reporting.drift_report.drift_overrides_apply 
     _new_nic_row_is_os_authority,
     _update_nic_row_is_os_authority,
 )
-from netbox_automation_plugin.sync.reporting.drift_report.maas_netbox_status import (
-    maas_to_netbox_mapping_reference_rows,
-)
 
 # Header label → catalog key for drift_nb_picker_catalog (NB proposed tag excluded).
 _PROPOSED_NB_PICK_DEVICE = {
@@ -128,21 +125,6 @@ def emit_proposed_change_tables(e, prop):
             ],
         ],
     )
-    e.spacer()
-    e.subtitle("Reference — MAAS → NetBox device.status (fallback when no OS runtime)")
-    e.paragraph(
-        "Placement and new-device rows prefer OpenStack Ironic when a BMC row exists; "
-        "this table is the MAAS-only mapping used when OS data is missing or does not map."
-    )
-    e.spacer()
-    e.table(
-        ["MAAS state (normalized)", "NetBox status slug"],
-        maas_to_netbox_mapping_reference_rows(),
-        dynamic_columns=True,
-        wrap_max_width=None,
-        selectable=False,
-    )
-
     # Detail order matches ``service.AUDIT_REPORT_APPLY_ORDER``: devices → missing VLANs →
     # missing tenants → missing NAT inside IPs → VMs → NICs, then IPAM / drift VMs, then BMC.
     if prop["add_devices"]:
