@@ -28,6 +28,32 @@
         });
       }
     }
+    function napUrlIsApplyLikePost(u) {
+      var s = String(u || "");
+      if (s.indexOf("/apply-results/") !== -1) return false;
+      return (
+        s.indexOf("/apply/") !== -1 ||
+        s.indexOf("/retry-failed/") !== -1 ||
+        s.indexOf("/recheck-branch/") !== -1
+      );
+    }
+    function napHideEmptyApplyHints(hide) {
+      document.querySelectorAll(".nap-recon-empty-apply-hint").forEach(function (el) {
+        if (hide) {
+          if (el.dataset.napSavedDisplay === undefined) {
+            el.dataset.napSavedDisplay = el.style.display || "";
+          }
+          el.style.display = "none";
+        } else if (el.dataset.napSavedDisplay !== undefined) {
+          el.style.display = el.dataset.napSavedDisplay;
+          delete el.dataset.napSavedDisplay;
+        }
+      });
+    }
+    function napApplyFlyMsg(text) {
+      var el = document.getElementById("reconApplyMsg");
+      if (el) el.textContent = text || "";
+    }
     function postAction(url, btn, opts) {
       opts = opts || {};
       if (!url || !btn) return;
@@ -36,6 +62,11 @@
         : document.getElementById("reconApplyMsg");
       var willNavigate = false;
       if (msg) msg.textContent = "";
+      var applyLike = napUrlIsApplyLikePost(url);
+      if (applyLike) {
+        napHideEmptyApplyHints(true);
+        napApplyFlyMsg("{% filter escapejs %}{% trans "Apply request in progress — results appear when this request finishes (usually a few seconds to minutes)." %}{% endfilter %}");
+      }
       setLifecycleBusy(true, btn);
       var fetchOpts = {
         method: "POST",
@@ -113,6 +144,7 @@
         if (msg) msg.textContent = String(err);
       }).finally(function() {
         if (willNavigate) return;
+        napHideEmptyApplyHints(false);
         setLifecycleBusy(false, null);
       });
     }

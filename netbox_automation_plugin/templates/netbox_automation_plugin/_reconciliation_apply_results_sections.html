@@ -16,6 +16,73 @@
     if (ar.cumulative_summary && typeof ar.cumulative_summary === "object") return true;
     return false;
   }
+  var _CACHE_TEXT_MAX = 120000;
+  function _truncateForCache(s, maxLen) {
+    var t = s == null ? "" : String(s);
+    if (t.length <= maxLen) return t;
+    return t.slice(0, Math.max(0, maxLen - 40)) + "\n/* …trimmed for browser cache… */";
+  }
+  function _slimApplyRow(r) {
+    if (!r || typeof r !== "object") return r;
+    var o = {};
+    var keys = [
+      "apply_sequence",
+      "status",
+      "reason",
+      "row_key",
+      "selection_key",
+      "action",
+      "summary",
+      "write_preview",
+      "write_preview_source",
+      "branch_write_preview",
+      "branch_write_preview_source",
+      "schema_audit_log_line",
+      "reason_detail",
+      "exception_type",
+      "exception_message",
+    ];
+    for (var i = 0; i < keys.length; i++) {
+      var k = keys[i];
+      if (r[k] !== undefined && r[k] !== null) o[k] = r[k];
+    }
+    if (r.schema_audit && typeof r.schema_audit === "object") {
+      o.schema_audit = { is_public_main: r.schema_audit.is_public_main === true };
+    }
+    return o;
+  }
+  function _shrinkApplyResultsForSession(ar) {
+    if (!ar || typeof ar !== "object") return ar;
+    var out = {};
+    var top = [
+      "summary",
+      "cumulative_summary",
+      "routing_confirmation",
+      "routing_confirmation_text",
+      "run_routing_context_text",
+      "retry_failed_only",
+      "retry_skipped_only",
+      "attempted_at",
+      "attempted_by",
+    ];
+    for (var j = 0; j < top.length; j++) {
+      var tk = top[j];
+      if (ar[tk] !== undefined) out[tk] = ar[tk];
+    }
+    if (typeof out.routing_confirmation_text === "string") {
+      out.routing_confirmation_text = _truncateForCache(out.routing_confirmation_text, _CACHE_TEXT_MAX);
+    }
+    if (typeof out.run_routing_context_text === "string") {
+      out.run_routing_context_text = _truncateForCache(out.run_routing_context_text, _CACHE_TEXT_MAX);
+    }
+    var rows = Array.isArray(ar.display_rows) ? ar.display_rows : Array.isArray(ar.rows) ? ar.rows : [];
+    out.rows = rows.map(_slimApplyRow);
+    out.display_rows = out.rows;
+    if (Array.isArray(ar.last_attempt_rows) && ar.last_attempt_rows.length) {
+      out.last_attempt_rows = ar.last_attempt_rows.map(_slimApplyRow);
+    }
+    return out;
+  }
   g.napReconApplyResultsCache = {
     TTL_MS: TTL_MS,
     storageKey: _storageKey,
@@ -23,14 +90,31 @@
     store: function (runId, ar, st) {
       try {
         if (!runId || !g.sessionStorage || !_usable(ar)) return;
-        g.sessionStorage.setItem(
-          _storageKey(runId),
-          JSON.stringify({
-            savedAt: Date.now(),
-            apply_results: ar,
-            status: st != null ? String(st) : "",
-          })
-        );
+        var slim = _shrinkApplyResultsForSession(ar);
+        var pack = {
+          savedAt: Date.now(),
+          apply_results: slim,
+          status: st != null ? String(st) : "",
+        };
+        var key = _storageKey(runId);
+        try {
+          g.sessionStorage.setItem(key, JSON.stringify(pack));
+        } catch (eQuota) {
+          try {
+            pack.apply_results.rows = (slim.rows || []).slice(0, 150).map(_slimApplyRow);
+            pack.apply_results.display_rows = pack.apply_results.rows;
+            if (pack.apply_results.last_attempt_rows) {
+              pack.apply_results.last_attempt_rows = pack.apply_results.last_attempt_rows.slice(0, 150).map(
+                _slimApplyRow
+              );
+            }
+            g.sessionStorage.setItem(key, JSON.stringify(pack));
+          } catch (e2) {
+            if (typeof console !== "undefined" && console.warn) {
+              console.warn("nap_recon_apply_cache: sessionStorage quota — first paint may miss cached apply_results");
+            }
+          }
+        }
       } catch (e) {}
     },
     clear: function (runId) {
@@ -293,17 +377,26 @@
   {% if run.status == "draft" or run.status == "branch_creating" or run.status == "branch_created" or run.status == "branch_create_failed" or run.status == "branch_not_ready" or run.status == "apply_in_progress" %}
     <div class="alert alert-info mb-0 nap-recon-empty-apply-hint" role="status">
       {% if run.status == "branch_created" %}
-        <p class="mb-2 fw-semibold">{% trans "No apply results on disk for this view yet" %}</p>
+        {% if poll_apply_snapshot_until_results %}
+        <p class="mb-2 fw-semibold">{% trans "Loading latest apply results..." %}</p>
+        <p class="small mb-0 text-body-secondary">
+          {% blocktrans trimmed %}
+          Apply just completed and this page is waiting for the persisted summary to be visible on the current database read path. This view auto-refreshes every second and switches to the full results table as soon as the summary is readable.
+          {% endblocktrans %}
+        </p>
+        {% else %}
+        <p class="mb-2 fw-semibold">{% trans "No apply summary in this view yet" %}</p>
         <p class="small mb-2 mb-md-2">
           {% blocktrans trimmed %}
-          Either you have not run “Apply selected changes to branch” for this run, or this page was loaded before the apply transaction became visible to the database connection NetBox used (common with read replicas). Use the lifecycle card above to run Apply, or wait a few seconds and refresh.
+          This is normal before the first Apply on this run: use “Apply selected changes to branch” in the lifecycle card above to execute frozen operations and store results here. After Apply, if this message persists for more than a few seconds, your NetBox read path may be lagging behind the primary database — refresh the page.
           {% endblocktrans %}
         </p>
         <p class="small mb-0 text-body-secondary">
           {% blocktrans trimmed %}
-          If the browser showed “Opening results…” after Apply, this URL may auto-refresh once a summary is readable. If Apply failed, check the browser network tab for the apply POST response and NetBox server logs.
+          While the Apply button shows “Working…”, this notice is hidden and status is shown under Lifecycle. If Apply failed, check the browser Network tab for the apply POST and NetBox server logs.
           {% endblocktrans %}
         </p>
+        {% endif %}
       {% else %}
         <p class="mb-1 fw-semibold">{% trans "Apply results are not available yet for this status." %}</p>
         <p class="small mb-0 text-body-secondary">

@@ -6,6 +6,7 @@ import json
 import logging
 
 from django.conf import settings
+from django.db import DEFAULT_DB_ALIAS
 from django.contrib import messages
 from django.contrib.auth.mixins import LoginRequiredMixin
 from django.http import JsonResponse
@@ -44,6 +45,36 @@ from .service import (
 logger = logging.getLogger(__name__)
 
 MAAS_RECON_STAGING_SESSION_KEY = "maas_recon_staging_v1"
+
+
+def _reconciliation_run_authority_db_alias() -> str:
+    """
+    Database alias for ``MAASOpenStackReconciliationRun`` reads that must see the latest commit
+    (``apply_results``, ``status``). When ``DATABASE_ROUTERS`` send reads to replicas, plain
+    ``Model.objects.get`` can lag behind the writer right after apply; ``QuerySet.using(alias)``
+    bypasses the router for this query.
+
+    Set ``RECONCILIATION_RUN_AUTHORITY_DB_ALIAS`` if your primary is not Django's ``default``.
+    """
+    raw = getattr(settings, "RECONCILIATION_RUN_AUTHORITY_DB_ALIAS", None)
+    if isinstance(raw, str) and raw.strip():
+        return raw.strip()
+    return DEFAULT_DB_ALIAS
+
+
+def _get_reconciliation_run_authoritative(
+    run_id: int,
+    *,
+    select_related: bool = False,
+    only: tuple[str, ...] | None = None,
+) -> MAASOpenStackReconciliationRun:
+    alias = _reconciliation_run_authority_db_alias()
+    qs = MAASOpenStackReconciliationRun.objects.using(alias)
+    if only is not None:
+        qs = qs.only(*only)
+    elif select_related:
+        qs = qs.select_related("drift_run", "created_by")
+    return get_object_or_404(qs, pk=run_id)
 
 
 def _reconciliation_branch_pg_browser_poll_interval_sec() -> float:
@@ -403,10 +434,7 @@ class ReconciliationRunDetailView(LoginRequiredMixin, View):
     template_name = "netbox_automation_plugin/maas_openstack_reconciliation_detail.html"
 
     def get(self, request, run_id: int):
-        run = get_object_or_404(
-            MAASOpenStackReconciliationRun.objects.select_related("drift_run", "created_by"),
-            pk=run_id,
-        )
+        run = _get_reconciliation_run_authoritative(run_id, select_related=True)
         raw_frozen_list = run.frozen_operations if isinstance(run.frozen_operations, list) else []
         frozen_ops = frozen_operations_for_display(raw_frozen_list)
         ops_for_tables = [
@@ -440,15 +468,13 @@ class ReconciliationApplyResultsView(LoginRequiredMixin, View):
     template_name = "netbox_automation_plugin/maas_openstack_reconciliation_apply_results.html"
 
     def get(self, request, run_id: int):
-        run = get_object_or_404(
-            MAASOpenStackReconciliationRun.objects.select_related("drift_run", "created_by"),
-            pk=run_id,
-        )
+        run = _get_reconciliation_run_authoritative(run_id, select_related=True)
         ctx = _reconciliation_run_page_context(run, nav_active="apply_results")
         ar = ctx.get("apply_results") if isinstance(ctx.get("apply_results"), dict) else {}
-        # Post-apply redirect adds ``_nap_apply_refresh``; DB reads can still lag on replicas, so
-        # the first HTML GET may show ``branch_created`` with empty ``apply_results``. Poll until
-        # the snapshot reports persisted summary, then reload once.
+        # Post-apply redirect adds ``_nap_apply_refresh``. With replica reads, the first GET could
+        # miss the new ``apply_results``; we load the run from the authority DB so the HTML matches
+        # the apply commit. Snapshot polling remains a fallback if the flag is set and summary
+        # is still missing.
         ctx["poll_apply_snapshot_until_results"] = bool(
             (request.GET.get("_nap_apply_refresh") or "").strip()
         ) and not bool(ar.get("summary"))
@@ -473,7 +499,7 @@ class ReconciliationBranchPgSchemaStatusView(LoginRequiredMixin, View):
     http_method_names = ["get"]
 
     def get(self, request, run_id: int):
-        run = get_object_or_404(MAASOpenStackReconciliationRun, pk=run_id)
+        run = _get_reconciliation_run_authoritative(run_id)
         light = (request.GET.get("light") or "").strip().lower() in (
             "1",
             "true",
@@ -507,11 +533,9 @@ class ReconciliationRunSnapshotView(LoginRequiredMixin, View):
     http_method_names = ["get"]
 
     def get(self, request, run_id: int):
-        run = get_object_or_404(
-            MAASOpenStackReconciliationRun.objects.only(
-                "pk", "status", "apply_results", "last_updated"
-            ),
-            pk=run_id,
+        run = _get_reconciliation_run_authoritative(
+            run_id,
+            only=("pk", "status", "apply_results", "last_updated"),
         )
         ar = run.apply_results if isinstance(run.apply_results, dict) else {}
         lu = getattr(run, "last_updated", None)
@@ -530,7 +554,7 @@ class ReconciliationApplyView(LoginRequiredMixin, View):
     http_method_names = ["post"]
 
     def post(self, request, run_id: int):
-        run = get_object_or_404(MAASOpenStackReconciliationRun, pk=run_id)
+        run = _get_reconciliation_run_authoritative(run_id)
         try:
             run = apply_reconciliation_run(run=run, actor=request.user, retry_failed_only=False)
         except ValueError as e:
@@ -570,7 +594,7 @@ class ReconciliationRetryFailedView(LoginRequiredMixin, View):
                 m = str(raw.get("retry") or raw.get("mode") or "").strip().lower()
                 if m in ("skipped", "failed", "both", "failed_and_skipped"):
                     mode = "failed_and_skipped" if m == "both" else m
-        run = get_object_or_404(MAASOpenStackReconciliationRun, pk=run_id)
+        run = _get_reconciliation_run_authoritative(run_id)
         try:
             if mode == "skipped":
                 run = apply_reconciliation_run(
@@ -613,7 +637,7 @@ class ReconciliationRecheckBranchView(LoginRequiredMixin, View):
     http_method_names = ["post"]
 
     def post(self, request, run_id: int):
-        run = get_object_or_404(MAASOpenStackReconciliationRun, pk=run_id)
+        run = _get_reconciliation_run_authoritative(run_id)
         try:
             ok, reason, run = check_and_reapply_if_branch_ready(run=run, actor=request.user)
         except ValueError as e:
@@ -658,7 +682,7 @@ class ReconciliationDiscardView(LoginRequiredMixin, View):
     http_method_names = ["post"]
 
     def post(self, request, run_id: int):
-        run = get_object_or_404(MAASOpenStackReconciliationRun, pk=run_id)
+        run = _get_reconciliation_run_authoritative(run_id)
         try:
             run = discard_reconciliation_run(run=run, actor=request.user)
         except ValueError as e:
@@ -863,7 +887,7 @@ class ReconciliationNotImplementedPostView(LoginRequiredMixin, View):
     http_method_names = ["post"]
 
     def post(self, request, run_id: int):
-        get_object_or_404(MAASOpenStackReconciliationRun, pk=run_id)
+        _get_reconciliation_run_authoritative(run_id)
         return JsonResponse(
             {"ok": False, "error": "This lifecycle action is not implemented yet."},
             status=501,
