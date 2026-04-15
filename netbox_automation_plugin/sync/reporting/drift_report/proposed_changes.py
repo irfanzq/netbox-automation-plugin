@@ -1464,8 +1464,8 @@ def _proposed_changes_rows(
                         ex["nb_proposed_intf_label"],
                         ex["nb_proposed_intf_type"],
                         suggested_name,
-                        props,
                         "[OS]" if os_has_runtime else "[MAAS]",
+                        props,
                         nic_reason,
                     ]
                 )
