@@ -17,6 +17,10 @@ from netbox_automation_plugin.sync.reporting.drift_report.drift_nb_picker_catalo
     DRIFT_NB_PROPOSED_TENANT_DEFAULT,
 )
 
+# Drift/recon tenant cell must match a label from ``build_drift_nb_picker_catalog`` (``tenant`` key):
+# ``{Tenant.group.name} / {Tenant.name}`` when ``tenant_hierarchy_fk`` is set (NetBox 4.x ``group``).
+DEFAULT_NB_PROPOSED_TENANT_NEW_OPENSTACK_VM = "Infrastructure / WhiteFiber"
+
 
 def _fip_openstack_project_cell(g: dict) -> str:
     s = str(
@@ -1949,7 +1953,7 @@ def _proposed_changes_rows(
                     prop_pri,
                     prop_cluster_cell,
                     nb_site if nb_site not in {"—", ""} else "—",
-                    DRIFT_NB_PROPOSED_TENANT_DEFAULT,
+                    DEFAULT_NB_PROPOSED_TENANT_NEW_OPENSTACK_VM,
                     nb_vm_status,
                     prop_dev if prop_dev not in {"—", ""} else "—",
                     "[OS]",

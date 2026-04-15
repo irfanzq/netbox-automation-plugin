@@ -1450,6 +1450,14 @@ def _finalize_apply_row(op: dict[str, Any], result: dict[str, Any]) -> dict[str,
             bwp = _apply_result_write_preview_from_snapshot(snap_n, sk)
             if bwp:
                 result["branch_write_preview"] = bwp
+        if not (result.get("branch_write_preview") or "").strip() and orm_w:
+            # ``_capture_applied_object_snapshot`` did not attach ``field_snapshot`` (reload miss,
+            # swallowed exception, or empty ORM walk) — still show handler ``orm_write`` so the
+            # Branch readback column is not blank. Prefer true readback when ``field_snapshot`` works.
+            bwp_fb = _apply_result_write_preview_from_snapshot(orm_w, sk)
+            if bwp_fb:
+                result["branch_write_preview"] = bwp_fb
+                result["branch_write_preview_source"] = "orm_write_snapshot"
     return result
 
 
@@ -2098,7 +2106,11 @@ def _first_failed_exception_snapshot(rows: list[dict[str, Any]]) -> dict[str, An
 
 
 # Skipped rows with these reasons are “already aligned / no-op”, not operator attention items.
-_APPLY_SUMMARY_BENIGN_SKIP_REASONS: frozenset[str] = frozenset({"skipped_already_desired"})
+# ``skipped_already_present`` is used e.g. by NAT-inside IP apply when the address row already
+# exists on the branch — same intent as ``skipped_already_desired`` for summary / retry gating.
+_APPLY_SUMMARY_BENIGN_SKIP_REASONS: frozenset[str] = frozenset(
+    {"skipped_already_desired", "skipped_already_present"}
+)
 
 
 def _apply_row_comprehensive_sort_key(row: dict[str, Any]) -> tuple[int, str, str]:

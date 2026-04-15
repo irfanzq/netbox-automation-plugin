@@ -67,6 +67,34 @@
     {% endif %}
     {% include "netbox_automation_plugin/_reconciliation_lifecycle_card.html" with hide_merge_to_main=True %}
     {% include "netbox_automation_plugin/_reconciliation_apply_results_sections.html" %}
+    {% if poll_apply_snapshot_until_results and reconciliation_run_snapshot_url %}
+    <script>
+      (function () {
+        var u = "{{ reconciliation_run_snapshot_url|escapejs }}";
+        var ticks = 0;
+        var maxTicks = 90;
+        var iv = window.setInterval(function () {
+          ticks += 1;
+          if (ticks > maxTicks) {
+            window.clearInterval(iv);
+            return;
+          }
+          fetch(u, { credentials: "same-origin", headers: { Accept: "application/json" } })
+            .then(function (r) {
+              return r.json();
+            })
+            .then(function (d) {
+              if (!d) return;
+              if (d.has_apply_summary || (d.status && d.status !== "branch_created")) {
+                window.clearInterval(iv);
+                window.location.reload();
+              }
+            })
+            .catch(function () {});
+        }, 1000);
+      })();
+    </script>
+    {% endif %}
   </div>
 </div>
 <form id="recon-csrf-anchor" class="d-none">{% csrf_token %}</form>

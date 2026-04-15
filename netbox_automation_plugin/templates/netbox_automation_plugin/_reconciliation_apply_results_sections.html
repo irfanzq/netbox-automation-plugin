@@ -1,4 +1,58 @@
 {% load i18n %}
+<script>
+(function (g) {
+  if (g.napReconApplyResultsCache) return;
+  var TTL_MS = 20000;
+  var PREFIX = "nap_recon_apply_v1_";
+  function _storageKey(pk) {
+    return PREFIX + String(pk);
+  }
+  function _usable(ar) {
+    if (!ar || typeof ar !== "object") return false;
+    if (ar.summary && typeof ar.summary === "object" && Object.keys(ar.summary).length) return true;
+    if (Array.isArray(ar.rows) && ar.rows.length) return true;
+    if (Array.isArray(ar.display_rows) && ar.display_rows.length) return true;
+    if (ar.routing_confirmation && typeof ar.routing_confirmation === "object") return true;
+    if (ar.cumulative_summary && typeof ar.cumulative_summary === "object") return true;
+    return false;
+  }
+  g.napReconApplyResultsCache = {
+    TTL_MS: TTL_MS,
+    storageKey: _storageKey,
+    usablePayload: _usable,
+    store: function (runId, ar, st) {
+      try {
+        if (!runId || !g.sessionStorage || !_usable(ar)) return;
+        g.sessionStorage.setItem(
+          _storageKey(runId),
+          JSON.stringify({
+            savedAt: Date.now(),
+            apply_results: ar,
+            status: st != null ? String(st) : "",
+          })
+        );
+      } catch (e) {}
+    },
+    clear: function (runId) {
+      try {
+        if (!runId || !g.sessionStorage) return;
+        g.sessionStorage.removeItem(_storageKey(runId));
+      } catch (e) {}
+    },
+    read: function (runId) {
+      try {
+        if (!runId || !g.sessionStorage) return null;
+        var raw = g.sessionStorage.getItem(_storageKey(runId));
+        if (!raw) return null;
+        return JSON.parse(raw);
+      } catch (e) {
+        return null;
+      }
+    },
+  };
+})(window);
+</script>
+<div id="nap-recon-apply-client-cache-mount" class="mb-0"></div>
 {% if apply_results.routing_confirmation %}
   <div class="card mb-3 {% if apply_results.routing_confirmation.entire_batch_aborted_no_row_handlers or apply_results.routing_confirmation.apply_rows_observed_branch_schema_public %}border-danger{% elif apply_results.routing_confirmation.preflight_ok %}border-success{% else %}border-warning{% endif %}">
     <h5 class="card-header">{% trans "Branch routing confirmation (this apply)" %}</h5>
@@ -150,7 +204,7 @@
                 <td class="small">{{ row.action|default:"—" }}</td>
                 <td class="small">{{ row.summary|default:"—" }}</td>
                 <td class="small text-break font-monospace" style="min-width: 14rem; max-width: 36rem;" {% if row.write_preview_source == "orm_write" %}title="{% trans 'Values the plugin recorded for ORM saves on this row (handler scope; not a separate branch readback query).' %}"{% elif row.write_preview_source == "projection" %}title="{% trans 'From drift projection only (handler did not attach orm_write — e.g. skip or action not instrumented yet).' %}"{% endif %}>{% if row.write_preview %}{% if row.write_preview_source == "orm_write" %}<span class="badge text-bg-primary me-1">ORM</span>{% elif row.write_preview_source == "projection" %}<span class="badge text-bg-secondary me-1">{% trans "plan" %}</span>{% endif %}{{ row.write_preview }}{% else %}—{% endif %}</td>
-                <td class="small text-break font-monospace" style="min-width: 14rem; max-width: 36rem;" title="{% trans 'Reloaded from the branch DB after apply (same field snapshot as merge/debug); compare to NetBox write column.' %}">{% if row.branch_write_preview %}{{ row.branch_write_preview }}{% else %}—{% endif %}</td>
+                <td class="small text-break font-monospace" style="min-width: 14rem; max-width: 36rem;" title="{% if row.branch_write_preview_source == 'orm_write_snapshot' %}{% trans 'From handler ORM snapshot only — branch DB reload did not produce a field_snapshot for this row (compare to NetBox write).' %}{% else %}{% trans 'Reloaded from the branch DB after apply (same field snapshot as merge/debug); compare to NetBox write column.' %}{% endif %}">{% if row.branch_write_preview %}{% if row.branch_write_preview_source == "orm_write_snapshot" %}<span class="badge text-bg-secondary me-1">{% trans "handler" %}</span>{% endif %}{{ row.branch_write_preview }}{% else %}—{% endif %}</td>
                 <td class="small text-break font-monospace" style="min-width: 12rem; max-width: 28rem;">
                   {% if row.schema_audit_log_line %}
                     {% if row.schema_audit and row.schema_audit.is_public_main %}<span class="badge text-bg-danger me-1">public</span>{% endif %}
@@ -207,7 +261,7 @@
                 <td class="small">{{ row.action|default:"—" }}</td>
                 <td class="small">{{ row.summary|default:"—" }}</td>
                 <td class="small text-break font-monospace" style="min-width: 14rem; max-width: 36rem;" {% if row.write_preview_source == "orm_write" %}title="{% trans 'Values the plugin recorded for ORM saves on this row (handler scope; not a separate branch readback query).' %}"{% elif row.write_preview_source == "projection" %}title="{% trans 'From drift projection only (handler did not attach orm_write — e.g. skip or action not instrumented yet).' %}"{% endif %}>{% if row.write_preview %}{% if row.write_preview_source == "orm_write" %}<span class="badge text-bg-primary me-1">ORM</span>{% elif row.write_preview_source == "projection" %}<span class="badge text-bg-secondary me-1">{% trans "plan" %}</span>{% endif %}{{ row.write_preview }}{% else %}—{% endif %}</td>
-                <td class="small text-break font-monospace" style="min-width: 14rem; max-width: 36rem;" title="{% trans 'Reloaded from the branch DB after apply (same field snapshot as merge/debug); compare to NetBox write column.' %}">{% if row.branch_write_preview %}{{ row.branch_write_preview }}{% else %}—{% endif %}</td>
+                <td class="small text-break font-monospace" style="min-width: 14rem; max-width: 36rem;" title="{% if row.branch_write_preview_source == 'orm_write_snapshot' %}{% trans 'From handler ORM snapshot only — branch DB reload did not produce a field_snapshot for this row (compare to NetBox write).' %}{% else %}{% trans 'Reloaded from the branch DB after apply (same field snapshot as merge/debug); compare to NetBox write column.' %}{% endif %}">{% if row.branch_write_preview %}{% if row.branch_write_preview_source == "orm_write_snapshot" %}<span class="badge text-bg-secondary me-1">{% trans "handler" %}</span>{% endif %}{{ row.branch_write_preview }}{% else %}—{% endif %}</td>
                 <td class="small text-break font-monospace" style="min-width: 12rem; max-width: 28rem;">
                   {% if row.schema_audit_log_line %}
                     {% if row.schema_audit and row.schema_audit.is_public_main %}<span class="badge text-bg-danger me-1">public</span>{% endif %}
@@ -232,14 +286,35 @@
   </details>
   {% endif %}
 {% elif apply_results.summary %}
-  <p class="small text-body-secondary mb-0">
+  <p class="small text-body-secondary mb-0 nap-recon-empty-apply-hint">
     {% trans "No per-row table for this view; see the summary cards above (attempted count may be zero)." %}
   </p>
 {% elif not apply_results.summary %}
   {% if run.status == "draft" or run.status == "branch_creating" or run.status == "branch_created" or run.status == "branch_create_failed" or run.status == "branch_not_ready" or run.status == "apply_in_progress" %}
-    {# No persisted apply summary yet — omit empty-state alert (pre-apply or in-flight; lifecycle / banner above cover next steps). #}
+    <div class="alert alert-info mb-0 nap-recon-empty-apply-hint" role="status">
+      {% if run.status == "branch_created" %}
+        <p class="mb-2 fw-semibold">{% trans "No apply results on disk for this view yet" %}</p>
+        <p class="small mb-2 mb-md-2">
+          {% blocktrans trimmed %}
+          Either you have not run “Apply selected changes to branch” for this run, or this page was loaded before the apply transaction became visible to the database connection NetBox used (common with read replicas). Use the lifecycle card above to run Apply, or wait a few seconds and refresh.
+          {% endblocktrans %}
+        </p>
+        <p class="small mb-0 text-body-secondary">
+          {% blocktrans trimmed %}
+          If the browser showed “Opening results…” after Apply, this URL may auto-refresh once a summary is readable. If Apply failed, check the browser network tab for the apply POST response and NetBox server logs.
+          {% endblocktrans %}
+        </p>
+      {% else %}
+        <p class="mb-1 fw-semibold">{% trans "Apply results are not available yet for this status." %}</p>
+        <p class="small mb-0 text-body-secondary">
+          {% blocktrans trimmed %}
+          Finish branch creation or wait for the run to leave this state, then run Apply from the lifecycle card. Summaries and per-row logs appear here after a successful apply commit.
+          {% endblocktrans %}
+        </p>
+      {% endif %}
+    </div>
   {% else %}
-  <div class="alert alert-secondary mb-0">
+  <div class="alert alert-secondary mb-0 nap-recon-empty-apply-hint">
     <p class="mb-2">{% trans "No apply has been recorded for this run yet. Use Apply from the lifecycle card above; when apply finishes successfully, this page should show a summary and row tables." %}</p>
     <p class="small mb-0 text-body-secondary">
       {% blocktrans trimmed %}
@@ -249,3 +324,494 @@
   </div>
   {% endif %}
 {% endif %}
+<script>
+(function () {
+  var c = window.napReconApplyResultsCache;
+  if (!c || typeof c.read !== "function" || typeof c.store !== "function") return;
+  var mount = document.getElementById("nap-recon-apply-client-cache-mount");
+  if (!mount) return;
+  var runPk = {{ run.pk }};
+  var serverHasBody = {% if apply_results_has_body %}true{% else %}false{% endif %};
+  var snapUrl = "{{ reconciliation_run_snapshot_url|default:''|escapejs }}";
+  var L = {
+    cacheBanner: "{% filter escapejs %}{% trans "Apply results — browser cache (replica lag)" %}{% endfilter %}",
+    cacheDetail: "{% filter escapejs %}{% trans "NetBox did not return stored apply_results on this GET. Showing the same payload your browser received from the last successful Apply POST (sessionStorage, 20s TTL). The page reloads automatically when the server row has a summary." %}{% endfilter %}",
+    cacheAge: "{% filter escapejs %}{% trans "Cache age" %}{% endfilter %}",
+    cacheTtl: "{% filter escapejs %}{% trans "TTL" %}{% endfilter %}",
+    lblReload: "{% filter escapejs %}{% trans "Reloading when server has summary…" %}{% endfilter %}",
+    routingTitle: "{% filter escapejs %}{% trans "Branch routing confirmation (this apply)" %}{% endfilter %}",
+    routingIntro: "{% filter escapejs %}{% trans "Intended Django ORM database alias for reconciliation writes (must be a schema_* key, not default). Preflight probes run before the branch write transaction; per-row probes run inside handlers — they can disagree if pooled connections are out of sync. Trust the row table if they conflict." %}{% endfilter %}",
+    routingOkAlert: "{% filter escapejs %}{% trans "Preflight passed and no row in this apply reported public on the branch alias. Per-row creates/updates use save(using= this alias). Optional Docker greps: reconciliation_row_schema_audit, reconciliation_netbox_write (when those log lines are enabled in settings)." %}{% endfilter %}",
+    dtBranchDb: "{% filter escapejs %}{% trans "branch_db_used" %}{% endfilter %}",
+    dtDjangoAlias: "{% filter escapejs %}{% trans "django_database_alias" %}{% endfilter %}",
+    dtPreflightSchema: "{% filter escapejs %}{% trans "Preflight: SELECT current_schema()" %}{% endfilter %}",
+    dtWriteSchema: "{% filter escapejs %}{% trans "Write transaction start: SELECT current_schema()" %}{% endfilter %}",
+    dtRouter: "{% filter escapejs %}{% trans "BranchAwareRouter in DATABASE_ROUTERS" %}{% endfilter %}",
+    dtPreflightOk: "{% filter escapejs %}{% trans "Preflight OK" %}{% endfilter %}",
+    yes: "{% filter escapejs %}{% trans "yes" %}{% endfilter %}",
+    no: "{% filter escapejs %}{% trans "no" %}{% endfilter %}",
+    routingJson: "{% filter escapejs %}{% trans "Full routing_confirmation JSON" %}{% endfilter %}",
+    runRoutingJson: "{% filter escapejs %}{% trans "Run routing context JSON (branch identity on this reconciliation run)" %}{% endfilter %}",
+    cumTitle: "{% filter escapejs %}{% trans "Comprehensive apply state (latest status per row)" %}{% endfilter %}",
+    latestTitle: "{% filter escapejs %}{% trans "Latest apply attempt" %}{% endfilter %}",
+    latestRetryTitle: "{% filter escapejs %}{% trans "Latest re-apply attempt (this click only)" %}{% endfilter %}",
+    rowsTitle: "{% filter escapejs %}{% trans "Apply row results (comprehensive)" %}{% endfilter %}",
+    lastAttemptTitle: "{% filter escapejs %}{% trans "This re-apply only — rows executed in the last partial apply" %}{% endfilter %}",
+    LRows: "{% filter escapejs %}{% trans "Rows" %}{% endfilter %}",
+    LSucceeded: "{% filter escapejs %}{% trans "Succeeded" %}{% endfilter %}",
+    LCreated: "{% filter escapejs %}{% trans "Created" %}{% endfilter %}",
+    LUpdated: "{% filter escapejs %}{% trans "Updated" %}{% endfilter %}",
+    LSkippedBenign: "{% filter escapejs %}{% trans "Skipped (Already in Sync)" %}{% endfilter %}",
+    LStillFailed: "{% filter escapejs %}{% trans "Still failed" %}{% endfilter %}",
+    LSkippedAttn: "{% filter escapejs %}{% trans "Skipped (needs attention)" %}{% endfilter %}",
+    LNeedsAttn: "{% filter escapejs %}{% trans "Needs attention (total)" %}{% endfilter %}",
+    LAttempted: "{% filter escapejs %}{% trans "Attempted" %}{% endfilter %}",
+    LSkipped: "{% filter escapejs %}{% trans "Skipped" %}{% endfilter %}",
+    LFailed: "{% filter escapejs %}{% trans "Failed" %}{% endfilter %}",
+    LPartialRetry: "{% filter escapejs %}{% trans "Partial retry" %}{% endfilter %}",
+    LRetryBoth: "{% filter escapejs %}{% trans "failed + skipped" %}{% endfilter %}",
+    LRetrySkipped: "{% filter escapejs %}{% trans "skipped only" %}{% endfilter %}",
+    LRetryFailed: "{% filter escapejs %}{% trans "failed only" %}{% endfilter %}",
+    LRetryNo: "{% filter escapejs %}{% trans "no (full apply)" %}{% endfilter %}",
+    LFirstExc: "{% filter escapejs %}{% trans "First exception (this attempt)" %}{% endfilter %}",
+    hRun: "{% filter escapejs %}{% trans "Run #" %}{% endfilter %}",
+    hSt: "{% filter escapejs %}{% trans "Status" %}{% endfilter %}",
+    hReason: "{% filter escapejs %}{% trans "Reason" %}{% endfilter %}",
+    hKey: "{% filter escapejs %}{% trans "Row key" %}{% endfilter %}",
+    hSec: "{% filter escapejs %}{% trans "Section" %}{% endfilter %}",
+    hAct: "{% filter escapejs %}{% trans "Action" %}{% endfilter %}",
+    hSum: "{% filter escapejs %}{% trans "Summary" %}{% endfilter %}",
+    hNbWrite: "{% filter escapejs %}{% trans "NetBox write" %}{% endfilter %}",
+    hBranchRb: "{% filter escapejs %}{% trans "Branch readback" %}{% endfilter %}",
+    hSchema: "{% filter escapejs %}{% trans "Schema audit (same as Docker log line)" %}{% endfilter %}",
+    hDetail: "{% filter escapejs %}{% trans "Detail (exceptions, skip reasons, routing)" %}{% endfilter %}",
+    badgeOrm: "ORM",
+    badgePlan: "{% filter escapejs %}{% trans "plan" %}{% endfilter %}",
+    badgeHandler: "{% filter escapejs %}{% trans "handler" %}{% endfilter %}",
+    badgePublic: "public",
+  };
+  function esc(s) {
+    if (s == null) return "";
+    var d = document.createElement("div");
+    d.textContent = String(s);
+    return d.innerHTML;
+  }
+  function addGridStat(row, cls, label, val) {
+    var col = document.createElement("div");
+    col.className = (cls || "col-md-2") + " small";
+    col.innerHTML = "<strong>" + esc(label) + ":</strong> " + esc(val);
+    row.appendChild(col);
+  }
+  function appendDetailsPre(parent, summaryText, textContent) {
+    if (!textContent) return;
+    var det = document.createElement("details");
+    det.className = "mt-2";
+    var sm = document.createElement("summary");
+    sm.className = "text-body-secondary";
+    sm.style.cursor = "pointer";
+    sm.textContent = summaryText;
+    det.appendChild(sm);
+    var pre = document.createElement("pre");
+    pre.className = "small mt-2 mb-0 p-2 bg-body-secondary rounded text-break";
+    pre.style.maxHeight = "20rem";
+    pre.style.overflow = "auto";
+    pre.textContent = textContent;
+    det.appendChild(pre);
+    parent.appendChild(det);
+  }
+  function buildRoutingCard(ar) {
+    var rc = ar.routing_confirmation;
+    if (!rc || typeof rc !== "object") return null;
+    var border =
+      rc.entire_batch_aborted_no_row_handlers || rc.apply_rows_observed_branch_schema_public
+        ? "border-danger"
+        : rc.preflight_ok
+          ? "border-success"
+          : "border-warning";
+    var card = document.createElement("div");
+    card.className = "card mb-3 " + border;
+    var head = document.createElement("h5");
+    head.className = "card-header";
+    head.textContent = L.routingTitle;
+    card.appendChild(head);
+    var body = document.createElement("div");
+    body.className = "card-body py-2 small";
+    var intro = document.createElement("p");
+    intro.className = "mb-2 text-body-secondary";
+    intro.textContent = L.routingIntro;
+    body.appendChild(intro);
+    var dl = document.createElement("dl");
+    dl.className = "row mb-2";
+    function dlRow(dt, dd) {
+      var ddt = document.createElement("dt");
+      ddt.className = "col-sm-4";
+      ddt.textContent = dt;
+      var ddd = document.createElement("dd");
+      ddd.className = "col-sm-8 text-monospace";
+      ddd.textContent = dd != null && String(dd).trim() ? String(dd) : "—";
+      dl.appendChild(ddt);
+      dl.appendChild(ddd);
+    }
+    dlRow(L.dtBranchDb, rc.branch_db_used);
+    dlRow(L.dtDjangoAlias, rc.django_database_alias);
+    dlRow(L.dtPreflightSchema, rc.postgresql_current_schema);
+    if (rc.write_context_postgresql_current_schema) {
+      dlRow(L.dtWriteSchema, rc.write_context_postgresql_current_schema);
+    }
+    var dtR = document.createElement("dt");
+    dtR.className = "col-sm-4";
+    dtR.textContent = L.dtRouter;
+    var ddR = document.createElement("dd");
+    ddR.className = "col-sm-8";
+    ddR.innerHTML = rc.branch_aware_router_configured
+      ? '<span class="text-success">' + esc(L.yes) + "</span>"
+      : '<span class="text-danger">' + esc(L.no) + "</span>";
+    dl.appendChild(dtR);
+    dl.appendChild(ddR);
+    var dtP = document.createElement("dt");
+    dtP.className = "col-sm-4";
+    dtP.textContent = L.dtPreflightOk;
+    var ddP = document.createElement("dd");
+    ddP.className = "col-sm-8";
+    ddP.innerHTML = rc.preflight_ok
+      ? '<span class="text-success">' + esc(L.yes) + "</span>"
+      : '<span class="text-warning">' + esc(L.no) + "</span>";
+    dl.appendChild(dtP);
+    dl.appendChild(ddP);
+    body.appendChild(dl);
+    if (rc.preflight_ok && !rc.apply_rows_observed_branch_schema_public) {
+      var ok = document.createElement("div");
+      ok.className = "alert alert-success mb-2 py-2";
+      ok.textContent = L.routingOkAlert;
+      body.appendChild(ok);
+    }
+    var rj =
+      typeof ar.routing_confirmation_text === "string" && ar.routing_confirmation_text.trim()
+        ? ar.routing_confirmation_text
+        : JSON.stringify(rc, null, 2);
+    appendDetailsPre(body, L.routingJson, rj);
+    if (ar.run_routing_context_text) {
+      appendDetailsPre(body, L.runRoutingJson, String(ar.run_routing_context_text));
+    }
+    card.appendChild(body);
+    return card;
+  }
+  function buildCumulativeCard(ar) {
+    var cs = ar.cumulative_summary;
+    if (!cs || typeof cs !== "object") return null;
+    var card = document.createElement("div");
+    card.className = "card mb-3";
+    var head = document.createElement("h5");
+    head.className = "card-header";
+    head.textContent = L.cumTitle;
+    card.appendChild(head);
+    var body = document.createElement("div");
+    body.className = "card-body py-2";
+    var r1 = document.createElement("div");
+    r1.className = "row g-2 small";
+    addGridStat(r1, "col-md-2", L.LRows, cs.rows != null ? cs.rows : 0);
+    addGridStat(r1, "col-md-2", L.LSucceeded, cs.succeeded != null ? cs.succeeded : 0);
+    addGridStat(r1, "col-md-2", L.LCreated, cs.created != null ? cs.created : 0);
+    addGridStat(r1, "col-md-2", L.LUpdated, cs.updated != null ? cs.updated : 0);
+    addGridStat(r1, "col-md-2", L.LSkippedBenign, cs.skipped_benign != null ? cs.skipped_benign : 0);
+    body.appendChild(r1);
+    var r2 = document.createElement("div");
+    r2.className = "row g-2 small mt-2";
+    addGridStat(r2, "col-md-3", L.LStillFailed, cs.failed != null ? cs.failed : 0);
+    addGridStat(r2, "col-md-4", L.LSkippedAttn, cs.skipped_needs_attention != null ? cs.skipped_needs_attention : 0);
+    addGridStat(r2, "col-md-3", L.LNeedsAttn, cs.needs_attention != null ? cs.needs_attention : 0);
+    body.appendChild(r2);
+    card.appendChild(body);
+    return card;
+  }
+  function buildLatestAttemptCard(ar) {
+    var sum = ar.summary;
+    if (!sum || typeof sum !== "object") return null;
+    var card = document.createElement("div");
+    card.className = "card mb-3";
+    var head = document.createElement("h5");
+    head.className = "card-header";
+    head.textContent = ar.last_attempt_rows && ar.last_attempt_rows.length ? L.latestRetryTitle : L.latestTitle;
+    card.appendChild(head);
+    var body = document.createElement("div");
+    body.className = "card-body py-2";
+    var r1 = document.createElement("div");
+    r1.className = "row g-2 small";
+    addGridStat(r1, "col-md-2", L.LAttempted, sum.attempted != null ? sum.attempted : 0);
+    addGridStat(r1, "col-md-2", L.LCreated, sum.created != null ? sum.created : 0);
+    addGridStat(r1, "col-md-2", L.LUpdated, sum.updated != null ? sum.updated : 0);
+    addGridStat(r1, "col-md-2", L.LSkipped, sum.skipped != null ? sum.skipped : 0);
+    addGridStat(r1, "col-md-2", L.LFailed, sum.failed != null ? sum.failed : 0);
+    var pr = "";
+    if (ar.retry_failed_only && ar.retry_skipped_only) pr = L.LRetryBoth;
+    else if (ar.retry_skipped_only) pr = L.LRetrySkipped;
+    else if (ar.retry_failed_only) pr = L.LRetryFailed;
+    else pr = L.LRetryNo;
+    addGridStat(r1, "col-md-3", L.LPartialRetry, pr);
+    body.appendChild(r1);
+    var fe = sum.first_failed_exception;
+    if (fe && typeof fe === "object") {
+      var al = document.createElement("div");
+      al.className = "alert alert-warning small mb-0 mt-3";
+      al.innerHTML =
+        "<strong>" +
+        esc(L.LFirstExc) +
+        "</strong><div class=\"mt-1 font-monospace\">" +
+        esc(fe.exception_type || "—") +
+        ": " +
+        esc(fe.exception_message || "—") +
+        "</div><div class=\"text-body-secondary mt-1\">" +
+        esc(fe.summary || "") +
+        ' <span class="text-muted">(' +
+        esc(fe.selection_key || "—") +
+        ")</span></div>";
+      body.appendChild(al);
+    }
+    card.appendChild(body);
+    return card;
+  }
+  function tdMono(txt) {
+    var td = document.createElement("td");
+    td.className = "small text-monospace text-break";
+    td.textContent = txt == null || txt === "" ? "—" : String(txt);
+    return td;
+  }
+  function tdStatusCell(st) {
+    var td = document.createElement("td");
+    td.className = "small";
+    var sp = document.createElement("span");
+    sp.className = "badge text-bg-secondary";
+    sp.textContent = st || "—";
+    td.appendChild(sp);
+    return td;
+  }
+  function tdWritePreview(r) {
+    var td = document.createElement("td");
+    td.className = "small text-break font-monospace";
+    td.style.minWidth = "14rem";
+    td.style.maxWidth = "36rem";
+    if (!r.write_preview) {
+      td.textContent = "—";
+      return td;
+    }
+    if (r.write_preview_source === "orm_write") {
+      var b = document.createElement("span");
+      b.className = "badge text-bg-primary me-1";
+      b.textContent = L.badgeOrm;
+      td.appendChild(b);
+    } else if (r.write_preview_source === "projection") {
+      var b2 = document.createElement("span");
+      b2.className = "badge text-bg-secondary me-1";
+      b2.textContent = L.badgePlan;
+      td.appendChild(b2);
+    }
+    td.appendChild(document.createTextNode(String(r.write_preview)));
+    return td;
+  }
+  function tdBranchReadback(r) {
+    var td = document.createElement("td");
+    td.className = "small text-break font-monospace";
+    td.style.minWidth = "14rem";
+    td.style.maxWidth = "36rem";
+    if (!r.branch_write_preview) {
+      td.textContent = "—";
+      return td;
+    }
+    if (r.branch_write_preview_source === "orm_write_snapshot") {
+      var b = document.createElement("span");
+      b.className = "badge text-bg-secondary me-1";
+      b.textContent = L.badgeHandler;
+      td.appendChild(b);
+    }
+    td.appendChild(document.createTextNode(String(r.branch_write_preview)));
+    return td;
+  }
+  function tdSchema(r) {
+    var td = document.createElement("td");
+    td.className = "small text-break font-monospace";
+    td.style.minWidth = "12rem";
+    td.style.maxWidth = "28rem";
+    if (!r.schema_audit_log_line) {
+      td.textContent = "—";
+      return td;
+    }
+    if (r.schema_audit && r.schema_audit.is_public_main) {
+      var b = document.createElement("span");
+      b.className = "badge text-bg-danger me-1";
+      b.textContent = L.badgePublic;
+      td.appendChild(b);
+    }
+    td.appendChild(document.createTextNode(String(r.schema_audit_log_line)));
+    return td;
+  }
+  function tdDetail(r) {
+    var td = document.createElement("td");
+    td.className = "small text-break";
+    td.style.minWidth = "12rem";
+    td.style.maxWidth = "28rem";
+    var hasRd = !!(r.reason_detail && String(r.reason_detail).trim());
+    var hasEx = !!(r.exception_type || r.exception_message);
+    if (!hasRd && !hasEx) {
+      td.textContent = "—";
+      return td;
+    }
+    if (hasRd) {
+      var d0 = document.createElement("div");
+      d0.className = "mb-0";
+      d0.textContent = String(r.reason_detail);
+      td.appendChild(d0);
+    }
+    if (hasEx) {
+      var d1 = document.createElement("div");
+      d1.className = "font-monospace" + (hasRd ? " mt-1 pt-1 border-top" : "");
+      d1.textContent =
+        (r.exception_type || "") + (r.exception_type && r.exception_message ? ": " : "") + (r.exception_message || "");
+      td.appendChild(d1);
+    }
+    return td;
+  }
+  function buildComprehensiveTableSection(rows) {
+    var body = document.createElement("div");
+    body.className = "card-body p-0 border-top";
+    var wrap = document.createElement("div");
+    wrap.className = "table-responsive";
+    wrap.style.maxHeight = "75vh";
+    wrap.style.overflow = "auto";
+    var tbl = document.createElement("table");
+    tbl.className = "table table-sm table-striped mb-0";
+    var thead = document.createElement("thead");
+    var trh = document.createElement("tr");
+    [L.hRun, L.hSt, L.hReason, L.hKey, L.hSec, L.hAct, L.hSum, L.hNbWrite, L.hBranchRb, L.hSchema, L.hDetail].forEach(
+      function (lab) {
+        var th = document.createElement("th");
+        th.className = "small";
+        th.textContent = lab;
+        trh.appendChild(th);
+      }
+    );
+    thead.appendChild(trh);
+    tbl.appendChild(thead);
+    var tb = document.createElement("tbody");
+    rows.forEach(function (r) {
+      if (!r || typeof r !== "object") return;
+      var tr = document.createElement("tr");
+      var td0 = document.createElement("td");
+      td0.className = "small text-monospace text-body-secondary";
+      td0.textContent = r.apply_sequence != null ? String(r.apply_sequence) : "—";
+      tr.appendChild(td0);
+      tr.appendChild(tdStatusCell(r.status));
+      tr.appendChild(tdMono(r.reason));
+      tr.appendChild(tdMono(r.row_key));
+      tr.appendChild(tdMono(r.selection_key));
+      var tda = document.createElement("td");
+      tda.className = "small";
+      tda.textContent = r.action || "—";
+      tr.appendChild(tda);
+      var tds = document.createElement("td");
+      tds.className = "small";
+      tds.textContent = r.summary || "—";
+      tr.appendChild(tds);
+      tr.appendChild(tdWritePreview(r));
+      tr.appendChild(tdBranchReadback(r));
+      tr.appendChild(tdSchema(r));
+      tr.appendChild(tdDetail(r));
+      tb.appendChild(tr);
+    });
+    tbl.appendChild(tb);
+    wrap.appendChild(tbl);
+    body.appendChild(wrap);
+    return body;
+  }
+  function buildRowTable(rows) {
+    var card = document.createElement("div");
+    card.className = "card mb-3";
+    var head = document.createElement("h5");
+    head.className = "card-header";
+    head.textContent = L.rowsTitle;
+    card.appendChild(head);
+    card.appendChild(buildComprehensiveTableSection(rows));
+    return card;
+  }
+  function buildLastAttemptBlock(ar) {
+    var lr = ar.last_attempt_rows;
+    if (!Array.isArray(lr) || !lr.length) return null;
+    var det = document.createElement("details");
+    det.className = "card mb-3";
+    var sm = document.createElement("summary");
+    sm.className = "card-header user-select-none";
+    sm.style.cursor = "pointer";
+    sm.textContent = L.lastAttemptTitle;
+    det.appendChild(sm);
+    det.appendChild(buildComprehensiveTableSection(lr));
+    return det;
+  }
+  if (serverHasBody) {
+    try {
+      c.clear(runPk);
+    } catch (e0) {}
+    return;
+  }
+  var pack = c.read(runPk);
+  if (!pack) return;
+  var ageMs = Date.now() - (pack.savedAt || 0);
+  if (ageMs > c.TTL_MS || !c.usablePayload(pack.apply_results)) return;
+  var ar = pack.apply_results;
+  var rows = Array.isArray(ar.display_rows) ? ar.display_rows : Array.isArray(ar.rows) ? ar.rows : [];
+  var frag = document.createDocumentFragment();
+  var ban = document.createElement("div");
+  ban.className = "alert alert-info py-2 mb-3";
+  ban.innerHTML =
+    "<strong>" +
+    esc(L.cacheBanner) +
+    "</strong><p class=\"small mb-1 mt-2 mb-0\">" +
+    esc(L.cacheDetail) +
+    "</p><p class=\"small text-muted mb-0\">" +
+    esc(L.cacheAge) +
+    ": " +
+    (ageMs / 1000).toFixed(1) +
+    "s · " +
+    esc(L.cacheTtl) +
+    ": " +
+    c.TTL_MS / 1000 +
+    "s</p>";
+  frag.appendChild(ban);
+  var rcCard = buildRoutingCard(ar);
+  if (rcCard) frag.appendChild(rcCard);
+  var cum = buildCumulativeCard(ar);
+  if (cum) frag.appendChild(cum);
+  var lat = buildLatestAttemptCard(ar);
+  if (lat) frag.appendChild(lat);
+  if (rows.length) frag.appendChild(buildRowTable(rows));
+  var lastB = buildLastAttemptBlock(ar);
+  if (lastB) frag.appendChild(lastB);
+  mount.appendChild(frag);
+  document.querySelectorAll(".nap-recon-empty-apply-hint").forEach(function (n) {
+    n.style.display = "none";
+  });
+  if (snapUrl) {
+    var pollMsg = document.createElement("p");
+    pollMsg.className = "small text-info mb-0 mt-2";
+    pollMsg.textContent = L.lblReload;
+    mount.appendChild(pollMsg);
+    var ticks = 0;
+    var iv = window.setInterval(function () {
+      ticks += 1;
+      if (ticks > 45) {
+        window.clearInterval(iv);
+        return;
+      }
+      fetch(snapUrl, { credentials: "same-origin", headers: { Accept: "application/json" } })
+        .then(function (r) {
+          return r.json();
+        })
+        .then(function (d) {
+          if (d && d.has_apply_summary) {
+            window.clearInterval(iv);
+            window.location.reload();
+          }
+        })
+        .catch(function () {});
+    }, 2000);
+  }
+})();
+</script>

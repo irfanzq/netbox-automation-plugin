@@ -53,6 +53,24 @@
         return r.json().then(function(j) { return { ok: r.ok, body: j }; });
       }).then(function(res) {
         if (res.ok && res.body && res.body.ok) {
+          try {
+            if (window.napReconApplyResultsCache && typeof window.napReconApplyResultsCache.store === "function") {
+              window.napReconApplyResultsCache.store(
+                res.body.run_id,
+                res.body.apply_results,
+                res.body.status
+              );
+            }
+          } catch (eStore) {}
+          if (opts.clearRunApplyCache) {
+            try {
+              var lc0 = document.getElementById("reconLifecycleCard");
+              var rpk0 = lc0 && lc0.getAttribute("data-recon-run-pk");
+              if (window.napReconApplyResultsCache && rpk0 && typeof window.napReconApplyResultsCache.clear === "function") {
+                window.napReconApplyResultsCache.clear(rpk0);
+              }
+            } catch (eClr) {}
+          }
           var stayOnPage = !!opts.stayOnPageOnSuccess;
           willNavigate = true;
           if (stayOnPage) {
@@ -72,7 +90,9 @@
             // ``apply_results`` is readable, so the first paint looked empty; a second apply
             // then showed skipped/updated from the first run. A short delay + cache-bust URL
             // gives the ORM commit time to propagate on typical primary/replica setups.
-            var navDelayMs = 250;
+            // Slightly longer delay before GET apply-results so ORM commits / read replicas are
+            // more likely to see ``apply_results`` on first paint (see apply-results snapshot poll).
+            var navDelayMs = applyResultsDest ? 600 : 250;
             if (applyResultsDest) {
               if (msg) msg.textContent = "{% filter escapejs %}{% trans "Opening results…" %}{% endfilter %}";
               window.setTimeout(function () {
@@ -157,7 +177,10 @@
         if (!confirm("{% trans 'Discard this run and delete its NetBox branch when possible? This cannot be undone.' %}")) {
           return;
         }
-        postAction("{{ discard_url|escapejs }}", discardBtn, { fallbackRedirect: "{{ recon_detail_url|escapejs }}" });
+        postAction("{{ discard_url|escapejs }}", discardBtn, {
+          fallbackRedirect: "{{ recon_detail_url|escapejs }}",
+          clearRunApplyCache: true,
+        });
       });
     }
     var lc = document.getElementById("reconLifecycleCard");

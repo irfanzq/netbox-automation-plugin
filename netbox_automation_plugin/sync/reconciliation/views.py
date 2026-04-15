@@ -109,6 +109,16 @@ def _reconciliation_run_page_context(
     }
     apply_results: dict = run.apply_results if isinstance(run.apply_results, dict) else {}
     result_rows = apply_results.get("rows") if isinstance(apply_results.get("rows"), list) else []
+    display_rows = (
+        apply_results.get("display_rows") if isinstance(apply_results.get("display_rows"), list) else []
+    )
+    apply_results_has_body = bool(
+        apply_results.get("summary")
+        or result_rows
+        or display_rows
+        or apply_results.get("routing_confirmation")
+        or apply_results.get("cumulative_summary")
+    )
     branch_schema_blocked = bool(
         apply_results.get("branch_not_ready")
         or run.status == MAASOpenStackReconciliationRun.STATUS_BRANCH_NOT_READY
@@ -184,6 +194,7 @@ def _reconciliation_run_page_context(
     return {
         "run": run,
         "apply_results": apply_results,
+        "apply_results_has_body": apply_results_has_body,
         "apply_url": reverse(
             "plugins:netbox_automation_plugin:maas_openstack_reconciliation_apply",
             args=[run.pk],
@@ -434,6 +445,13 @@ class ReconciliationApplyResultsView(LoginRequiredMixin, View):
             pk=run_id,
         )
         ctx = _reconciliation_run_page_context(run, nav_active="apply_results")
+        ar = ctx.get("apply_results") if isinstance(ctx.get("apply_results"), dict) else {}
+        # Post-apply redirect adds ``_nap_apply_refresh``; DB reads can still lag on replicas, so
+        # the first HTML GET may show ``branch_created`` with empty ``apply_results``. Poll until
+        # the snapshot reports persisted summary, then reload once.
+        ctx["poll_apply_snapshot_until_results"] = bool(
+            (request.GET.get("_nap_apply_refresh") or "").strip()
+        ) and not bool(ar.get("summary"))
         return render(request, self.template_name, ctx)
 
 
