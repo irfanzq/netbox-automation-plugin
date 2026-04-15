@@ -126,8 +126,7 @@
     if (applyBtn) {
       applyBtn.addEventListener("click", function() {
         postAction("{{ apply_url|escapejs }}", applyBtn, {
-          fallbackRedirect: applyResultsUrl,
-          stayOnPageOnSuccess: true
+          fallbackRedirect: applyResultsUrl
         });
       });
     }
@@ -136,7 +135,6 @@
       btn.addEventListener("click", function() {
         postAction(retryUrl, btn, {
           fallbackRedirect: applyResultsUrl,
-          stayOnPageOnSuccess: true,
           body: JSON.stringify(payload || { retry: "failed" })
         });
       });
