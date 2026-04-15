@@ -1451,6 +1451,65 @@ def _cell_nic_proposed_body(cells: dict[str, str]) -> str:
     )
 
 
+def _nic_inventory_columns_prefer_os(cells: dict[str, str]) -> bool:
+    """NIC drift / new-NIC rows: ``[OS]`` authority means inventory fallbacks prefer OS columns."""
+    return _cell(cells, "Authority").strip() == "[OS]"
+
+
+def _nic_pick_inventory_mac(
+    cells: dict[str, str], *, include_nb_fallback: bool, os_first: bool
+) -> str:
+    if os_first:
+        order = (
+            ("OS MAC", "MAAS MAC", "NB MAC", "Parsed MAC")
+            if include_nb_fallback
+            else ("OS MAC", "MAAS MAC", "Parsed MAC")
+        )
+    else:
+        order = (
+            ("MAAS MAC", "OS MAC", "NB MAC", "Parsed MAC")
+            if include_nb_fallback
+            else ("MAAS MAC", "OS MAC", "Parsed MAC")
+        )
+    return _cell(cells, *order)
+
+
+def _nic_pick_inventory_vlan_raw(
+    cells: dict[str, str], *, include_nb_fallback: bool, os_first: bool
+) -> str:
+    if os_first:
+        order = (
+            ("OS runtime VLAN", "MAAS VLAN", "NB VLAN", "Parsed untagged VLAN")
+            if include_nb_fallback
+            else ("OS runtime VLAN", "MAAS VLAN", "Parsed untagged VLAN")
+        )
+    else:
+        order = (
+            ("MAAS VLAN", "OS runtime VLAN", "NB VLAN", "Parsed untagged VLAN")
+            if include_nb_fallback
+            else ("MAAS VLAN", "OS runtime VLAN", "Parsed untagged VLAN")
+        )
+    return _cell(cells, *order)
+
+
+def _nic_pick_inventory_ips_raw(
+    cells: dict[str, str], *, include_nb_fallback: bool, os_first: bool
+) -> str:
+    if os_first:
+        order = (
+            ("OS runtime IP", "MAAS IPs", "NB IPs", "Parsed IPs")
+            if include_nb_fallback
+            else ("OS runtime IP", "MAAS IPs", "Parsed IPs")
+        )
+    else:
+        order = (
+            ("MAAS IPs", "OS runtime IP", "NB IPs", "Parsed IPs")
+            if include_nb_fallback
+            else ("MAAS IPs", "OS runtime IP", "Parsed IPs")
+        )
+    return _cell(cells, *order)
+
+
 def _set_netbox_mac_directive_present(body: str) -> bool:
     return bool(re.search(r"\bSET_NETBOX_MAC\s*=", body or "", flags=re.IGNORECASE))
 
@@ -1547,49 +1606,44 @@ def _interface_mac_vlan_ip_from_cells(
         body, p_mac, p_vlan, p_ips, s_mac, s_vlan, s_ips
     )
     set_nb = bool(re.search(r"\bSET_NETBOX_", body, re.IGNORECASE))
+    os_first = _nic_inventory_columns_prefer_os(cells)
 
     if set_nb:
         mac = _normalize_mac(s_mac) if _nic_proposed_property_segment_ok(s_mac) else None
         if mac is None and use_mac_cols:
-            if include_nb_fallback:
-                mac = _normalize_mac(
-                    _cell(cells, "MAAS MAC", "OS MAC", "NB MAC", "Parsed MAC")
+            mac = _normalize_mac(
+                _nic_pick_inventory_mac(
+                    cells, include_nb_fallback=include_nb_fallback, os_first=os_first
                 )
-            else:
-                mac = _normalize_mac(_cell(cells, "MAAS MAC", "OS MAC", "Parsed MAC"))
+            )
 
         vid: int | None = None
         if s_vlan:
             vid = _parse_vlan_vid(s_vlan)
         if vid is None and use_vlan_cols:
-            if include_nb_fallback:
-                vid = _parse_vlan_vid(
-                    _cell(cells, "MAAS VLAN", "OS runtime VLAN", "NB VLAN", "Parsed untagged VLAN")
+            vid = _parse_vlan_vid(
+                _nic_pick_inventory_vlan_raw(
+                    cells, include_nb_fallback=include_nb_fallback, os_first=os_first
                 )
-            else:
-                vid = _parse_vlan_vid(
-                    _cell(cells, "MAAS VLAN", "OS runtime VLAN", "Parsed untagged VLAN")
-                )
+            )
 
         ip_blob = ""
         if _nic_proposed_property_segment_ok(s_ips):
             ip_blob = str(s_ips).strip()
         if not ip_blob and use_ip_cols:
-            if include_nb_fallback:
-                ip_blob = _cell(cells, "MAAS IPs", "OS runtime IP", "NB IPs", "Parsed IPs")
-            else:
-                ip_blob = _cell(cells, "MAAS IPs", "OS runtime IP", "Parsed IPs")
+            ip_blob = _nic_pick_inventory_ips_raw(
+                cells, include_nb_fallback=include_nb_fallback, os_first=os_first
+            )
     else:
         mac = _normalize_mac(p_mac) if _nic_proposed_property_segment_ok(p_mac) else None
         if mac is None and _nic_proposed_property_segment_ok(s_mac):
             mac = _normalize_mac(s_mac)
         if mac is None and use_mac_cols:
-            if include_nb_fallback:
-                mac = _normalize_mac(
-                    _cell(cells, "MAAS MAC", "OS MAC", "NB MAC", "Parsed MAC")
+            mac = _normalize_mac(
+                _nic_pick_inventory_mac(
+                    cells, include_nb_fallback=include_nb_fallback, os_first=os_first
                 )
-            else:
-                mac = _normalize_mac(_cell(cells, "MAAS MAC", "OS MAC", "Parsed MAC"))
+            )
 
         vid = None
         if _nic_proposed_property_segment_ok(p_vlan):
@@ -1597,14 +1651,11 @@ def _interface_mac_vlan_ip_from_cells(
         if vid is None and s_vlan:
             vid = _parse_vlan_vid(s_vlan)
         if vid is None and use_vlan_cols:
-            if include_nb_fallback:
-                vid = _parse_vlan_vid(
-                    _cell(cells, "MAAS VLAN", "OS runtime VLAN", "NB VLAN", "Parsed untagged VLAN")
+            vid = _parse_vlan_vid(
+                _nic_pick_inventory_vlan_raw(
+                    cells, include_nb_fallback=include_nb_fallback, os_first=os_first
                 )
-            else:
-                vid = _parse_vlan_vid(
-                    _cell(cells, "MAAS VLAN", "OS runtime VLAN", "Parsed untagged VLAN")
-                )
+            )
 
         ip_blob = ""
         if _nic_proposed_property_segment_ok(p_ips):
@@ -1612,10 +1663,9 @@ def _interface_mac_vlan_ip_from_cells(
         if not ip_blob and _nic_proposed_property_segment_ok(s_ips):
             ip_blob = str(s_ips).strip()
         if not ip_blob and use_ip_cols:
-            if include_nb_fallback:
-                ip_blob = _cell(cells, "MAAS IPs", "OS runtime IP", "NB IPs", "Parsed IPs")
-            else:
-                ip_blob = _cell(cells, "MAAS IPs", "OS runtime IP", "Parsed IPs")
+            ip_blob = _nic_pick_inventory_ips_raw(
+                cells, include_nb_fallback=include_nb_fallback, os_first=os_first
+            )
 
     ip_blob = str(ip_blob or "").strip()
     if ip_blob in ("—", "-"):
@@ -1638,6 +1688,7 @@ def _nic_mac_intent_raw(cells: dict[str, str], *, include_nb_fallback: bool) -> 
         body, p_mac, p_vlan, p_ips, s_mac, s_vlan, s_ips
     )
     set_nb = bool(re.search(r"\bSET_NETBOX_", body, re.IGNORECASE))
+    os_first = _nic_inventory_columns_prefer_os(cells)
     if set_nb:
         if _nic_proposed_property_segment_ok(s_mac):
             return str(s_mac).strip()
@@ -1650,10 +1701,8 @@ def _nic_mac_intent_raw(cells: dict[str, str], *, include_nb_fallback: bool) -> 
             return str(s_mac).strip()
         if not use_mac_cols:
             return None
-    cols = (
-        _cell(cells, "MAAS MAC", "OS MAC", "NB MAC", "Parsed MAC")
-        if include_nb_fallback
-        else _cell(cells, "MAAS MAC", "OS MAC", "Parsed MAC")
+    cols = _nic_pick_inventory_mac(
+        cells, include_nb_fallback=include_nb_fallback, os_first=os_first
     )
     return str(cols).strip() if _nic_proposed_property_segment_ok(cols) else None
 

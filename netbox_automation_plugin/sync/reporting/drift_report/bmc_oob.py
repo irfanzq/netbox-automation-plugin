@@ -230,6 +230,7 @@ def _build_proposed_mgmt_interface_rows(
         if not h:
             continue
         m = maas_by_hostname.get(h) or {}
+        maas_status_disp = str(m.get("status_name") or "—").strip() or "—"
         bmc = (m.get("bmc_ip") or "").strip()
         pt = (m.get("power_type") or "").strip() or "—"
         maas_vendor = str(m.get("hardware_vendor") or "").strip() or "—"
@@ -275,6 +276,7 @@ def _build_proposed_mgmt_interface_rows(
             bx = _bmc_drift_extra_columns(m)
             out.append([
                 h,
+                maas_status_disp,
                 "—",
                 pt,
                 maas_vendor,
@@ -455,6 +457,7 @@ def _build_proposed_mgmt_interface_rows(
         bx = _bmc_drift_extra_columns(m)
         out.append([
             h,
+            maas_status_disp,
             bmc or "—",
             pt,
             maas_vendor,

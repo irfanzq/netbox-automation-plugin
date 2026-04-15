@@ -4,10 +4,10 @@ Heuristic NB proposed intf Label / Type for drift NIC tables (review defaults).
 Neighbor **switch** naming for heuristics follows the same authority as the audit row:
 OpenStack/Ironic runtime (``local_link`` / ``os_lldp``) first; MAAS commissioning LLDP
 switch name when OS does not supply one. MAAS VLAN name remains a further fallback for
-peer-style naming hints. Drift tables list ``MAAS LLDP switch`` after other MAAS columns,
-then ``OS LLDP switch`` with OS runtime columns; both stay independent (OS vs MAAS sources);
-combined logic uses OS-then-MAAS only for
-derivations (label, mgmt/data hints, etc.).
+peer-style naming hints. Report columns are grouped **MAAS** (incl. ``MAAS LLDP switch``),
+then **OS** (``OS LLDP switch`` and runtime MAC/IP/VLAN), then **NetBox** / suggested name,
+then **Authority** and **Proposed Action** (and **Reason** on new-NIC rows). Combined logic
+uses OS-then-MAAS only for derivations (label, mgmt/data hints, etc.).
 """
 
 from __future__ import annotations
@@ -16,11 +16,11 @@ import re
 from typing import Any
 
 # Authority column (0-based) for NIC drift vs new-NIC tables (headers differ).
-# ``Reason`` sits after ``Proposed Action`` (drift) or after ``Authority`` (new NICs); indices unchanged.
-NIC_DRIFT_AUTHORITY_COL_INDEX = 23  # HEADERS_DETAIL_NIC_DRIFT
-NIC_NEW_AUTHORITY_COL_INDEX = 20  # HEADERS_DETAIL_NEW_NICS
+# Drift: ``Reason`` after ``Proposed Action``. New NICs: ``Authority`` then ``Proposed Action`` then ``Reason``.
+NIC_DRIFT_AUTHORITY_COL_INDEX = 24  # HEADERS_DETAIL_NIC_DRIFT
+NIC_NEW_AUTHORITY_COL_INDEX = 20  # HEADERS_DETAIL_NEW_NICS (Authority before Proposed Action)
 # "OS MAC" column (same index in new-NIC and NIC-drift detail tables).
-NIC_OS_MAC_COL_INDEX = 11
+NIC_OS_MAC_COL_INDEX = 12
 
 
 def nic_row_os_mac_is_present(row: Any) -> bool:

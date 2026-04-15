@@ -31,13 +31,6 @@ from netbox_automation_plugin.sync.reconciliation.audit_detail import (
     openstack_subnets_missing_prefixes,
 )
 from netbox_automation_plugin.sync.clients.openstack_client import fetch_openstack_data, fetch_all_openstack_data
-from netbox_automation_plugin.sync.reporting.drift_report.birch_audit_scope import (
-    birch_audit_hostname_is_weka_storage,
-    birch_audit_rules_active,
-)
-from netbox_automation_plugin.sync.reporting.drift_report.maas_netbox_status import (
-    normalize_maas_status,
-)
 from netbox_automation_plugin.sync.reconciliation.maas_netbox import (
     compute_maas_netbox_drift,
     _hostname_short,
@@ -962,13 +955,6 @@ class MAASOpenStackSyncView(LoginRequiredMixin, View):
             config.get("maas_api_key") or "",
             config.get("maas_insecure", True),
         )
-        if birch_audit_rules_active(scope_meta):
-            maas_data["machines"] = [
-                m
-                for m in (maas_data.get("machines") or [])
-                if normalize_maas_status(m.get("status_name") or m.get("status")) == "DEPLOYED"
-                or birch_audit_hostname_is_weka_storage(str(m.get("hostname") or ""))
-            ]
         maas_machines_before = list(maas_data.get("machines") or [])
         scope_meta["maas_machines_before"] = len(maas_machines_before)
         fabrics_before = _unique_fabric_names(maas_machines_before)

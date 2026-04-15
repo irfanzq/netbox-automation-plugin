@@ -1330,7 +1330,8 @@ async def fetch_maas_data(maas_url: str, maas_api_key: str, maas_insecure: bool)
     """
     Fetch machines, zones, and pools from MAAS. Returns a dict with:
       - machines: list of dicts including hostname, system_id, zone_name, pool_name,
-        status_name, power_type, bmc_*, serial, hardware_vendor (from MAAS / hardware_info)
+        status_name, power_type, bmc_*, serial, hardware_vendor (from MAAS / hardware_info).
+        **Only machines in MAAS Deployed lifecycle state** are returned (same rule for every site).
       - zones: list of {name, id}
       - pools: list of {name, id}
       - error: str if connection failed
@@ -1531,6 +1532,26 @@ async def fetch_maas_data(maas_url: str, maas_api_key: str, maas_insecure: bool)
     except Exception as e:
         logger.exception("MAAS fetch failed")
         result["error"] = str(e)
+
+    # Drift / audit: only Deployed machines (no per-location exceptions).
+    try:
+        from netbox_automation_plugin.sync.reporting.drift_report.maas_netbox_status import (
+            normalize_maas_status,
+        )
+
+        machines = result.get("machines") or []
+        if isinstance(machines, list):
+            result["machines"] = [
+                m
+                for m in machines
+                if isinstance(m, dict)
+                and normalize_maas_status(
+                    m.get("status_name") or m.get("status") or ""
+                )
+                == "DEPLOYED"
+            ]
+    except Exception:
+        logger.exception("MAAS Deployed-only machine filter failed")
 
     return result
 

@@ -117,7 +117,9 @@ def _maas_iface_row_fabric(m: dict, mi: dict) -> str:
     return (m.get("fabric_name") or "").strip()
 
 
-def _nic_audit_sidecar(mi: dict, os_row: dict | None, *, host_bmc_mac: str) -> dict:
+def _nic_audit_sidecar(
+    mi: dict, os_row: dict | None, *, host_bmc_mac: str, maas_status: str = "—"
+) -> dict:
     """
     MAAS/OpenStack fields joined onto interface audit rows for drift NIC tables.
 
@@ -140,7 +142,9 @@ def _nic_audit_sidecar(mi: dict, os_row: dict | None, *, host_bmc_mac: str) -> d
     os_parts = parse_os_lldp_structured(os_row)
     os_sw = (os_parts.get("switch") or "").strip()
     maas_sw = str(mi.get("maas_lldp_switch") or "").strip()
+    st = str(maas_status or "").strip() or "—"
     return {
+        "maas_status": st,
         "maas_link_speed": ls if ls not in (None, "") else "",
         "maas_nic_vendor": str(mi.get("vendor") or "").strip(),
         "maas_nic_product": str(mi.get("product") or "").strip(),
@@ -226,6 +230,7 @@ def build_maas_netbox_interface_audit(
         ironic_note_done = False
         m_fab = (m.get("fabric_name") or "-")[:14]
         m_pool = (m.get("pool_name") or "-")[:12]
+        maas_status_disp = str(m.get("status_name") or "—").strip() or "—"
         nb_by_mac = {}
         lag_members_by_name = defaultdict(set)
         lag_member_macs_by_name = defaultdict(set)
@@ -276,7 +281,11 @@ def build_maas_netbox_interface_audit(
                     "status": "MAAS_NO_MAC",
                     "notes": f"type={itype or '?'} (bond/vlan child — match parent MAC if needed)",
                 }
-                row_no_mac.update(_nic_audit_sidecar(mi, None, host_bmc_mac=host_bmc_norm))
+                row_no_mac.update(
+                    _nic_audit_sidecar(
+                        mi, None, host_bmc_mac=host_bmc_norm, maas_status=maas_status_disp
+                    )
+                )
                 rows.append(row_no_mac)
                 continue
 
@@ -313,7 +322,11 @@ def build_maas_netbox_interface_audit(
                                 f"(NB={cmac} MAAS={mac})"
                             ),
                         }
-                        row_mm.update(_nic_audit_sidecar(mi, None, host_bmc_mac=host_bmc_norm))
+                        row_mm.update(
+                            _nic_audit_sidecar(
+                                mi, None, host_bmc_mac=host_bmc_norm, maas_status=maas_status_disp
+                            )
+                        )
                         rows.append(row_mm)
                         mac_mismatch_done = True
                     else:
@@ -370,7 +383,11 @@ def build_maas_netbox_interface_audit(
                     "status": "NOT_IN_NETBOX",
                     "notes": nib_notes,
                 }
-                row_nib.update(_nic_audit_sidecar(mi, os_nib, host_bmc_mac=host_bmc_norm))
+                row_nib.update(
+                    _nic_audit_sidecar(
+                        mi, os_nib, host_bmc_mac=host_bmc_norm, maas_status=maas_status_disp
+                    )
+                )
                 rows.append(row_nib)
                 continue
 
@@ -545,7 +562,11 @@ def build_maas_netbox_interface_audit(
                 "status": status,
                 "notes": "; ".join(notes) if notes else "—",
             }
-            row_ok.update(_nic_audit_sidecar(mi, os_row, host_bmc_mac=host_bmc_norm))
+            row_ok.update(
+                _nic_audit_sidecar(
+                    mi, os_row, host_bmc_mac=host_bmc_norm, maas_status=maas_status_disp
+                )
+            )
             rows.append(row_ok)
 
         netbox_only = []

@@ -1,5 +1,8 @@
 """Drift counts, severity triage, run metrics, and placement-alignment tables."""
 
+from netbox_automation_plugin.sync.reporting.drift_report.drift_overrides_apply import (
+    HEADERS_PLACEMENT_ALIGNMENT,
+)
 from netbox_automation_plugin.sync.reporting.drift_report.fabric_alignment import (
     _alignment_review_rows,
 )
@@ -149,21 +152,7 @@ def emit_drift_counts_and_alignment(
         )
         e.spacer()
         e.table(
-            [
-                "Host",
-                "MAAS fabric",
-                "MAAS state",
-                "OS region",
-                "OS provision",
-                "OS power",
-                "OS maintenance",
-                "NetBox site",
-                "NetBox location",
-                "NB state (current)",
-                "NB proposed device status",
-                "Authority",
-                "Proposed Action",
-            ],
+            list(HEADERS_PLACEMENT_ALIGNMENT),
             align_rows,
             dynamic_columns=True,
             notes_col_idx=11,

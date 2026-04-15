@@ -4,11 +4,32 @@ from __future__ import annotations
 
 from netbox_automation_plugin.sync.reporting.drift_report.misc_utils import _dedupe_note_parts
 from netbox_automation_plugin.sync.reporting.drift_report.proposed_action_format import (
+    SET_NETBOX_ACTION_REVIEW_PORT_ALIGNMENT,
+    _PLACEHOLDER,
     format_set_netbox_nic_directives,
 )
 from netbox_automation_plugin.sync.reporting.drift_report.proposed_nic_derived import (
     derive_nic_proposed_columns,
 )
+
+def _nic_directive_field(os_val: str, maas_val: str, *, authority: str) -> str:
+    """
+    MAC / VLAN / IP blob to feed ``format_set_netbox_nic_directives`` for new-NIC rows.
+
+    Matches NIC drift semantics: ``openstack_runtime`` uses OS only (no silent MAAS substitute
+    when OS is empty); ``maas_fallback`` prefers MAAS then OS.
+    """
+    os_v = str(os_val or "").strip()
+    maas_v = str(maas_val or "").strip()
+    if authority == "openstack_runtime":
+        if os_v and os_v not in _PLACEHOLDER:
+            return os_v
+        return ""
+    if maas_v and maas_v not in _PLACEHOLDER:
+        return maas_v
+    if os_v and os_v not in _PLACEHOLDER:
+        return os_v
+    return ""
 
 
 def _build_add_nb_interface_rows(
@@ -17,7 +38,11 @@ def _build_add_nb_interface_rows(
 ):
     """
     MAAS NICs with a MAC that do not match any NetBox port on the device.
-    Preview: proposed new NetBox ports (+ VLAN, IPs from MAAS).
+
+    ``SET_NETBOX_*`` directives use MAAS inventory when authority is MAAS fallback; when
+    authority is OpenStack runtime they use **OS** MAC / VLAN / IP only (no silent MAAS
+    substitute if OS fields are empty). Reconciliation preview uses the same ``Authority``
+    column via :func:`apply_cells._interface_mac_vlan_ip_from_cells`.
     """
     out = []
     for b in (interface_audit or {}).get("hosts") or []:
@@ -40,14 +65,29 @@ def _build_add_nb_interface_rows(
             authority = str(row.get("authority") or "maas_fallback").strip()
             authority_badge = "[OS]" if authority == "openstack_runtime" else "[MAAS]"
             os_region = str(row.get("os_region") or "—").strip() or "—"
+            dir_mac = _nic_directive_field(os_mac, mac, authority=authority)
+            dir_vlan = _nic_directive_field(os_vlan, vlan, authority=authority)
+            dir_ips = _nic_directive_field(os_ip, ips, authority=authority)
             props, nic_reason = format_set_netbox_nic_directives(
-                mac=mac, vlan=vlan, ips=ips, vm_primary_hosts=vm_primary_hosts
+                mac=dir_mac,
+                vlan=dir_vlan,
+                ips=dir_ips,
+                vm_primary_hosts=vm_primary_hosts,
             )
+            if authority == "openstack_runtime" and not (props or "").strip():
+                props = SET_NETBOX_ACTION_REVIEW_PORT_ALIGNMENT
+                if nic_reason in _PLACEHOLDER or not (nic_reason or "").strip():
+                    nic_reason = (
+                        "OpenStack authority but runtime MAC/VLAN/IP not yet present for this "
+                        "NIC; re-run audit when Neutron/Ironic data is available, or apply from MAAS "
+                        "after switching authority."
+                    )
             ex = derive_nic_proposed_columns(
                 hn, row, bmc_mac=str(row.get("host_bmc_mac") or "")
             )
             out.append([
                 hn,
+                str(row.get("maas_status") or "—").strip() or "—",
                 maas_if,
                 maas_fab,
                 mac,
@@ -70,8 +110,8 @@ def _build_add_nb_interface_rows(
                     if maas_if != "—"
                     else (f"maas-nic-{mac.replace(':', '')[-6:]}" if mac else "maas-nic")
                 ),
-                props,
                 authority_badge,
+                props,
                 nic_reason,
             ])
     return sorted(out, key=lambda x: (x[0] or "").lower())

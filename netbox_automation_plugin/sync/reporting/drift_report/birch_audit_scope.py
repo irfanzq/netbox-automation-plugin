@@ -1,29 +1,30 @@
 """
-Birch-only MAAS/OpenStack audit rules.
+Legacy Birch-scoped audit helpers (disabled).
 
-When the operator scopes an audit to NetBox locations (or sites) whose names/slugs all
-contain ``birch``, stricter filtering applies: MAAS machines must be Deployed, proposed
-new devices must appear in OpenStack inventory, and MAAS-authority NIC rows without OS
-MAC are dropped.
+Historically, when an audit was scoped to NetBox locations/sites whose names contained
+``birch``, extra rules applied: MAAS was filtered to Deployed machines plus a ``-weka-``
+hostname carve-out, OpenStack-gated MAAS-only hosts were skipped in some proposed tables,
+and placement alignment omitted MAAS-only rows.
 
-**Exception:** hostnames containing ``-weka-`` (case-insensitive) are treated like
-pre-Birch behavior for MAAS inclusion, OpenStack membership checks, placement alignment,
-and MAAS-only NIC rows so Weka storage nodes stay in the audit when not Deployed or
-not present in OpenStack inventory.
+**Current behavior:** :func:`birch_audit_rules_active` is always false so Birch-scoped
+runs use the **same** MAAS machine inventory and report logic as any other location
+(full ``fetch_maas_data_sync`` list; no Deployed-only filter; no Weka substring gate).
+
+The hostname helper and :func:`openstack_hostnames_short` remain for API compatibility
+and tests; they are unused when Birch rules are inactive.
 """
 
 from __future__ import annotations
 
-# Birch audit: include these MAAS hosts even when Deployed-only / OpenStack gates would drop them.
+# Legacy Birch carve-out (no longer used when rules are inactive).
 _BIRCH_AUDIT_WILDCARD_HOST_SUBSTRING = "-weka-"
 
 
 def birch_audit_hostname_is_weka_storage(hostname: str | None) -> bool:
     """
-    True when the hostname should bypass strict Birch MAAS/OpenStack/NIC filters.
+    True when the hostname label contains ``-weka-`` (case-insensitive), e.g. ``b1-r2-weka-1``.
 
-    Matches short or FQDN host labels containing ``-weka-`` (case-insensitive), e.g.
-    ``b1-r2-weka-1``.
+    Retained for callers/tests; Birch audit rules no longer consult this by default.
     """
     h = (hostname or "").strip().casefold()
     if not h:
@@ -33,20 +34,11 @@ def birch_audit_hostname_is_weka_storage(hostname: str | None) -> bool:
 
 def birch_audit_rules_active(scope_meta: dict | None) -> bool:
     """
-    True when the run is scoped to Birch-only NetBox context (substring match, case-insensitive).
+    Birch-only stricter audit rules are **disabled** (always false).
 
-    - If specific **locations** were selected: every selected location name must contain ``birch``.
-    - Else if only **sites** were selected (no location keys): every site slug must contain ``birch``.
-    - Unscoped / all-locations audits: False.
+    ``scope_meta`` is ignored. Birch NetBox scope therefore uses the same MAAS and
+    proposed-change behavior as other sites/locations.
     """
-    if not scope_meta:
-        return False
-    locs = [str(x).strip() for x in (scope_meta.get("selected_locations") or []) if str(x).strip()]
-    sites = [str(x).strip() for x in (scope_meta.get("selected_sites") or []) if str(x).strip()]
-    if locs:
-        return all("birch" in x.casefold() for x in locs)
-    if sites:
-        return all("birch" in x.casefold() for x in sites)
     return False
 
 

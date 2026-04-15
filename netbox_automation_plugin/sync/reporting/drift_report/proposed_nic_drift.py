@@ -32,6 +32,32 @@ def _drift_row_nb_placement_cells(row: dict) -> tuple[str, str, str]:
     )
 
 
+def _vlan_vid_token_ok(v: str) -> bool:
+    t = str(v or "").strip()
+    if not t or t in ("—", "-", "None", "none"):
+        return False
+    try:
+        n = int(t)
+    except ValueError:
+        return False
+    return 1 <= n <= 4094
+
+
+def _mac_token_ok(v: str) -> bool:
+    t = str(v or "").strip().lower().replace("-", ":")
+    if not t or t in ("—", "-", "none", "n/a"):
+        return False
+    parts = [p for p in t.split(":") if p]
+    if len(parts) != 6:
+        return False
+    try:
+        for p in parts:
+            int(p, 16)
+    except ValueError:
+        return False
+    return True
+
+
 def _build_update_nic_rows(
     interface_audit,
     vm_primary_hosts: frozenset[str] | None = None,
@@ -65,10 +91,19 @@ def _build_update_nic_rows(
             maas_ips = str(row.get("maas_ips") or "").strip() or "—"
 
             def _preferred_value(os_val: str, maas_val: str) -> str:
+                """
+                Runtime target for SET_NETBOX_* tokens.
+
+                When ``authority`` is OpenStack runtime, MAAS must not silently substitute
+                for missing OS fields (Neutron/Ironic can lag one audit behind host-level
+                ``openstack_runtime``). MAAS fallback applies only for ``maas_fallback`` rows.
+                """
                 os_v = str(os_val or "").strip()
                 maas_v = str(maas_val or "").strip()
-                if authority == "openstack_runtime" and os_v not in {"", "—", "-", "None", "none"}:
-                    return os_v
+                if authority == "openstack_runtime":
+                    if os_v not in {"", "—", "-", "None", "none"}:
+                        return os_v
+                    return "—"
                 if maas_v not in {"", "—", "-", "None", "none"}:
                     return maas_v
                 if os_v:
@@ -81,7 +116,8 @@ def _build_update_nic_rows(
                 else:
                     statuses.append("VLAN_MISMATCH")
                 vlan_target = _preferred_value(os_vlan, maas_vlan)
-                actions.append(f"SET_NETBOX_UNTAGGED_VLAN={vlan_target}")
+                if _vlan_vid_token_ok(vlan_target):
+                    actions.append(f"SET_NETBOX_UNTAGGED_VLAN={vlan_target}")
 
             if "IP_GAP" in st:
                 statuses.append("MISSING_NB_IP")
@@ -110,7 +146,13 @@ def _build_update_nic_rows(
                 else:
                     statuses.append("MISSING_NB_MAC")
                 mac_target = _preferred_value(os_mac, maas_mac)
-                actions.append(f"SET_NETBOX_MAC={mac_target}")
+                if _mac_token_ok(mac_target):
+                    actions.append(f"SET_NETBOX_MAC={mac_target}")
+
+            # VLAN drift with no safe SET_NETBOX_UNTAGGED_VLAN (e.g. OS authority but runtime VID
+            # not yet in the row): keep a review row instead of dropping the proposed line entirely.
+            if statuses and not actions and "VLAN_DRIFT" in st and "IP_GAP" not in st:
+                actions.append(SET_NETBOX_ACTION_REVIEW_PORT_ALIGNMENT)
 
             if not statuses:
                 statuses.append(st)
@@ -132,6 +174,7 @@ def _build_update_nic_rows(
             nb_site_c, nb_loc_c, nb_vg_c = _drift_row_nb_placement_cells(row)
             update_nic.append([
                 hn,
+                str(row.get("maas_status") or "—").strip() or "—",
                 row.get("maas_if") or "",
                 str(row.get("maas_fabric") or "—"),
                 row.get("maas_mac") or "",

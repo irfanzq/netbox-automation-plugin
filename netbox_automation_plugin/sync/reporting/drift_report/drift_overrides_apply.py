@@ -40,8 +40,8 @@ SELECTION_KEY_TO_PROP_LIST: dict[str, str] = {
 
 HEADERS_DETAIL_NEW_DEVICES: list[str] = [
     "Hostname",
-    "MAAS fabric",
     "MAAS status",
+    "MAAS fabric",
     "Serial Number",
     "OS region",
     "OS provision",
@@ -183,8 +183,8 @@ HEADERS_DETAIL_NEW_IP_RANGES: list[str] = [
 
 HEADERS_PLACEMENT_ALIGNMENT: list[str] = [
     "Host",
+    "MAAS status",
     "MAAS fabric",
-    "MAAS state",
     "OS region",
     "OS provision",
     "OS power",
@@ -197,8 +197,10 @@ HEADERS_PLACEMENT_ALIGNMENT: list[str] = [
     "Proposed Action",
 ]
 
+# Column order: Host (key) | MAAS* | OS* | NB* | Suggested name | Authority | Proposed | Reason
 HEADERS_DETAIL_NEW_NICS: list[str] = [
     "Host",
+    "MAAS status",
     "MAAS intf",
     "MAAS fabric",
     "MAAS MAC",
@@ -217,13 +219,15 @@ HEADERS_DETAIL_NEW_NICS: list[str] = [
     "NB Proposed intf Label",
     "NB Proposed intf Type",
     "Suggested NB name",
-    "Proposed Action",
     "Authority",
+    "Proposed Action",
     "Reason",
 ]
 
+# Column order: Host | MAAS* | OS* | NB* | Authority | Proposed | Reason
 HEADERS_DETAIL_NIC_DRIFT: list[str] = [
     "Host",
+    "MAAS status",
     "MAAS intf",
     "MAAS fabric",
     "MAAS MAC",
@@ -254,8 +258,10 @@ HEADERS_DETAIL_NIC_DRIFT: list[str] = [
 # Same columns as MAAS-fallback NIC drift; selection_key differs only.
 HEADERS_DETAIL_NIC_DRIFT_OS: list[str] = list(HEADERS_DETAIL_NIC_DRIFT)
 
+# Host | MAAS* | OS* | NB / suggested | Authority | Proposed
 HEADERS_BMC_NEW_DEVICES: list[str] = [
     "Host",
+    "MAAS status",
     "MAAS BMC IP",
     "MAAS power_type",
     "MAAS vendor",
@@ -275,8 +281,10 @@ HEADERS_BMC_NEW_DEVICES: list[str] = [
     "Proposed Action",
 ]
 
+# Host | MAAS* | OS* | NB / coverage | Authority | Status | Proposed
 HEADERS_BMC_EXISTING: list[str] = [
     "Host",
+    "MAAS status",
     "MAAS BMC IP",
     "MAAS power_type",
     "MAAS vendor",
