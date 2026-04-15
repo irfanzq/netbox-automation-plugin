@@ -79,6 +79,7 @@ from .apply_cells import (
     _interface_mac_vlan_ip_from_cells,
     _merge_apply_extra_debug,
     _norm_header,
+    _normalize_ip_for_netbox,
     _parse_vlan_vid,
     _resolve_tenant,
     apply_row_operation,
@@ -1688,6 +1689,26 @@ def _fetch_written_object_fallback(op: dict[str, Any], using: str) -> Any | None
             elif not vrf_name:
                 qs = qs.filter(vrf__isnull=True)
             return qs.first()
+        if action in ("create_floating_ip", "create_nat_inside_ip"):
+            from ipam.models import IPAddress, VRF
+
+            addr = str(proj.get("address") or "").strip()
+            if not addr:
+                return None
+            vrf_name = str(proj.get("vrf") or "").strip()
+            vrf = None
+            if vrf_name:
+                vrf = _orm(VRF).filter(name=vrf_name).first()
+            try:
+                norm = _normalize_ip_for_netbox(addr)
+            except ValueError:
+                return None
+            qs = _orm(IPAddress).filter(address=norm)
+            if vrf is not None:
+                qs = qs.filter(vrf=vrf)
+            elif not vrf_name:
+                qs = qs.filter(vrf__isnull=True)
+            return qs.first()
         if action in ("create_device", "review_device", "placement_alignment"):
             from dcim.models import Device
 
@@ -2182,16 +2203,19 @@ SK_TO_ACTION = {
     "detail_placement_lifecycle_alignment": "placement_alignment",
     "detail_proposed_missing_vlans": "create_vlan",
     "detail_proposed_missing_tenants": "create_tenant",
+    "detail_proposed_missing_nat_inside_ips": "create_nat_inside_ip",
 }
 
 # Reconciliation preview tables, frozen-op sorting, and branch apply all use this tuple (low index runs first).
-# New devices + MAAS review hosts first, then proposed missing VLANs (IPAM), then new/existing
+# New devices + MAAS review hosts first, then proposed missing VLANs (IPAM), missing tenants,
+# missing NAT-inside IPAddress rows (OpenStack fixed IP not yet in IPAM), then new/existing
 # prefix rows (VLAN FK), then placement, VMs, NICs, OpenStack IPAM/FIP/VM drift, BMC, serial.
 AUDIT_REPORT_APPLY_ORDER: tuple[str, ...] = (
     "detail_new_devices",
     "detail_review_only_devices",
     "detail_proposed_missing_vlans",
     "detail_proposed_missing_tenants",
+    "detail_proposed_missing_nat_inside_ips",
     # Prefixes reference IPAM VLANs: run immediately after proposed VLAN creates so the
     # same apply batch resolves VLAN FKs before NIC / VM rows (ordering tie-break is still
     # phase-based; this keeps section order aligned with dependencies).
@@ -2221,6 +2245,7 @@ _ACTION_APPLY_PHASE: dict[str, int] = {
     "review_device": 1,
     "create_vlan": 2,
     "create_tenant": 2,
+    "create_nat_inside_ip": 2,
     "placement_alignment": 3,
     "create_interface": 4,
     "update_interface": 4,
@@ -2242,6 +2267,7 @@ RECON_SECTION_TITLES: dict[str, str] = {
     "detail_review_only_devices": "MAAS only hosts",
     "detail_proposed_missing_vlans": "Proposed missing VLANs (IPAM)",
     "detail_proposed_missing_tenants": "Proposed missing tenants (OpenStack projects)",
+    "detail_proposed_missing_nat_inside_ips": "Proposed missing NAT inside IPs (OpenStack fixed)",
     "detail_new_prefixes": "New prefixes",
     "detail_existing_prefixes": "Existing prefixes",
     "detail_new_ip_ranges": "New IP ranges",
@@ -2264,6 +2290,7 @@ _PROP_LIST_KEY_FALLBACK_ACTION: dict[str, str] = {
     "add_nb_interfaces": "create_interface",
     "add_proposed_missing_vlans": "create_vlan",
     "add_proposed_missing_tenants": "create_tenant",
+    "add_proposed_missing_nat_inside_ips": "create_nat_inside_ip",
 }
 
 
@@ -2346,6 +2373,10 @@ def _operation_summary(meta: dict[str, Any]) -> str:
     if sk == "detail_proposed_missing_tenants":
         tn = (cells.get("NB proposed tenant name") or cells.get("OpenStack project") or "").strip()
         return f"Create tenant: {tn or '—'}"
+    if sk == "detail_proposed_missing_nat_inside_ips":
+        inner = (cells.get("NAT inside IP") or cells.get("NAT inside IP (to create)") or "").strip()
+        vrf = (cells.get("NB proposed VRF") or "").strip()
+        return f"Create NAT inside IP: {inner or '—'} (VRF {vrf or '—'})"
     if sk == "detail_new_prefixes":
         cidr = cells.get("CIDR") or "—"
         vrf = cells.get("NB proposed VRF") or "—"
@@ -2619,6 +2650,15 @@ def _expand_partial_retry_ops_with_device_creates(
             if rk and rk not in have_rk2:
                 have_rk2.add(rk)
                 out.append(o)
+        for o in all_ops:
+            if not isinstance(o, dict):
+                continue
+            if str(o.get("action") or "") != "create_nat_inside_ip":
+                continue
+            rk = str(o.get("row_key") or "").strip()
+            if rk and rk not in have_rk2:
+                have_rk2.add(rk)
+                out.append(o)
     allowed_sk = all_registered_selection_keys()
     out.sort(key=lambda o: _operation_apply_sort_key(o, allowed=allowed_sk))
     return out
@@ -2817,6 +2857,7 @@ def build_frozen_operations(
 
     _inject_interface_prerequisite_ops(ops, seen, row_index)
     _inject_floating_ip_prerequisite_tenant_ops(ops, seen, row_index)
+    _inject_floating_ip_prerequisite_nat_inside_ops(ops, seen, row_index)
     ops.sort(key=lambda o: _operation_apply_sort_key(o, allowed=allowed))
     return ops
 
@@ -2832,6 +2873,21 @@ def _inject_floating_ip_prerequisite_tenant_ops(
         return
     for meta in row_index.values():
         if str(meta.get("selection_key") or "") != "detail_proposed_missing_tenants":
+            continue
+        _append_frozen_op_from_meta(meta, ops, seen)
+
+
+def _inject_floating_ip_prerequisite_nat_inside_ops(
+    ops: list[dict[str, Any]],
+    seen: set[str],
+    row_index: dict[str, dict[str, Any]],
+) -> None:
+    """When any floating IP row is selected, include proposed missing NAT-inside IP rows (prereq)."""
+    fip_sk = frozenset({"detail_new_fips", "detail_existing_fips"})
+    if not any(str(o.get("selection_key") or "") in fip_sk for o in ops if isinstance(o, dict)):
+        return
+    for meta in row_index.values():
+        if str(meta.get("selection_key") or "") != "detail_proposed_missing_nat_inside_ips":
             continue
         _append_frozen_op_from_meta(meta, ops, seen)
 
@@ -3067,6 +3123,7 @@ _ROW_DIFF_ONE_LINE_SECTIONS = frozenset(
     {
         "detail_proposed_missing_vlans",
         "detail_proposed_missing_tenants",
+        "detail_proposed_missing_nat_inside_ips",
     }
 )
 

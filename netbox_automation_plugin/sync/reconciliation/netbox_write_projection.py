@@ -25,6 +25,10 @@ Location field); apply requires **NB site** and sets ``VLAN.site`` when the mode
 **Proposed missing tenants** (``detail_proposed_missing_tenants``): projection keys ``name``,
 ``description``, ``openstack_project`` — same contract as ``apply_create_tenant``.
 
+**Proposed missing NAT inside IPs** (``detail_proposed_missing_nat_inside_ips``): projection keys
+``address``, ``vrf``, ``status``, ``description`` — same contract as
+``apply_create_nat_inside_ip``.
+
 **New / NIC drift interfaces**: projection uses ``untagged_vlan_vid`` (802.1Q tag parsed from
 audit cells), not NetBox ``ipam.VLAN`` database ``id`` — avoids confusing VID with VLAN pk in
 apply logs and preview tables. The ``type`` key is the NetBox ``Interface.type`` **slug**
@@ -123,6 +127,11 @@ _NETBOX_PREVIEW_FULL_KEY_ORDER: dict[str, tuple[str, ...]] = {
         "name",
         "description",
         "openstack_project",
+    ),
+    "detail_proposed_missing_nat_inside_ips": (
+        "address",
+        "vrf",
+        "status",
     ),
 }
 
@@ -480,6 +489,12 @@ def netbox_write_projection_cells(selection_key: str, cells: dict[str, str] | No
             "name": tname,
             "description": _cell(c, "NB proposed tenant description"),
             "openstack_project": _cell(c, "OpenStack project"),
+        }
+    if sk == "detail_proposed_missing_nat_inside_ips":
+        return {
+            "address": _cell(c, "NAT inside IP", "NAT inside IP (to create)"),
+            "vrf": _cell(c, "NB proposed VRF"),
+            "status": _cell(c, "NB proposed status"),
         }
     if sk == "detail_serial_review":
         return {

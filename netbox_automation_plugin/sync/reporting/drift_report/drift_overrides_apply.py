@@ -22,6 +22,7 @@ SELECTION_KEY_TO_PROP_LIST: dict[str, str] = {
     "detail_review_only_devices": "add_devices_review_only",
     "detail_proposed_missing_vlans": "add_proposed_missing_vlans",
     "detail_proposed_missing_tenants": "add_proposed_missing_tenants",
+    "detail_proposed_missing_nat_inside_ips": "add_proposed_missing_nat_inside_ips",
     "detail_new_prefixes": "add_prefixes",
     "detail_new_ip_ranges": "add_ip_ranges",
     "detail_new_fips": "add_fips",
@@ -325,11 +326,22 @@ HEADERS_DETAIL_PROPOSED_MISSING_TENANTS: list[str] = [
     "Proposed Action",
 ]
 
+HEADERS_DETAIL_PROPOSED_MISSING_NAT_INSIDE_IPS: list[str] = [
+    "OS region",
+    "NAT inside IP",
+    "Floating IP",
+    "NB proposed status",
+    "NB proposed VRF",
+    "Authority",
+    "Proposed Action",
+]
+
 SELECTION_KEY_TO_HEADERS: dict[str, list[str]] = {
     "detail_new_devices": HEADERS_DETAIL_NEW_DEVICES,
     "detail_review_only_devices": HEADERS_DETAIL_NEW_DEVICES,
     "detail_proposed_missing_vlans": HEADERS_DETAIL_PROPOSED_MISSING_VLANS,
     "detail_proposed_missing_tenants": HEADERS_DETAIL_PROPOSED_MISSING_TENANTS,
+    "detail_proposed_missing_nat_inside_ips": HEADERS_DETAIL_PROPOSED_MISSING_NAT_INSIDE_IPS,
     "detail_new_prefixes": HEADERS_DETAIL_NEW_PREFIXES,
     "detail_new_ip_ranges": HEADERS_DETAIL_NEW_IP_RANGES,
     "detail_new_fips": HEADERS_DETAIL_NEW_FIPS,

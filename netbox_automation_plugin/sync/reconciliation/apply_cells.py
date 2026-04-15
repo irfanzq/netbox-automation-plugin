@@ -188,6 +188,7 @@ SUPPORTED_APPLY_ACTIONS: frozenset[str] = frozenset(
         "create_prefix",
         "create_ip_range",
         "create_floating_ip",
+        "create_nat_inside_ip",
         "create_device",
         "review_device",
         "create_interface",
@@ -3392,10 +3393,13 @@ def _fip_description_from_cells(cells: dict[str, str], *, max_len: int) -> str:
     return body
 
 
-def _resolve_nat_inside_ipaddress(inside_raw: str, vrf_preferred: Any) -> Any:
+def _resolve_nat_inside_ipaddress(
+    inside_raw: str, vrf_preferred: Any, tenant_preferred: Any | None = None
+) -> Any:
     """
     NetBox: public / floating side stores NAT inside on IPAddress.nat_inside (inside address object).
-    Prefer same VRF as the floating IP, then Global (null VRF), then any single match.
+    Prefer same VRF as the floating IP, then Global (null VRF), then same tenant as the public IP,
+    then a unique VMInterface assignment, then any single match.
     """
     from ipam.models import IPAddress
 
@@ -3413,6 +3417,21 @@ def _resolve_nat_inside_ipaddress(inside_raw: str, vrf_preferred: Any) -> Any:
     hit = qs.filter(vrf__isnull=True).first()
     if hit is not None:
         return hit
+    tid = getattr(tenant_preferred, "pk", None)
+    if tid and hasattr(IPAddress, "tenant_id"):
+        hit = qs.filter(tenant_id=tid).first()
+        if hit is not None:
+            return hit
+    try:
+        from django.contrib.contenttypes.models import ContentType
+        from virtualization.models import VMInterface
+
+        ct = ContentType.objects.get_for_model(VMInterface)
+        vm_qs = qs.filter(assigned_object_type_id=ct.pk)
+        if vm_qs.count() == 1:
+            return vm_qs.first()
+    except Exception:
+        pass
     if qs.count() == 1:
         return qs.first()
     return None
@@ -3520,7 +3539,8 @@ def _floating_ip_apply_row_stepwise(
         "NAT inside IP (from OpenStack fixed IP)",
         "NAT inside IP",
     )
-    inner = _resolve_nat_inside_ipaddress(inside_raw, vrf)
+    tenant_for_nat = tenant_obj if tenant_obj is not None else getattr(ip_obj, "tenant", None)
+    inner = _resolve_nat_inside_ipaddress(inside_raw, vrf, tenant_for_nat)
     if inner is not None and getattr(ip_obj, "nat_inside_id", None) != inner.pk:
         with _tx_branch():
             _netbox_changelog_snapshot(ip_obj)
@@ -3534,6 +3554,76 @@ def _floating_ip_apply_row_stepwise(
             ip_obj.save(**_save_branch())
             any_save = True
     return any_save
+
+
+def apply_create_nat_inside_ip(op: dict[str, Any]) -> tuple[Any, ...]:
+    """
+    Create a standalone ``ipam.IPAddress`` for an OpenStack fixed IP that is missing from IPAM.
+    Prerequisite for ``nat_inside`` on floating / VIP rows and for NAT drift apply.
+    """
+    from ipam.models import IPAddress, VRF
+
+    cells = op.get("cells") or {}
+    if (reason := skip_reason_from_row_guides(cells)) is not None:
+        return "skipped", reason
+    proj = netbox_write_projection_for_op(op)
+    raw_addr = (proj.get("address") or "").strip()
+    vrf_name = (proj.get("vrf") or "").strip()
+    tenant_name = (proj.get("tenant") or "").strip()
+    status_name = ((proj.get("status") or "").strip() or "active")
+    role_name = (proj.get("role") or "").strip()
+    descr_raw = (proj.get("description") or "").strip()
+    dmax = _ip_address_description_max_len()
+    if not raw_addr:
+        return _skip_missing_prereq("NAT inside IP (to create) is empty in row / projection.")
+    try:
+        address = _normalize_ip_for_netbox(raw_addr)
+    except ValueError:
+        return "failed", "failed_validation_bad_ip"
+    vrf = _resolve_by_name(VRF, vrf_name, using=_orm_alias()) if vrf_name else None
+    if vrf_name and vrf is None:
+        return _skip_missing_prereq(f'VRF "{vrf_name}" not found in NetBox (NB proposed VRF).')
+    tenant_obj = None
+    if tenant_name and tenant_name not in {"—", "-"}:
+        tenant_obj = _resolve_tenant(tenant_name, using=_orm_alias())
+        if tenant_obj is None:
+            return _skip_missing_prereq(f'Tenant "{tenant_name}" not found in NetBox (NB Proposed Tenant).')
+    elif not tenant_name:
+        nb_raw = _cell(cells, "NB Proposed Tenant").strip()
+        if nb_raw and nb_raw not in {"—", "-"}:
+            tenant_obj = _resolve_tenant(nb_raw, using=_orm_alias())
+    if _orm_qs(IPAddress).filter(address=address).exists():
+        return "skipped", "skipped_already_present"
+    ip_obj = IPAddress(address=address, vrf=vrf)
+    if tenant_obj is not None and hasattr(ip_obj, "tenant_id"):
+        ip_obj.tenant = tenant_obj
+    st_f = ip_obj._meta.get_field("status")
+    val_status = _pick_choice_value(st_f, status_name)
+    if val_status is None:
+        return _skip_missing_prereq(
+            f'IP address status "{status_name}" is not valid for NetBox (NB proposed status).'
+        )
+    ip_obj.status = val_status
+    if role_name:
+        role_value, role_err = _resolve_floating_ip_role_value(role_name)
+        if role_err:
+            return _skip_missing_prereq(role_err)
+        if role_value is not None and hasattr(ip_obj, "role"):
+            ip_obj.role = role_value
+    if descr_raw and hasattr(ip_obj, "description"):
+        body = descr_raw
+        if dmax and len(body) > dmax:
+            body = body[: max(0, dmax - 3)] + "..."
+        ip_obj.description = body
+    _netbox_changelog_snapshot(ip_obj)
+    try:
+        ip_obj.save(**_save_branch())
+    except Exception:
+        logger.debug("create_nat_inside_ip save failed for %s", address, exc_info=True)
+        return "failed", "failed_validation_save"
+    if (bad := _fail_merge_precheck_if_invalid(ip_obj, model_label="IPAddress")) is not None:
+        return bad
+    return "created", "ok_created", None, _apply_written_meta(op, pk=int(ip_obj.pk), obj=ip_obj)
 
 
 def apply_create_floating_ip(op: dict[str, Any]) -> tuple[str, str]:
@@ -4388,6 +4478,7 @@ _MANDATORY_NETBOX_PREVIEW_FIELDS: dict[str, tuple[str, ...]] = {
     "detail_review_only_devices": ("name", "site", "role", "device_type"),
     "detail_proposed_missing_vlans": ("vid", "vlan_group", "site"),
     "detail_proposed_missing_tenants": ("name",),
+    "detail_proposed_missing_nat_inside_ips": ("address", "vrf", "status"),
     "detail_new_prefixes": ("prefix", "status"),
     "detail_existing_prefixes": ("prefix", "status"),
     "detail_new_ip_ranges": ("start_address", "end_address", "status"),
@@ -5917,6 +6008,7 @@ def apply_bmc_alignment(op: dict[str, Any]) -> tuple[str, str]:
 _APPLY_FUNCS: dict[str, Any] = {
     "create_vlan": apply_create_vlan,
     "create_tenant": apply_create_tenant,
+    "create_nat_inside_ip": apply_create_nat_inside_ip,
     "create_prefix": apply_create_prefix,
     "create_ip_range": apply_create_ip_range,
     "create_floating_ip": apply_create_floating_ip,
@@ -6189,6 +6281,14 @@ def _netbox_preview_source_header_norms(selection_key: str) -> frozenset[str] | 
             "OpenStack project",
             "NB proposed tenant name",
             "NB proposed tenant description",
+        )
+    if sk == "detail_proposed_missing_nat_inside_ips":
+        return _header_norms(
+            "OS region",
+            "NAT inside IP",
+            "Floating IP",
+            "NB proposed status",
+            "NB proposed VRF",
         )
     return None
 

@@ -36,6 +36,7 @@ from netbox_automation_plugin.sync.reporting.drift_report.drift_overrides_apply 
     HEADERS_DETAIL_NEW_PREFIXES,
     HEADERS_DETAIL_NEW_VMS,
     HEADERS_DETAIL_NIC_DRIFT,
+    HEADERS_DETAIL_PROPOSED_MISSING_NAT_INSIDE_IPS,
     HEADERS_DETAIL_PROPOSED_MISSING_TENANTS,
     HEADERS_DETAIL_PROPOSED_MISSING_VLANS,
     HEADERS_PLACEMENT_ALIGNMENT,
@@ -357,6 +358,7 @@ def build_drift_report_xlsx(
         + len(prop["review_serial"])
         + len(prop.get("add_proposed_missing_vlans", []))
         + len(prop.get("add_proposed_missing_tenants", []))
+        + len(prop.get("add_proposed_missing_nat_inside_ips", []))
     )
     ws_sum.append(["New devices", str(len(prop["add_devices"]))])
     ws_sum.append(["Review-only MAAS-only hosts", str(len(prop.get("add_devices_review_only", [])))])
@@ -367,6 +369,12 @@ def build_drift_report_xlsx(
         [
             "Proposed missing tenants (floating IP projects)",
             str(len(prop.get("add_proposed_missing_tenants", []))),
+        ]
+    )
+    ws_sum.append(
+        [
+            "Proposed missing NAT inside IPs (OpenStack fixed)",
+            str(len(prop.get("add_proposed_missing_nat_inside_ips", []))),
         ]
     )
     ws_sum.append(["New prefixes", str(len(prop["add_prefixes"]))])
@@ -401,6 +409,12 @@ def build_drift_report_xlsx(
         [
             "Proposed missing tenants (floating IP projects)",
             len(prop.get("add_proposed_missing_tenants", [])),
+        ]
+    )
+    ws_prop.append(
+        [
+            "Proposed missing NAT inside IPs (OpenStack fixed)",
+            len(prop.get("add_proposed_missing_nat_inside_ips", [])),
         ]
     )
     ws_prop.append(["New prefixes (OpenStack authority)", len(prop["add_prefixes"])])
@@ -455,6 +469,11 @@ def build_drift_report_xlsx(
         "A) Proposed missing tenants (OpenStack floating IP projects)",
         list(HEADERS_DETAIL_PROPOSED_MISSING_TENANTS),
         prop.get("add_proposed_missing_tenants", []),
+    )
+    _append_block(
+        "A) Proposed missing NAT inside IPs (OpenStack fixed)",
+        list(HEADERS_DETAIL_PROPOSED_MISSING_NAT_INSIDE_IPS),
+        prop.get("add_proposed_missing_nat_inside_ips", []),
     )
     _append_block(
         "A) New prefixes",

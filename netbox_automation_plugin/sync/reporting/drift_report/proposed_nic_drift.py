@@ -120,6 +120,12 @@ def _build_update_nic_rows(
             if _drift_table_status_is_ok_only(status_cell):
                 continue
 
+            action_str = "; ".join(dict.fromkeys([a for a in actions if a]))
+            if not action_str.strip():
+                # Drift is informational only (e.g. IP_GAP where every runtime IP is deferred
+                # because it matches a Nova VM primary elsewhere); nothing is safe to apply.
+                continue
+
             ex = derive_nic_proposed_columns(
                 hn, row, bmc_mac=str(row.get("host_bmc_mac") or "")
             )
@@ -149,7 +155,7 @@ def _build_update_nic_rows(
                 ex["nb_proposed_intf_label"],
                 ex["nb_proposed_intf_type"],
                 authority_badge,
-                "; ".join(dict.fromkeys([a for a in actions if a])),
+                action_str,
                 reason_cell,
             ])
     return update_nic

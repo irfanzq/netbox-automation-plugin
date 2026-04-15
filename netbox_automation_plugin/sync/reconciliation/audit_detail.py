@@ -893,6 +893,22 @@ def _ip_host_only(addr_val) -> str:
     return s.lower()
 
 
+def netbox_any_ipaddress_exists_for_host(addr_val) -> bool:
+    """
+    True if NetBox already has at least one ``ipam.IPAddress`` whose address string
+    starts with ``{host}/`` (any prefix length). Used to propose creating missing NAT-inside IPs.
+    """
+    host = _ip_host_only(addr_val)
+    if not host:
+        return False
+    try:
+        from ipam.models import IPAddress
+
+        return IPAddress.objects.filter(address__startswith=f"{host}/").exists()
+    except Exception:
+        return False
+
+
 def openstack_floating_ips_nat_inside_drift(openstack_data: dict) -> list[dict]:
     """
     Floating IPs that already exist as NetBox IPAddress but OpenStack fixed IP

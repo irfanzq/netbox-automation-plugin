@@ -76,6 +76,7 @@ from netbox_automation_plugin.sync.reporting.drift_report.proposed_lldp_tables i
 from netbox_automation_plugin.sync.reporting.drift_report.proposed_action_format import (
     SET_NETBOX_ACTION_CREATE_DEVICE,
     SET_NETBOX_ACTION_CREATE_FIP,
+    SET_NETBOX_ACTION_CREATE_NAT_INSIDE_IP,
     SET_NETBOX_ACTION_CREATE_PREFIX,
     SET_NETBOX_ACTION_CREATE_VM,
     SET_NETBOX_ACTION_REVIEW_DEVICE,
@@ -92,6 +93,7 @@ from netbox_automation_plugin.sync.reporting.drift_report.proposed_nic_helpers i
     _build_add_nb_interface_rows,
 )
 from netbox_automation_plugin.sync.reconciliation.audit_detail import (
+    netbox_any_ipaddress_exists_for_host,
     openstack_floating_ips_nat_inside_drift,
 )
 from netbox_automation_plugin.sync.reconciliation.apply_cells import (
@@ -1806,6 +1808,87 @@ def _proposed_changes_rows(
             SET_NETBOX_ACTION_UPDATE_FIP_NAT,
         ])
 
+    import ipaddress as _ipaddress_nat_inside
+
+    def _display_nat_inside_ip_from_fixed(fixed_raw: str) -> str | None:
+        raw = str(fixed_raw or "").strip()
+        if not raw or raw in {"-", "—"}:
+            return None
+        host = raw.split("/", 1)[0].strip()
+        try:
+            ip_o = _ipaddress_nat_inside.ip_address(host)
+        except ValueError:
+            return None
+        if ip_o.version == 4:
+            return f"{ip_o}/32"
+        return f"{ip_o}/128"
+
+    def _suggest_vrf_for_nat_inside_prereq(gap: dict) -> str:
+        """OS-region-first VRF default for missing NAT-inside IP prerequisites."""
+        reg_raw = str(gap.get("os_region") or "").strip()
+        reg = reg_raw.lower()
+        if reg and reg not in {"—", "-"}:
+            exact: list[str] = []
+            fuzzy: list[str] = []
+            for v in (netbox_data.get("vrfs") or []):
+                if not isinstance(v, dict):
+                    continue
+                nm = str(v.get("name") or "").strip()
+                if not nm:
+                    continue
+                nl = nm.lower()
+                if nl == reg:
+                    exact.append(nm)
+                elif reg in nl or nl in reg:
+                    fuzzy.append(nm)
+            if exact:
+                return sorted(set(exact))[0]
+            if fuzzy:
+                return sorted(set(fuzzy))[0]
+        return _suggest_vrf_for_floating_ip_gap(gap)
+
+    seen_nat_inside_prereq: set[tuple[str, str]] = set()
+    add_proposed_missing_nat_inside_ips: list[list] = []
+
+    def _emit_nat_inside_prereq_row(gap: dict, floating_disp: str) -> None:
+        fixed_raw = str(gap.get("fixed_ip_address") or "").strip()
+        addr_disp = _display_nat_inside_ip_from_fixed(fixed_raw)
+        if not addr_disp:
+            return
+        if netbox_any_ipaddress_exists_for_host(fixed_raw):
+            return
+        nb_vrf = _suggest_vrf_for_nat_inside_prereq(gap)
+        dedupe = (addr_disp.lower(), str(nb_vrf or ""))
+        if dedupe in seen_nat_inside_prereq:
+            return
+        seen_nat_inside_prereq.add(dedupe)
+        os_reg = (gap.get("os_region") or "—") or "—"
+        fip_d = (floating_disp or "—").strip() or "—"
+        desc = f"OpenStack fixed IP (NAT inside target) for floating {fip_d}"
+        nb_status = "active"
+        add_proposed_missing_nat_inside_ips.append(
+            [
+                os_reg,
+                addr_disp,
+                fip_d,
+                nb_status,
+                nb_vrf,
+                "[OS]",
+                SET_NETBOX_ACTION_CREATE_NAT_INSIDE_IP,
+            ]
+        )
+
+    for _d in fip_nat_drift_rows:
+        _emit_nat_inside_prereq_row(
+            _d,
+            str(_d.get("floating_ip") or "—").strip() or "—",
+        )
+    for _g in os_floating_gaps or []:
+        _emit_nat_inside_prereq_row(
+            _g,
+            str(_g.get("floating_ip") or "—").strip() or "—",
+        )
+
     add_proposed_missing_tenants = build_proposed_missing_tenant_rows(
         os_floating_gap_dicts=os_floating_gaps or [],
         fip_nat_drift_dicts=fip_nat_drift_rows,
@@ -2031,6 +2114,7 @@ def _proposed_changes_rows(
         "update_nic": update_nic,
         "add_proposed_missing_vlans": add_proposed_missing_vlans,
         "add_proposed_missing_tenants": add_proposed_missing_tenants,
+        "add_proposed_missing_nat_inside_ips": add_proposed_missing_nat_inside_ips,
         "add_nb_interfaces": add_nb_interfaces,
         "add_mgmt_iface": add_mgmt_iface,
         "add_mgmt_iface_new_devices": add_mgmt_iface_new_devices,

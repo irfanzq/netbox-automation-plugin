@@ -13,6 +13,7 @@ from netbox_automation_plugin.sync.reporting.drift_report.drift_overrides_apply 
     HEADERS_DETAIL_NEW_PREFIXES,
     HEADERS_DETAIL_NEW_VMS,
     HEADERS_DETAIL_NIC_DRIFT,
+    HEADERS_DETAIL_PROPOSED_MISSING_NAT_INSIDE_IPS,
     HEADERS_DETAIL_PROPOSED_MISSING_TENANTS,
     HEADERS_DETAIL_PROPOSED_MISSING_VLANS,
     HEADERS_SERIAL_REVIEW,
@@ -64,6 +65,9 @@ _PROPOSED_NB_PICK_BMC_EXISTING = {
 _PROPOSED_NB_PICK_MISSING_VLAN = {
     "NB proposed VLAN group": "vlan_group",
 }
+_PROPOSED_NB_PICK_MISSING_NAT_INSIDE = {
+    "NB proposed VRF": "vrf",
+}
 
 
 def emit_proposed_change_tables(e, prop):
@@ -91,6 +95,11 @@ def emit_proposed_change_tables(e, prop):
                 "Proposed missing tenants (floating IP projects)",
                 str(len(prop.get("add_proposed_missing_tenants", []))),
                 "OpenStack project on a floating IP row has no matching NetBox Tenant yet",
+            ],
+            [
+                "Proposed missing NAT inside IPs (OpenStack fixed)",
+                str(len(prop.get("add_proposed_missing_nat_inside_ips", []))),
+                "OpenStack fixed IP for NAT is not yet an IPAM IPAddress (prerequisite for floating NAT / VIP linkage)",
             ],
             ["New VMs (OpenStack Nova)", str(len(prop.get("add_openstack_vms", []))), "Instance not modeled as NetBox Virtual Machine"],
             ["New NICs in NetBox", str(len(prop["add_nb_interfaces"])), "Runtime/MAAS fallback interface not modeled in NetBox"],
@@ -134,7 +143,8 @@ def emit_proposed_change_tables(e, prop):
         selectable=False,
     )
 
-    # Detail order matches ``service.AUDIT_REPORT_APPLY_ORDER``: devices → missing VLANs → missing tenants → VMs → NICs, then IPAM / drift VMs, then BMC.
+    # Detail order matches ``service.AUDIT_REPORT_APPLY_ORDER``: devices → missing VLANs →
+    # missing tenants → missing NAT inside IPs → VMs → NICs, then IPAM / drift VMs, then BMC.
     if prop["add_devices"]:
         e.spacer()
         e.subtitle("Detail — new devices")
@@ -186,6 +196,18 @@ def emit_proposed_change_tables(e, prop):
             selectable=True,
             selection_key="detail_proposed_missing_tenants",
             editable_columns=["NB proposed tenant name", "NB proposed tenant description"],
+        )
+    if prop.get("add_proposed_missing_nat_inside_ips"):
+        e.spacer()
+        e.line_total("Detail — proposed missing NAT inside IPs (OpenStack fixed)")
+        e.table(
+            list(HEADERS_DETAIL_PROPOSED_MISSING_NAT_INSIDE_IPS),
+            prop["add_proposed_missing_nat_inside_ips"],
+            dynamic_columns=True,
+            wrap_max_width=None,
+            selectable=True,
+            selection_key="detail_proposed_missing_nat_inside_ips",
+            proposed_pick_columns=_PROPOSED_NB_PICK_MISSING_NAT_INSIDE,
         )
     if prop.get("add_openstack_vms"):
         e.spacer()
@@ -454,6 +476,7 @@ def emit_proposed_change_tables(e, prop):
         len(prop.get("add_openstack_vms", [])) + len(prop.get("update_openstack_vms", [])) +
         len(prop.get("add_proposed_missing_vlans", [])) +
         len(prop.get("add_proposed_missing_tenants", [])) +
+        len(prop.get("add_proposed_missing_nat_inside_ips", [])) +
         len(prop["update_nic"]) + len(prop["add_nb_interfaces"]) +
         len(prop["add_mgmt_iface"]) + len(prop.get("add_mgmt_iface_new_devices", [])) +
         len(prop["review_serial"])
@@ -470,6 +493,10 @@ def emit_proposed_change_tables(e, prop):
             [
                 "Proposed missing tenants (floating IP projects)",
                 str(len(prop.get("add_proposed_missing_tenants", []))),
+            ],
+            [
+                "Proposed missing NAT inside IPs (OpenStack fixed)",
+                str(len(prop.get("add_proposed_missing_nat_inside_ips", []))),
             ],
             ["New NICs", str(len(prop["add_nb_interfaces"]))],
             ["NIC drift", str(len(prop["update_nic"]))],
