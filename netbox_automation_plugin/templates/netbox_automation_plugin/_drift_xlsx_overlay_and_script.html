@@ -1,14 +1,33 @@
 {% load i18n %}
+{# NetBox may set CSRF_COOKIE_HTTPONLY; drift JS must read the token from this input. #}
+<form id="drift-review-csrf-anchor" class="d-none" aria-hidden="true">{% csrf_token %}</form>
 <script>
 (function() {
   function csrfToken() {
+    var anchor = document.querySelector("#drift-review-csrf-anchor input[name=csrfmiddlewaretoken]");
+    if (anchor && anchor.value) return anchor.value;
     var inp = document.querySelector("input[name=csrfmiddlewaretoken]");
     if (inp && inp.value) return inp.value;
     var m = document.cookie.match(/csrftoken=([^;]+)/);
     return m ? decodeURIComponent(m[1]) : "";
   }
-  function readErrorText(r) {
-    return r.text().then(function(t) { return t || r.statusText || String(r.status); });
+  /** Avoid dumping full Django HTML error pages into alert(). */
+  function shortHttpError(status, raw) {
+    var s = status || "";
+    var t = (raw || "").trim();
+    if (!t) return "HTTP " + s;
+    if (t.indexOf("<!DOCTYPE") === 0 || t.indexOf("<html") >= 0 || t.indexOf("<h1") >= 0) {
+      var m = t.match(/<title>([^<]+)<\/title>/i);
+      if (m && m[1]) return "HTTP " + s + ": " + m[1].trim();
+      return "HTTP " + s + ": non-JSON error response (see browser Network tab for details).";
+    }
+    if (t.length > 240) return t.slice(0, 240) + "…";
+    return t;
+  }
+  function readErrorBodyAsThrow(r) {
+    return r.text().then(function(t) {
+      throw new Error(shortHttpError(r.status, t));
+    });
   }
   var overlay = document.getElementById("drift-xlsx-loading-overlay");
   var xlsxOverlayDefaultMsg = null;
@@ -55,7 +74,7 @@
     var bustUrl = url + sep + "_drift_xlsx_cb=" + Date.now();
     return fetch(bustUrl, { credentials: "same-origin" })
       .then(function(r) {
-        if (!r.ok) throw new Error(r.statusText || String(r.status));
+        if (!r.ok) return readErrorBodyAsThrow(r);
         return r.blob();
       })
       .then(function(blob) { downloadBlob(blob, filename); })
@@ -106,11 +125,7 @@
       body: JSON.stringify({ overrides: overrides, run_id: runId })
     })
       .then(function(r) {
-        if (!r.ok) {
-          return readErrorText(r).then(function(msg) {
-            throw new Error(msg);
-          });
-        }
+        if (!r.ok) return readErrorBodyAsThrow(r);
         return r.blob();
       })
       .then(function(blob) { downloadBlob(blob, "drift-report-modified.xlsx"); })
@@ -161,14 +176,22 @@
           try {
             j = t ? JSON.parse(t) : {};
           } catch (ignore) {
-            j = { ok: false, error: t || r.statusText || "Save failed" };
+            j = {
+              ok: false,
+              error: shortHttpError(r.status, t || r.statusText || "Save failed"),
+            };
           }
           return { r: r, j: j };
         });
       })
       .then(function(pair) {
         if (!pair.r.ok || !pair.j.ok) {
-          throw new Error((pair.j && pair.j.error) || pair.r.statusText || "Save failed");
+          var rawErr = pair.j && pair.j.error;
+          var msg =
+            rawErr && String(rawErr).length
+              ? String(rawErr)
+              : shortHttpError(pair.r.status, "");
+          throw new Error(msg);
         }
         if (pair.j.reload && window.DriftReviewReloadAfterSave === true) {
           saveWillNavigate = true;
