@@ -584,8 +584,6 @@
           </script>
         {% endif %}
         {% if audit_done %}
-          {# NetBox sets CSRF_COOKIE_HTTPONLY; JS must read csrftoken from this input, not document.cookie. #}
-          <form id="drift-review-csrf-anchor" class="d-none" aria-hidden="true">{% csrf_token %}</form>
           <script>
             window._driftXlsxUiConfig = {
               postModifiedUrl: "{{ drift_download_xlsx_modified_post_url|default:''|escapejs }}",
